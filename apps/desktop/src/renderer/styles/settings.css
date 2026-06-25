@@ -22,45 +22,6 @@
   padding: 28px var(--space-page);
 }
 
-.settings-tabs {
-  display: inline-flex;
-  align-self: center;
-  overflow: hidden;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-control);
-  background: var(--color-surface-muted);
-}
-
-.settings-tab {
-  min-width: 104px;
-  min-height: 36px;
-  border: 0;
-  border-right: 1px solid var(--color-border-strong);
-  background: transparent;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.settings-tab:last-child {
-  border-right: 0;
-}
-
-.settings-tab[data-state="active"] {
-  background: var(--color-primary-fill);
-  color: var(--color-primary-fill-text);
-}
-
-.settings-tab-content {
-  outline: none;
-}
-
-.settings-tab-content:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 4px;
-  border-radius: var(--radius-content);
-}
-
 .settings-panel {
   display: grid;
   gap: 20px;
@@ -75,8 +36,7 @@
   gap: 4px;
 }
 
-.settings-panel-heading h2,
-.skill-title-row h3 {
+.settings-panel-heading h2 {
   margin: 0;
 }
 
@@ -87,7 +47,6 @@
 }
 
 .settings-panel-heading p,
-.skill-copy p,
 .settings-status {
   margin: 0;
   color: var(--color-text-muted);
@@ -175,99 +134,9 @@
   background: var(--color-primary-fill-hover);
 }
 
-.skill-list {
-  display: grid;
-  gap: 10px;
-}
-
-.settings-skill-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-content);
-  background: var(--color-surface-muted);
-  padding: 14px;
-}
-
-.skill-copy {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-}
-
-.skill-title-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.skill-title-row h3 {
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 21px;
-}
-
-.skill-status {
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-control);
-  color: var(--color-primary-text);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 16px;
-  padding: 1px 6px;
-  text-transform: uppercase;
-}
-
-.skill-switch {
-  position: relative;
-  width: 42px;
-  height: 24px;
-  flex: 0 0 auto;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 999px;
-  background: var(--color-border-strong);
-  cursor: pointer;
-}
-
-.skill-switch[data-state="checked"] {
-  border-color: var(--color-primary-fill);
-  background: var(--color-primary-fill);
-}
-
-.skill-switch:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.skill-switch-thumb {
-  display: block;
-  width: 18px;
-  height: 18px;
-  border-radius: 999px;
-  background: var(--color-surface);
-  transform: translateX(2px);
-  transition: transform 120ms ease;
-}
-
-.skill-switch[data-state="checked"] .skill-switch-thumb {
-  transform: translateX(18px);
-}
-
 @media (max-width: 640px) {
   .settings-shell {
     padding: 18px var(--space-page-mobile);
-  }
-
-  .settings-tabs {
-    align-self: stretch;
-  }
-
-  .settings-tab {
-    flex: 1;
-    min-width: 0;
   }
 
   .settings-panel {
@@ -283,13 +152,8 @@
     grid-column: auto;
   }
 
-  .settings-actions,
-  .settings-skill-row {
+  .settings-actions {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .skill-switch {
-    align-self: flex-start;
   }
 }

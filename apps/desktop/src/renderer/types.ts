@@ -18,13 +18,3 @@ export type ModelSettings = {
   endpointType: EndpointType;
   modelName: string;
 };
-
-export type SkillStatus = "active" | "inactive" | "unavailable";
-
-export type SkillSummary = {
-  description: string;
-  enabled: boolean;
-  id: string;
-  name: string;
-  status: SkillStatus;
-};

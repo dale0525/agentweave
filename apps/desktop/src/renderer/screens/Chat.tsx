@@ -121,7 +121,7 @@ export function Chat({
         </AppIconButton>
         <div className="top-bar-title">
           <h1>GeneralAgent</h1>
-          <p>Ask anything, use skills when you need them.</p>
+          <p>Ask naturally. The agent will handle the work.</p>
         </div>
         <AppIconButton label="Open settings" onClick={onOpenSettings}>
           <Settings size={18} aria-hidden="true" />

@@ -108,13 +108,17 @@ describe("Chat", () => {
     );
   });
 
-  it("exposes consumer chat controls", () => {
+  it("exposes consumer chat controls without skill-facing copy", () => {
     render(<Chat />);
 
     expect(
       screen.getByRole("button", { name: "Open conversations" })
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open settings" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Ask naturally. The agent will handle the work.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/use skills/i)).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Open sessions" })
     ).not.toBeInTheDocument();
@@ -267,44 +271,29 @@ describe("App navigation", () => {
     expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
   });
 
-  it("switches between model and skills settings", async () => {
-    const user = userEvent.setup();
+  it("shows only model connection settings to end users", () => {
     window.history.replaceState(null, "", "/#settings");
 
     render(<App />);
 
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Model connection" })).toBeInTheDocument();
     expect(screen.getByLabelText("Base URL")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-
-    expect(screen.getByText("File Helper")).toBeInTheDocument();
-    expect(screen.getByText("Web Research")).toBeInTheDocument();
+    expect(screen.getByLabelText("API key")).toBeInTheDocument();
+    expect(screen.getByLabelText("Model name")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Skills" })).not.toBeInTheDocument();
+    expect(screen.queryByText("File Helper")).not.toBeInTheDocument();
+    expect(screen.queryByText("Web Research")).not.toBeInTheDocument();
   });
 
-  it("toggles an available skill", async () => {
-    const user = userEvent.setup();
+  it("keeps user-facing settings free of skill controls", () => {
     window.history.replaceState(null, "", "/#settings");
 
     render(<App />);
 
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-    await user.click(screen.getByRole("switch", { name: "Calendar" }));
-
-    expect(screen.getByRole("switch", { name: "Calendar" })).toHaveAttribute(
-      "aria-checked",
-      "true"
-    );
-  });
-
-  it("keeps unavailable skills disabled", async () => {
-    const user = userEvent.setup();
-    window.history.replaceState(null, "", "/#settings");
-
-    render(<App />);
-
-    await user.click(screen.getByRole("tab", { name: "Skills" }));
-
-    expect(screen.getByRole("switch", { name: "Local Command" })).toBeDisabled();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.queryByText(/skill/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/tool/i)).not.toBeInTheDocument();
   });
 
   it("keeps model connection testing static in the renderer", async () => {
@@ -322,13 +311,15 @@ describe("App navigation", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("scopes settings skill row styles away from session skill rows", () => {
+  it("keeps settings styles free of user-facing skill selectors", () => {
     const css = readCssBundle("src/renderer/styles/index.css");
 
     expect(css).toMatch(/\.conversation-drawer-content[\s\S]*?\{/);
     expect(css).toMatch(/\.settings-shell[\s\S]*?\{/);
-    expect(css).toMatch(/\.settings-skill-row[\s\S]*?\{/);
-    expect(css).not.toMatch(/(^|[,{]\s*)\.skill-row(?:\s|,|\{)/m);
+    expect(css).toMatch(/\.settings-panel[\s\S]*?\{/);
+    expect(css).not.toMatch(/\.settings-skill-row/);
+    expect(css).not.toMatch(/\.skill-switch/);
+    expect(css).not.toMatch(/(^|[,{}]\s*)\.skill-row(?:\s|,|\{)/m);
   });
 
   it("keeps sessions available only through the location hash", () => {
