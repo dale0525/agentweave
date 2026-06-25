@@ -304,6 +304,28 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn production_router_does_not_expose_skill_inventory() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let app = router(Arc::new(AppState::new(storage)));
+
+        for uri in ["/skills", "/dev/skills"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
     fn json_request(uri: &str, body: Value) -> Request<Body> {
         Request::builder()
             .method("POST")
