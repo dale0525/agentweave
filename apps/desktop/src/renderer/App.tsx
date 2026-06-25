@@ -1,17 +1,12 @@
 import { useEffect, useState } from "react";
 
 import { Chat } from "./screens/Chat";
-import { Sessions } from "./screens/Sessions";
 import { Settings } from "./screens/Settings";
 
-type AppView = "chat" | "sessions" | "settings";
+type AppView = "chat" | "settings";
 
 function getViewFromHash(): AppView {
   if (typeof window !== "undefined") {
-    if (window.location.hash === "#sessions") {
-      return "sessions";
-    }
-
     if (window.location.hash === "#settings") {
       return "settings";
     }
@@ -43,8 +38,6 @@ export default function App(): JSX.Element {
     <div className="app-root">
       {view === "settings" ? (
         <Settings onBack={() => navigate("chat")} />
-      ) : view === "sessions" ? (
-        <Sessions onNavigate={navigate} />
       ) : (
         <Chat onOpenSettings={() => navigate("settings")} />
       )}

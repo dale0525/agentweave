@@ -249,12 +249,20 @@ describe("App navigation", () => {
     });
   });
 
-  it("opens sessions from the location hash", async () => {
+  it("does not open the legacy sessions workbench from the location hash", () => {
     window.history.replaceState(null, "", "/#sessions");
 
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: "Sessions" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Sessions" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open conversations" })
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
+    expect(screen.queryByText("Skills")).not.toBeInTheDocument();
+    expect(screen.queryByText(/active skill/i)).not.toBeInTheDocument();
   });
 
   it("opens settings from chat and returns to chat", async () => {
@@ -322,12 +330,14 @@ describe("App navigation", () => {
     expect(css).not.toMatch(/(^|[,{}]\s*)\.skill-row(?:\s|,|\{)/m);
   });
 
-  it("keeps sessions available only through the location hash", () => {
+  it("does not expose the legacy sessions workbench route to packaged users", () => {
     render(<App />);
 
     expect(
       screen.queryByRole("button", { name: "Open sessions" })
     ).not.toBeInTheDocument();
+    expect(screen.queryByText("Skills")).not.toBeInTheDocument();
+    expect(screen.queryByText(/active skill/i)).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Open conversations" })
     ).toBeInTheDocument();
