@@ -46,6 +46,64 @@ CORS smoke for the desktop Vite origins:
 - JSON `POST /sessions` and `POST /sessions/:id/messages` with `Origin: http://127.0.0.1:5173` returned `access-control-allow-origin: http://127.0.0.1:5173`
 - JSON `POST /sessions` and `POST /sessions/:id/messages` with `Origin: http://localhost:5173` returned `access-control-allow-origin: http://localhost:5173`
 
+## Consumer Chat UI Verification
+
+Date: 2026-06-25
+
+This pass verifies the consumer chat redesign against the Stitch source of truth:
+
+- Stitch project: `projects/8616130577965446903`
+- Stitch design system: `assets/e4d441befa1d42e4af22f64b6d8e5d3c`
+- Chat desktop: `projects/8616130577965446903/screens/461eff16a7494012ad9524538fbb0a51`
+- Chat mobile: `projects/8616130577965446903/screens/167503d23b82470c8d94be18327febb8`
+- Settings Model desktop: `projects/8616130577965446903/screens/649a9bb196474ef59732a3c3f0d1f9d7`
+- Settings Model mobile: `projects/8616130577965446903/screens/a57913d00fce464a8c06befeef388c08`
+- Settings Skills desktop: `projects/8616130577965446903/screens/7a290ad8d9d5450cafae27b8f5c436fd`
+- Settings Skills mobile: `projects/8616130577965446903/screens/86ab488e0e8f47c9bc4ae489798efe96`
+- Drawer desktop: `projects/8616130577965446903/screens/acfff82e35404878ba881ddddeb6788e`
+- Drawer mobile: `projects/8616130577965446903/screens/e5b849ed880e4170b77d8f6d5ad54284`
+
+Automated checks:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `pixi run npm --prefix apps/desktop test` | PASS | Vitest passed `tests/chat.test.tsx`: 1 file, 17 tests. |
+| `cd apps/desktop && pixi run npm exec tsc -- --noEmit -p tsconfig.vitest.json` | PASS | TypeScript test config check exited 0. |
+| `pixi run npm --prefix apps/desktop exec tsc -- --noEmit -p tsconfig.vitest.json` | NOT USED | This exact planned form resolved `tsconfig.vitest.json` from the repo root in this npm environment and failed with TS5058. The equivalent app-cwd command above was used for the TypeScript verification. |
+| `git diff --check HEAD && git diff --cached --check` | PASS | Whitespace check exited 0. |
+| Contrast check for primary filled controls | PASS | Light fill and hover measured 5.47:1 and 7.58:1; dark fill and hover measured 7.77:1 and 9.78:1. |
+| Source line budget | PASS | Renderer TSX/CSS and `apps/desktop/tests/chat.test.tsx` were checked; largest checked file was 388 physical lines. |
+
+Local visual verification:
+
+- Requested Vite command: `pixi run npm --prefix apps/desktop run dev -- --host 127.0.0.1 --port 5173`
+- Port `5173` was already occupied by an existing `node` process, so this verification used `http://127.0.0.1:5174/`.
+- Actual command: `pixi run npm --prefix apps/desktop run dev -- --host 127.0.0.1 --port 5174`
+- Browser console check: 0 warnings and 0 errors.
+- Desktop chat checked at `1440x900`.
+- Mobile chat checked at `390x844`.
+- Desktop conversation drawer checked at `1440x900`.
+- Mobile conversation drawer checked at `390x844`.
+- Desktop settings Model and Skills tabs checked at `1440x900`.
+- Mobile settings Model and Skills tabs checked at `390x844`.
+- Dark mode checked for desktop chat at `1440x900` and mobile settings at `390x844`.
+
+Visual review result:
+
+- PASS. The implementation matches the Stitch structure and style direction: chat-first layout, centered message column, temporary conversation drawer, focused settings route, segmented settings tabs, neutral surfaces, teal primary actions, no visible developer workbench panels, no gradients, and no purple decorative treatment.
+- Layout, spacing, typography scale, hierarchy, color, component states, drawer behavior, and mobile fit were checked against the Stitch screens.
+- The mobile settings screenshots were recaptured after resetting tab state; `mobile-settings-model.png` displayed the Model connection form and `mobile-settings-skills.png` displayed the Skills list.
+- The mobile composer stayed anchored at the bottom without overlapping the visible starter message. DOM measurement at `390x844` showed the composer at `y=765`, height `79`, and message list bottom padding preserved room for it.
+- Dark mode retained the same structure, readable surfaces, and acceptable primary-control contrast.
+
+Known acceptable deviations:
+
+- Stitch reference canvases are `2560x2048` desktop and `780x1768` mobile, while implementation screenshots used runtime browser viewports of `1440x900` and `390x844`.
+- Browser font rendering and real Vite content differ slightly from Stitch screenshots.
+- The implementation uses larger, looser settings rows and toggle controls than the tighter Stitch references; content hierarchy remains clear and no text is clipped.
+- Chat screenshots omit some nonessential Stitch hint/status details and suggested chips; the MVP scope keeps the primary chat, drawer, and settings surfaces simple.
+- Dark mode has no direct Stitch screen, so it was verified for structural parity, readability, and contrast rather than pixel parity.
+
 ## Known Gaps
 
 - The assistant reply is deterministic and local: `MVP agent received: ...`; it does not call a real model provider.
