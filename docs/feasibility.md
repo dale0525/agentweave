@@ -128,7 +128,7 @@ MVP 明确不做：
 建议复用方式：
 
 - 以 Hermes 的桌面壳和聊天体验为主要参考。
-- 复制/移植 Chat、Sessions、Settings、Skills 相关 UI 和 IPC 模式。
+- 复制/移植 Chat、Sessions、Settings 相关 UI 和 IPC 模式；skill 相关代码只借鉴内部 registry 或 dev-only diagnostics 边界，不作为终端用户 UI。
 - 后端 main process 不直接沿用 Hermes 业务逻辑，而是连接新的 General App Agent Runtime。
 
 ### farion1231/cc-switch
