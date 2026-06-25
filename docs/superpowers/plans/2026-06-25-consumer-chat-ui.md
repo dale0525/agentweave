@@ -128,7 +128,7 @@ it("opens settings from chat and returns to chat", async () => {
 Run:
 
 ```bash
-pixi run npm --prefix apps/desktop test -- --runInBand
+pixi run npm --prefix apps/desktop test
 ```
 
 Expected: FAIL because the chat screen has no `Open settings` control and `Settings` route does not exist.
@@ -259,7 +259,7 @@ export default function App(): JSX.Element {
 Run:
 
 ```bash
-pixi run npm --prefix apps/desktop test -- --runInBand
+pixi run npm --prefix apps/desktop test
 ```
 
 Expected: Navigation test still fails until `Chat` exposes `Open settings`; existing chat tests may also fail because labels change in later tasks.
@@ -488,7 +488,7 @@ The top bar must include:
 Run:
 
 ```bash
-pixi run npm --prefix apps/desktop test -- --runInBand
+pixi run npm --prefix apps/desktop test
 ```
 
 Expected: chat send, blank message, error copy, and settings navigation tests pass after `Chat` exposes the new labels and settings button.
@@ -566,7 +566,7 @@ In `Chat.tsx`, add `isDrawerOpen` state and render:
 Run:
 
 ```bash
-pixi run npm --prefix apps/desktop test -- --runInBand
+pixi run npm --prefix apps/desktop test
 ```
 
 Expected: drawer tests pass; no existing chat tests regress.
@@ -652,7 +652,7 @@ Modify `apps/desktop/src/renderer/screens/Settings.tsx` to use `@radix-ui/react-
 Run:
 
 ```bash
-pixi run npm --prefix apps/desktop test -- --runInBand
+pixi run npm --prefix apps/desktop test
 ```
 
 Expected: model tab, skills tab, skill toggle, settings navigation, and chat tests pass.
@@ -730,7 +730,7 @@ Expected: every edited or created source file is under 1000 physical lines.
 Run:
 
 ```bash
-pixi run npm --prefix apps/desktop test -- --runInBand
+pixi run npm --prefix apps/desktop test
 ```
 
 Expected: PASS.
@@ -765,7 +765,7 @@ Expected: PASS with no TypeScript errors.
 Run:
 
 ```bash
-pixi run npm --prefix apps/desktop test -- --runInBand
+pixi run npm --prefix apps/desktop test
 ```
 
 Expected: PASS.
