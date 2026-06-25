@@ -47,12 +47,18 @@
 }
 
 .settings-tab[data-state="active"] {
-  background: var(--color-primary);
-  color: #ffffff;
+  background: var(--color-primary-fill);
+  color: var(--color-primary-fill-text);
 }
 
 .settings-tab-content {
   outline: none;
+}
+
+.settings-tab-content:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 4px;
+  border-radius: var(--radius-content);
 }
 
 .settings-panel {
@@ -118,15 +124,15 @@
 
 .endpoint-option[aria-pressed="true"],
 .settings-primary-action {
-  border-color: var(--color-primary);
-  background: var(--color-primary);
-  color: #ffffff;
+  border-color: var(--color-primary-fill);
+  background: var(--color-primary-fill);
+  color: var(--color-primary-fill-text);
   font-weight: 600;
 }
 
 .endpoint-option:not([aria-pressed="true"]):hover {
   border-color: var(--color-primary);
-  color: var(--color-primary);
+  color: var(--color-primary-text);
 }
 
 .settings-form-grid {
@@ -165,8 +171,8 @@
 }
 
 .settings-primary-action:hover {
-  border-color: var(--color-primary-hover);
-  background: var(--color-primary-hover);
+  border-color: var(--color-primary-fill-hover);
+  background: var(--color-primary-fill-hover);
 }
 
 .skill-list {
@@ -207,7 +213,7 @@
 .skill-status {
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-control);
-  color: var(--color-primary);
+  color: var(--color-primary-text);
   font-size: 11px;
   font-weight: 600;
   line-height: 16px;
@@ -227,8 +233,8 @@
 }
 
 .skill-switch[data-state="checked"] {
-  border-color: var(--color-primary);
-  background: var(--color-primary);
+  border-color: var(--color-primary-fill);
+  background: var(--color-primary-fill);
 }
 
 .skill-switch:disabled {

@@ -89,15 +89,15 @@
 }
 
 .composer-input-row .icon-button[type="submit"] {
-  border-color: var(--color-primary);
-  background: var(--color-primary);
-  color: #ffffff;
+  border-color: var(--color-primary-fill);
+  background: var(--color-primary-fill);
+  color: var(--color-primary-fill-text);
 }
 
 .composer-input-row .icon-button[type="submit"]:hover {
-  border-color: var(--color-primary-hover);
-  background: var(--color-primary-hover);
-  color: #ffffff;
+  border-color: var(--color-primary-fill-hover);
+  background: var(--color-primary-fill-hover);
+  color: var(--color-primary-fill-text);
 }
 
 @media (max-width: 640px) {

@@ -100,7 +100,7 @@ input:focus-visible,
 
 .icon-button:hover {
   border-color: var(--color-primary);
-  color: var(--color-primary);
+  color: var(--color-primary-text);
 }
 
 .icon-button:disabled {

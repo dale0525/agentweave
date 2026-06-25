@@ -52,7 +52,7 @@
   align-items: center;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-control);
-  color: var(--color-primary);
+  color: var(--color-primary-text);
   font-size: 12px;
   font-weight: 600;
   padding: 2px 6px;
@@ -85,7 +85,7 @@
 .nav-item.active,
 .filter-row button.active {
   border-color: var(--color-primary);
-  color: var(--color-primary);
+  color: var(--color-primary-text);
 }
 
 .manager-header {

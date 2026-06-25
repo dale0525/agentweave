@@ -43,17 +43,17 @@
   gap: 8px;
   min-height: 38px;
   margin: 14px 16px 10px;
-  border: 1px solid var(--color-primary);
+  border: 1px solid var(--color-primary-fill);
   border-radius: var(--radius-control);
-  background: var(--color-primary);
-  color: #ffffff;
+  background: var(--color-primary-fill);
+  color: var(--color-primary-fill-text);
   cursor: pointer;
   font-weight: 600;
 }
 
 .conversation-drawer-new:hover {
-  border-color: var(--color-primary-hover);
-  background: var(--color-primary-hover);
+  border-color: var(--color-primary-fill-hover);
+  background: var(--color-primary-fill-hover);
 }
 
 .conversation-drawer-search {
