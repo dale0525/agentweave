@@ -291,6 +291,7 @@ mod tests {
         remove_test_dir(root).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn packaged_load_rejects_symlink_escape_paths() {
         let root = unique_test_dir("packaged-symlink");
@@ -300,10 +301,9 @@ mod tests {
         write_echo_skill(&outside_root, "outside", "outside_echo").await;
 
         if let Err(error) = create_dir_symlink(&outside_skill_dir, &root.join("included")) {
-            eprintln!("skipping symlink test because symlink creation failed: {error}");
             remove_test_dir(root).await;
             remove_test_dir(outside_root).await;
-            return;
+            panic!("symlink creation failed on unix: {error}");
         }
 
         tokio::fs::write(
@@ -323,6 +323,12 @@ mod tests {
         assert!(error.to_string().contains("unsafe packaged skill path"));
         remove_test_dir(root).await;
         remove_test_dir(outside_root).await;
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn packaged_load_rejects_symlink_escape_paths() {
+        eprintln!("skipping symlink escape test on non-unix platform");
     }
 
     #[tokio::test]
@@ -405,11 +411,6 @@ mod tests {
     #[cfg(unix)]
     fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
         std::os::unix::fs::symlink(target, link)
-    }
-
-    #[cfg(windows)]
-    fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-        std::os::windows::fs::symlink_dir(target, link)
     }
 
     async fn remove_test_dir(path: PathBuf) {
