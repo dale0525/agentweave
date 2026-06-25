@@ -1,6 +1,8 @@
 use crate::session::{Message, Session};
 use chrono::{DateTime, Utc};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
+use std::str::FromStr;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -10,7 +12,8 @@ pub struct Storage {
 
 impl Storage {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
-        let pool = SqlitePool::connect(url).await?;
+        let options = SqliteConnectOptions::from_str(url)?.foreign_keys(true);
+        let pool = SqlitePoolOptions::new().connect_with(options).await?;
         let storage = Self { pool };
         storage.migrate().await?;
         Ok(storage)
@@ -98,7 +101,7 @@ impl Storage {
 
     pub async fn list_messages(&self, session_id: &str) -> anyhow::Result<Vec<Message>> {
         let rows = sqlx::query(
-            "SELECT id, session_id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+            "SELECT id, session_id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC, id ASC",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -138,5 +141,16 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].content, "hello");
+    }
+
+    #[tokio::test]
+    async fn rejects_messages_for_missing_sessions() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+
+        let result = storage
+            .append_message("missing-session", "user", "hello")
+            .await;
+
+        assert!(result.is_err());
     }
 }
