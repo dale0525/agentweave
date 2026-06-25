@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a headless-first general app agent MVP with configurable OpenAI-compatible model providers, pluggable skills, looping agent turns, and multi-session conversation storage.
+> Repositioning note: Skill registry work in this plan is now an internal/developer-facing packaged capability path. Packaged apps hide skills from end users; desktop settings should expose model configuration only, with skill diagnostics limited to dev mode.
+
+**Goal:** Build a headless-first general app agent MVP with configurable OpenAI-compatible model providers, developer-provided packaged skills, looping agent turns, and multi-session conversation storage.
 
 **Architecture:** Use an Electron + React desktop client inspired by Hermes Desktop, backed by a Rust sidecar runtime inspired by Codex. Put protocol conversion and provider routing in a Rust Model Gateway that reuses cc-switch's provider adapter and Codex Responses/Chat bridge logic.
 
@@ -64,8 +66,8 @@ Responsibility boundaries:
 - `crates/model-gateway`: Provider config, auth headers, protocol conversion, streaming normalization.
 - `crates/agent-runtime`: Session model, conversation persistence, agent turn loop, skill registry and execution.
 - `crates/agent-server`: Local HTTP/WebSocket API consumed by desktop or future clients.
-- `apps/desktop`: Hermes-like chat, session, model profile, and skill management UI.
-- `skills/echo`: Minimal command skill used by tests and demos.
+- `apps/desktop`: Hermes-like chat, session, and model profile UI. Skill diagnostics, if any, are dev-only and hidden in packaged apps.
+- `skills/echo`: Minimal developer command skill fixture used by tests and packaged registry demos.
 
 ## Task 1: Bootstrap Workspace
 
