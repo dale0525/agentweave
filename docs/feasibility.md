@@ -12,6 +12,8 @@
 - 用 `hermes-desktop` 作为桌面客户端和会话 UI 的主要参考，复用 Electron + React 客户端结构、IPC 边界、聊天流式渲染、多 session 管理方式。
 - 用 `cc-switch` 作为模型网关和协议适配层的主要代码来源，复用 provider adapter、Responses 到 Chat Completions 的转换、Chat streaming 到 Responses SSE 的转换、provider routing/failover。
 
+GeneralAgent 的产品定位调整为“为开发者服务的 agent 应用框架”。开发者在开发阶段通过本地 skill 包、Codex 内置 `skill-creator`、以及后续 SDK/脚手架扩展 agent 能力；打包后 skill inventory 被固定为应用内部能力，对终端用户不可见。用户只通过自然对话表达意图，由 runtime 自动选择和调用内置能力。
+
 推荐架构可以概括为：
 
 ```text
@@ -44,7 +46,7 @@ MVP 只需要覆盖这四件事：
 
 1. 用户可以配置 OpenAI-compatible 模型接口。
 2. 支持 `responses`、`chat/completions`、基础 `completion` 三类上游形态。
-3. 用户发送信息后，agent 可以循环思考、调用 skill/tool、继续请求模型，直到回复用户。
+3. 用户发送信息后，agent 可以循环思考、自动调用打包内置 skill/tool、继续请求模型，直到回复用户。
 4. 支持多 session / conversation，并能恢复历史。
 
 MVP 明确不做：
@@ -263,6 +265,8 @@ skills/
     index.js 或 command
 ```
 
+Skill 是开发者扩展点，不是终端用户配置项。开发模式可以扫描 `skills/` 目录并支持调试诊断；打包模式必须读取冻结的 skill bundle/index。生产 UI 和生产 API 默认不暴露 skill 列表、开关或 marketplace。
+
 建议 manifest：
 
 ```json
@@ -401,7 +405,7 @@ MVP 建议 SQLite 表：
 - Hermes-like Chat UI。
 - Session list / restore / delete / rename。
 - Model profile settings。
-- Skill management screen。
+- 不提供终端用户 skill management screen；后续只在 dev mode 增加 skill validation/diagnostics。
 - Runtime event streaming display。
 
 ### M5：打磨与验证
@@ -450,7 +454,7 @@ MVP 建议 SQLite 表：
 2. `POST /sessions/:id/messages`
 3. `GET /sessions/:id/events` 或 WebSocket stream
 4. `GET /sessions`
-5. `GET /skills`
-6. `POST /model-profiles`
+5. `POST /model-profiles`
+6. Dev-only: `GET /dev/skills` / `POST /dev/skills/validate`，生产包默认关闭。
 
 只要 headless runtime 能跑通“用户消息 -> 模型 -> tool call -> tool result -> 模型 -> assistant reply -> session restore”，客户端就可以按 Hermes Desktop 的方式接入。

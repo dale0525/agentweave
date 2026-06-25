@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> Superseded note: The Skills settings tab described in this plan is no longer a valid product target. Use `docs/superpowers/specs/2026-06-25-developer-agent-framework-repositioning-design.md` and `docs/superpowers/plans/2026-06-25-developer-agent-framework-repositioning.md` for the current implementation direction.
+
 **Goal:** Replace the current developer workbench renderer with a consumer-friendly chat-first UI that has a hidden conversation drawer and a settings view for model connection and skill management.
 
 **Architecture:** Keep the existing React/Vite/Electron renderer and server chat API. Use Radix UI primitives for drawer, tabs, and switches; split chat, drawer, settings, fixtures, and styles into focused files so no source file approaches 1000 physical lines.

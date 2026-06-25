@@ -2,6 +2,8 @@
 
 Date: 2026-06-25
 
+> Superseded note: The user-facing Skills settings direction in this document has been replaced by `docs/superpowers/specs/2026-06-25-developer-agent-framework-repositioning-design.md`. GeneralAgent is now positioned as a developer-facing agent framework. Packaged apps hide skills from end users and use them automatically at runtime.
+
 ## Goal
 
 Redesign the desktop client from a developer-oriented app-agent workbench into a consumer-friendly chat application. The MVP should feel approachable to ordinary users while preserving the existing server-backed chat loop, multi-session direction, model configuration direction, and pluggable skill direction.
@@ -240,4 +242,3 @@ Implementation must be visually compared against the new Stitch screens at match
 - Whether settings should become a route, modal, or side panel can be decided during Stitch exploration.
 - Whether conversation history should later connect to a `GET /sessions` endpoint is a follow-up backend task.
 - Whether failed optimistic messages should become retryable message rows is a later UX refinement.
-

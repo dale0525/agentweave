@@ -50,6 +50,8 @@ CORS smoke for the desktop Vite origins:
 
 Date: 2026-06-25
 
+> Repositioning note: The Settings Skills desktop/mobile checks below describe a superseded implementation. The current target is model-only Settings, sourced from Stitch screens `b591242868d74b0093a7f11b2c0c0f8e` and `0a239471a02d413da7880f4ccef955e6`, with no user-facing skill controls.
+
 This pass verifies the consumer chat redesign against the Stitch source of truth:
 
 - Stitch project: `projects/8616130577965446903`
@@ -91,6 +93,7 @@ Local visual verification:
 Visual review result:
 
 - PASS. The implementation matches the Stitch structure and style direction: chat-first layout, centered message column, temporary conversation drawer, focused settings route, segmented settings tabs, neutral surfaces, teal primary actions, no visible developer workbench panels, no gradients, and no purple decorative treatment.
+- Repositioning follow-up required: remove user-facing Skills tab and verify model-only Settings at desktop and mobile breakpoints.
 - Layout, spacing, typography scale, hierarchy, color, component states, drawer behavior, and mobile fit were checked against the Stitch screens.
 - The mobile settings screenshots were recaptured after resetting tab state; `mobile-settings-model.png` displayed the Model connection form and `mobile-settings-skills.png` displayed the Skills list.
 - The mobile composer stayed anchored at the bottom without overlapping the visible starter message. DOM measurement at `390x844` showed the composer at `y=765`, height `79`, and message list bottom padding preserved room for it.
