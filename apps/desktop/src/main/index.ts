@@ -11,7 +11,8 @@ export const desktopWindowConfig: DesktopWindowConfig = {
   height: 900,
   minHeight: 720,
   minWidth: 1024,
-  preload: "src/preload/index.ts",
+  // Electron hosts should point BrowserWindow at the compiled preload bundle.
+  preload: "dist/preload/index.js",
   title: "GeneralAgent",
   width: 1280
 };
