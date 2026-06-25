@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useRef, useState } from "react";
 import { Menu, Settings } from "lucide-react";
 
 import {
@@ -34,11 +34,14 @@ export function Chat({
   const [apiError, setApiError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const requestGenerationRef = useRef(0);
 
   const handleNewChat = () => {
+    requestGenerationRef.current += 1;
     setMessages(starterMessages);
     setSessionId(null);
     setApiError(null);
+    setIsSending(false);
     setIsDrawerOpen(false);
   };
 
@@ -60,16 +63,26 @@ export function Chat({
     ]);
     setDraft("");
 
+    const requestGeneration = requestGenerationRef.current + 1;
+    requestGenerationRef.current = requestGeneration;
+    const isCurrentRequest = () => requestGenerationRef.current === requestGeneration;
+
     try {
       setIsSending(true);
       let activeSessionId = sessionId;
       if (!activeSessionId) {
         const session = await createServerSession("Provider adapter MVP");
+        if (!isCurrentRequest()) {
+          return;
+        }
         activeSessionId = session.id;
         setSessionId(session.id);
       }
 
       const response = await postSessionMessage(activeSessionId, text);
+      if (!isCurrentRequest()) {
+        return;
+      }
       const assistantText = extractAssistantText(response);
       if (assistantText) {
         setMessages((current) => [
@@ -82,9 +95,13 @@ export function Chat({
         ]);
       }
     } catch {
-      setApiError("Could not send message. Check your model or service connection.");
+      if (isCurrentRequest()) {
+        setApiError("Could not send message. Check your model or service connection.");
+      }
     } finally {
-      setIsSending(false);
+      if (isCurrentRequest()) {
+        setIsSending(false);
+      }
     }
   };
 

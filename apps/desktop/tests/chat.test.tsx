@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -157,8 +158,47 @@ describe("Chat", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("ignores an in-flight assistant response after starting a new chat", async () => {
+    const user = userEvent.setup();
+    const pendingMessage = createDeferred<Response>();
+    mockFetch([
+      jsonResponse({ id: "session-1", title: "Provider adapter MVP" }),
+      pendingMessage.promise
+    ]);
+
+    render(<Chat />);
+
+    await user.type(screen.getByLabelText("Message GeneralAgent"), "Old request");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByText("Old request");
+
+    await user.click(screen.getByRole("button", { name: "Open conversations" }));
+    await user.click(screen.getByRole("button", { name: "New chat" }));
+
+    pendingMessage.resolve(
+      jsonResponse({
+        accepted: true,
+        assistant_message: {
+          content: "Stale assistant response",
+          created_at: "2026-06-25T00:00:00.000Z",
+          id: "assistant-1",
+          role: "assistant",
+          session_id: "session-1"
+        }
+      })
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
+    });
+    expect(screen.getByText("Hello! How can I help you today?")).toBeInTheDocument();
+    expect(screen.queryByText("Old request")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stale assistant response")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("keeps the consumer chat layout classes styled", () => {
-    const css = readFileSync("src/renderer/styles.css", "utf8");
+    const css = readCssBundle("src/renderer/styles.css");
 
     expect(css).toMatch(/\.chat-shell[\s\S]*?\{/);
     expect(css).toMatch(/\.top-bar[\s\S]*?\{/);
@@ -236,11 +276,34 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
-function mockFetch(responses: Response[]) {
+function mockFetch(responses: Array<Response | Promise<Response>>) {
   const fetchMock = vi.fn();
   for (const response of responses) {
     fetchMock.mockResolvedValueOnce(response);
   }
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
+}
+
+function readCssBundle(entryPath: string): string {
+  const css = readFileSync(entryPath, "utf8");
+  const imports = [...css.matchAll(/@import\s+"([^"]+)";/g)];
+  if (imports.length === 0) {
+    return css;
+  }
+
+  return imports
+    .map((match) => readCssBundle(join(dirname(entryPath), match[1])))
+    .join("\n");
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+
+  return { promise, reject, resolve };
 }
