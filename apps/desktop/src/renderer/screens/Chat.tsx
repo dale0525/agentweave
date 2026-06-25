@@ -15,6 +15,12 @@ import {
 } from "lucide-react";
 import { FormEvent, ReactNode, useMemo, useState } from "react";
 
+import {
+  createServerSession,
+  extractAssistantText,
+  postSessionMessage
+} from "../api";
+
 type AppView = "chat" | "sessions";
 
 type ChatProps = {
@@ -72,11 +78,13 @@ function createMessageId(): string {
 function IconButton({
   label,
   children,
+  disabled = false,
   onClick,
   type = "button"
 }: {
   label: string;
   children: ReactNode;
+  disabled?: boolean;
   onClick?: () => void;
   type?: "button" | "submit";
 }) {
@@ -84,6 +92,7 @@ function IconButton({
     <button
       aria-label={label}
       className="icon-button"
+      disabled={disabled}
       onClick={onClick}
       title={label}
       type={type}
@@ -96,19 +105,23 @@ function IconButton({
 export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState(initialMessages);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [isSending, setIsSending] = useState(false);
 
   const tokenUsage = useMemo(() => {
     const added = messages.length - initialMessages.length;
     return 1240 + Math.max(added, 0) * 18;
   }, [messages.length]);
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = draft.trim();
-    if (!text) {
+    if (!text || isSending) {
       return;
     }
 
+    setApiError(null);
     setMessages((current) => [
       ...current,
       {
@@ -119,6 +132,34 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
       }
     ]);
     setDraft("");
+
+    try {
+      setIsSending(true);
+      let activeSessionId = sessionId;
+      if (!activeSessionId) {
+        const session = await createServerSession("Provider adapter MVP");
+        activeSessionId = session.id;
+        setSessionId(session.id);
+      }
+
+      const response = await postSessionMessage(activeSessionId, text);
+      const assistantText = extractAssistantText(response);
+      if (assistantText) {
+        setMessages((current) => [
+          ...current,
+          {
+            id: createMessageId(),
+            role: "agent",
+            body: assistantText,
+            meta: "agent"
+          }
+        ]);
+      }
+    } catch (error) {
+      setApiError(`Could not send message: ${readErrorMessage(error)}`);
+    } finally {
+      setIsSending(false);
+    }
   };
 
   return (
@@ -207,7 +248,7 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
           </div>
           <span className="status-pill">
             <span className="status-dot" aria-hidden="true" />
-            Running
+            {isSending ? "Sending" : "Running"}
           </span>
         </header>
 
@@ -255,6 +296,11 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
               Files
             </button>
           </div>
+          {apiError ? (
+            <p className="composer-error" role="alert">
+              {apiError}
+            </p>
+          ) : null}
           <div className="composer-input-row">
             <IconButton label="Attach context">
               <Paperclip size={16} aria-hidden="true" />
@@ -268,7 +314,7 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
             />
-            <IconButton label="Send message" type="submit">
+            <IconButton disabled={isSending} label="Send message" type="submit">
               <Send size={17} aria-hidden="true" />
             </IconButton>
           </div>
@@ -331,4 +377,12 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
       </aside>
     </div>
   );
+}
+
+function readErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return "unknown error";
 }

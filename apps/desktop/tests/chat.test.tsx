@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../src/renderer/App";
 import { Chat } from "../src/renderer/screens/Chat";
@@ -8,11 +8,32 @@ import { Chat } from "../src/renderer/screens/Chat";
 describe("Chat", () => {
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     window.history.replaceState(null, "", "/");
   });
 
-  it("adds a typed user message after send", async () => {
+  it("creates a session, posts a user message, and displays the assistant response", async () => {
     const user = userEvent.setup();
+    const fetchMock = mockFetch([
+      jsonResponse({ id: "session-1", title: "Provider adapter MVP" }),
+      jsonResponse({
+        accepted: true,
+        assistant_message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: "MVP agent received: Run the renderer smoke test"
+        },
+        events: [
+          { type: "turn_started", turn_id: "turn-1" },
+          {
+            type: "assistant_message_finished",
+            text: "MVP agent received: Run the renderer smoke test"
+          },
+          { type: "turn_finished", turn_id: "turn-1" }
+        ]
+      })
+    ]);
 
     render(<Chat />);
 
@@ -21,10 +42,31 @@ describe("Chat", () => {
 
     expect(screen.getByText("Run the renderer smoke test")).toBeInTheDocument();
     expect(screen.getByLabelText("Message agent")).toHaveValue("");
+    expect(
+      await screen.findByText("MVP agent received: Run the renderer smoke test")
+    ).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:49321/sessions",
+      expect.objectContaining({
+        body: JSON.stringify({ title: "Provider adapter MVP" }),
+        method: "POST"
+      })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:49321/sessions/session-1/messages",
+      expect.objectContaining({
+        body: JSON.stringify({ content: "Run the renderer smoke test" }),
+        method: "POST"
+      })
+    );
   });
 
   it("ignores blank messages", async () => {
     const user = userEvent.setup();
+    const fetchMock = mockFetch([]);
 
     render(<Chat />);
 
@@ -32,6 +74,29 @@ describe("Chat", () => {
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(screen.queryByText("you")).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("shows an inline server error when posting fails", async () => {
+    const user = userEvent.setup();
+    mockFetch([
+      jsonResponse({ id: "session-1", title: "Provider adapter MVP" }),
+      new Response(JSON.stringify({ error: "boom" }), {
+        headers: { "Content-Type": "application/json" },
+        status: 500,
+        statusText: "Internal Server Error"
+      })
+    ]);
+
+    render(<Chat />);
+
+    await user.type(screen.getByLabelText("Message agent"), "Trigger an API failure");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(screen.getByText("Trigger an API failure")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not send message: boom"
+    );
   });
 });
 
@@ -67,3 +132,19 @@ describe("App navigation", () => {
     expect(screen.getByRole("heading", { name: "Provider adapter MVP" })).toBeInTheDocument();
   });
 });
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    headers: { "Content-Type": "application/json" },
+    status: 200
+  });
+}
+
+function mockFetch(responses: Response[]) {
+  const fetchMock = vi.fn();
+  for (const response of responses) {
+    fetchMock.mockResolvedValueOnce(response);
+  }
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}

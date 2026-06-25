@@ -183,6 +183,11 @@ strong {
   color: var(--copper-soft);
 }
 
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .search-box {
   display: flex;
   align-items: center;
@@ -432,6 +437,17 @@ strong {
 
 .composer-tools {
   border-bottom: 1px solid var(--line);
+}
+
+.composer-error {
+  margin: 8px 12px 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--danger) 72%, var(--line));
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface-low));
+  color: #ffc8c1;
+  font-family: var(--mono);
+  font-size: 11px;
 }
 
 .model-select,
