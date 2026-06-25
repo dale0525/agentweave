@@ -1,0 +1,23 @@
+{
+  "name": "echo",
+  "description": "Echo a text payload.",
+  "version": "0.1.0",
+  "entry": {
+    "type": "command",
+    "command": "node",
+    "args": ["index.js"]
+  },
+  "tools": [
+    {
+      "name": "echo",
+      "description": "Return the provided text.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" }
+        },
+        "required": ["text"]
+      }
+    }
+  ]
+}
