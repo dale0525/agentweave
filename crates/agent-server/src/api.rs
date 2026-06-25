@@ -84,11 +84,10 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 fn desktop_cors_layer() -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(
-            "http://127.0.0.1:5173"
-                .parse::<HeaderValue>()
-                .expect("desktop dev origin is a valid header value"),
-        )
+        .allow_origin([
+            HeaderValue::from_static("http://127.0.0.1:5173"),
+            HeaderValue::from_static("http://localhost:5173"),
+        ])
         .allow_methods([Method::GET, Method::POST])
         .allow_headers([header::CONTENT_TYPE])
 }
@@ -115,20 +114,20 @@ async fn post_message(
     State(state): State<Arc<AppState>>,
     Json(request): Json<UserMessageRequest>,
 ) -> Result<Json<UserMessageResponse>, ApiError> {
-    let user_message = state
+    let session_exists = state
         .storage
-        .append_message(&session_id, "user", &request.content)
+        .session_exists(&session_id)
         .await
-        .map_err(|error| {
-            tracing::debug!(?error, session_id, "failed to append user message");
-            ApiError::NotFound("session not found")
-        })?;
+        .map_err(ApiError::Internal)?;
+    if !session_exists {
+        return Err(ApiError::NotFound("session not found"));
+    }
 
     let turn_id = uuid::Uuid::new_v4().to_string();
     let assistant_text = deterministic_assistant_reply(&request.content);
-    let assistant_message = state
+    let (user_message, assistant_message) = state
         .storage
-        .append_message(&session_id, "assistant", &assistant_text)
+        .append_turn(&session_id, &request.content, &assistant_text)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -257,42 +256,52 @@ mod tests {
         assert_eq!(body["error"], "session not found");
     }
 
+    #[test]
+    fn internal_api_errors_return_500() {
+        let response = ApiError::Internal(anyhow::anyhow!("storage unavailable")).into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     #[tokio::test]
     async fn supports_vite_desktop_cors_preflight() {
         let storage = Storage::connect("sqlite::memory:").await.unwrap();
         let app = router(Arc::new(AppState::new(storage)));
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("OPTIONS")
-                    .uri("/sessions/session-1/messages")
-                    .header(header::ORIGIN, "http://127.0.0.1:5173")
-                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        for origin in ["http://127.0.0.1:5173", "http://localhost:5173"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("OPTIONS")
+                        .uri("/sessions/session-1/messages")
+                        .header(header::ORIGIN, origin)
+                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
-            "http://127.0.0.1:5173"
-        );
-        assert!(
-            response.headers()[header::ACCESS_CONTROL_ALLOW_METHODS]
-                .to_str()
-                .unwrap()
-                .contains("POST")
-        );
-        assert!(
-            response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
-                .to_str()
-                .unwrap()
-                .contains("content-type")
-        );
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                origin
+            );
+            assert!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_METHODS]
+                    .to_str()
+                    .unwrap()
+                    .contains("POST")
+            );
+            assert!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                    .to_str()
+                    .unwrap()
+                    .contains("content-type")
+            );
+        }
     }
 
     fn json_request(uri: &str, body: Value) -> Request<Body> {

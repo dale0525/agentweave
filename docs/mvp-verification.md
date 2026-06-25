@@ -17,7 +17,7 @@ No new route, major layout, or visual system was introduced for Task 10. The imp
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| `pixi run test` | PASS | Rust workspace tests passed: `agent-runtime` 5/5, `agent-server` 4/4, `model-gateway` 2/2, doc tests 0 failures. |
+| `pixi run test` | PASS | Rust workspace tests passed: `agent-runtime` 8/8, `agent-server` 5/5, `model-gateway` 2/2, doc tests 0 failures. |
 | `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy finished for `model-gateway`, `agent-runtime`, and `agent-server` with no warnings. |
 | `cd apps/desktop && pixi run npm test` | PASS | Vitest passed `tests/chat.test.tsx`: 1 file, 5 tests. |
 | `cd apps/desktop && pixi run npm exec tsc -- --noEmit` | PASS | TypeScript app check exited 0. |
@@ -30,18 +30,21 @@ Started the server with the default SQLite storage URL and `RUST_LOG=info`:
 
 - Server log included: `agent server listening on http://127.0.0.1:49321`
 - `GET http://127.0.0.1:49321/health` returned `ok`
-- `POST /sessions` with JSON returned HTTP 200 and title `MVP Verification Smoke`
+- `POST /sessions` with JSON returned HTTP 200 for both Vite dev origins
 - `POST /sessions/:id/messages` with JSON returned HTTP 200
-- Assistant payload returned: `MVP agent received: cors smoke ping`
+- Assistant payload returned for `http://127.0.0.1:5173`: `MVP agent received: cors 127 smoke`
+- Assistant payload returned for `http://localhost:5173`: `MVP agent received: cors localhost smoke`
 - Runtime event types returned: `turn_started,assistant_text_delta,assistant_message_finished,turn_finished`
 
-CORS smoke for the desktop Vite origin:
+CORS smoke for the desktop Vite origins:
 
 - `OPTIONS /sessions/session-1/messages` with `Origin: http://127.0.0.1:5173`, `Access-Control-Request-Method: POST`, and `Access-Control-Request-Headers: content-type` returned HTTP 200
-- Preflight response included `access-control-allow-origin: http://127.0.0.1:5173`
-- Preflight response included `access-control-allow-methods: GET,POST`
-- Preflight response included `access-control-allow-headers: content-type`
-- JSON `POST /sessions` and `POST /sessions/:id/messages` with the same Origin returned `access-control-allow-origin: http://127.0.0.1:5173`
+- `OPTIONS /sessions/session-1/messages` with `Origin: http://localhost:5173`, `Access-Control-Request-Method: POST`, and `Access-Control-Request-Headers: content-type` returned HTTP 200
+- Each preflight response echoed the matching `access-control-allow-origin`
+- Preflight responses included `access-control-allow-methods: GET,POST`
+- Preflight responses included `access-control-allow-headers: content-type`
+- JSON `POST /sessions` and `POST /sessions/:id/messages` with `Origin: http://127.0.0.1:5173` returned `access-control-allow-origin: http://127.0.0.1:5173`
+- JSON `POST /sessions` and `POST /sessions/:id/messages` with `Origin: http://localhost:5173` returned `access-control-allow-origin: http://localhost:5173`
 
 ## Known Gaps
 
@@ -49,4 +52,5 @@ CORS smoke for the desktop Vite origin:
 - There is no real model streaming yet. The server returns normalized runtime events in one JSON response instead of WebSocket or SSE deltas.
 - Command skill sandbox limits remain MVP-level and are not equivalent to a hardened Codex sandbox.
 - Provider failover is still static/incremental; richer health checks, dynamic routing, and retry policies remain future work.
-- The desktop currently targets the local dev server origin for CORS: `http://127.0.0.1:5173`. Additional packaged-app origins may need explicit policy once packaging is implemented.
+- The desktop local dev server origins are covered for CORS: `http://127.0.0.1:5173` and `http://localhost:5173`. Additional packaged-app origins may need explicit policy once packaging is implemented.
+- The desktop keeps the optimistic user message visible if creating/posting fails; the inline error reports the failure, and a future UI pass can mark or roll back failed optimistic messages.
