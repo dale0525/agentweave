@@ -198,8 +198,17 @@ describe("Chat", () => {
   });
 
   it("keeps the consumer chat layout classes styled", () => {
-    const css = readCssBundle("src/renderer/styles.css");
+    const css = readCssBundle("src/renderer/styles/index.css");
+    const entryCss = readCssBundle("src/renderer/styles/index.css", {
+      inlineImports: false
+    });
 
+    expect(entryCss).toContain('@import "./tokens.css";');
+    expect(entryCss).toContain('@import "./base.css";');
+    expect(entryCss).toContain('@import "./chat.css";');
+    expect(entryCss).toContain('@import "./drawer.css";');
+    expect(entryCss).toContain('@import "./settings.css";');
+    expect(css).toMatch(/--color-primary:\s*#0d9488/);
     expect(css).toMatch(/\.chat-shell[\s\S]*?\{/);
     expect(css).toMatch(/\.top-bar[\s\S]*?\{/);
     expect(css).toMatch(/\.top-bar-title[\s\S]*?\{/);
@@ -208,7 +217,7 @@ describe("Chat", () => {
     expect(css).toMatch(/\.message-bubble-assistant[\s\S]*?\{/);
     expect(css).toMatch(/\.message-bubble-user[\s\S]*?\{/);
     expect(css).toMatch(
-      /@media \(max-width: 900px\)[\s\S]*\.message-list[\s\S]*padding-bottom: 96px/
+      /@media \(max-width: 640px\)[\s\S]*\.composer[\s\S]*position: fixed/
     );
   });
 });
@@ -314,8 +323,10 @@ describe("App navigation", () => {
   });
 
   it("scopes settings skill row styles away from session skill rows", () => {
-    const css = readCssBundle("src/renderer/styles/settings.css");
+    const css = readCssBundle("src/renderer/styles/index.css");
 
+    expect(css).toMatch(/\.conversation-drawer-content[\s\S]*?\{/);
+    expect(css).toMatch(/\.settings-shell[\s\S]*?\{/);
     expect(css).toMatch(/\.settings-skill-row[\s\S]*?\{/);
     expect(css).not.toMatch(/(^|[,{]\s*)\.skill-row(?:\s|,|\{)/m);
   });
@@ -349,10 +360,14 @@ function mockFetch(responses: Array<Response | Promise<Response>>) {
   return fetchMock;
 }
 
-function readCssBundle(entryPath: string): string {
+function readCssBundle(
+  entryPath: string,
+  options: { inlineImports?: boolean } = {}
+): string {
+  const { inlineImports = true } = options;
   const css = readFileSync(entryPath, "utf8");
   const imports = [...css.matchAll(/@import\s+"([^"]+)";/g)];
-  if (imports.length === 0) {
+  if (!inlineImports || imports.length === 0) {
     return css;
   }
 

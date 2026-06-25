@@ -1,138 +1,123 @@
-.chat-shell,
-.settings-screen {
+.chat-shell {
   display: flex;
-  flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: var(--bg);
-}
-
-.top-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 56px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
+  flex-direction: column;
+  background: var(--color-background);
 }
 
 .chat-top-bar {
   justify-content: space-between;
 }
 
-.top-bar-title {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  text-align: center;
-}
-
-.top-bar-title h1 {
-  margin: 0;
-  font-size: 17px;
-  line-height: 22px;
-}
-
-.top-bar-title p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.top-bar-spacer {
-  width: 30px;
-  flex: 0 0 auto;
-}
-
-.conversation-drawer-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-  background: rgba(8, 12, 12, 0.62);
-}
-
-.conversation-drawer-content {
-  position: fixed;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 31;
-  display: flex;
-  width: min(320px, 82vw);
-  flex-direction: column;
-  border-right: 1px solid var(--line);
-  background: var(--surface);
-  outline: 0;
-}
-
-.conversation-drawer-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 48px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.conversation-drawer-header h2 {
-  margin: 0;
-  font-size: 15px;
-  line-height: 22px;
-}
-
-.conversation-drawer-new {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 34px;
-  margin: 12px;
-  border: 1px solid var(--cyan);
-  border-radius: 4px;
-  background: var(--cyan);
-  color: #001f1d;
-  cursor: pointer;
-  font-weight: 700;
-}
-
-.conversation-drawer-list {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 0 12px 12px;
-}
-
 .message-list {
   display: flex;
+  width: min(100%, var(--chat-column-width));
   flex: 1;
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+  margin: 0 auto;
   overflow: auto;
-  padding: 24px max(16px, calc((100vw - 820px) / 2));
+  padding: 28px var(--space-page) 24px;
 }
 
 .message-bubble {
-  max-width: min(720px, 86%);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-high);
+  max-width: min(680px, 86%);
+  border-radius: var(--radius-content);
 }
 
 .message-bubble-assistant {
   align-self: flex-start;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
 }
 
 .message-bubble-user {
   align-self: flex-end;
-  border-color: var(--line-strong);
-  background: #202725;
+  border: 1px solid var(--color-surface-raised);
+  background: var(--color-surface-raised);
 }
 
 .message-bubble p {
   margin: 0;
   padding: 10px 12px;
-  white-space: pre-wrap;
+  color: var(--color-text);
+  font-size: 15px;
+  line-height: 22px;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.composer {
+  width: min(100%, var(--chat-column-width));
+  margin: 0 auto;
+  padding: 0 var(--space-page) 18px;
+  background: var(--color-background);
+}
+
+.composer-error {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 34%, transparent);
+  border-radius: var(--radius-control);
+  background: var(--color-danger-surface);
+  color: var(--color-danger);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.composer-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-content);
+  background: var(--color-surface-muted);
+}
+
+.composer-input-row:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow-focus);
+}
+
+.composer-input-row input {
+  height: 40px;
+  padding: 0 12px;
+  outline: 0;
+}
+
+.composer-input-row .icon-button[type="submit"] {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: #ffffff;
+}
+
+.composer-input-row .icon-button[type="submit"]:hover {
+  border-color: var(--color-primary-hover);
+  background: var(--color-primary-hover);
+  color: #ffffff;
+}
+
+@media (max-width: 640px) {
+  .message-list {
+    padding: 20px var(--space-page-mobile) 112px;
+  }
+
+  .message-bubble {
+    max-width: 90%;
+  }
+
+  .composer {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    padding: 10px var(--space-page-mobile)
+      calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--color-border);
+    background: var(--color-background);
+  }
 }

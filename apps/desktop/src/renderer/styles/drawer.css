@@ -1,0 +1,128 @@
+.conversation-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(17, 24, 39, 0.38);
+}
+
+.conversation-drawer-content {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 31;
+  display: flex;
+  width: var(--drawer-width);
+  max-width: calc(100vw - 32px);
+  flex-direction: column;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-surface);
+  outline: 0;
+}
+
+.conversation-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 56px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.conversation-drawer-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.conversation-drawer-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  margin: 14px 16px 10px;
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-control);
+  background: var(--color-primary);
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.conversation-drawer-new:hover {
+  border-color: var(--color-primary-hover);
+  background: var(--color-primary-hover);
+}
+
+.conversation-drawer-search {
+  margin: 0 16px 14px;
+  padding: 0 10px;
+}
+
+.conversation-drawer-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 8px 16px;
+}
+
+.conversation-drawer-section {
+  padding: 12px 8px 6px;
+}
+
+.session-row {
+  display: flex;
+  width: 100%;
+  min-height: 54px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-content);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.session-row:hover {
+  border-color: var(--color-border);
+  background: var(--color-surface-muted);
+}
+
+.session-row span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px;
+}
+
+.session-row strong,
+.session-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-row strong {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.session-row small {
+  color: var(--color-text-subtle);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+@media (max-width: 640px) {
+  .conversation-drawer-overlay {
+    background: rgba(17, 24, 39, 0.46);
+  }
+
+  .conversation-drawer-content {
+    width: calc(100vw - 24px);
+    max-width: none;
+  }
+}
