@@ -107,6 +107,54 @@ Known acceptable deviations:
 - Chat screenshots omit some nonessential Stitch hint/status details and suggested chips; the MVP scope keeps the primary chat, drawer, and settings surfaces simple.
 - Dark mode has no direct Stitch screen, so it was verified for structural parity, readability, and contrast rather than pixel parity.
 
+## Developer Framework Repositioning Verification
+
+Date: 2026-06-25
+
+Stitch source of truth:
+
+- Project: `projects/8616130577965446903`
+- Design system: `assets/e4d441befa1d42e4af22f64b6d8e5d3c`
+- Chat desktop: `d9113e7a1ce640c88135dcd875982cf0`
+- Chat mobile: `f74d11de4aa845e0bca5ac976c50352f`
+- Settings desktop: `b591242868d74b0093a7f11b2c0c0f8e`
+- Settings mobile: `0a239471a02d413da7880f4ccef955e6`
+
+Automated checks:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 13/13, `agent-server` 6/6, `model-gateway` 2/2, doc tests 0 failures. |
+| `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy finished for `agent-runtime` and `agent-server` with no warnings. |
+| `pixi run npm --prefix apps/desktop test` | PASS | Vitest passed `tests/chat.test.tsx`: 1 file, 16 tests. |
+| `cd apps/desktop && pixi run npm exec tsc -- --noEmit -p tsconfig.vitest.json` | PASS | TypeScript test config check exited 0. |
+| `git diff --check HEAD` | PASS | Whitespace check exited 0. |
+| Source line budget | PASS | Edited source files were checked; largest edited source file was `crates/agent-runtime/src/skill.rs` at 421 physical lines. |
+
+Local visual verification:
+
+- Actual Vite command: `pixi run npm --prefix apps/desktop run dev -- --host 127.0.0.1 --port 5173`
+- Browser console check: 0 warnings and 0 errors.
+- Desktop chat checked at `1440x900`.
+- Mobile chat checked at `390x844`.
+- Desktop settings checked at `1440x900`.
+- Mobile settings checked at `390x844`.
+- Legacy `/#sessions` hash checked at `1440x900`; it renders the chat UI and does not expose the old Sessions workbench.
+
+Visual review result:
+
+- PASS. The packaged user UI exposes chat and model connection settings only.
+- Chat shows the repositioned copy: `Ask naturally. The agent will handle the work.`
+- Settings shows only `Model connection`; there are no tabs, switches, skill rows, skill toggles, tool panels, capability chips, diagnostics, or marketplace concepts.
+- Programmatic DOM checks found no visible `Skills`, `Active skill`, `use skills`, `skill toggle`, `tool`, `capability`, `diagnostic`, or `marketplace` text in the checked chat/settings routes.
+- Mobile chat was corrected to keep the subtitle visible while wrapping within the top bar.
+
+Known acceptable deviations:
+
+- Stitch reference canvases are `2560x2048` desktop and `780x1768` mobile, while runtime checks used browser viewports of `1440x900` and `390x844`.
+- Browser font rendering and real Vite content differ slightly from Stitch screenshots.
+- The Settings screen does not include extra informational footer content from Stitch; the current implementation intentionally stays within the existing MVP model connection form.
+
 ## Known Gaps
 
 - The assistant reply is deterministic and local: `MVP agent received: ...`; it does not call a real model provider.
