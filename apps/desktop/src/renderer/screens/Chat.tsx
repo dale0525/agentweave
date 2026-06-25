@@ -1,19 +1,5 @@
-import {
-  Activity,
-  Bot,
-  FileText,
-  History,
-  Paperclip,
-  Play,
-  Plus,
-  RefreshCw,
-  Search,
-  Send,
-  Settings,
-  Terminal,
-  Wrench
-} from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useState } from "react";
+import { Menu, Settings } from "lucide-react";
 
 import {
   createServerSession,
@@ -21,6 +7,10 @@ import {
   postSessionMessage
 } from "../api";
 import { AppIconButton } from "../components/AppIconButton";
+import { Composer } from "../components/Composer";
+import { MessageList } from "../components/MessageList";
+import { starterMessages } from "../data/fixtures";
+import { ChatMessage } from "../types";
 
 type AppView = "chat" | "sessions";
 
@@ -29,68 +19,23 @@ type ChatProps = {
   onOpenSettings?: () => void;
 };
 
-type Message = {
-  id: string;
-  role: "agent" | "tool" | "user";
-  body: string;
-  meta: string;
-};
-
-const initialMessages: Message[] = [
-  {
-    id: "m-1",
-    role: "user",
-    body: "Initialize provider adapter for AWS.",
-    meta: "18:42:01"
-  },
-  {
-    id: "m-2",
-    role: "agent",
-    body: "Analyzing provider requirements...",
-    meta: "system 0.4s"
-  },
-  {
-    id: "m-3",
-    role: "tool",
-    body: 'echo_skill({"status":"init"})\n\n{"success": true}',
-    meta: "tool call 18:42:02"
-  },
-  {
-    id: "m-4",
-    role: "agent",
-    body: "Adapter initialized. Ready for deployment.",
-    meta: "agent 18:42:03"
-  }
-];
-
-const recentSessions = [
-  { title: "Provider adapter MVP", state: "Running", time: "10:42 AM" },
-  { title: "Schema validation fix", state: "Idle", time: "Yesterday" },
-  { title: "API test", state: "Ready", time: "Oct 24" }
-];
-
 function createMessageId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
 
-  return `user-${Math.random().toString(36).slice(2)}`;
+  return `message-${Math.random().toString(36).slice(2)}`;
 }
 
 export function Chat({
-  onNavigate = () => undefined,
   onOpenSettings = () => undefined
 }: ChatProps): JSX.Element {
   const [draft, setDraft] = useState("");
-  const [messages, setMessages] = useState(initialMessages);
+  const [messages, setMessages] = useState<ChatMessage[]>(starterMessages);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
-
-  const tokenUsage = useMemo(() => {
-    const added = messages.length - initialMessages.length;
-    return 1240 + Math.max(added, 0) * 18;
-  }, [messages.length]);
+  const [, setIsDrawerOpen] = useState(false);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -103,10 +48,9 @@ export function Chat({
     setMessages((current) => [
       ...current,
       {
-        id: createMessageId(),
-        role: "user",
         body: text,
-        meta: "you"
+        id: createMessageId(),
+        role: "user"
       }
     ]);
     setDraft("");
@@ -126,253 +70,44 @@ export function Chat({
         setMessages((current) => [
           ...current,
           {
-            id: createMessageId(),
-            role: "agent",
             body: assistantText,
-            meta: "agent"
+            id: createMessageId(),
+            role: "assistant"
           }
         ]);
       }
-    } catch (error) {
-      setApiError(`Could not send message: ${readErrorMessage(error)}`);
+    } catch {
+      setApiError("Could not send message. Check your model or service connection.");
     } finally {
       setIsSending(false);
     }
   };
 
   return (
-    <div className="screen-grid chat-screen">
-      <aside className="session-rail" aria-label="Session navigation">
-        <div className="brand-row">
-          <div>
-            <span className="brand-mark">GA</span>
-            <span className="brand-name">GeneralAgent</span>
-          </div>
-          <AppIconButton label="New session">
-            <Plus size={15} aria-hidden="true" />
-          </AppIconButton>
-        </div>
-
-        <label className="search-box">
-          <Search size={14} aria-hidden="true" />
-          <span className="sr-only">Search sessions</span>
-          <input placeholder="Search sessions..." />
-        </label>
-
-        <div className="rail-section">
-          <p className="section-label">Recent sessions</p>
-          {recentSessions.map((session) => (
-            <button
-              className="session-row"
-              key={session.title}
-              type="button"
-            >
-              <span>
-                <strong>{session.title}</strong>
-                <small>
-                  <span className="status-dot" aria-hidden="true" />
-                  {session.state}
-                </small>
-              </span>
-              <time>{session.time}</time>
-            </button>
-          ))}
-        </div>
-
-        <nav className="rail-nav" aria-label="Primary views">
-          <button aria-current="page" className="nav-item active" type="button">
-            <Bot size={15} aria-hidden="true" />
-            Chat
-          </button>
-          <button
-            className="nav-item"
-            type="button"
-            onClick={() => onNavigate("sessions")}
-          >
-            <History size={15} aria-hidden="true" />
-            Sessions
-          </button>
-          <button className="nav-item" type="button">
-            <Wrench size={15} aria-hidden="true" />
-            Skills
-          </button>
-          <button
-            aria-label="Open settings"
-            className="nav-item"
-            type="button"
-            onClick={onOpenSettings}
-          >
-            <Settings size={15} aria-hidden="true" />
-            Settings
-          </button>
-        </nav>
-      </aside>
-
-      <main className="workbench" aria-label="Conversation workbench">
-        <header className="mobile-topbar">
-          <div>
-            <strong>GeneralAgent</strong>
-            <span>Provider adapter MVP</span>
-          </div>
-          <div className="mobile-actions">
-            <AppIconButton label="Refresh session">
-              <RefreshCw size={16} aria-hidden="true" />
-            </AppIconButton>
-            <AppIconButton
-              label="Open sessions"
-              onClick={() => onNavigate("sessions")}
-            >
-              <History size={16} aria-hidden="true" />
-            </AppIconButton>
-          </div>
-        </header>
-
-        <header className="workbench-header">
-          <div>
-            <h1>Provider adapter MVP</h1>
-            <p>chat/completions</p>
-          </div>
-          <span className="status-pill">
-            <span className="status-dot" aria-hidden="true" />
-            {isSending ? "Sending" : "Running"}
-          </span>
-        </header>
-
-        <div className="mobile-chip-row" aria-label="Runtime chips">
-          <span>chat/completions</span>
-          <span>GPT-4o-mini</span>
-          <span>skills: 3</span>
-        </div>
-
-        <div className="conversation-log" aria-live="polite">
-          <span className="date-chip">Today</span>
-          {messages.map((message) => (
-            <article
-              className={`message-card message-card-${message.role}`}
-              key={message.id}
-            >
-              <div className="message-meta">
-                <span>{message.role}</span>
-                <time>{message.meta}</time>
-              </div>
-              <p>{message.body}</p>
-            </article>
-          ))}
-        </div>
-
-        <form
-          aria-label="Agent composer"
-          className="composer"
-          onSubmit={handleSubmit}
+    <main className="chat-shell" aria-label="GeneralAgent chat">
+      <header className="top-bar chat-top-bar">
+        <AppIconButton
+          label="Open conversations"
+          onClick={() => setIsDrawerOpen(true)}
         >
-          <div className="composer-tools">
-            <button className="model-select" type="button">
-              GPT-4o
-            </button>
-            <button aria-pressed="true" className="tool-toggle active" type="button">
-              <Terminal size={13} aria-hidden="true" />
-              Terminal
-            </button>
-            <button aria-pressed="false" className="tool-toggle" type="button">
-              <Wrench size={13} aria-hidden="true" />
-              Web
-            </button>
-            <button aria-pressed="false" className="tool-toggle" type="button">
-              <FileText size={13} aria-hidden="true" />
-              Files
-            </button>
-          </div>
-          {apiError ? (
-            <p className="composer-error" role="alert">
-              {apiError}
-            </p>
-          ) : null}
-          <div className="composer-input-row">
-            <AppIconButton label="Attach context">
-              <Paperclip size={16} aria-hidden="true" />
-            </AppIconButton>
-            <label className="sr-only" htmlFor="agent-message">
-              Message GeneralAgent
-            </label>
-            <input
-              id="agent-message"
-              placeholder="Message GeneralAgent..."
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-            />
-            <AppIconButton
-              disabled={isSending}
-              label="Send message"
-              type="submit"
-            >
-              <Send size={17} aria-hidden="true" />
-            </AppIconButton>
-          </div>
-        </form>
-      </main>
-
-      <aside className="inspector-panel" aria-label="Runtime inspector">
-        <div className="panel-heading">
-          <h2>Inspector</h2>
-          <span className="status-pill compact">Active</span>
+          <Menu size={18} aria-hidden="true" />
+        </AppIconButton>
+        <div className="top-bar-title">
+          <h1>GeneralAgent</h1>
+          <p>Ask anything, use skills when you need them.</p>
         </div>
-        <section className="inspector-block">
-          <p className="section-label">Model configuration</p>
-          <dl className="kv-grid">
-            <div>
-              <dt>Model</dt>
-              <dd>GPT-4o-mini</dd>
-            </div>
-            <div>
-              <dt>Context</dt>
-              <dd>persistent</dd>
-            </div>
-          </dl>
-        </section>
-        <section className="inspector-block metric-grid">
-          <div>
-            <span>Tokens</span>
-            <strong>{tokenUsage}</strong>
-          </div>
-          <div>
-            <span>Latency</span>
-            <strong>240ms</strong>
-          </div>
-        </section>
-        <section className="inspector-block">
-          <p className="section-label">Enabled skills</p>
-          {["bash_execution", "file_system", "web_search"].map((skill) => (
-            <div className="skill-row" key={skill}>
-              <span className="status-dot" aria-hidden="true" />
-              {skill}
-              <Play size={12} aria-hidden="true" />
-            </div>
-          ))}
-        </section>
-        <section className="inspector-block runtime-log">
-          <p className="section-label">Runtime log</p>
-          <pre>{`[18:42:01] session initialized
-[18:42:01] binding model
-[18:42:02] load_skill: file_system
-[18:42:03] user prompt received
-[18:42:03] execution successful`}</pre>
-        </section>
-        <section className="inspector-block">
-          <p className="section-label">Activity</p>
-          <div className="activity-row">
-            <Activity size={14} aria-hidden="true" />
-            agent-server online
-          </div>
-        </section>
-      </aside>
-    </div>
+        <AppIconButton label="Open settings" onClick={onOpenSettings}>
+          <Settings size={18} aria-hidden="true" />
+        </AppIconButton>
+      </header>
+      <MessageList messages={messages} />
+      <Composer
+        draft={draft}
+        error={apiError}
+        isSending={isSending}
+        onChange={setDraft}
+        onSubmit={handleSubmit}
+      />
+    </main>
   );
-}
-
-function readErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-
-  return "unknown error";
 }

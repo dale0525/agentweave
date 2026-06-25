@@ -101,8 +101,20 @@ describe("Chat", () => {
 
     expect(screen.getByText("Trigger an API failure")).toBeInTheDocument();
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Could not send message: boom"
+      "Could not send message. Check your model or service connection."
     );
+  });
+
+  it("exposes consumer chat controls", () => {
+    render(<Chat />);
+
+    expect(
+      screen.getByRole("button", { name: "Open conversations" })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open settings" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Open sessions" })
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -149,17 +161,15 @@ describe("App navigation", () => {
     expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
   });
 
-  it("opens sessions from chat and returns to chat", async () => {
-    const user = userEvent.setup();
-
+  it("keeps sessions available only through the location hash", () => {
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Open sessions" }));
-
-    expect(screen.getByRole("heading", { name: "Sessions" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Back to chat" }));
-
+    expect(
+      screen.queryByRole("button", { name: "Open sessions" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open conversations" })
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
   });
 });
