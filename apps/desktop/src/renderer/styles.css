@@ -825,6 +825,10 @@ strong {
     padding: 18px 12px 96px;
   }
 
+  .message-list {
+    padding-bottom: 96px;
+  }
+
   .message-card {
     max-width: 90%;
   }

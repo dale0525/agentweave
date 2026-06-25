@@ -122,13 +122,16 @@ describe("Chat", () => {
   it("keeps the consumer chat layout classes styled", () => {
     const css = readFileSync("src/renderer/styles.css", "utf8");
 
-    expect(css).toContain(".chat-shell");
-    expect(css).toContain(".top-bar");
-    expect(css).toContain(".top-bar-title");
-    expect(css).toContain(".message-list");
-    expect(css).toContain(".message-bubble");
-    expect(css).toContain(".message-bubble-assistant");
-    expect(css).toContain(".message-bubble-user");
+    expect(css).toMatch(/\.chat-shell[\s\S]*?\{/);
+    expect(css).toMatch(/\.top-bar[\s\S]*?\{/);
+    expect(css).toMatch(/\.top-bar-title[\s\S]*?\{/);
+    expect(css).toMatch(/\.message-list[\s\S]*?\{/);
+    expect(css).toMatch(/\.message-bubble[\s\S]*?\{/);
+    expect(css).toMatch(/\.message-bubble-assistant[\s\S]*?\{/);
+    expect(css).toMatch(/\.message-bubble-user[\s\S]*?\{/);
+    expect(css).toMatch(
+      /@media \(max-width: 900px\)[\s\S]*\.message-list[\s\S]*padding-bottom: 96px/
+    );
   });
 });
 
