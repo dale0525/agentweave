@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -115,6 +117,18 @@ describe("Chat", () => {
     expect(
       screen.queryByRole("button", { name: "Open sessions" })
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps the consumer chat layout classes styled", () => {
+    const css = readFileSync("src/renderer/styles.css", "utf8");
+
+    expect(css).toContain(".chat-shell");
+    expect(css).toContain(".top-bar");
+    expect(css).toContain(".top-bar-title");
+    expect(css).toContain(".message-list");
+    expect(css).toContain(".message-bubble");
+    expect(css).toContain(".message-bubble-assistant");
+    expect(css).toContain(".message-bubble-user");
   });
 });
 
