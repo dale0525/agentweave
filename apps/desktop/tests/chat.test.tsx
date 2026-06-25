@@ -127,6 +127,14 @@ describe("App navigation", () => {
     });
   });
 
+  it("opens sessions from the location hash", async () => {
+    window.history.replaceState(null, "", "/#sessions");
+
+    render(<App />);
+
+    expect(screen.getByRole("heading", { name: "Sessions" })).toBeInTheDocument();
+  });
+
   it("opens settings from chat and returns to chat", async () => {
     const user = userEvent.setup();
 
@@ -135,6 +143,20 @@ describe("App navigation", () => {
     await user.click(screen.getByRole("button", { name: "Open settings" }));
 
     expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back to chat" }));
+
+    expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
+  });
+
+  it("opens sessions from chat and returns to chat", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Open sessions" }));
+
+    expect(screen.getByRole("heading", { name: "Sessions" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Back to chat" }));
 
