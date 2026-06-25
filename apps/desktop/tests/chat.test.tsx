@@ -37,11 +37,14 @@ describe("Chat", () => {
 
     render(<Chat />);
 
-    await user.type(screen.getByLabelText("Message agent"), "Run the renderer smoke test");
+    await user.type(
+      screen.getByLabelText("Message GeneralAgent"),
+      "Run the renderer smoke test"
+    );
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(screen.getByText("Run the renderer smoke test")).toBeInTheDocument();
-    expect(screen.getByLabelText("Message agent")).toHaveValue("");
+    expect(screen.getByLabelText("Message GeneralAgent")).toHaveValue("");
     expect(
       await screen.findByText("MVP agent received: Run the renderer smoke test")
     ).toBeInTheDocument();
@@ -70,7 +73,7 @@ describe("Chat", () => {
 
     render(<Chat />);
 
-    await user.type(screen.getByLabelText("Message agent"), "   ");
+    await user.type(screen.getByLabelText("Message GeneralAgent"), "   ");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(screen.queryByText("you")).not.toBeInTheDocument();
@@ -90,7 +93,10 @@ describe("Chat", () => {
 
     render(<Chat />);
 
-    await user.type(screen.getByLabelText("Message agent"), "Trigger an API failure");
+    await user.type(
+      screen.getByLabelText("Message GeneralAgent"),
+      "Trigger an API failure"
+    );
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(screen.getByText("Trigger an API failure")).toBeInTheDocument();
@@ -107,29 +113,32 @@ describe("App navigation", () => {
   });
 
   it("updates the active view when the location hash changes", async () => {
-    window.history.replaceState(null, "", "/#sessions");
+    window.history.replaceState(null, "", "/#settings");
 
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: "Sessions" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
 
     window.history.replaceState(null, "", "/");
     window.dispatchEvent(new HashChangeEvent("hashchange"));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Provider adapter MVP" })).toBeInTheDocument();
+      expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
     });
   });
 
-  it("provides a mobile sessions control that returns to chat", async () => {
+  it("opens settings from chat and returns to chat", async () => {
     const user = userEvent.setup();
-    window.history.replaceState(null, "", "/#sessions");
 
     render(<App />);
 
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: "Back to chat" }));
 
-    expect(screen.getByRole("heading", { name: "Provider adapter MVP" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
   });
 });
 

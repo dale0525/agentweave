@@ -13,18 +13,20 @@ import {
   Terminal,
   Wrench
 } from "lucide-react";
-import { FormEvent, ReactNode, useMemo, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 
 import {
   createServerSession,
   extractAssistantText,
   postSessionMessage
 } from "../api";
+import { AppIconButton } from "../components/AppIconButton";
 
 type AppView = "chat" | "sessions";
 
 type ChatProps = {
   onNavigate?: (view: AppView) => void;
+  onOpenSettings?: () => void;
 };
 
 type Message = {
@@ -75,34 +77,10 @@ function createMessageId(): string {
   return `user-${Math.random().toString(36).slice(2)}`;
 }
 
-function IconButton({
-  label,
-  children,
-  disabled = false,
-  onClick,
-  type = "button"
-}: {
-  label: string;
-  children: ReactNode;
-  disabled?: boolean;
-  onClick?: () => void;
-  type?: "button" | "submit";
-}) {
-  return (
-    <button
-      aria-label={label}
-      className="icon-button"
-      disabled={disabled}
-      onClick={onClick}
-      title={label}
-      type={type}
-    >
-      {children}
-    </button>
-  );
-}
-
-export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
+export function Chat({
+  onNavigate = () => undefined,
+  onOpenSettings = () => undefined
+}: ChatProps): JSX.Element {
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState(initialMessages);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -170,9 +148,9 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
             <span className="brand-mark">GA</span>
             <span className="brand-name">GeneralAgent</span>
           </div>
-          <IconButton label="New session">
+          <AppIconButton label="New session">
             <Plus size={15} aria-hidden="true" />
-          </IconButton>
+          </AppIconButton>
         </div>
 
         <label className="search-box">
@@ -218,7 +196,12 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
             <Wrench size={15} aria-hidden="true" />
             Skills
           </button>
-          <button className="nav-item" type="button">
+          <button
+            aria-label="Open settings"
+            className="nav-item"
+            type="button"
+            onClick={onOpenSettings}
+          >
             <Settings size={15} aria-hidden="true" />
             Settings
           </button>
@@ -232,12 +215,15 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
             <span>Provider adapter MVP</span>
           </div>
           <div className="mobile-actions">
-            <IconButton label="Refresh session">
+            <AppIconButton label="Refresh session">
               <RefreshCw size={16} aria-hidden="true" />
-            </IconButton>
-            <IconButton label="Open sessions" onClick={() => onNavigate("sessions")}>
+            </AppIconButton>
+            <AppIconButton
+              label="Open sessions"
+              onClick={() => onNavigate("sessions")}
+            >
               <History size={16} aria-hidden="true" />
-            </IconButton>
+            </AppIconButton>
           </div>
         </header>
 
@@ -302,21 +288,25 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
             </p>
           ) : null}
           <div className="composer-input-row">
-            <IconButton label="Attach context">
+            <AppIconButton label="Attach context">
               <Paperclip size={16} aria-hidden="true" />
-            </IconButton>
+            </AppIconButton>
             <label className="sr-only" htmlFor="agent-message">
-              Message agent
+              Message GeneralAgent
             </label>
             <input
               id="agent-message"
-              placeholder="Message agent..."
+              placeholder="Message GeneralAgent..."
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
             />
-            <IconButton disabled={isSending} label="Send message" type="submit">
+            <AppIconButton
+              disabled={isSending}
+              label="Send message"
+              type="submit"
+            >
               <Send size={17} aria-hidden="true" />
-            </IconButton>
+            </AppIconButton>
           </div>
         </form>
       </main>
