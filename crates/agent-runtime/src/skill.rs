@@ -83,13 +83,14 @@ impl SkillRegistry {
             })?;
         let index: SkillBundleIndex = serde_json::from_slice(&bytes)?;
         let mut skills = Vec::new();
+        let canonical_root = tokio::fs::canonicalize(root)
+            .await
+            .with_context(|| format!("failed to resolve packaged skill root {}", root.display()))?;
 
         for entry in index.skills {
-            if !is_safe_packaged_skill_path(&entry.path) {
-                anyhow::bail!("unsafe packaged skill path: {}", entry.path.display());
-            }
-
-            skills.push(Self::load_skill(root.join(entry.path)).await?);
+            let skill_root =
+                resolve_packaged_skill_path(root, &canonical_root, &entry.path).await?;
+            skills.push(Self::load_skill(skill_root).await?);
         }
 
         Ok(Self { skills })
@@ -188,6 +189,27 @@ fn is_safe_packaged_skill_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+async fn resolve_packaged_skill_path(
+    root: &Path,
+    canonical_root: &Path,
+    path: &Path,
+) -> anyhow::Result<PathBuf> {
+    if !is_safe_packaged_skill_path(path) {
+        anyhow::bail!("unsafe packaged skill path: {}", path.display());
+    }
+
+    let candidate = root.join(path);
+    let canonical_candidate = tokio::fs::canonicalize(&candidate)
+        .await
+        .with_context(|| format!("failed to resolve packaged skill path {}", path.display()))?;
+
+    if !canonical_candidate.starts_with(canonical_root) {
+        anyhow::bail!("unsafe packaged skill path: {}", path.display());
+    }
+
+    Ok(canonical_candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +292,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn packaged_load_rejects_symlink_escape_paths() {
+        let root = unique_test_dir("packaged-symlink");
+        let outside_root = unique_test_dir("packaged-outside");
+        let outside_skill_dir = outside_root.join("outside");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        write_echo_skill(&outside_root, "outside", "outside_echo").await;
+
+        if let Err(error) = create_dir_symlink(&outside_skill_dir, &root.join("included")) {
+            eprintln!("skipping symlink test because symlink creation failed: {error}");
+            remove_test_dir(root).await;
+            remove_test_dir(outside_root).await;
+            return;
+        }
+
+        tokio::fs::write(
+            root.join("skill-bundle.json"),
+            serde_json::json!({
+                "skills": [
+                    { "path": "included" }
+                ]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let error = SkillRegistry::load_packaged(&root).await.unwrap_err();
+
+        assert!(error.to_string().contains("unsafe packaged skill path"));
+        remove_test_dir(root).await;
+        remove_test_dir(outside_root).await;
+    }
+
+    #[tokio::test]
     async fn rejects_manifest_without_runtime_tools() {
         let root = unique_test_dir("invalid-manifest");
         let skill_dir = root.join("empty");
@@ -344,6 +400,16 @@ mod tests {
 
     fn unique_test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[cfg(unix)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
     }
 
     async fn remove_test_dir(path: PathBuf) {
