@@ -161,6 +161,7 @@ input:focus-visible,
   }
 
   .top-bar-title p {
-    display: none;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 }
