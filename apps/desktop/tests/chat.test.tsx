@@ -256,6 +256,35 @@ describe("App navigation", () => {
     expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
   });
 
+  it("switches between model and skills settings", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/#settings");
+
+    render(<App />);
+
+    expect(screen.getByLabelText("Base URL")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Skills" }));
+
+    expect(screen.getByText("File Helper")).toBeInTheDocument();
+    expect(screen.getByText("Web Research")).toBeInTheDocument();
+  });
+
+  it("toggles an available skill", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/#settings");
+
+    render(<App />);
+
+    await user.click(screen.getByRole("tab", { name: "Skills" }));
+    await user.click(screen.getByRole("switch", { name: "Calendar" }));
+
+    expect(screen.getByRole("switch", { name: "Calendar" })).toHaveAttribute(
+      "aria-checked",
+      "true"
+    );
+  });
+
   it("keeps sessions available only through the location hash", () => {
     render(<App />);
 
