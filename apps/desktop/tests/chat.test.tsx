@@ -216,6 +216,8 @@ describe("Chat", () => {
 describe("App navigation", () => {
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     window.history.replaceState(null, "", "/");
   });
 
@@ -283,6 +285,39 @@ describe("App navigation", () => {
       "aria-checked",
       "true"
     );
+  });
+
+  it("keeps unavailable skills disabled", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/#settings");
+
+    render(<App />);
+
+    await user.click(screen.getByRole("tab", { name: "Skills" }));
+
+    expect(screen.getByRole("switch", { name: "Local Command" })).toBeDisabled();
+  });
+
+  it("keeps model connection testing static in the renderer", async () => {
+    const user = userEvent.setup();
+    const fetchMock = mockFetch([]);
+    window.history.replaceState(null, "", "/#settings");
+
+    render(<App />);
+
+    expect(screen.getByText("Connection: Not tested")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Test connection" }));
+
+    expect(screen.getByText("Connection: Not tested")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("scopes settings skill row styles away from session skill rows", () => {
+    const css = readCssBundle("src/renderer/styles/settings.css");
+
+    expect(css).toMatch(/\.settings-skill-row[\s\S]*?\{/);
+    expect(css).not.toMatch(/(^|[,{]\s*)\.skill-row(?:\s|,|\{)/m);
   });
 
   it("keeps sessions available only through the location hash", () => {

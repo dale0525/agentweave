@@ -24,7 +24,7 @@ export function SettingsSkills(): JSX.Element {
 
       <div className="skill-list">
         {skillRows.map((skill) => (
-          <article className="skill-row" key={skill.id}>
+          <article className="settings-skill-row" key={skill.id}>
             <div className="skill-copy">
               <div className="skill-title-row">
                 <h3>{skill.name}</h3>
