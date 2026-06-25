@@ -46,10 +46,7 @@ export default function App(): JSX.Element {
       ) : view === "sessions" ? (
         <Sessions onNavigate={navigate} />
       ) : (
-        <Chat
-          onNavigate={navigate}
-          onOpenSettings={() => navigate("settings")}
-        />
+        <Chat onOpenSettings={() => navigate("settings")} />
       )}
     </div>
   );

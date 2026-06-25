@@ -375,6 +375,64 @@ strong {
   flex: 0 0 auto;
 }
 
+.conversation-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(8, 12, 12, 0.62);
+}
+
+.conversation-drawer-content {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 31;
+  display: flex;
+  width: min(320px, 82vw);
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  outline: 0;
+}
+
+.conversation-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.conversation-drawer-header h2 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 22px;
+}
+
+.conversation-drawer-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  margin: 12px;
+  border: 1px solid var(--cyan);
+  border-radius: 4px;
+  background: var(--cyan);
+  color: #001f1d;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.conversation-drawer-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 12px 12px;
+}
+
 .message-list {
   display: flex;
   flex: 1;

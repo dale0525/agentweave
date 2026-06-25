@@ -8,14 +8,12 @@ import {
 } from "../api";
 import { AppIconButton } from "../components/AppIconButton";
 import { Composer } from "../components/Composer";
+import { ConversationDrawer } from "../components/ConversationDrawer";
 import { MessageList } from "../components/MessageList";
 import { starterMessages } from "../data/fixtures";
 import { ChatMessage } from "../types";
 
-type AppView = "chat" | "sessions";
-
 type ChatProps = {
-  onNavigate?: (view: AppView) => void;
   onOpenSettings?: () => void;
 };
 
@@ -35,7 +33,14 @@ export function Chat({
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
-  const [, setIsDrawerOpen] = useState(false);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+
+  const handleNewChat = () => {
+    setMessages(starterMessages);
+    setSessionId(null);
+    setApiError(null);
+    setIsDrawerOpen(false);
+  };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -85,6 +90,11 @@ export function Chat({
 
   return (
     <main className="chat-shell" aria-label="GeneralAgent chat">
+      <ConversationDrawer
+        isOpen={isDrawerOpen}
+        onNewChat={handleNewChat}
+        onOpenChange={setIsDrawerOpen}
+      />
       <header className="top-bar chat-top-bar">
         <AppIconButton
           label="Open conversations"

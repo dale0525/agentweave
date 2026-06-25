@@ -119,6 +119,44 @@ describe("Chat", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("opens and closes the conversation drawer", async () => {
+    const user = userEvent.setup();
+
+    render(<Chat />);
+
+    await user.click(screen.getByRole("button", { name: "Open conversations" }));
+
+    expect(
+      screen.getByRole("dialog", { name: "Conversations" })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New chat" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close conversations" }));
+
+    expect(
+      screen.queryByRole("dialog", { name: "Conversations" })
+    ).not.toBeInTheDocument();
+  });
+
+  it("starts a new local conversation from the drawer", async () => {
+    const user = userEvent.setup();
+
+    render(<Chat />);
+
+    await user.type(screen.getByLabelText("Message GeneralAgent"), "Clear this");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(screen.getByText("Clear this")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Open conversations" }));
+    await user.click(screen.getByRole("button", { name: "New chat" }));
+
+    expect(screen.getByText("Hello! How can I help you today?")).toBeInTheDocument();
+    expect(screen.queryByText("Clear this")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "Conversations" })
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps the consumer chat layout classes styled", () => {
     const css = readFileSync("src/renderer/styles.css", "utf8");
 
