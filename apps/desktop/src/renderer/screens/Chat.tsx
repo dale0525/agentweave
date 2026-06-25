@@ -61,6 +61,14 @@ const recentSessions = [
   { title: "API test", state: "Ready", time: "Oct 24" }
 ];
 
+function createMessageId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `user-${Math.random().toString(36).slice(2)}`;
+}
+
 function IconButton({
   label,
   children,
@@ -104,7 +112,7 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
     setMessages((current) => [
       ...current,
       {
-        id: `user-${Date.now()}`,
+        id: createMessageId(),
         role: "user",
         body: text,
         meta: "you"
@@ -153,7 +161,7 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
         </div>
 
         <nav className="rail-nav" aria-label="Primary views">
-          <button className="nav-item active" type="button">
+          <button aria-current="page" className="nav-item active" type="button">
             <Bot size={15} aria-hidden="true" />
             Chat
           </button>
@@ -234,15 +242,15 @@ export function Chat({ onNavigate = () => undefined }: ChatProps): JSX.Element {
             <button className="model-select" type="button">
               GPT-4o
             </button>
-            <button className="tool-toggle active" type="button">
+            <button aria-pressed="true" className="tool-toggle active" type="button">
               <Terminal size={13} aria-hidden="true" />
               Terminal
             </button>
-            <button className="tool-toggle" type="button">
+            <button aria-pressed="false" className="tool-toggle" type="button">
               <Wrench size={13} aria-hidden="true" />
               Web
             </button>
-            <button className="tool-toggle" type="button">
+            <button aria-pressed="false" className="tool-toggle" type="button">
               <FileText size={13} aria-hidden="true" />
               Files
             </button>

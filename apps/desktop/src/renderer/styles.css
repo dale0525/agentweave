@@ -29,10 +29,17 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  min-height: 100%;
+  overflow: hidden;
   background: var(--bg);
 }
 
@@ -46,13 +53,17 @@ button {
 }
 
 .app-root {
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
   background: var(--bg);
 }
 
 .screen-grid {
   display: grid;
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
   background: var(--bg);
 }
 
@@ -68,6 +79,7 @@ button {
 .inspector-panel,
 .workbench,
 .session-manager {
+  min-height: 0;
   min-width: 0;
   background: var(--surface);
 }
@@ -76,6 +88,7 @@ button {
 .inspector-panel {
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   border-color: var(--line);
 }
 
@@ -305,7 +318,9 @@ strong {
 .session-manager {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .status-pill,
@@ -340,6 +355,7 @@ strong {
   flex: 1;
   flex-direction: column;
   gap: 10px;
+  min-height: 0;
   overflow: auto;
   padding: 24px 20px;
   background: #0d1614;
@@ -552,7 +568,8 @@ strong {
   margin: 0;
 }
 
-.mobile-new-session {
+.mobile-new-session,
+.mobile-back-chat {
   display: none;
 }
 
@@ -566,6 +583,11 @@ strong {
 
 .session-table {
   display: grid;
+  align-content: start;
+  flex: 1;
+  grid-auto-rows: max-content;
+  min-height: 0;
+  overflow: auto;
   padding: 12px;
 }
 
@@ -645,7 +667,7 @@ strong {
 
   .workbench,
   .session-manager {
-    min-height: 100vh;
+    min-height: 0;
   }
 
   .mobile-topbar,
@@ -742,6 +764,23 @@ strong {
     display: inline-grid;
   }
 
+  .mobile-back-chat {
+    display: inline-grid;
+    width: 30px;
+    height: 30px;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--surface-low);
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  .mobile-back-chat:hover {
+    border-color: var(--copper);
+    color: var(--copper-soft);
+  }
+
   .filter-row {
     padding: 8px 10px;
   }
@@ -749,6 +788,8 @@ strong {
   .session-card-list {
     display: grid;
     gap: 10px;
+    min-height: 0;
+    overflow: auto;
     padding: 12px 10px 88px;
   }
 

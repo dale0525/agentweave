@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   Bot,
   ChevronRight,
   History,
@@ -65,7 +66,7 @@ export function Sessions({ onNavigate = () => undefined }: SessionsProps): JSX.E
             <Bot size={15} aria-hidden="true" />
             Chat
           </button>
-          <button className="nav-item active" type="button">
+          <button aria-current="page" className="nav-item active" type="button">
             <History size={15} aria-hidden="true" />
             Sessions
           </button>
@@ -87,6 +88,15 @@ export function Sessions({ onNavigate = () => undefined }: SessionsProps): JSX.E
       <main className="session-manager" aria-label="Sessions manager">
         <header className="manager-header">
           <div>
+            <button
+              aria-label="Back to chat"
+              className="mobile-back-chat"
+              onClick={() => onNavigate("chat")}
+              title="Back to chat"
+              type="button"
+            >
+              <ArrowLeft size={17} aria-hidden="true" />
+            </button>
             <h1>Sessions</h1>
             <span className="status-pill compact">Online</span>
           </div>
@@ -102,7 +112,12 @@ export function Sessions({ onNavigate = () => undefined }: SessionsProps): JSX.E
 
         <div className="filter-row" aria-label="Session filters">
           {["All", "Responses", "Chat", "Completion"].map((filter) => (
-            <button className={filter === "All" ? "active" : ""} key={filter} type="button">
+            <button
+              aria-pressed={filter === "All"}
+              className={filter === "All" ? "active" : ""}
+              key={filter}
+              type="button"
+            >
               {filter}
             </button>
           ))}

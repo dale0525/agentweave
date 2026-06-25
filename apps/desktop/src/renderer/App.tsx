@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Chat } from "./screens/Chat";
 import { Sessions } from "./screens/Sessions";
 
 type AppView = "chat" | "sessions";
 
-function getInitialView(): AppView {
+function getViewFromHash(): AppView {
   if (typeof window !== "undefined" && window.location.hash === "#sessions") {
     return "sessions";
   }
@@ -14,12 +14,23 @@ function getInitialView(): AppView {
 }
 
 export default function App(): JSX.Element {
-  const [view, setView] = useState<AppView>(getInitialView);
+  const [view, setView] = useState<AppView>(getViewFromHash);
+
+  useEffect(() => {
+    const syncViewFromHash = () => setView(getViewFromHash());
+
+    window.addEventListener("hashchange", syncViewFromHash);
+
+    return () => window.removeEventListener("hashchange", syncViewFromHash);
+  }, []);
 
   const navigate = (nextView: AppView) => {
     setView(nextView);
     if (typeof window !== "undefined") {
-      window.location.hash = nextView === "sessions" ? "sessions" : "";
+      const nextHash = nextView === "sessions" ? "#sessions" : "";
+      if (window.location.hash !== nextHash) {
+        window.location.hash = nextHash;
+      }
     }
   };
 

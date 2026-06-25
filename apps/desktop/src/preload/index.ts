@@ -3,23 +3,19 @@ type DesktopRuntimeInfo = {
   shell: "generalagent-desktop";
 };
 
-declare global {
-  interface Window {
-    generalAgent?: DesktopRuntimeInfo;
-  }
-}
+export type DesktopPreloadApi = {
+  getRuntimeInfo: () => DesktopRuntimeInfo;
+};
 
 const runtimeInfo: DesktopRuntimeInfo = {
   platform: typeof process === "undefined" ? "browser" : process.platform,
   shell: "generalagent-desktop"
 };
 
-if (typeof window !== "undefined") {
-  Object.defineProperty(window, "generalAgent", {
-    configurable: false,
-    enumerable: true,
-    value: runtimeInfo
-  });
-}
+export const desktopPreloadApi: DesktopPreloadApi = Object.freeze({
+  getRuntimeInfo: () => runtimeInfo
+});
 
-export {};
+export function getDesktopRuntimeInfo(): DesktopRuntimeInfo {
+  return desktopPreloadApi.getRuntimeInfo();
+}
