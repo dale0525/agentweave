@@ -1,9 +1,14 @@
+pub mod builtin;
 pub mod path;
 pub mod result;
 
+use crate::skill::SkillRegistry;
+use builtin::BuiltInTools;
+use result::{ToolError, ToolResult, ToolResultMetadata};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_TOOL_CALLS_PER_TURN: usize = 16;
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
@@ -76,9 +81,151 @@ pub fn permission_allowed(mode: RuntimeMode, permission: ToolPermission) -> bool
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolRegistry {
+    builtins: BuiltInTools,
+    skills: SkillRegistry,
+    tool_timeout: Duration,
+    output_limit_bytes: usize,
+}
+
+impl ToolRegistry {
+    pub fn new(skills: SkillRegistry, config: &RuntimeConfig) -> Self {
+        Self {
+            builtins: BuiltInTools::new(config.clone()),
+            skills,
+            tool_timeout: Duration::from_millis(config.tool_timeout_ms),
+            output_limit_bytes: config.output_limit_bytes,
+        }
+    }
+
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = self.builtins.definitions();
+        definitions.extend(self.skills.tools().into_iter().map(|tool| ToolDefinition {
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.input_schema,
+            permission: ToolPermission::ReadWorkspace,
+        }));
+        definitions
+    }
+
+    pub async fn execute(&self, name: &str, call_id: &str, arguments: Value) -> ToolResult {
+        if BuiltInTools::handles(name) {
+            return self.builtins.execute(name, call_id, arguments).await;
+        }
+
+        if !self
+            .skills
+            .tools()
+            .iter()
+            .any(|tool| tool.name.as_str() == name)
+        {
+            return registry_failure(
+                name,
+                call_id,
+                "unknown_tool",
+                format!("unknown tool: {name}"),
+                false,
+                ToolResultMetadata::default(),
+            );
+        }
+
+        let started = Instant::now();
+        let execution =
+            tokio::time::timeout(self.tool_timeout, self.skills.execute(name, arguments));
+        match execution.await {
+            Ok(Ok(value)) => self.skill_success(name, call_id, value, started),
+            Ok(Err(error)) => registry_failure(
+                name,
+                call_id,
+                skill_error_code(&error.to_string()),
+                error.to_string(),
+                false,
+                registry_metadata(started),
+            ),
+            Err(_) => registry_failure(
+                name,
+                call_id,
+                "timeout",
+                "tool execution timed out",
+                true,
+                registry_metadata(started),
+            ),
+        }
+    }
+
+    fn skill_success(
+        &self,
+        name: &str,
+        call_id: &str,
+        value: Value,
+        started: Instant,
+    ) -> ToolResult {
+        let metadata = registry_metadata(started);
+        if serde_json::to_vec(&value)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX)
+            > self.output_limit_bytes
+        {
+            return registry_failure(
+                name,
+                call_id,
+                "output_limit_exceeded",
+                "tool output exceeded runtime output limit",
+                false,
+                ToolResultMetadata {
+                    output_truncated: true,
+                    ..metadata
+                },
+            );
+        }
+
+        ToolResult::success(name, call_id, value, metadata)
+    }
+}
+
+fn registry_metadata(started: Instant) -> ToolResultMetadata {
+    ToolResultMetadata {
+        duration_ms: started.elapsed().as_millis() as u64,
+        ..ToolResultMetadata::default()
+    }
+}
+
+fn registry_failure(
+    tool: &str,
+    call_id: &str,
+    code: &str,
+    message: impl Into<String>,
+    retryable: bool,
+    metadata: ToolResultMetadata,
+) -> ToolResult {
+    ToolResult::failure(
+        tool,
+        call_id,
+        ToolError {
+            code: code.to_string(),
+            message: message.into(),
+            retryable,
+        },
+        metadata,
+    )
+}
+
+fn skill_error_code(message: &str) -> &'static str {
+    if message.contains("unknown tool") {
+        "unknown_tool"
+    } else if message.contains("Permission denied") {
+        "permission_denied"
+    } else {
+        "internal_error"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skill::SkillRegistry;
     use std::path::PathBuf;
 
     #[test]
@@ -121,5 +268,110 @@ mod tests {
         assert_eq!(read_only.max_tool_calls_per_turn, 16);
         assert_eq!(read_only.tool_timeout_ms, 30_000);
         assert_eq!(read_only.output_limit_bytes, 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn tool_registry_applies_skill_output_limit() {
+        let root = unique_test_dir("registry-output-limit");
+        write_skill(
+            &root,
+            "large",
+            "large_output",
+            "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ text: 'abcdef' })));\n",
+        )
+        .await;
+        let skills = SkillRegistry::load_development(&root).await.unwrap();
+        let config = RuntimeConfig {
+            workspace_root: root.clone(),
+            cwd: root.clone(),
+            mode: RuntimeMode::WorkspaceWrite,
+            command_mode: CommandMode::Disabled,
+            max_tool_calls_per_turn: 16,
+            tool_timeout_ms: 30_000,
+            output_limit_bytes: 4,
+        };
+        let registry = ToolRegistry::new(skills, &config);
+
+        let result = registry
+            .execute("large_output", "call-1", serde_json::json!({}))
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "output_limit_exceeded");
+        assert!(result.metadata.output_truncated);
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn tool_registry_applies_skill_timeout() {
+        let root = unique_test_dir("registry-timeout");
+        write_skill(
+            &root,
+            "slow",
+            "slow_output",
+            "setTimeout(() => {}, 1000);\nprocess.stdin.resume();\n",
+        )
+        .await;
+        let skills = SkillRegistry::load_development(&root).await.unwrap();
+        let config = RuntimeConfig {
+            workspace_root: root.clone(),
+            cwd: root.clone(),
+            mode: RuntimeMode::WorkspaceWrite,
+            command_mode: CommandMode::Disabled,
+            max_tool_calls_per_turn: 16,
+            tool_timeout_ms: 5,
+            output_limit_bytes: 64 * 1024,
+        };
+        let registry = ToolRegistry::new(skills, &config);
+
+        let result = registry
+            .execute("slow_output", "call-1", serde_json::json!({}))
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "timeout");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        remove_test_dir(root).await;
+    }
+
+    async fn write_skill(root: &std::path::Path, folder: &str, tool_name: &str, script: &str) {
+        let skill_dir = root.join(folder);
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        tokio::fs::write(
+            skill_dir.join("skill.json"),
+            serde_json::json!({
+                "name": folder,
+                "description": "Test runtime skill.",
+                "version": "0.1.0",
+                "entry": {
+                    "type": "command",
+                    "command": "node",
+                    "args": ["index.js"]
+                },
+                "tools": [
+                    {
+                        "name": tool_name,
+                        "description": "Test tool.",
+                        "input_schema": { "type": "object" }
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(skill_dir.join("index.js"), script)
+            .await
+            .unwrap();
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
+    async fn remove_test_dir(path: PathBuf) {
+        if path.exists() {
+            tokio::fs::remove_dir_all(path).await.unwrap();
+        }
     }
 }
