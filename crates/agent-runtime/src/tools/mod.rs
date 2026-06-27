@@ -7,6 +7,7 @@ pub mod result;
 pub mod schema;
 pub mod search;
 
+use crate::policy::{ApprovalPolicy, SandboxProfile};
 use crate::skill::SkillRegistry;
 use builtin::BuiltInTools;
 use result::{ToolError, ToolResult, ToolResultMetadata};
@@ -35,6 +36,8 @@ pub struct RuntimeConfig {
     pub max_tool_calls_per_turn: usize,
     pub tool_timeout_ms: u64,
     pub output_limit_bytes: usize,
+    pub approval_policy: ApprovalPolicy,
+    pub sandbox_profile: SandboxProfile,
 }
 
 impl RuntimeConfig {
@@ -55,6 +58,8 @@ impl RuntimeConfig {
             max_tool_calls_per_turn: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
             tool_timeout_ms: DEFAULT_TOOL_TIMEOUT_MS,
             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
+            approval_policy: ApprovalPolicy::Never,
+            sandbox_profile: SandboxProfile::default(),
         }
     }
 
@@ -418,6 +423,14 @@ mod tests {
         assert_eq!(workspace_write.max_tool_calls_per_turn, 16);
         assert_eq!(workspace_write.tool_timeout_ms, 30_000);
         assert_eq!(workspace_write.output_limit_bytes, 64 * 1024);
+        assert_eq!(
+            workspace_write.approval_policy,
+            crate::policy::ApprovalPolicy::Never
+        );
+        assert_eq!(
+            workspace_write.sandbox_profile.network,
+            crate::policy::NetworkPolicy::UnrestrictedPlaceholder
+        );
 
         assert_eq!(read_only.mode, RuntimeMode::ReadOnly);
         assert_eq!(read_only.command_mode, CommandMode::Disabled);
@@ -448,13 +461,8 @@ mod tests {
         .await;
         let skills = SkillRegistry::load_development(&root).await.unwrap();
         let config = RuntimeConfig {
-            workspace_root: root.clone(),
-            cwd: root.clone(),
-            mode: RuntimeMode::WorkspaceWrite,
-            command_mode: CommandMode::Disabled,
-            max_tool_calls_per_turn: 16,
-            tool_timeout_ms: 30_000,
             output_limit_bytes: 4,
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
         };
         let registry = ToolRegistry::new(skills, &config);
 
@@ -480,13 +488,8 @@ mod tests {
         .await;
         let skills = SkillRegistry::load_development(&root).await.unwrap();
         let config = RuntimeConfig {
-            workspace_root: root.clone(),
-            cwd: root.clone(),
-            mode: RuntimeMode::WorkspaceWrite,
-            command_mode: CommandMode::Disabled,
-            max_tool_calls_per_turn: 16,
-            tool_timeout_ms: 30_000,
             output_limit_bytes: 4,
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
         };
         let registry = ToolRegistry::new(skills, &config);
 
@@ -509,13 +512,8 @@ mod tests {
             .unwrap();
         let skills = SkillRegistry::load_development(&root).await.unwrap();
         let config = RuntimeConfig {
-            workspace_root: root.clone(),
-            cwd: root.clone(),
-            mode: RuntimeMode::WorkspaceWrite,
-            command_mode: CommandMode::Disabled,
-            max_tool_calls_per_turn: 16,
-            tool_timeout_ms: 30_000,
             output_limit_bytes: 4,
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
         };
         let registry = ToolRegistry::new(skills, &config);
 
@@ -539,13 +537,9 @@ mod tests {
         tokio::fs::create_dir_all(&root).await.unwrap();
         let skills = SkillRegistry::load_development(&root).await.unwrap();
         let config = RuntimeConfig {
-            workspace_root: root.clone(),
-            cwd: root.clone(),
-            mode: RuntimeMode::WorkspaceWrite,
             command_mode: CommandMode::Allowed,
-            max_tool_calls_per_turn: 16,
-            tool_timeout_ms: 30_000,
             output_limit_bytes: 2048,
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
         };
         let registry = ToolRegistry::new(skills, &config);
 
@@ -579,13 +573,8 @@ mod tests {
         .await;
         let skills = SkillRegistry::load_development(&root).await.unwrap();
         let config = RuntimeConfig {
-            workspace_root: root.clone(),
-            cwd: root.clone(),
-            mode: RuntimeMode::WorkspaceWrite,
-            command_mode: CommandMode::Disabled,
-            max_tool_calls_per_turn: 16,
             tool_timeout_ms: 5,
-            output_limit_bytes: 64 * 1024,
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
         };
         let registry = ToolRegistry::new(skills, &config);
 
@@ -615,13 +604,8 @@ mod tests {
         .await;
         let skills = SkillRegistry::load_development(&root).await.unwrap();
         let config = RuntimeConfig {
-            workspace_root: root.clone(),
-            cwd: root.clone(),
-            mode: RuntimeMode::WorkspaceWrite,
-            command_mode: CommandMode::Disabled,
-            max_tool_calls_per_turn: 16,
-            tool_timeout_ms: 30_000,
             output_limit_bytes: 32,
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
         };
         let registry = ToolRegistry::new(skills, &config);
 
@@ -647,13 +631,8 @@ mod tests {
         .await;
         let skills = SkillRegistry::load_development(&root).await.unwrap();
         let config = RuntimeConfig {
-            workspace_root: root.clone(),
-            cwd: root.clone(),
-            mode: RuntimeMode::WorkspaceWrite,
-            command_mode: CommandMode::Disabled,
-            max_tool_calls_per_turn: 16,
-            tool_timeout_ms: 30_000,
             output_limit_bytes: 32,
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
         };
         let registry = ToolRegistry::new(skills, &config);
 
