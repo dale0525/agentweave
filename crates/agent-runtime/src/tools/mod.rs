@@ -11,10 +11,12 @@ pub mod search;
 use crate::policy::{ApprovalPolicy, SandboxProfile};
 use crate::skill::SkillRegistry;
 use builtin::BuiltInTools;
+use discovery::{ConnectorMetadata, ExternalToolConfig, ExternalToolExecution, ToolDiscoveryItem};
 use result::{ToolError, ToolResult, ToolResultMetadata};
 use schema::{ToolDiagnostic, validate_tool_definition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -28,7 +30,7 @@ pub enum CommandMode {
     Allowed,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct RuntimeConfig {
     pub workspace_root: PathBuf,
     pub cwd: PathBuf,
@@ -39,6 +41,8 @@ pub struct RuntimeConfig {
     pub output_limit_bytes: usize,
     pub approval_policy: ApprovalPolicy,
     pub sandbox_profile: SandboxProfile,
+    pub external_tools: Vec<ExternalToolConfig>,
+    pub connectors: Vec<ConnectorMetadata>,
 }
 
 impl RuntimeConfig {
@@ -61,6 +65,8 @@ impl RuntimeConfig {
             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
             approval_policy: ApprovalPolicy::Never,
             sandbox_profile: SandboxProfile::default(),
+            external_tools: Vec::new(),
+            connectors: Vec::new(),
         }
     }
 
@@ -108,6 +114,12 @@ pub struct ApprovalRequirement {
     pub policy: ApprovalPolicy,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ToolDiscovery {
+    pub tools: Vec<ToolDiscoveryItem>,
+    pub connectors: Vec<ConnectorMetadata>,
+}
+
 pub fn permission_allowed(
     mode: RuntimeMode,
     command_mode: CommandMode,
@@ -126,6 +138,10 @@ pub fn permission_allowed(
 pub struct ToolRegistry {
     builtins: BuiltInTools,
     skills: SkillRegistry,
+    external_tools: Vec<ExternalToolConfig>,
+    external_definitions: Vec<ToolDefinition>,
+    external_discovery: Vec<ToolDiscoveryItem>,
+    connectors: Vec<ConnectorMetadata>,
     tool_timeout: Duration,
     output_limit_bytes: usize,
     approval_policy: ApprovalPolicy,
@@ -133,13 +149,24 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new(skills: SkillRegistry, config: &RuntimeConfig) -> Self {
+        Self::try_new(skills, config).expect("runtime tool registry should be valid")
+    }
+
+    pub fn try_new(skills: SkillRegistry, config: &RuntimeConfig) -> anyhow::Result<Self> {
+        let external_definitions = external_definitions(&config.external_tools)?;
+        let external_discovery = external_discovery(&config.external_tools)?;
         Self {
             builtins: BuiltInTools::new(config.clone()),
             skills,
+            external_tools: config.external_tools.clone(),
+            external_definitions,
+            external_discovery,
+            connectors: config.connectors.clone(),
             tool_timeout: Duration::from_millis(config.tool_timeout_ms),
             output_limit_bytes: config.output_limit_bytes,
             approval_policy: config.approval_policy,
         }
+        .validate()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -155,6 +182,7 @@ impl ToolRegistry {
                 source: ToolSource::RuntimeSkill { skill_name },
             },
         ));
+        definitions.extend(self.external_definitions.clone());
         definitions
     }
 
@@ -193,6 +221,39 @@ impl ToolRegistry {
             })
     }
 
+    pub fn discovery(&self) -> ToolDiscovery {
+        let mut tools: Vec<_> = self
+            .definitions()
+            .into_iter()
+            .map(|definition| ToolDiscoveryItem {
+                name: definition.name,
+                namespace: definition.namespace,
+                summary: definition.description.clone(),
+                description: definition.description,
+                permission: definition.permission,
+                source: definition.source,
+                schema_loaded: true,
+                deferred: false,
+            })
+            .collect();
+        tools.extend(
+            self.external_discovery
+                .iter()
+                .filter(|item| item.deferred)
+                .cloned(),
+        );
+        tools.sort_by(|left, right| {
+            left.namespace
+                .cmp(&right.namespace)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        ToolDiscovery {
+            tools,
+            connectors: self.connectors.clone(),
+        }
+    }
+
     pub async fn execute(&self, name: &str, call_id: &str, arguments: Value) -> ToolResult {
         let started = Instant::now();
         let execution = tokio::time::timeout(
@@ -222,6 +283,10 @@ impl ToolRegistry {
     ) -> ToolResult {
         if BuiltInTools::handles(name) {
             return self.builtins.execute(name, call_id, arguments).await;
+        }
+
+        if let Some(tool) = self.external_tool(name) {
+            return self.execute_external_tool(tool, name, call_id, started);
         }
 
         if !self
@@ -258,6 +323,48 @@ impl ToolRegistry {
         }
     }
 
+    fn external_tool(&self, name: &str) -> Option<&ExternalToolConfig> {
+        self.external_tools
+            .iter()
+            .find(|tool| matches!(tool.flattened_name(), Ok(flattened) if flattened == name))
+    }
+
+    fn execute_external_tool(
+        &self,
+        tool: &ExternalToolConfig,
+        name: &str,
+        call_id: &str,
+        started: Instant,
+    ) -> ToolResult {
+        if matches!(
+            tool.visibility,
+            discovery::ExternalToolVisibility::Deferred { .. }
+        ) {
+            return registry_failure(
+                name,
+                call_id,
+                "tool_disabled",
+                "Deferred external tool schema is not loaded.",
+                false,
+                registry_metadata(started),
+            );
+        }
+
+        match &tool.execution {
+            ExternalToolExecution::Static { result } => {
+                ToolResult::success(name, call_id, result.clone(), registry_metadata(started))
+            }
+            ExternalToolExecution::Unavailable => registry_failure(
+                name,
+                call_id,
+                "tool_disabled",
+                "External tool execution is not implemented in this phase.",
+                false,
+                registry_metadata(started),
+            ),
+        }
+    }
+
     fn apply_output_limit(&self, result: ToolResult) -> ToolResult {
         if !result.ok {
             return result;
@@ -284,6 +391,31 @@ impl ToolRegistry {
 
         result
     }
+
+    fn validate(self) -> anyhow::Result<Self> {
+        let mut names = HashSet::new();
+        for definition in self.definitions() {
+            if !names.insert(definition.name.clone()) {
+                anyhow::bail!("duplicate tool name: {}", definition.name);
+            }
+        }
+
+        Ok(self)
+    }
+}
+
+fn external_definitions(tools: &[ExternalToolConfig]) -> anyhow::Result<Vec<ToolDefinition>> {
+    tools
+        .iter()
+        .filter_map(|tool| tool.tool_definition().transpose())
+        .collect()
+}
+
+fn external_discovery(tools: &[ExternalToolConfig]) -> anyhow::Result<Vec<ToolDiscoveryItem>> {
+    tools
+        .iter()
+        .map(ExternalToolConfig::discovery_summary)
+        .collect()
 }
 
 fn serialized_len<T: Serialize>(value: &T) -> usize {
@@ -487,6 +619,135 @@ mod tests {
         assert_eq!(
             requirement.policy,
             crate::policy::ApprovalPolicy::OnWorkspaceWrite
+        );
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn tool_registry_includes_immediate_mcp_tools_with_namespaced_names() {
+        let root = unique_test_dir("mcp-immediate");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = RuntimeConfig {
+            external_tools: vec![crate::tools::discovery::ExternalToolConfig::mcp(
+                "filesystem",
+                "read_file",
+                "Read a file through MCP.",
+                serde_json::json!({ "type": "object" }),
+                crate::tools::discovery::ExternalToolVisibility::Immediate,
+            )],
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
+        };
+        let registry = ToolRegistry::new(SkillRegistry::empty_for_tests(), &config);
+
+        let tool = registry
+            .definitions()
+            .into_iter()
+            .find(|tool| tool.name == "mcp__filesystem__read_file")
+            .unwrap();
+
+        assert_eq!(tool.namespace.as_deref(), Some("mcp__filesystem"));
+        assert_eq!(
+            tool.source,
+            ToolSource::Mcp {
+                server: "filesystem".into()
+            }
+        );
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn tool_registry_executes_static_mcp_adapter_result() {
+        let root = unique_test_dir("mcp-static-exec");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = RuntimeConfig {
+            external_tools: vec![
+                crate::tools::discovery::ExternalToolConfig::mcp(
+                    "clock",
+                    "now",
+                    "Return a static time.",
+                    serde_json::json!({ "type": "object" }),
+                    crate::tools::discovery::ExternalToolVisibility::Immediate,
+                )
+                .with_static_result(serde_json::json!({ "time": "12:00" })),
+            ],
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
+        };
+        let registry = ToolRegistry::new(SkillRegistry::empty_for_tests(), &config);
+
+        let result = registry
+            .execute("mcp__clock__now", "call-1", serde_json::json!({}))
+            .await;
+
+        assert!(result.ok);
+        assert_eq!(result.data.unwrap()["time"], "12:00");
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn tool_registry_rejects_namespaced_collisions() {
+        let root = unique_test_dir("mcp-collision");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = RuntimeConfig {
+            external_tools: vec![
+                crate::tools::discovery::ExternalToolConfig::mcp(
+                    "search",
+                    "lookup",
+                    "First lookup tool.",
+                    serde_json::json!({ "type": "object" }),
+                    crate::tools::discovery::ExternalToolVisibility::Immediate,
+                ),
+                crate::tools::discovery::ExternalToolConfig::mcp(
+                    "search",
+                    "lookup",
+                    "Second lookup tool.",
+                    serde_json::json!({ "type": "object" }),
+                    crate::tools::discovery::ExternalToolVisibility::Immediate,
+                ),
+            ],
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
+        };
+
+        let result = ToolRegistry::try_new(SkillRegistry::empty_for_tests(), &config);
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate tool name")
+        );
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn deferred_mcp_tools_are_discoverable_but_not_model_visible() {
+        let root = unique_test_dir("mcp-deferred");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = RuntimeConfig {
+            external_tools: vec![crate::tools::discovery::ExternalToolConfig::mcp(
+                "search",
+                "expensive_lookup",
+                "Search a remote corpus.",
+                serde_json::json!({ "type": "object" }),
+                crate::tools::discovery::ExternalToolVisibility::Deferred {
+                    summary: "Remote corpus lookup.".into(),
+                },
+            )],
+            ..RuntimeConfig::workspace_write(root.clone(), root.clone())
+        };
+        let registry = ToolRegistry::new(SkillRegistry::empty_for_tests(), &config);
+
+        assert!(
+            !registry
+                .definitions()
+                .iter()
+                .any(|tool| tool.name == "mcp__search__expensive_lookup")
+        );
+        assert!(
+            registry
+                .discovery()
+                .tools
+                .iter()
+                .any(|tool| tool.name == "mcp__search__expensive_lookup" && tool.deferred)
         );
         remove_test_dir(root).await;
     }
