@@ -227,6 +227,47 @@ Notes:
 - `apply_patch` intentionally implements a minimal text patch grammar. Moves, binary patches, and full no-final-newline fidelity remain out of scope.
 - Approval workflows, stronger sandbox profiles, network policy, MCP, connectors, and Codex-style skill catalog behavior remain later phases.
 
+## Codex-Like Runtime Phase 3 Verification
+
+Date: 2026-06-28
+
+Source design:
+
+- `docs/superpowers/specs/2026-06-27-codex-like-runtime-migration-design.md`
+
+Implementation plan:
+
+- `docs/superpowers/plans/2026-06-28-codex-like-runtime-phase-3.md`
+
+Automated checks:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 123/123, `agent-server` 11/11, `model-gateway` 15/15, doc tests 0 failures. |
+| `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy completed for `agent-runtime` and `agent-server` with no warnings. |
+| `pixi run cargo fmt --all --check` | PASS | Rust formatting check passed. |
+| `git diff --check HEAD` | PASS | Whitespace check exited 0. |
+| Source line budget | PASS | Edited and created source files were checked; largest checked source files remain `crates/agent-runtime/src/tools/builtin.rs` and `crates/agent-server/src/api.rs` at 943 physical lines. |
+
+Focused runtime checks:
+
+- `SkillCatalog` discovers `SKILL.md` instruction skills in development mode.
+- `SkillCatalog` parses `name`, `description`, and `aliases` front matter and rejects missing or empty required fields.
+- Packaged catalog loading excludes `SKILL.md` unless `skill-bundle.json` sets `include_instructions: true`.
+- `InstructionContext` injects deterministic `<available_skills>` summaries and selected `<skill_instructions>` blocks.
+- `$skill-name` mentions and unique plain-text name or alias mentions load full skill instructions.
+- Ambiguous plain-text matches do not inject every full skill.
+- Runtime skills and instruction skills can coexist in one skill directory.
+- Instruction-only skills can provide model-visible instructions without `skill.json`.
+- Runtime-only skills without `SKILL.md` still execute through `SkillRegistry`.
+- Turn-loop tests prove triggered skill instructions are visible in the first model request.
+
+Notes:
+
+- Phase 3 keeps runtime tool exposure controlled by `skill.json`; `SKILL.md` only affects instruction context.
+- Deep `references/` routing remains out of scope and is left for a later skill-catalog expansion.
+- Approval workflows, stronger sandbox profiles, MCP, connectors, deferred tools, and subagents inside GeneralAgent remain later phases.
+
 ## Known Gaps
 
 - Production server startup now wires `TurnRunner` to the model gateway and the runtime skill registry. Local unit tests still use a deterministic agent stub where isolated API behavior is under test.

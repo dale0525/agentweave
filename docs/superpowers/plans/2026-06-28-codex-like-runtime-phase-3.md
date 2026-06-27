@@ -962,16 +962,41 @@ git commit -m "docs: record codex-like runtime phase 3 verification"
 
 ## Phase 3 Acceptance Checklist
 
-- [ ] `SkillCatalog` discovers `SKILL.md` instruction skills.
-- [ ] `SKILL.md` front matter parsing validates `name` and `description`.
-- [ ] Available skill summaries are injected into model developer context.
-- [ ] Explicit `$skill-name` mentions load full skill instructions.
-- [ ] Unique plain-text name or alias mentions load full skill instructions.
-- [ ] Ambiguous plain-text matches do not inject every full skill.
-- [ ] Runtime skills and instruction skills can coexist.
-- [ ] A skill without `skill.json` can still provide instructions.
-- [ ] A runtime tool without `SKILL.md` can still execute.
-- [ ] Packaged mode excludes `SKILL.md` unless explicitly configured.
-- [ ] Production desktop UI remains free of skill/tool management UI.
-- [ ] `docs/mvp-verification.md` records Phase 3 verification evidence.
-- [ ] No edited/new source file exceeds 1000 physical lines.
+- [x] `SkillCatalog` discovers `SKILL.md` instruction skills.
+- [x] `SKILL.md` front matter parsing validates `name` and `description`.
+- [x] Available skill summaries are injected into model developer context.
+- [x] Explicit `$skill-name` mentions load full skill instructions.
+- [x] Unique plain-text name or alias mentions load full skill instructions.
+- [x] Ambiguous plain-text matches do not inject every full skill.
+- [x] Runtime skills and instruction skills can coexist.
+- [x] A skill without `skill.json` can still provide instructions.
+- [x] A runtime tool without `SKILL.md` can still execute.
+- [x] Packaged mode excludes `SKILL.md` unless explicitly configured.
+- [x] Production desktop UI remains free of skill/tool management UI.
+- [x] `docs/mvp-verification.md` records Phase 3 verification evidence.
+- [x] No edited/new source file exceeds 1000 physical lines.
+
+## Codex-Like Runtime Phase 3 Completion Evidence
+
+Completed: 2026-06-28
+
+Commits:
+- `18b7e36` docs: add codex-like runtime phase 3 plan
+- `75bf257` feat: add skill catalog front matter parser
+- `85d2f84` feat: discover instruction skill catalog
+- `0ca0a89` feat: inject instruction skill context
+- `3c0419e` feat: trigger instruction skills in turns
+- `c821992` test: cover instruction skill compatibility
+
+Focused verification:
+- `pixi run cargo test -p agent-runtime skill_catalog::tests -- --nocapture`: PASS, 11/11
+- `pixi run cargo test -p agent-runtime instructions::tests::renders_skill_summaries_and_selected_skill_instructions -- --nocapture`: PASS
+- `pixi run cargo test -p agent-runtime turn::tests::phase_three_injects_summary_and_triggered_skill_instruction -- --nocapture`: PASS
+- `pixi run cargo test -p agent-server`: PASS, 11/11
+
+Full verification:
+- `pixi run cargo test --workspace`: PASS, `agent-runtime` 123/123, `agent-server` 11/11, `model-gateway` 15/15
+- `pixi run cargo clippy --workspace --all-targets -- -D warnings`: PASS
+- `pixi run cargo fmt --all --check`: PASS
+- `git diff --check HEAD`: PASS
+- Source line budget: PASS, no edited/new source file exceeds 1000 physical lines; largest checked source files remain `crates/agent-runtime/src/tools/builtin.rs` and `crates/agent-server/src/api.rs` at 943 lines.
