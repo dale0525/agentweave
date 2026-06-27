@@ -87,6 +87,10 @@ pub fn gateway_request_body(
     profile: &ProviderProfile,
     request: GatewayRequest,
 ) -> anyhow::Result<Value> {
+    if !profile.supports_tools() && !request.tools.is_empty() {
+        anyhow::bail!("model_endpoint_does_not_support_tools");
+    }
+
     match profile.endpoint_type {
         EndpointType::Responses => Ok(gateway_responses_body(&profile.model, request)),
         EndpointType::ChatCompletions => {
@@ -561,6 +565,55 @@ mod tests {
                 GatewayEvent::Completed,
             ]
         );
+    }
+
+    #[test]
+    fn completion_body_rejects_tool_schemas() {
+        let profile = ProviderProfile {
+            id: "legacy".into(),
+            name: "Legacy".into(),
+            endpoint_type: EndpointType::Completion,
+            base_url: "http://localhost:11434/v1".into(),
+            model: "legacy-model".into(),
+            api_key: None,
+            headers: BTreeMap::new(),
+        };
+        let request = GatewayRequest {
+            input: vec![serde_json::json!({ "role": "user", "content": "echo hello" })],
+            tools: vec![GatewayTool {
+                name: "echo".into(),
+                description: "Return text.".into(),
+                input_schema: serde_json::json!({ "type": "object" }),
+            }],
+        };
+
+        let error = gateway_request_body(&profile, request).unwrap_err();
+
+        assert!(error.to_string().contains("model_endpoint_does_not_support_tools"));
+    }
+
+    #[test]
+    fn completion_body_without_tools_still_builds_prompt() {
+        let profile = ProviderProfile {
+            id: "legacy".into(),
+            name: "Legacy".into(),
+            endpoint_type: EndpointType::Completion,
+            base_url: "http://localhost:11434/v1".into(),
+            model: "legacy-model".into(),
+            api_key: None,
+            headers: BTreeMap::new(),
+        };
+        let request = GatewayRequest {
+            input: vec![serde_json::json!({ "role": "user", "content": "plain prompt" })],
+            tools: Vec::new(),
+        };
+
+        let body = gateway_request_body(&profile, request).unwrap();
+
+        assert_eq!(body["model"], "legacy-model");
+        assert_eq!(body["prompt"], "plain prompt");
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["tools"], Value::Null);
     }
 
     #[test]
