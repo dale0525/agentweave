@@ -11,6 +11,7 @@ import { Chat } from "../src/renderer/screens/Chat";
 describe("Chat", () => {
   afterEach(() => {
     cleanup();
+    window.localStorage.clear();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     window.history.replaceState(null, "", "/");
@@ -68,6 +69,43 @@ describe("Chat", () => {
         method: "POST"
       })
     );
+  });
+
+  it("sends saved model settings with chat messages", async () => {
+    const user = userEvent.setup();
+    const savedSettings = {
+      apiKey: "local-secret",
+      baseUrl: "http://127.0.0.1:9876/v1",
+      endpointType: "chat_completions",
+      modelName: "qwen2.5"
+    };
+    window.localStorage.setItem(
+      "generalagent.modelSettings.v1",
+      JSON.stringify(savedSettings)
+    );
+    const fetchMock = mockFetch([
+      jsonResponse({ id: "session-1", title: "Provider adapter MVP" }),
+      jsonResponse({
+        accepted: true,
+        assistant_message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: "configured model response"
+        }
+      })
+    ]);
+
+    render(<Chat />);
+
+    await user.type(screen.getByLabelText("Message GeneralAgent"), "Use my provider");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByText("configured model response")).toBeInTheDocument();
+    const messageBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    expect(messageBody).toEqual({
+      content: "Use my provider",
+      modelSettings: savedSettings
+    });
   });
 
   it("ignores blank messages", async () => {
@@ -229,6 +267,7 @@ describe("Chat", () => {
 describe("App navigation", () => {
   afterEach(() => {
     cleanup();
+    window.localStorage.clear();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     window.history.replaceState(null, "", "/");
@@ -304,19 +343,66 @@ describe("App navigation", () => {
     expect(screen.queryByText(/tool/i)).not.toBeInTheDocument();
   });
 
-  it("keeps model connection testing static in the renderer", async () => {
+  it("tests the configured model connection from settings", async () => {
     const user = userEvent.setup();
-    const fetchMock = mockFetch([]);
+    const fetchMock = mockFetch([
+      jsonResponse({ ok: true, message: "Connection succeeded" })
+    ]);
     window.history.replaceState(null, "", "/#settings");
 
     render(<App />);
 
-    expect(screen.getByText("Connection: Not tested")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Chat Completions" }));
+    await user.clear(screen.getByLabelText("Base URL"));
+    await user.type(screen.getByLabelText("Base URL"), "http://127.0.0.1:11434/v1");
+    await user.clear(screen.getByLabelText("API key"));
+    await user.type(screen.getByLabelText("API key"), "local-secret");
+    await user.clear(screen.getByLabelText("Model name"));
+    await user.type(screen.getByLabelText("Model name"), "qwen2.5");
 
     await user.click(screen.getByRole("button", { name: "Test connection" }));
 
-    expect(screen.getByText("Connection: Not tested")).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await screen.findByText("Connection: Connection succeeded")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:49321/model/test",
+      expect.objectContaining({
+        body: JSON.stringify({
+          apiKey: "local-secret",
+          baseUrl: "http://127.0.0.1:11434/v1",
+          endpointType: "chat_completions",
+          modelName: "qwen2.5"
+        }),
+        method: "POST"
+      })
+    );
+  });
+
+  it("keeps model settings after leaving and reopening settings", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Chat Completions" }));
+    await user.clear(screen.getByLabelText("Base URL"));
+    await user.type(screen.getByLabelText("Base URL"), "http://127.0.0.1:11434/v1");
+    await user.clear(screen.getByLabelText("API key"));
+    await user.type(screen.getByLabelText("API key"), "local-secret");
+    await user.clear(screen.getByLabelText("Model name"));
+    await user.type(screen.getByLabelText("Model name"), "qwen2.5");
+
+    await user.click(screen.getByRole("button", { name: "Back to chat" }));
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+
+    expect(screen.getByRole("button", { name: "Chat Completions" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    expect(screen.getByLabelText("Base URL")).toHaveValue(
+      "http://127.0.0.1:11434/v1"
+    );
+    expect(screen.getByLabelText("API key")).toHaveValue("local-secret");
+    expect(screen.getByLabelText("Model name")).toHaveValue("qwen2.5");
   });
 
   it("keeps settings styles free of user-facing skill selectors", () => {

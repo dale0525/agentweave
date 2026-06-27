@@ -6,6 +6,8 @@ platforms = ["osx-arm64", "osx-64", "linux-64"]
 fmt = "cargo fmt --all"
 test = "cargo test --workspace"
 server = "cargo run -p agent-server"
+dev = "node scripts/dev.mjs"
+test-dev-script = "node --test scripts/dev.test.mjs"
 
 [dependencies]
 nodejs = ">=22,<23"

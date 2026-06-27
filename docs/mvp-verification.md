@@ -124,12 +124,12 @@ Automated checks:
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 13/13, `agent-server` 6/6, `model-gateway` 2/2, doc tests 0 failures. |
-| `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy finished for `agent-runtime` and `agent-server` with no warnings. |
+| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 18/18, `agent-server` 7/7, `model-gateway` 10/10, doc tests 0 failures. |
+| `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy finished for `model-gateway`, `agent-runtime`, and `agent-server` with no warnings. |
 | `pixi run npm --prefix apps/desktop test` | PASS | Vitest passed `tests/chat.test.tsx`: 1 file, 16 tests. |
 | `cd apps/desktop && pixi run npm exec tsc -- --noEmit -p tsconfig.vitest.json` | PASS | TypeScript test config check exited 0. |
 | `git diff --check HEAD` | PASS | Whitespace check exited 0. |
-| Source line budget | PASS | Edited source files were checked; largest edited source file was `crates/agent-runtime/src/skill.rs` at 421 physical lines. |
+| Source line budget | PASS | Edited source files were checked; largest edited source file was `crates/agent-runtime/src/skill.rs` at 621 physical lines. |
 
 Local visual verification:
 
@@ -186,8 +186,8 @@ Runtime behavior verified:
 - Built-in `read_text_file` rejects files larger than the configured output limit before reading them into memory.
 - The first model request includes base instructions, tool schemas, and AGENTS.md project instructions.
 - Completion endpoints reject non-empty tool schemas with `model_endpoint_does_not_support_tools`.
-- Server model-settings turns use the configured runtime workspace root and include workspace instruction context.
 - Server message turns return a clear bad request when completion endpoints are selected for tool-using runtime turns.
+- Server model-settings turns use the configured runtime workspace root and include workspace instruction context.
 
 ## Codex-Like Runtime Phase 2 Verification
 
@@ -229,8 +229,8 @@ Notes:
 
 ## Known Gaps
 
-- The assistant reply is deterministic and local: `MVP agent received: ...`; it does not call a real model provider.
-- There is no real model streaming yet. The server returns normalized runtime events in one JSON response instead of WebSocket or SSE deltas.
+- Production server startup now wires `TurnRunner` to the model gateway and the runtime skill registry. Local unit tests still use a deterministic agent stub where isolated API behavior is under test.
+- Model gateway HTTP support is non-streaming in this slice. The server returns normalized runtime events in one JSON response instead of WebSocket or SSE deltas.
 - Command skill sandbox limits remain MVP-level and are not equivalent to a hardened Codex sandbox.
 - Provider failover is still static/incremental; richer health checks, dynamic routing, and retry policies remain future work.
 - The desktop local dev server origins are covered for CORS: `http://127.0.0.1:5173` and `http://localhost:5173`. Additional packaged-app origins may need explicit policy once packaging is implemented.

@@ -8,75 +8,8 @@
 }
 
 @media (max-width: 900px) {
-  .chat-screen,
-  .sessions-screen {
-    grid-template-columns: 1fr;
-  }
-
-  .session-rail,
-  .inspector-panel,
-  .workbench-header,
-  .session-table {
-    display: none;
-  }
-
-  .workbench,
-  .session-manager {
-    min-height: 0;
-  }
-
-  .mobile-topbar,
-  .mobile-chip-row {
-    display: flex;
-  }
-
-  .mobile-topbar {
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--line);
-    background: var(--surface);
-  }
-
-  .mobile-topbar span {
-    display: block;
-    color: var(--muted);
-    font-family: var(--mono);
-    font-size: 10px;
-  }
-
-  .mobile-actions {
-    display: flex;
-    gap: 6px;
-  }
-
-  .mobile-chip-row {
-    gap: 5px;
-    overflow-x: auto;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .mobile-chip-row span {
-    flex: 0 0 auto;
-    padding: 3px 7px;
-    border: 1px solid var(--line);
-    border-radius: 3px;
-    color: var(--muted);
-    font-family: var(--mono);
-    font-size: 10px;
-  }
-
-  .conversation-log {
-    padding: 18px 12px 96px;
-  }
-
   .message-list {
     padding-bottom: 96px;
-  }
-
-  .message-card {
-    max-width: 90%;
   }
 
   .composer {
@@ -87,10 +20,6 @@
     z-index: 10;
   }
 
-  .composer-tools {
-    display: none;
-  }
-
   .composer-input-row {
     padding: 9px 10px;
   }
@@ -98,88 +27,5 @@
   .composer-input-row input {
     height: 40px;
     font-size: 12px;
-  }
-
-  .manager-header {
-    flex-wrap: wrap;
-    padding: 9px 10px;
-  }
-
-  .manager-header > div {
-    flex: 0 0 auto;
-  }
-
-  .manager-header h1 {
-    font-size: 16px;
-  }
-
-  .manager-search {
-    order: 3;
-    flex: 1 0 100%;
-    max-width: none;
-  }
-
-  .mobile-new-session {
-    display: inline-grid;
-  }
-
-  .mobile-back-chat {
-    display: inline-grid;
-    width: 30px;
-    height: 30px;
-    place-items: center;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    background: var(--surface-low);
-    color: var(--text);
-    cursor: pointer;
-  }
-
-  .mobile-back-chat:hover {
-    border-color: var(--copper);
-    color: var(--copper-soft);
-  }
-
-  .filter-row {
-    padding: 8px 10px;
-  }
-
-  .session-card-list {
-    display: grid;
-    gap: 10px;
-    min-height: 0;
-    overflow: auto;
-    padding: 12px 10px 88px;
-  }
-
-  .mobile-session-card {
-    border: 1px solid var(--line-strong);
-    border-radius: 4px;
-    background: var(--surface-high);
-  }
-
-  .mobile-session-card header,
-  .mobile-session-card footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 9px 10px;
-  }
-
-  .mobile-session-card time,
-  .mobile-session-card p {
-    color: var(--muted);
-    font-family: var(--mono);
-    font-size: 11px;
-  }
-
-  .mobile-session-card p {
-    margin: 0;
-    padding: 0 10px 8px;
-  }
-
-  .session-state.error .status-dot {
-    background: var(--danger);
   }
 }

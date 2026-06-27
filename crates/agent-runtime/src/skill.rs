@@ -70,6 +70,7 @@ impl SkillRegistry {
 
             skills.push(Self::load_skill(path).await?);
         }
+        validate_registry_tool_names(&skills)?;
 
         Ok(Self { skills })
     }
@@ -92,6 +93,7 @@ impl SkillRegistry {
                 resolve_packaged_skill_path(root, &canonical_root, &entry.path).await?;
             skills.push(Self::load_skill(skill_root).await?);
         }
+        validate_registry_tool_names(&skills)?;
 
         Ok(Self { skills })
     }
@@ -175,7 +177,7 @@ impl SkillRegistry {
         let manifest: SkillManifest = serde_json::from_slice(&bytes).with_context(|| {
             format!("failed to parse skill manifest {}", manifest_path.display())
         })?;
-        validate_manifest(&manifest)?;
+        validate_manifest(&root, &manifest)?;
 
         Ok(InstalledSkill { root, manifest })
     }
@@ -278,12 +280,18 @@ async fn read_limited_stream(
     }
 }
 
-fn validate_manifest(manifest: &SkillManifest) -> anyhow::Result<()> {
+fn validate_manifest(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
     if manifest.name.trim().is_empty() {
         anyhow::bail!("skill manifest name must not be empty");
     }
+    if manifest.description.trim().is_empty() {
+        anyhow::bail!("skill manifest description must not be empty");
+    }
     if manifest.version.trim().is_empty() {
         anyhow::bail!("skill manifest version must not be empty");
+    }
+    if manifest.entry.kind != "command" {
+        anyhow::bail!("skill manifest entry type must be command");
     }
     if manifest.entry.command.trim().is_empty() {
         anyhow::bail!("skill manifest entry command must not be empty");
@@ -294,15 +302,76 @@ fn validate_manifest(manifest: &SkillManifest) -> anyhow::Result<()> {
 
     let mut tool_names = HashSet::new();
     for tool in &manifest.tools {
-        if tool.name.trim().is_empty() {
-            anyhow::bail!("skill manifest tool name must not be empty");
+        validate_tool_name(&tool.name)?;
+        if tool.description.trim().is_empty() {
+            anyhow::bail!("skill manifest tool description must not be empty");
+        }
+        if tool.input_schema.get("type").and_then(Value::as_str) != Some("object") {
+            anyhow::bail!("skill manifest tool input_schema type must be object");
         }
         if !tool_names.insert(tool.name.as_str()) {
             anyhow::bail!("skill manifest tool name must be unique: {}", tool.name);
         }
     }
+    validate_entry_resources(root, manifest)?;
 
     Ok(())
+}
+
+fn validate_registry_tool_names(skills: &[InstalledSkill]) -> anyhow::Result<()> {
+    let mut tool_names = HashSet::new();
+    for skill in skills {
+        for tool in &skill.manifest.tools {
+            validate_tool_name(&tool.name)?;
+            if !tool_names.insert(tool.name.as_str()) {
+                anyhow::bail!("duplicate runtime tool name: {}", tool.name);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_tool_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() || name.len() > 64 || name.trim() != name || !is_tool_name(name) {
+        anyhow::bail!("invalid runtime tool name: {name}");
+    }
+
+    Ok(())
+}
+
+fn is_tool_name(name: &str) -> bool {
+    name.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn validate_entry_resources(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
+    for arg in &manifest.entry.args {
+        if !looks_like_entry_resource(arg) {
+            continue;
+        }
+
+        let path = Path::new(arg);
+        if !is_safe_packaged_skill_path(path) {
+            anyhow::bail!("unsafe skill entry resource path: {arg}");
+        }
+
+        let resource_path = root.join(path);
+        if !resource_path.is_file() {
+            anyhow::bail!("skill manifest entry resource does not exist: {arg}");
+        }
+    }
+
+    Ok(())
+}
+
+fn looks_like_entry_resource(arg: &str) -> bool {
+    if arg.trim().is_empty() || arg.starts_with('-') {
+        return false;
+    }
+
+    let path = Path::new(arg);
+    path.extension().is_some() || path.components().count() > 1
 }
 
 fn is_safe_packaged_skill_path(path: &Path) -> bool {
@@ -488,11 +557,136 @@ mod tests {
         remove_test_dir(root).await;
     }
 
-    async fn write_echo_skill(root: &Path, folder: &str, tool_name: &str) {
-        let skill_dir = root.join(folder);
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+    #[tokio::test]
+    async fn rejects_manifest_with_unsupported_entry_type() {
+        let root = unique_test_dir("invalid-entry-type");
+        write_skill_manifest(
+            &root,
+            "bad-entry",
+            serde_json::json!({
+                "name": "bad-entry",
+                "description": "Invalid entry type.",
+                "version": "0.1.0",
+                "entry": {
+                    "type": "http",
+                    "command": "node",
+                    "args": ["index.js"]
+                },
+                "tools": [
+                    {
+                        "name": "bad_entry",
+                        "description": "Invalid entry type.",
+                        "input_schema": { "type": "object" }
+                    }
+                ]
+            }),
+        )
+        .await;
+
+        let error = SkillRegistry::load_development(&root).await.unwrap_err();
+
+        assert!(error.to_string().contains("entry type must be command"));
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn rejects_manifest_with_missing_entry_resource() {
+        let root = unique_test_dir("missing-entry-resource");
+        write_skill_manifest(
+            &root,
+            "missing-entry",
+            serde_json::json!({
+                "name": "missing-entry",
+                "description": "Missing entry file.",
+                "version": "0.1.0",
+                "entry": {
+                    "type": "command",
+                    "command": "node",
+                    "args": ["missing.js"]
+                },
+                "tools": [
+                    {
+                        "name": "missing_entry",
+                        "description": "Missing entry file.",
+                        "input_schema": { "type": "object" }
+                    }
+                ]
+            }),
+        )
+        .await;
+
+        let error = SkillRegistry::load_development(&root).await.unwrap_err();
+
+        assert!(error.to_string().contains("entry resource does not exist"));
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn rejects_manifest_with_invalid_tool_name() {
+        let root = unique_test_dir("invalid-tool-name");
+        write_skill_manifest(
+            &root,
+            "invalid-tool-name",
+            serde_json::json!({
+                "name": "invalid-tool-name",
+                "description": "Invalid tool name.",
+                "version": "0.1.0",
+                "entry": {
+                    "type": "command",
+                    "command": "node",
+                    "args": ["index.js"]
+                },
+                "tools": [
+                    {
+                        "name": "bad tool",
+                        "description": "Invalid tool name.",
+                        "input_schema": { "type": "object" }
+                    }
+                ]
+            }),
+        )
+        .await;
         tokio::fs::write(
-            skill_dir.join("skill.json"),
+            root.join("invalid-tool-name").join("index.js"),
+            "process.stdin.resume();\n",
+        )
+        .await
+        .unwrap();
+
+        let error = SkillRegistry::load_development(&root).await.unwrap_err();
+
+        assert!(error.to_string().contains("invalid runtime tool name"));
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn rejects_duplicate_tool_names_across_packaged_skills() {
+        let root = unique_test_dir("duplicate-tools");
+        write_echo_skill(&root, "first", "echo").await;
+        write_echo_skill(&root, "second", "echo").await;
+        tokio::fs::write(
+            root.join("skill-bundle.json"),
+            serde_json::json!({
+                "skills": [
+                    { "path": "first" },
+                    { "path": "second" }
+                ]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let error = SkillRegistry::load_packaged(&root).await.unwrap_err();
+
+        assert!(error.to_string().contains("duplicate runtime tool name"));
+        remove_test_dir(root).await;
+    }
+
+    async fn write_echo_skill(root: &Path, folder: &str, tool_name: &str) {
+        write_skill_manifest(
+            root,
+            folder,
             serde_json::json!({
                 "name": folder,
                 "description": "Echo a text payload.",
@@ -515,17 +709,23 @@ mod tests {
                         }
                     }
                 ]
-            })
-            .to_string(),
+            }),
         )
-        .await
-        .unwrap();
+        .await;
         tokio::fs::write(
-            skill_dir.join("index.js"),
+            root.join(folder).join("index.js"),
             "process.stdin.resume();\nprocess.stdin.on('data', (chunk) => process.stdout.write(chunk));\n",
         )
         .await
         .unwrap();
+    }
+
+    async fn write_skill_manifest(root: &Path, folder: &str, manifest: Value) {
+        let skill_dir = root.join(folder);
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        tokio::fs::write(skill_dir.join("skill.json"), manifest.to_string())
+            .await
+            .unwrap();
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

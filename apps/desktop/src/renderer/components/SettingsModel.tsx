@@ -1,13 +1,8 @@
 import { useState } from "react";
 
+import { testModelConnection } from "../api";
+import { loadModelSettings, saveModelSettings } from "../modelSettings";
 import { EndpointType, ModelSettings } from "../types";
-
-const initialSettings: ModelSettings = {
-  apiKey: "",
-  baseUrl: "http://127.0.0.1:11434/v1",
-  endpointType: "responses",
-  modelName: "local-agent-model"
-};
 
 const endpointOptions: Array<{ label: string; value: EndpointType }> = [
   { label: "Responses", value: "responses" },
@@ -16,16 +11,37 @@ const endpointOptions: Array<{ label: string; value: EndpointType }> = [
 ];
 
 export function SettingsModel(): JSX.Element {
-  const [settings, setSettings] = useState<ModelSettings>(initialSettings);
+  const [settings, setSettings] = useState<ModelSettings>(loadModelSettings);
+  const [connectionStatus, setConnectionStatus] = useState("Not tested");
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
 
   const updateSetting = <Key extends keyof ModelSettings>(
     key: Key,
     value: ModelSettings[Key]
   ) => {
-    setSettings((currentSettings) => ({
-      ...currentSettings,
-      [key]: value
-    }));
+    setSettings((currentSettings) => {
+      const nextSettings = {
+        ...currentSettings,
+        [key]: value
+      };
+      saveModelSettings(nextSettings);
+      return nextSettings;
+    });
+  };
+
+  const testConnection = async () => {
+    setIsTestingConnection(true);
+    setConnectionStatus("Testing...");
+
+    try {
+      const response = await testModelConnection(settings);
+      setConnectionStatus(response.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      setConnectionStatus(`Failed: ${message}`);
+    } finally {
+      setIsTestingConnection(false);
+    }
   };
 
   return (
@@ -83,10 +99,15 @@ export function SettingsModel(): JSX.Element {
       </div>
 
       <div className="settings-actions">
-        <button className="settings-primary-action" type="button">
+        <button
+          className="settings-primary-action"
+          disabled={isTestingConnection}
+          onClick={testConnection}
+          type="button"
+        >
           Test connection
         </button>
-        <p className="settings-status">Connection: Not tested</p>
+        <p className="settings-status">Connection: {connectionStatus}</p>
       </div>
     </section>
   );

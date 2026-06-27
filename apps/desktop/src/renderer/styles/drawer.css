@@ -72,7 +72,7 @@
   padding: 12px 8px 6px;
 }
 
-.session-row {
+.conversation-row {
   display: flex;
   width: 100%;
   min-height: 54px;
@@ -85,32 +85,32 @@
   text-align: left;
 }
 
-.session-row:hover {
+.conversation-row:hover {
   border-color: var(--color-border);
   background: var(--color-surface-muted);
 }
 
-.session-row span {
+.conversation-row span {
   display: grid;
   gap: 2px;
   min-width: 0;
   padding: 8px;
 }
 
-.session-row strong,
-.session-row small {
+.conversation-row strong,
+.conversation-row small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.session-row strong {
+.conversation-row strong {
   font-size: 14px;
   font-weight: 600;
   line-height: 20px;
 }
 
-.session-row small {
+.conversation-row small {
   color: var(--color-text-subtle);
   font-size: 12px;
   line-height: 16px;

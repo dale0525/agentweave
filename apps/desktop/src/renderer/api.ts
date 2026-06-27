@@ -1,3 +1,5 @@
+import { ModelSettings } from "./types";
+
 const SERVER_ORIGIN = "http://127.0.0.1:49321";
 
 export type ServerSession = {
@@ -27,6 +29,11 @@ export type PostMessageResponse = {
   events?: RuntimeEvent[];
 };
 
+export type ModelConnectionTestResponse = {
+  ok: boolean;
+  message: string;
+};
+
 type ErrorPayload = {
   error?: string;
 };
@@ -40,10 +47,23 @@ export async function createServerSession(title: string): Promise<ServerSession>
 
 export async function postSessionMessage(
   sessionId: string,
-  content: string
+  content: string,
+  modelSettings?: ModelSettings | null
 ): Promise<PostMessageResponse> {
   return requestJson<PostMessageResponse>(`/sessions/${sessionId}/messages`, {
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({
+      content,
+      ...(modelSettings ? { modelSettings } : {})
+    }),
+    method: "POST"
+  });
+}
+
+export async function testModelConnection(
+  settings: ModelSettings
+): Promise<ModelConnectionTestResponse> {
+  return requestJson<ModelConnectionTestResponse>("/model/test", {
+    body: JSON.stringify(settings),
     method: "POST"
   });
 }

@@ -11,6 +11,7 @@ import { Composer } from "../components/Composer";
 import { ConversationDrawer } from "../components/ConversationDrawer";
 import { MessageList } from "../components/MessageList";
 import { starterMessages } from "../data/fixtures";
+import { loadSavedModelSettings } from "../modelSettings";
 import { ChatMessage } from "../types";
 
 type ChatProps = {
@@ -79,7 +80,11 @@ export function Chat({
         setSessionId(session.id);
       }
 
-      const response = await postSessionMessage(activeSessionId, text);
+      const response = await postSessionMessage(
+        activeSessionId,
+        text,
+        loadSavedModelSettings()
+      );
       if (!isCurrentRequest()) {
         return;
       }

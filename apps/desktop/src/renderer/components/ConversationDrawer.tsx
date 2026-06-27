@@ -68,7 +68,7 @@ export function ConversationDrawer({
                       {sectionLabel}
                     </p>
                   ) : null}
-                  <button className="session-row" type="button">
+                  <button className="conversation-row" type="button">
                     <span>
                       <strong>{conversation.title}</strong>
                       <small>{conversation.updatedAt}</small>
