@@ -268,6 +268,44 @@ Notes:
 - Deep `references/` routing remains out of scope and is left for a later skill-catalog expansion.
 - Approval workflows, stronger sandbox profiles, MCP, connectors, deferred tools, and subagents inside GeneralAgent remain later phases.
 
+## Codex-Like Runtime Phase 4 Verification
+
+Date: 2026-06-28
+
+Source design:
+
+- `docs/superpowers/specs/2026-06-27-codex-like-runtime-migration-design.md`
+
+Implementation plan:
+
+- `docs/superpowers/plans/2026-06-28-codex-like-runtime-phase-4.md`
+
+Automated checks:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 125/125, `agent-server` 14/14, `model-gateway` 15/15, doc tests 0 failures. |
+| `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy completed for `agent-runtime` and `agent-server` with no warnings. |
+| `pixi run cargo fmt --all --check` | PASS | Rust formatting check passed. |
+| `git diff --check HEAD` | PASS | Whitespace check exited 0. |
+| Source line budget | PASS | Edited and created source files were checked; largest checked source file is `crates/agent-server/src/api.rs` at 971 physical lines. |
+
+Focused runtime checks:
+
+- Tool definitions now include source metadata, namespace, optional output schema, and schema diagnostics.
+- Runtime skill tools report `RuntimeSkill` source metadata with the originating skill name.
+- Tool diagnostics validate tool names, namespace shape, input schema shape, and declared output schema shape.
+- `/dev/tools` returns visible tool diagnostics only through the explicit dev router or `GENERAL_AGENT_DEV_API=1`.
+- The production router still does not expose `/dev/tools` or user-facing skill/tool management endpoints.
+- `/dev/instructions/preview` returns deterministic system, developer, and user blocks for a supplied message.
+- Instruction preview includes AGENTS.md context, available skill summaries, triggered skill names, and selected full `SKILL.md` instructions.
+
+Notes:
+
+- Persistent runtime diagnostics are intentionally deferred. Phase 4 adds dev inspection endpoints and structured diagnostics, not storage schema changes.
+- Dev endpoints are developer diagnostics only and are not mounted in the production router by default.
+- Approval workflow, sandbox profiles, MCP/connectors, deferred tools, and advanced Codex parity remain later phases.
+
 ## Known Gaps
 
 - Production server startup now wires `TurnRunner` to the model gateway and the runtime skill registry. Local unit tests still use a deterministic agent stub where isolated API behavior is under test.

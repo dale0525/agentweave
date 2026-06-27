@@ -464,15 +464,38 @@ git commit -m "docs: record codex-like runtime phase 4 verification"
 
 ## Phase 4 Acceptance Checklist
 
-- [ ] Tool definitions include source metadata.
-- [ ] Tool definitions include namespace and optional output schema fields.
-- [ ] Tool schema diagnostics validate names and schema shapes.
-- [ ] Runtime skill tools report `RuntimeSkill` source metadata.
-- [ ] Development diagnostics can explain visible tool metadata.
-- [ ] Production API does not expose dev diagnostics by default.
-- [ ] `/dev/tools` is available only through explicit dev mode.
-- [ ] `/dev/instructions/preview` explains model-visible instruction context.
-- [ ] Invalid tool schemas fail fast during runtime skill loading or are reported invalid in diagnostics.
-- [ ] Persistent runtime diagnostics are documented as deferred.
-- [ ] `docs/mvp-verification.md` records Phase 4 verification evidence.
-- [ ] No edited/new source file exceeds 1000 physical lines.
+- [x] Tool definitions include source metadata.
+- [x] Tool definitions include namespace and optional output schema fields.
+- [x] Tool schema diagnostics validate names and schema shapes.
+- [x] Runtime skill tools report `RuntimeSkill` source metadata.
+- [x] Development diagnostics can explain visible tool metadata.
+- [x] Production API does not expose dev diagnostics by default.
+- [x] `/dev/tools` is available only through explicit dev mode.
+- [x] `/dev/instructions/preview` explains model-visible instruction context.
+- [x] Invalid tool schemas fail fast during runtime skill loading or are reported invalid in diagnostics.
+- [x] Persistent runtime diagnostics are documented as deferred.
+- [x] `docs/mvp-verification.md` records Phase 4 verification evidence.
+- [x] No edited/new source file exceeds 1000 physical lines.
+
+## Codex-Like Runtime Phase 4 Completion Evidence
+
+Completed: 2026-06-28
+
+Commits:
+- `1fb66d7` docs: add codex-like runtime phase 4 plan
+- `0f80c3b` feat: add runtime tool diagnostics metadata
+- `98f5174` feat: add dev tool diagnostics endpoint
+- `8e1d87e` feat: add dev instruction preview endpoint
+
+Focused verification:
+- `pixi run cargo test -p agent-runtime tools::tests -- --nocapture`: PASS, 13/13 after metadata task.
+- `pixi run cargo test -p agent-server dev_api::tests -- --nocapture`: PASS, 3/3.
+- `pixi run cargo test -p agent-server api::tests::production_router_does_not_expose_skill_inventory -- --nocapture`: PASS.
+- `pixi run cargo test -p agent-server`: PASS, 14/14.
+
+Full verification:
+- `pixi run cargo test --workspace`: PASS, `agent-runtime` 125/125, `agent-server` 14/14, `model-gateway` 15/15.
+- `pixi run cargo clippy --workspace --all-targets -- -D warnings`: PASS.
+- `pixi run cargo fmt --all --check`: PASS.
+- `git diff --check HEAD`: PASS.
+- Source line budget: PASS, no edited/new source file exceeds 1000 physical lines; largest checked source file is `crates/agent-server/src/api.rs` at 971 lines.
