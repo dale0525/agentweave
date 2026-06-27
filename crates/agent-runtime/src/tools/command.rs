@@ -188,6 +188,12 @@ mod tests {
             "echo `sudo true`",
             "git -C . reset --hard",
             "git -C . clean -xdf",
+            "/usr/bin/git reset --hard",
+            "/usr/bin/git -C . clean -xdf",
+            "/usr/bin/sudo true",
+            "/bin/bash -c 'sudo true'",
+            "/sbin/mkfs.ext4 /dev/disk",
+            "/bin/rm -rf /",
         ] {
             let result = execute(&config, "call-1", json!({ "cmd": cmd }), Instant::now()).await;
 
@@ -679,7 +685,7 @@ fn nested_shell_command_denied(cmd: &str) -> bool {
 
 fn is_shell_token(token: &str) -> bool {
     matches!(
-        token,
+        executable_basename(token),
         "sh" | "/bin/sh" | "bash" | "/bin/bash" | "zsh" | "/bin/zsh"
     )
 }
@@ -687,7 +693,7 @@ fn is_shell_token(token: &str) -> bool {
 fn git_reset_hard_denied(cmd: &str) -> bool {
     let tokens = command_tokens(cmd);
     tokens.iter().enumerate().any(|(index, token)| {
-        token == "git"
+        executable_basename(token) == "git"
             && git_tail_has_subcommand_and_option(&tokens[index + 1..], "reset", "--hard")
     })
 }
@@ -695,7 +701,7 @@ fn git_reset_hard_denied(cmd: &str) -> bool {
 fn git_clean_denied(cmd: &str) -> bool {
     let tokens = command_tokens(cmd);
     tokens.iter().enumerate().any(|(index, token)| {
-        token == "git"
+        executable_basename(token) == "git"
             && git_tail_has_matching_subcommand_option(
                 &tokens[index + 1..],
                 "clean",
@@ -728,7 +734,7 @@ fn git_tail_has_matching_subcommand_option(
 fn rm_force_recursive_target_denied(cmd: &str, target: &str) -> bool {
     let tokens = command_tokens(cmd);
     tokens.iter().enumerate().any(|(index, token)| {
-        if token != "rm" {
+        if executable_basename(token) != "rm" {
             return false;
         }
         let rest = &tokens[index + 1..];
@@ -743,13 +749,15 @@ fn is_force_recursive_rm_option(token: &str) -> bool {
 }
 
 fn contains_token(cmd: &str, word: &str) -> bool {
-    command_tokens(cmd).iter().any(|token| token == word)
+    command_tokens(cmd)
+        .iter()
+        .any(|token| executable_basename(token) == word)
 }
 
 fn contains_token_prefix(cmd: &str, prefix: &str) -> bool {
     command_tokens(cmd)
         .iter()
-        .any(|token| token.starts_with(prefix))
+        .any(|token| executable_basename(token).starts_with(prefix))
 }
 
 fn command_tokens(cmd: &str) -> Vec<String> {
@@ -768,6 +776,10 @@ fn normalize_command_token(token: &str) -> String {
             )
         })
         .to_ascii_lowercase()
+}
+
+fn executable_basename(token: &str) -> &str {
+    token.rsplit('/').next().unwrap_or(token)
 }
 
 fn command_capture_limit_bytes(output_limit_bytes: usize) -> usize {
