@@ -589,7 +589,11 @@ mod tests {
 
         let error = gateway_request_body(&profile, request).unwrap_err();
 
-        assert!(error.to_string().contains("model_endpoint_does_not_support_tools"));
+        assert!(
+            error
+                .to_string()
+                .contains("model_endpoint_does_not_support_tools")
+        );
     }
 
     #[test]

@@ -37,6 +37,7 @@ impl AppState {
         Self::new_with_agent(storage, Arc::new(DeterministicAgent))
     }
 
+    #[cfg(test)]
     pub fn new_with_agent(storage: Storage, agent: Arc<dyn AgentRunner>) -> Self {
         Self {
             storage,
@@ -598,12 +599,14 @@ mod tests {
         .unwrap();
         let runtime_config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
         let skills = development_skills().await;
-        let app = router(Arc::new(AppState::new_with_agent_and_skills(
-            storage.clone(),
-            Arc::new(DeterministicAgent),
-            skills,
-        )
-        .with_runtime_config(runtime_config)));
+        let app = router(Arc::new(
+            AppState::new_with_agent_and_skills(
+                storage.clone(),
+                Arc::new(DeterministicAgent),
+                skills,
+            )
+            .with_runtime_config(runtime_config),
+        ));
 
         let create_response = app
             .clone()
@@ -667,15 +670,15 @@ mod tests {
         let runtime_config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
         let skills = development_skills().await;
 
-        let state = AppState::new_with_agent_and_skills(
-            storage,
-            Arc::new(DeterministicAgent),
-            skills,
-        )
-        .with_runtime_config(runtime_config);
+        let state =
+            AppState::new_with_agent_and_skills(storage, Arc::new(DeterministicAgent), skills)
+                .with_runtime_config(runtime_config);
 
         assert_eq!(state.runtime_config.workspace_root, workspace);
-        assert_eq!(state.runtime_config.cwd, state.runtime_config.workspace_root);
+        assert_eq!(
+            state.runtime_config.cwd,
+            state.runtime_config.workspace_root
+        );
 
         remove_test_dir(state.runtime_config.workspace_root).await;
     }

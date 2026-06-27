@@ -18,7 +18,7 @@ pub struct ToolError {
     pub retryable: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct ToolResultMetadata {
     pub duration_ms: u64,
     pub stdout_truncated: bool,
@@ -61,17 +61,6 @@ impl ToolResult {
 
     pub fn into_value(self) -> Value {
         serde_json::to_value(self).expect("tool result should serialize")
-    }
-}
-
-impl Default for ToolResultMetadata {
-    fn default() -> Self {
-        Self {
-            duration_ms: 0,
-            stdout_truncated: false,
-            stderr_truncated: false,
-            output_truncated: false,
-        }
     }
 }
 

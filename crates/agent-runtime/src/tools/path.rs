@@ -106,7 +106,7 @@ fn ensure_existing_path_inside_canonical_workspace(
         .canonicalize()
         .with_context(|| format!("failed to resolve workspace path {}", absolute.display()))?;
 
-    if !canonical_path.starts_with(&canonical_root) {
+    if !canonical_path.starts_with(canonical_root) {
         bail!(
             "workspace path is outside workspace: {}",
             absolute.display()

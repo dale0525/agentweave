@@ -1,10 +1,7 @@
 mod api;
 
 use agent_runtime::{
-    skill::SkillRegistry,
-    storage::Storage,
-    tools::RuntimeConfig,
-    turn::TurnRunner,
+    skill::SkillRegistry, storage::Storage, tools::RuntimeConfig, turn::TurnRunner,
 };
 use model_gateway::{
     provider::{EndpointType, ProviderProfile},
@@ -30,12 +27,10 @@ async fn main() -> anyhow::Result<()> {
     let model = GatewayHttpClient::new(model_profile_from_env());
     let runtime_config = runtime_config_from_env();
     let runner = TurnRunner::new_with_config(model, skills.clone(), runtime_config.clone());
-    let app = api::router(Arc::new(api::AppState::new_with_agent_and_skills(
-        storage,
-        Arc::new(runner),
-        skills,
-    )
-    .with_runtime_config(runtime_config)));
+    let app = api::router(Arc::new(
+        api::AppState::new_with_agent_and_skills(storage, Arc::new(runner), skills)
+            .with_runtime_config(runtime_config),
+    ));
     let addr = SocketAddr::from(([127, 0, 0, 1], 49321));
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
