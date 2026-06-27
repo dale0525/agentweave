@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod command;
+pub mod discovery;
 pub mod patch;
 pub mod path;
 pub mod process;
@@ -97,6 +98,8 @@ pub struct ToolDefinition {
 pub enum ToolSource {
     BuiltIn,
     RuntimeSkill { skill_name: String },
+    Mcp { server: String },
+    AppConnector { connector: String },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
