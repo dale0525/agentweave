@@ -2,7 +2,6 @@ use super::{
     RuntimeConfig, ToolDefinition, ToolPermission,
     result::{ToolError, ToolResult, ToolResultMetadata},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -101,7 +100,6 @@ pub async fn execute(
     )
 }
 
-#[derive(Debug, Deserialize)]
 struct ApplyPatchArgs {
     patch: String,
 }
@@ -208,12 +206,19 @@ impl PlannedChange {
 }
 
 fn parse_args(arguments: Value) -> Result<ApplyPatchArgs, String> {
-    let args: ApplyPatchArgs =
-        serde_json::from_value(arguments).map_err(|error| error.to_string())?;
-    if args.patch.is_empty() {
+    let Value::Object(mut object) = arguments else {
+        return Err("arguments must be an object".to_string());
+    };
+    if object.len() != 1 || !object.contains_key("patch") {
+        return Err("only patch argument is allowed".to_string());
+    }
+    let Some(Value::String(patch)) = object.remove("patch") else {
+        return Err("patch must be a string".to_string());
+    };
+    if patch.is_empty() {
         return Err("patch must not be empty".to_string());
     }
-    Ok(args)
+    Ok(ApplyPatchArgs { patch })
 }
 
 fn parse_patch(input: &str) -> Result<Patch, String> {
@@ -231,6 +236,9 @@ fn parse_patch(input: &str) -> Result<Patch, String> {
             parser.index += 1;
             if !parser.is_done() {
                 return Err("unexpected content after end marker".to_string());
+            }
+            if operations.is_empty() {
+                return Err("patch must include at least one operation".to_string());
             }
             return Ok(Patch { operations });
         }
@@ -383,7 +391,28 @@ fn plan_patch(config: &RuntimeConfig, patch: Patch) -> Result<PlannedPatch, Patc
             PatchOperation::Delete { path } => plan_delete(config, path)?,
         });
     }
+    validate_planned_changes(&changes)?;
     Ok(PlannedPatch { changes })
+}
+
+fn validate_planned_changes(changes: &[PlannedChange]) -> Result<(), PatchFailure> {
+    for (index, change) in changes.iter().enumerate() {
+        for other in changes.iter().skip(index + 1) {
+            if change.path() == other.path() {
+                return Err(PatchFailure::new(
+                    "patch_apply_failed",
+                    "multiple operations target the same path",
+                ));
+            }
+            if change.is_add() && other.is_add() && paths_overlap(change.path(), other.path()) {
+                return Err(PatchFailure::new(
+                    "patch_apply_failed",
+                    "add operations have parent-child path conflict",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn plan_add(
@@ -464,12 +493,7 @@ fn apply_hunks(original: String, hunks: &[Hunk]) -> Result<(String, usize, usize
                 HunkLine::Remove(_) => None,
             })
             .collect::<Vec<_>>();
-        let Some(start) = find_subsequence(&lines, &old_lines) else {
-            return Err(PatchFailure::new(
-                "patch_apply_failed",
-                "hunk context did not match file",
-            ));
-        };
+        let start = unique_subsequence_start(&lines, &old_lines)?;
         added_lines += hunk
             .lines
             .iter()
@@ -495,13 +519,48 @@ fn split_text_lines(text: &str) -> Vec<String> {
     }
 }
 
-fn find_subsequence(lines: &[String], needle: &[String]) -> Option<usize> {
+fn unique_subsequence_start(lines: &[String], needle: &[String]) -> Result<usize, PatchFailure> {
     if needle.is_empty() {
-        return Some(0);
+        return Err(PatchFailure::new(
+            "patch_apply_failed",
+            "update hunk must include context or removal lines",
+        ));
     }
-    lines
+    let mut matches = lines
         .windows(needle.len())
-        .position(|window| window == needle)
+        .enumerate()
+        .filter(|(_, window)| *window == needle);
+    let Some((start, _)) = matches.next() else {
+        return Err(PatchFailure::new(
+            "patch_apply_failed",
+            "hunk context did not match file",
+        ));
+    };
+    if matches.next().is_some() {
+        return Err(PatchFailure::new(
+            "patch_apply_failed",
+            "hunk context matched multiple locations",
+        ));
+    }
+    Ok(start)
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    let left = Path::new(left);
+    let right = Path::new(right);
+    left.starts_with(right) || right.starts_with(left)
+}
+
+impl PlannedChange {
+    fn path(&self) -> &str {
+        match self {
+            Self::Add { path, .. } | Self::Update { path, .. } | Self::Delete { path, .. } => path,
+        }
+    }
+
+    fn is_add(&self) -> bool {
+        matches!(self, Self::Add { .. })
+    }
 }
 
 fn ensure_file(path: &Path) -> Result<(), PatchFailure> {
@@ -591,17 +650,13 @@ fn failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        path::PathBuf,
-        time::{Instant, SystemTime, UNIX_EPOCH},
-    };
+    use std::{path::PathBuf, time::Instant};
 
     #[tokio::test]
     async fn apply_patch_adds_file_inside_workspace() {
         let root = unique_test_dir("patch-add");
         std::fs::create_dir_all(&root).unwrap();
         let config = RuntimeConfig::workspace_write(&root, &root);
-
         let result = execute(
             &config,
             "call-1",
@@ -611,7 +666,6 @@ mod tests {
             Instant::now(),
         )
         .await;
-
         assert!(result.ok, "{result:?}");
         assert_eq!(
             std::fs::read_to_string(root.join("notes/example.txt")).unwrap(),
@@ -623,14 +677,31 @@ mod tests {
         );
         remove_test_dir(root);
     }
-
+    #[tokio::test]
+    async fn add_file_without_patch_trailing_newline_writes_trailing_newline() {
+        let root = unique_test_dir("patch-add-no-final-newline");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = RuntimeConfig::workspace_write(&root, &root);
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "patch": "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch" }),
+            Instant::now(),
+        )
+        .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("note.txt")).unwrap(),
+            "hello\n"
+        );
+        remove_test_dir(root);
+    }
     #[tokio::test]
     async fn apply_patch_updates_file_with_context_hunk() {
         let root = unique_test_dir("patch-update");
         std::fs::create_dir_all(root.join("notes")).unwrap();
         std::fs::write(root.join("notes/example.txt"), "alpha\nold\nomega\n").unwrap();
         let config = RuntimeConfig::workspace_write(&root, &root);
-
         let result = execute(
             &config,
             "call-1",
@@ -640,7 +711,6 @@ mod tests {
             Instant::now(),
         )
         .await;
-
         assert!(result.ok, "{result:?}");
         assert_eq!(
             std::fs::read_to_string(root.join("notes/example.txt")).unwrap(),
@@ -652,14 +722,12 @@ mod tests {
         );
         remove_test_dir(root);
     }
-
     #[tokio::test]
     async fn apply_patch_deletes_file_inside_workspace() {
         let root = unique_test_dir("patch-delete");
         std::fs::create_dir_all(root.join("notes")).unwrap();
         std::fs::write(root.join("notes/remove.txt"), "bye\n").unwrap();
         let config = RuntimeConfig::workspace_write(&root, &root);
-
         let result = execute(
             &config,
             "call-1",
@@ -669,7 +737,6 @@ mod tests {
             Instant::now(),
         )
         .await;
-
         assert!(result.ok, "{result:?}");
         assert!(!root.join("notes/remove.txt").exists());
         assert_eq!(
@@ -678,13 +745,11 @@ mod tests {
         );
         remove_test_dir(root);
     }
-
     #[tokio::test]
     async fn apply_patch_rejects_outside_workspace_add() {
         let root = unique_test_dir("patch-outside-add");
         std::fs::create_dir_all(&root).unwrap();
         let config = RuntimeConfig::workspace_write(&root, &root);
-
         let result = execute(
             &config,
             "call-1",
@@ -694,13 +759,11 @@ mod tests {
             Instant::now(),
         )
         .await;
-
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "path_escape");
         assert!(!root.parent().unwrap().join("escape.txt").exists());
         remove_test_dir(root);
     }
-
     #[tokio::test]
     async fn apply_patch_rejects_hunk_that_does_not_match() {
         let root = unique_test_dir("patch-hunk-mismatch");
@@ -708,7 +771,6 @@ mod tests {
         let path = root.join("example.txt");
         std::fs::write(&path, "alpha\nactual\nomega\n").unwrap();
         let config = RuntimeConfig::workspace_write(&root, &root);
-
         let result = execute(
             &config,
             "call-1",
@@ -718,7 +780,6 @@ mod tests {
             Instant::now(),
         )
         .await;
-
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "patch_apply_failed");
         assert_eq!(
@@ -727,14 +788,12 @@ mod tests {
         );
         remove_test_dir(root);
     }
-
     #[tokio::test]
     async fn add_existing_returns_path_exists() {
         let root = unique_test_dir("patch-add-existing");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("example.txt"), "already\n").unwrap();
         let config = RuntimeConfig::workspace_write(&root, &root);
-
         let result = execute(
             &config,
             "call-1",
@@ -744,7 +803,6 @@ mod tests {
             Instant::now(),
         )
         .await;
-
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "path_exists");
         assert_eq!(
@@ -753,14 +811,12 @@ mod tests {
         );
         remove_test_dir(root);
     }
-
     #[tokio::test]
     async fn update_non_utf8_returns_path_not_text() {
         let root = unique_test_dir("patch-non-utf8");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("binary.bin"), [0xff, 0xfe, b'\n']).unwrap();
         let config = RuntimeConfig::workspace_write(&root, &root);
-
         let result = execute(
             &config,
             "call-1",
@@ -770,18 +826,15 @@ mod tests {
             Instant::now(),
         )
         .await;
-
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "path_not_text");
         remove_test_dir(root);
     }
-
     #[tokio::test]
     async fn invalid_patch_returns_invalid_patch() {
         let root = unique_test_dir("patch-invalid");
         std::fs::create_dir_all(&root).unwrap();
         let config = RuntimeConfig::workspace_write(&root, &root);
-
         let result = execute(
             &config,
             "call-1",
@@ -789,12 +842,123 @@ mod tests {
             Instant::now(),
         )
         .await;
-
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "invalid_patch");
         remove_test_dir(root);
     }
-
+    #[tokio::test]
+    async fn apply_patch_rejects_unknown_arguments() {
+        let root = unique_test_dir("patch-unknown-args");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = RuntimeConfig::workspace_write(&root, &root);
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "patch": "*** Begin Patch\n*** End Patch\n", "extra": true }),
+            Instant::now(),
+        )
+        .await;
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "invalid_arguments");
+        remove_test_dir(root);
+    }
+    #[tokio::test]
+    async fn empty_patch_returns_invalid_patch() {
+        let root = unique_test_dir("patch-empty");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = RuntimeConfig::workspace_write(&root, &root);
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "patch": "*** Begin Patch\n*** End Patch\n" }),
+            Instant::now(),
+        )
+        .await;
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "invalid_patch");
+        remove_test_dir(root);
+    }
+    #[tokio::test]
+    async fn update_hunk_with_only_added_lines_returns_patch_apply_failed() {
+        let root = unique_test_dir("patch-no-anchor");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("example.txt"), "alpha\n").unwrap();
+        let config = RuntimeConfig::workspace_write(&root, &root);
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "patch": "*** Begin Patch\n*** Update File: example.txt\n@@\n+inserted\n*** End Patch\n" }),
+            Instant::now(),
+        )
+        .await;
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "patch_apply_failed");
+        assert_eq!(
+            std::fs::read_to_string(root.join("example.txt")).unwrap(),
+            "alpha\n"
+        );
+        remove_test_dir(root);
+    }
+    #[tokio::test]
+    async fn repeated_updates_same_file_are_rejected_or_applied_sequentially_without_losing_first_change()
+     {
+        let root = unique_test_dir("patch-repeat-update");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("example.txt"), "one\ntwo\nthree\n").unwrap();
+        let config = RuntimeConfig::workspace_write(&root, &root);
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "patch": "*** Begin Patch\n*** Update File: example.txt\n@@\n-one\n+ONE\n*** Update File: example.txt\n@@\n-three\n+THREE\n*** End Patch\n" }),
+            Instant::now(),
+        )
+        .await;
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "patch_apply_failed");
+        assert_eq!(
+            std::fs::read_to_string(root.join("example.txt")).unwrap(),
+            "one\ntwo\nthree\n"
+        );
+        remove_test_dir(root);
+    }
+    #[tokio::test]
+    async fn ambiguous_duplicate_context_returns_patch_apply_failed() {
+        let root = unique_test_dir("patch-ambiguous-context");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("example.txt"), "same\nold\nsame\nold\n").unwrap();
+        let config = RuntimeConfig::workspace_write(&root, &root);
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "patch": "*** Begin Patch\n*** Update File: example.txt\n@@\n same\n-old\n+new\n*** End Patch\n" }),
+            Instant::now(),
+        )
+        .await;
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "patch_apply_failed");
+        assert_eq!(
+            std::fs::read_to_string(root.join("example.txt")).unwrap(),
+            "same\nold\nsame\nold\n"
+        );
+        remove_test_dir(root);
+    }
+    #[tokio::test]
+    async fn multi_add_parent_child_conflict_rejected_without_partial_write() {
+        let root = unique_test_dir("patch-parent-child");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = RuntimeConfig::workspace_write(&root, &root);
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "patch": "*** Begin Patch\n*** Add File: dir\n+file\n*** Add File: dir/file.txt\n+nested\n*** End Patch\n" }),
+            Instant::now(),
+        )
+        .await;
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "patch_apply_failed");
+        assert!(!root.join("dir").exists());
+        remove_test_dir(root);
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn add_through_symlink_parent_escape_rejected_and_outside_target_not_written() {
@@ -804,7 +968,6 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
         let config = RuntimeConfig::workspace_write(&root, &root);
-
         let result = execute(
             &config,
             "call-1",
@@ -814,7 +977,6 @@ mod tests {
             Instant::now(),
         )
         .await;
-
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "path_escape");
         assert!(!outside.join("escape.txt").exists());
@@ -823,11 +985,7 @@ mod tests {
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("generalagent-{name}-{nanos}"))
+        std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
     }
 
     fn remove_test_dir(path: PathBuf) {
