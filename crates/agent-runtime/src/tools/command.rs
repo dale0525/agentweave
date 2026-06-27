@@ -183,6 +183,11 @@ mod tests {
             "git clean -df",
             "git clean -xfd",
             "(sudo true)",
+            "sh -c 'sudo true'",
+            "echo $(sudo true)",
+            "echo `sudo true`",
+            "git -C . reset --hard",
+            "git -C . clean -xdf",
         ] {
             let result = execute(&config, "call-1", json!({ "cmd": cmd }), Instant::now()).await;
 
@@ -264,14 +269,14 @@ mod tests {
         let root = unique_test_dir("command-timeout-process-group");
         std::fs::create_dir_all(&root).unwrap();
         let mut config = allowed_config(&root);
-        config.tool_timeout_ms = 200;
+        config.tool_timeout_ms = 500;
 
         let result = execute(
             &config,
             "call-1",
             json!({
-                "cmd": "(sleep 0.2; printf late > late.txt) & sleep 1",
-                "timeout_ms": 25
+                "cmd": "(sleep 0.5; printf late > late.txt) & sleep 1",
+                "timeout_ms": 75
             }),
             Instant::now(),
         )
@@ -279,7 +284,7 @@ mod tests {
 
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "timeout");
-        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(650)).await;
         assert!(!root.join("late.txt").exists());
         remove_test_dir(root);
     }
@@ -321,14 +326,14 @@ mod tests {
         let result = execute(
             &config,
             "call-1",
-            json!({ "cmd": "printf abcdef; (sleep 0.2; printf late > late.txt) & sleep 1" }),
+            json!({ "cmd": "printf abcdef; (sleep 0.5; printf late > late.txt) & sleep 1" }),
             Instant::now(),
         )
         .await;
 
         assert!(result.ok);
         assert!(result.metadata.stdout_truncated);
-        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(650)).await;
         assert!(!root.join("late.txt").exists());
         remove_test_dir(root);
     }
@@ -614,8 +619,16 @@ struct DenyRule {
 
 const DENY_RULES: &[DenyRule] = &[
     DenyRule {
+        name: "command substitution",
+        denied: has_command_substitution,
+    },
+    DenyRule {
+        name: "nested shell -c",
+        denied: nested_shell_command_denied,
+    },
+    DenyRule {
         name: "git reset --hard",
-        denied: |cmd| contains_words(cmd, &["git", "reset", "--hard"]),
+        denied: git_reset_hard_denied,
     },
     DenyRule {
         name: "git clean -fd",
@@ -654,19 +667,62 @@ fn command_denied(cmd: &str) -> bool {
     })
 }
 
-fn contains_words(cmd: &str, words: &[&str]) -> bool {
+fn has_command_substitution(cmd: &str) -> bool {
+    cmd.contains("$(") || cmd.contains('`')
+}
+
+fn nested_shell_command_denied(cmd: &str) -> bool {
+    command_tokens(cmd)
+        .windows(2)
+        .any(|window| is_shell_token(&window[0]) && window[1] == "-c")
+}
+
+fn is_shell_token(token: &str) -> bool {
+    matches!(
+        token,
+        "sh" | "/bin/sh" | "bash" | "/bin/bash" | "zsh" | "/bin/zsh"
+    )
+}
+
+fn git_reset_hard_denied(cmd: &str) -> bool {
     let tokens = command_tokens(cmd);
-    tokens.windows(words.len()).any(|window| window == words)
+    tokens.iter().enumerate().any(|(index, token)| {
+        token == "git"
+            && git_tail_has_subcommand_and_option(&tokens[index + 1..], "reset", "--hard")
+    })
 }
 
 fn git_clean_denied(cmd: &str) -> bool {
-    command_tokens(cmd).windows(3).any(|window| {
-        window[0] == "git" && window[1] == "clean" && is_git_clean_force_delete(&window[2])
+    let tokens = command_tokens(cmd);
+    tokens.iter().enumerate().any(|(index, token)| {
+        token == "git"
+            && git_tail_has_matching_subcommand_option(
+                &tokens[index + 1..],
+                "clean",
+                is_git_clean_force_delete,
+            )
     })
 }
 
 fn is_git_clean_force_delete(token: &str) -> bool {
     token.starts_with('-') && token.contains('f') && token.contains('d')
+}
+
+fn git_tail_has_subcommand_and_option(tokens: &[String], subcommand: &str, option: &str) -> bool {
+    git_tail_has_matching_subcommand_option(tokens, subcommand, |token| token == option)
+}
+
+fn git_tail_has_matching_subcommand_option(
+    tokens: &[String],
+    subcommand: &str,
+    option_matches: impl Fn(&str) -> bool,
+) -> bool {
+    let Some(subcommand_index) = tokens.iter().position(|token| token == subcommand) else {
+        return false;
+    };
+    tokens[subcommand_index + 1..]
+        .iter()
+        .any(|token| option_matches(token))
 }
 
 fn rm_force_recursive_target_denied(cmd: &str, target: &str) -> bool {
@@ -705,7 +761,12 @@ fn command_tokens(cmd: &str) -> Vec<String> {
 
 fn normalize_command_token(token: &str) -> String {
     token
-        .trim_matches(|character: char| matches!(character, '(' | ')' | '{' | '}' | '[' | ']'))
+        .trim_matches(|character: char| {
+            matches!(
+                character,
+                '(' | ')' | '{' | '}' | '[' | ']' | '\'' | '"' | '`' | '$'
+            )
+        })
         .to_ascii_lowercase()
 }
 
