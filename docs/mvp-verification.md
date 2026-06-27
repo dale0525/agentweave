@@ -346,6 +346,48 @@ Notes:
 - `NetworkPolicy::UnrestrictedPlaceholder` is intentionally a declaration placeholder and does not claim network isolation.
 - Real OS sandboxing, persistent approval decisions, and end-user approval controls remain later work.
 
+## Codex-Like Runtime Phase 6 Verification
+
+Date: 2026-06-28
+
+Source design:
+
+- `docs/superpowers/specs/2026-06-27-codex-like-runtime-migration-design.md`
+
+Implementation plan:
+
+- `docs/superpowers/plans/2026-06-28-codex-like-runtime-phase-6.md`
+
+Automated checks:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 137/137, `agent-server` 15/15, `model-gateway` 15/15, doc tests 0 failures. |
+| `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy completed with no warnings. |
+| `pixi run cargo fmt --all --check` | PASS | Rust formatting check passed. |
+| `git diff --check HEAD` | PASS | Whitespace check exited 0. |
+| Source line budget | PASS | Checked `crates`, `apps`, and `scripts` source files; largest checked source file is `crates/agent-runtime/src/tools/mod.rs` at 992 physical lines. |
+
+Focused runtime checks:
+
+- External MCP-style tool metadata can produce model-safe names such as `mcp__filesystem__read_file`.
+- Invalid external namespace parts are rejected before registry exposure.
+- Connector metadata records id, name, description, version, permissions, auth-state placeholder, and tool count.
+- `ToolSource` now distinguishes built-ins, runtime skills, MCP tools, and app connectors.
+- Immediate fake/static MCP tools share the registry with built-ins and runtime skills.
+- The registry rejects duplicate final model-visible tool names.
+- Deferred external tools produce discovery summaries without loading their full schema into `ToolRegistry::definitions()`.
+- Deferred external tools are not sent as model `GatewayTool` schemas in `TurnRunner` requests.
+- `/dev/tool-discovery` returns tool discovery summaries and connector metadata through the explicit dev router.
+- Production router behavior remains unchanged: dev diagnostics are not mounted by default.
+
+Notes:
+
+- Phase 6 adds static/fake MCP-style adapter metadata and discovery plumbing, not a real MCP client.
+- Deferred tools are visible through dev discovery, but model-visible `discover_tools` / `load_deferred_tool` activation remains later work.
+- Connector auth state is metadata only. Real authentication, installation, secret handling, and schema materialization remain later work.
+- `crates/agent-runtime/src/tools/mod.rs` is now close to the 1000-line source limit and should be split before further substantial tool-registry changes.
+
 ## Known Gaps
 
 - Production server startup now wires `TurnRunner` to the model gateway and the runtime skill registry. Local unit tests still use a deterministic agent stub where isolated API behavior is under test.

@@ -57,7 +57,7 @@ Modify:
 - Create: `crates/agent-runtime/src/tools/discovery.rs`
 - Modify: `crates/agent-runtime/src/tools/mod.rs`
 
-- [ ] **Step 1: Write failing discovery type tests**
+- [x] **Step 1: Write failing discovery type tests**
 
 Add tests in `tools/discovery.rs`:
 
@@ -112,7 +112,7 @@ fn deferred_external_tool_summaries_do_not_require_full_schema() {
 }
 ```
 
-- [ ] **Step 2: Run discovery tests to verify they fail**
+- [x] **Step 2: Run discovery tests to verify they fail**
 
 Run:
 
@@ -122,7 +122,7 @@ pixi run cargo test -p agent-runtime tools::discovery::tests -- --nocapture
 
 Expected: fail because the discovery module and types do not exist.
 
-- [ ] **Step 3: Implement discovery types**
+- [x] **Step 3: Implement discovery types**
 
 Add:
 
@@ -210,7 +210,7 @@ impl ExternalToolConfig {
 
 The name helper must accept only ASCII alphanumeric, `_`, or `-` in each part and return an error for invalid namespace or tool names.
 
-- [ ] **Step 4: Run discovery tests to verify they pass**
+- [x] **Step 4: Run discovery tests to verify they pass**
 
 Run:
 
@@ -218,7 +218,7 @@ Run:
 pixi run cargo test -p agent-runtime tools::discovery::tests -- --nocapture
 ```
 
-- [ ] **Step 5: Commit discovery types**
+- [x] **Step 5: Commit discovery types**
 
 Run:
 
@@ -232,7 +232,7 @@ git commit -m "feat: add external tool discovery metadata"
 **Files:**
 - Modify: `crates/agent-runtime/src/tools/mod.rs`
 
-- [ ] **Step 1: Write failing registry tests**
+- [x] **Step 1: Write failing registry tests**
 
 Add tests in `tools/mod.rs`:
 
@@ -353,7 +353,7 @@ async fn deferred_mcp_tools_are_discoverable_but_not_model_visible() {
 
 Adjust helper cleanup to use an async test if needed; keep tests deterministic and do not rely on real MCP processes.
 
-- [ ] **Step 2: Run registry tests to verify they fail**
+- [x] **Step 2: Run registry tests to verify they fail**
 
 Run:
 
@@ -366,7 +366,7 @@ pixi run cargo test -p agent-runtime tools::tests::deferred_mcp_tools_are_discov
 
 Expected: fail because runtime config and registry discovery integration do not exist.
 
-- [ ] **Step 3: Implement registry integration**
+- [x] **Step 3: Implement registry integration**
 
 Update:
 
@@ -418,7 +418,7 @@ Registry validation must reject duplicate final `ToolDefinition.name` values acr
 
 `ToolRegistry::execute` must route immediate external tools with `ExternalToolExecution::Static` to a successful `ToolResult`. Immediate external tools with `ExternalToolExecution::Unavailable` must return `tool_disabled` with the message `External tool execution is not implemented in this phase.`
 
-- [ ] **Step 4: Run registry tests to verify they pass**
+- [x] **Step 4: Run registry tests to verify they pass**
 
 Run:
 
@@ -429,7 +429,7 @@ pixi run cargo test -p agent-runtime tools::tests::tool_registry_rejects_namespa
 pixi run cargo test -p agent-runtime tools::tests::deferred_mcp_tools_are_discoverable_but_not_model_visible -- --nocapture
 ```
 
-- [ ] **Step 5: Commit registry integration**
+- [x] **Step 5: Commit registry integration**
 
 Run:
 
@@ -444,7 +444,7 @@ git commit -m "feat: integrate deferred external tools into registry"
 - Modify: `crates/agent-runtime/src/turn.rs`
 - Modify: `crates/agent-server/src/dev_api.rs`
 
-- [ ] **Step 1: Write failing turn and API tests**
+- [x] **Step 1: Write dev API failing test and turn integration coverage**
 
 Add a turn-loop test in `turn.rs`:
 
@@ -543,7 +543,7 @@ async fn dev_tool_discovery_returns_deferred_tools_and_connectors() {
 }
 ```
 
-- [ ] **Step 2: Run turn and API tests to verify they fail**
+- [x] **Step 2: Run dev API test to verify it fails**
 
 Run:
 
@@ -552,9 +552,9 @@ pixi run cargo test -p agent-runtime turn::tests::deferred_external_tools_are_no
 pixi run cargo test -p agent-server dev_api::tests::dev_tool_discovery_returns_deferred_tools_and_connectors -- --nocapture
 ```
 
-Expected: fail because dev discovery route and config-driven deferred discovery are not wired.
+Expected: the dev API test fails with `404` because the dev discovery route is not wired. The turn integration test is regression coverage for registry filtering and may pass once Task 2 has made deferred tools absent from `ToolRegistry::definitions()`.
 
-- [ ] **Step 3: Implement turn and dev endpoint wiring**
+- [x] **Step 3: Implement turn and dev endpoint wiring**
 
 Keep `TurnRunner` using `self.tools.definitions()` for model-visible tools. Because deferred tools return `None` from `ExternalToolConfig::tool_definition`, they remain out of every model request until future materialization.
 
@@ -587,7 +587,7 @@ Mount:
 .route("/dev/tool-discovery", get(discover_tools))
 ```
 
-- [ ] **Step 4: Run turn and API tests to verify they pass**
+- [x] **Step 4: Run turn and API tests to verify they pass**
 
 Run:
 
@@ -596,7 +596,7 @@ pixi run cargo test -p agent-runtime turn::tests::deferred_external_tools_are_no
 pixi run cargo test -p agent-server dev_api::tests::dev_tool_discovery_returns_deferred_tools_and_connectors -- --nocapture
 ```
 
-- [ ] **Step 5: Commit turn/API discovery**
+- [x] **Step 5: Commit turn/API discovery**
 
 Run:
 
@@ -611,7 +611,7 @@ git commit -m "feat: expose deferred tool discovery diagnostics"
 - Modify: `docs/mvp-verification.md`
 - Modify: `docs/superpowers/plans/2026-06-28-codex-like-runtime-phase-6.md`
 
-- [ ] **Step 1: Run full verification**
+- [x] **Step 1: Run full verification**
 
 Run:
 
@@ -623,7 +623,7 @@ git diff --check HEAD
 find crates apps scripts -type f \( -name '*.rs' -o -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' -o -name '*.css' -o -name '*.mjs' \) -not -path '*/target/*' -not -path '*/node_modules/*' -print0 | xargs -0 wc -l | sort -nr | head -20
 ```
 
-- [ ] **Step 2: Append verification record**
+- [x] **Step 2: Append verification record**
 
 Record:
 
@@ -633,7 +633,7 @@ Record:
 - Connector metadata is available through dev-only discovery.
 - Real MCP execution, auth, install, and schema materialization remain later work.
 
-- [ ] **Step 3: Commit documentation**
+- [x] **Step 3: Commit documentation**
 
 Run:
 
@@ -644,13 +644,13 @@ git commit -m "docs: record codex-like runtime phase 6 verification"
 
 ## Phase 6 Acceptance Checklist
 
-- [ ] Runtime has MCP-style external tool metadata.
-- [ ] Runtime has connector metadata with auth-state placeholders.
-- [ ] Built-in tools, runtime skills, and immediate external tools share one registry discovery model.
-- [ ] Namespaced external tool names do not collide with built-ins.
-- [ ] Registry rejects duplicate model-visible tool names.
-- [ ] Deferred tools are advertised through discovery summaries.
-- [ ] Deferred tools are not loaded into every model request as full schemas.
-- [ ] Dev-only discovery endpoint reports tools and connectors.
-- [ ] Documentation states that real MCP execution/auth/materialization remains later work.
-- [ ] No edited/new source file exceeds 1000 physical lines.
+- [x] Runtime has MCP-style external tool metadata.
+- [x] Runtime has connector metadata with auth-state placeholders.
+- [x] Built-in tools, runtime skills, and immediate external tools share one registry discovery model.
+- [x] Namespaced external tool names do not collide with built-ins.
+- [x] Registry rejects duplicate model-visible tool names.
+- [x] Deferred tools are advertised through discovery summaries.
+- [x] Deferred tools are not loaded into every model request as full schemas.
+- [x] Dev-only discovery endpoint reports tools and connectors.
+- [x] Documentation states that real MCP execution/auth/materialization remains later work.
+- [x] No edited/new source file exceeds 1000 physical lines.
