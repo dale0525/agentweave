@@ -25,7 +25,7 @@ impl BuiltInTools {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        definitions(self.config.command_mode)
+        definitions(self.config.mode, self.config.command_mode)
     }
 
     pub fn handles(name: &str) -> bool {
@@ -281,7 +281,7 @@ impl BuiltInTools {
     }
 }
 
-fn definitions(command_mode: CommandMode) -> Vec<ToolDefinition> {
+fn definitions(mode: super::RuntimeMode, command_mode: CommandMode) -> Vec<ToolDefinition> {
     let mut definitions = vec![
         tool_definition(
             CREATE_DIRECTORY,
@@ -349,7 +349,7 @@ fn definitions(command_mode: CommandMode) -> Vec<ToolDefinition> {
         patch::definition(),
     ];
 
-    if command_mode == CommandMode::Allowed {
+    if permission_allowed(mode, command_mode, ToolPermission::ExecuteCommand) {
         definitions.push(command::definition());
     }
 
@@ -539,6 +539,25 @@ mod tests {
         );
         assert!(
             allowed_tools
+                .definitions()
+                .iter()
+                .any(|tool| tool.name == "exec_command")
+        );
+
+        remove_test_dir(root);
+    }
+
+    #[tokio::test]
+    async fn definitions_exclude_exec_command_when_read_only_even_if_command_mode_allowed() {
+        let root = unique_test_dir("command-definitions-read-only");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let tools = BuiltInTools::new(
+            RuntimeConfig::read_only(&root, &root).with_command_mode(CommandMode::Allowed),
+        );
+
+        assert!(
+            !tools
                 .definitions()
                 .iter()
                 .any(|tool| tool.name == "exec_command")
