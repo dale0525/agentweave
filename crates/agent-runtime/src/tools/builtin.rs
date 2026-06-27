@@ -202,6 +202,10 @@ impl BuiltInTools {
         let requested = required_string(&arguments, "path")?;
         let workspace_path =
             path::resolve_existing_workspace_path(&self.config.workspace_root, requested)?;
+        let file_metadata = tokio::fs::metadata(&workspace_path.absolute).await?;
+        if file_metadata.len() > self.config.output_limit_bytes as u64 {
+            return Ok(output_limit_failure(READ_TEXT_FILE, call_id, started));
+        }
         let bytes = tokio::fs::read(&workspace_path.absolute).await?;
         let text = String::from_utf8(bytes)
             .map_err(|_| anyhow::anyhow!("workspace path is not valid UTF-8 text"))?;
@@ -393,6 +397,21 @@ fn failure(
             retryable,
         },
         metadata(started),
+    )
+}
+
+fn output_limit_failure(tool: &str, call_id: &str, started: Instant) -> ToolResult {
+    let mut metadata = metadata(started);
+    metadata.output_truncated = true;
+    ToolResult::failure(
+        tool,
+        call_id,
+        ToolError {
+            code: "output_limit_exceeded".to_string(),
+            message: "tool output exceeded runtime output limit".to_string(),
+            retryable: false,
+        },
+        metadata,
     )
 }
 
@@ -715,6 +734,25 @@ mod tests {
 
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "path_not_text");
+        remove_test_dir(root);
+    }
+
+    #[tokio::test]
+    async fn read_text_file_rejects_file_larger_than_output_limit_before_reading() {
+        let root = unique_test_dir("read-output-limit");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("big.txt"), "abcdef").unwrap();
+        let mut config = RuntimeConfig::workspace_write(&root, &root);
+        config.output_limit_bytes = 4;
+        let tools = BuiltInTools::new(config);
+
+        let result = tools
+            .execute("read_text_file", "call-1", json!({ "path": "big.txt" }))
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "output_limit_exceeded");
+        assert!(result.metadata.output_truncated);
         remove_test_dir(root);
     }
 

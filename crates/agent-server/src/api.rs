@@ -275,17 +275,25 @@ async fn run_agent_turn(
             state.runtime_config.clone(),
         );
 
-        return runner
-            .run(&request.content)
-            .await
-            .map_err(ApiError::Internal);
+        return runner.run(&request.content).await.map_err(agent_turn_error);
     }
 
     state
         .agent
         .run(&request.content)
         .await
-        .map_err(ApiError::Internal)
+        .map_err(agent_turn_error)
+}
+
+fn agent_turn_error(error: anyhow::Error) -> ApiError {
+    if error
+        .to_string()
+        .contains("model_endpoint_does_not_support_tools")
+    {
+        ApiError::BadRequest("model endpoint does not support runtime tools")
+    } else {
+        ApiError::Internal(error)
+    }
 }
 
 fn assistant_text_from_events(events: &[RuntimeEvent]) -> Option<String> {
@@ -660,6 +668,50 @@ mod tests {
         }));
 
         remove_test_dir(workspace).await;
+    }
+
+    #[tokio::test]
+    async fn post_message_rejects_completion_endpoint_for_tool_using_turns() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let skills = development_skills().await;
+        let app = router(Arc::new(AppState::new_with_agent_and_skills(
+            storage,
+            Arc::new(DeterministicAgent),
+            skills,
+        )));
+
+        let create_response = app
+            .clone()
+            .oneshot(json_request(
+                "/sessions",
+                json!({ "title": "Completion endpoint" }),
+            ))
+            .await
+            .unwrap();
+        let created = read_json(create_response).await;
+        let session_id = created["id"].as_str().unwrap();
+
+        let message_response = app
+            .oneshot(json_request(
+                &format!("/sessions/{session_id}/messages"),
+                json!({
+                    "content": "Use completion endpoint",
+                    "modelSettings": {
+                        "baseUrl": "http://127.0.0.1:9/v1",
+                        "endpointType": "completion",
+                        "modelName": "legacy"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(message_response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(message_response).await;
+        assert_eq!(
+            body["error"],
+            "model endpoint does not support runtime tools"
+        );
     }
 
     #[tokio::test]

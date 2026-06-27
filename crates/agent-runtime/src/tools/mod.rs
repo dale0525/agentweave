@@ -157,16 +157,21 @@ impl ToolRegistry {
             );
         }
 
-        match self.skills.execute(name, arguments).await {
+        match self
+            .skills
+            .execute_with_output_limit(name, arguments, self.output_limit_bytes)
+            .await
+        {
             Ok(value) => ToolResult::success(name, call_id, value, registry_metadata(started)),
-            Err(error) => registry_failure(
-                name,
-                call_id,
-                skill_error_code(&error.to_string()),
-                error.to_string(),
-                false,
-                registry_metadata(started),
-            ),
+            Err(error) => {
+                let message = error.to_string();
+                let code = skill_error_code(&message);
+                let mut metadata = registry_metadata(started);
+                if code == "output_limit_exceeded" {
+                    metadata.output_truncated = true;
+                }
+                registry_failure(name, call_id, code, message, false, metadata)
+            }
         }
     }
 
@@ -181,8 +186,7 @@ impl ToolRegistry {
             .map(|data| serialized_len(data) > self.output_limit_bytes)
             .unwrap_or(false);
         let result_exceeds_limit = serialized_len(&result) > self.output_limit_bytes;
-        if data_exceeds_limit || result_exceeds_limit
-        {
+        if data_exceeds_limit || result_exceeds_limit {
             let mut metadata = result.metadata;
             metadata.output_truncated = true;
             return registry_failure(
@@ -237,6 +241,8 @@ fn skill_error_code(message: &str) -> &'static str {
         "unknown_tool"
     } else if message.contains("Permission denied") {
         "permission_denied"
+    } else if message.contains("output limit") {
+        "output_limit_exceeded"
     } else {
         "internal_error"
     }
@@ -323,6 +329,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_registry_limits_skill_stdout_before_json_parsing() {
+        let root = unique_test_dir("registry-skill-stdout-limit");
+        write_skill(
+            &root,
+            "large-stdout",
+            "large_stdout",
+            "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write('x'.repeat(1024)));\n",
+        )
+        .await;
+        let skills = SkillRegistry::load_development(&root).await.unwrap();
+        let config = RuntimeConfig {
+            workspace_root: root.clone(),
+            cwd: root.clone(),
+            mode: RuntimeMode::WorkspaceWrite,
+            command_mode: CommandMode::Disabled,
+            max_tool_calls_per_turn: 16,
+            tool_timeout_ms: 30_000,
+            output_limit_bytes: 4,
+        };
+        let registry = ToolRegistry::new(skills, &config);
+
+        let result = registry
+            .execute("large_stdout", "call-1", serde_json::json!({}))
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "output_limit_exceeded");
+        assert!(result.metadata.output_truncated);
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
     async fn tool_registry_applies_builtin_output_limit() {
         let root = unique_test_dir("registry-builtin-output-limit");
         tokio::fs::create_dir_all(&root).await.unwrap();
@@ -342,7 +380,11 @@ mod tests {
         let registry = ToolRegistry::new(skills, &config);
 
         let result = registry
-            .execute("read_text_file", "call-1", serde_json::json!({ "path": "big.txt" }))
+            .execute(
+                "read_text_file",
+                "call-1",
+                serde_json::json!({ "path": "big.txt" }),
+            )
             .await;
 
         assert!(!result.ok);
@@ -358,7 +400,7 @@ mod tests {
             &root,
             "slow",
             "slow_output",
-            "setTimeout(() => {}, 1000);\nprocess.stdin.resume();\n",
+            "const fs = require('fs');\nsetTimeout(() => fs.writeFileSync('timed-out.txt', 'late'), 100);\nprocess.stdin.resume();\n",
         )
         .await;
         let skills = SkillRegistry::load_development(&root).await.unwrap();
@@ -379,7 +421,75 @@ mod tests {
 
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "timeout");
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !root.join("slow").join("timed-out.txt").exists(),
+            "timed-out skill process should be stopped before it can write after timeout"
+        );
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn tool_registry_stops_skill_when_stdout_exceeds_limit() {
+        let root = unique_test_dir("registry-stdout-limit");
+        write_skill(
+            &root,
+            "chatty",
+            "chatty_output",
+            "process.stdin.resume();\nprocess.stdin.on('end', () => {\n  process.stdout.write('x'.repeat(1024));\n  setTimeout(() => {}, 1000);\n});\n",
+        )
+        .await;
+        let skills = SkillRegistry::load_development(&root).await.unwrap();
+        let config = RuntimeConfig {
+            workspace_root: root.clone(),
+            cwd: root.clone(),
+            mode: RuntimeMode::WorkspaceWrite,
+            command_mode: CommandMode::Disabled,
+            max_tool_calls_per_turn: 16,
+            tool_timeout_ms: 1_000,
+            output_limit_bytes: 32,
+        };
+        let registry = ToolRegistry::new(skills, &config);
+
+        let result = registry
+            .execute("chatty_output", "call-1", serde_json::json!({}))
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "output_limit_exceeded");
+        assert!(result.metadata.output_truncated);
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn tool_registry_stops_skill_when_stderr_exceeds_limit() {
+        let root = unique_test_dir("registry-stderr-limit");
+        write_skill(
+            &root,
+            "chatty",
+            "chatty_error",
+            "process.stdin.resume();\nprocess.stdin.on('end', () => {\n  process.stderr.write('x'.repeat(1024));\n  setTimeout(() => {}, 1000);\n});\n",
+        )
+        .await;
+        let skills = SkillRegistry::load_development(&root).await.unwrap();
+        let config = RuntimeConfig {
+            workspace_root: root.clone(),
+            cwd: root.clone(),
+            mode: RuntimeMode::WorkspaceWrite,
+            command_mode: CommandMode::Disabled,
+            max_tool_calls_per_turn: 16,
+            tool_timeout_ms: 1_000,
+            output_limit_bytes: 32,
+        };
+        let registry = ToolRegistry::new(skills, &config);
+
+        let result = registry
+            .execute("chatty_error", "call-1", serde_json::json!({}))
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "output_limit_exceeded");
+        assert!(result.metadata.output_truncated);
         remove_test_dir(root).await;
     }
 

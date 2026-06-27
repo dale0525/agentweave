@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -104,6 +104,16 @@ impl SkillRegistry {
     }
 
     pub async fn execute(&self, tool_name: &str, input: Value) -> anyhow::Result<Value> {
+        self.execute_with_output_limit(tool_name, input, usize::MAX)
+            .await
+    }
+
+    pub async fn execute_with_output_limit(
+        &self,
+        tool_name: &str,
+        input: Value,
+        output_limit_bytes: usize,
+    ) -> anyhow::Result<Value> {
         let skill = self
             .skills
             .iter()
@@ -121,8 +131,18 @@ impl SkillRegistry {
             .current_dir(&skill.root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()?;
 
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("skill command stdout unavailable"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("skill command stderr unavailable"))?;
         let mut stdin = child
             .stdin
             .take()
@@ -132,9 +152,16 @@ impl SkillRegistry {
             .await?;
         drop(stdin);
 
-        let output = child.wait_with_output().await?;
-        if !output.status.success() {
-            anyhow::bail!("skill command failed: {}", output.status);
+        let output = read_limited_child_output(stdout, stderr, output_limit_bytes).await?;
+        if output.stdout_truncated || output.stderr_truncated {
+            child.kill().await?;
+            let _ = child.wait().await;
+            anyhow::bail!("tool output exceeded runtime output limit");
+        }
+
+        let status = child.wait().await?;
+        if !status.success() {
+            anyhow::bail!("skill command failed: {}", status);
         }
 
         Ok(serde_json::from_slice(&output.stdout)?)
@@ -151,6 +178,103 @@ impl SkillRegistry {
         validate_manifest(&manifest)?;
 
         Ok(InstalledSkill { root, manifest })
+    }
+}
+
+struct LimitedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+struct LimitedChildOutput {
+    stdout: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+async fn read_limited_child_output(
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    output_limit_bytes: usize,
+) -> anyhow::Result<LimitedChildOutput> {
+    let stdout_future = read_limited_stream(stdout, output_limit_bytes);
+    let stderr_future = read_limited_stream(stderr, output_limit_bytes);
+    tokio::pin!(stdout_future);
+    tokio::pin!(stderr_future);
+
+    let mut stdout_output: Option<LimitedOutput> = None;
+    let mut stderr_output: Option<LimitedOutput> = None;
+
+    while stdout_output.is_none() || stderr_output.is_none() {
+        tokio::select! {
+            output = &mut stdout_future, if stdout_output.is_none() => {
+                stdout_output = Some(output?);
+            }
+            output = &mut stderr_future, if stderr_output.is_none() => {
+                stderr_output = Some(output?);
+            }
+        }
+
+        let stdout_truncated = stdout_output
+            .as_ref()
+            .map(|output| output.truncated)
+            .unwrap_or(false);
+        let stderr_truncated = stderr_output
+            .as_ref()
+            .map(|output| output.truncated)
+            .unwrap_or(false);
+        if stdout_truncated || stderr_truncated {
+            return Ok(LimitedChildOutput {
+                stdout: stdout_output.map(|output| output.bytes).unwrap_or_default(),
+                stdout_truncated,
+                stderr_truncated,
+            });
+        }
+    }
+
+    let stdout = stdout_output.expect("stdout output should be captured");
+    let stderr = stderr_output.expect("stderr output should be captured");
+    Ok(LimitedChildOutput {
+        stdout: stdout.bytes,
+        stdout_truncated: stdout.truncated,
+        stderr_truncated: stderr.truncated,
+    })
+}
+
+async fn read_limited_stream(
+    mut stream: impl AsyncRead + Unpin,
+    output_limit_bytes: usize,
+) -> anyhow::Result<LimitedOutput> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let hard_limit = output_limit_bytes.saturating_add(1);
+
+    loop {
+        let remaining = hard_limit.saturating_sub(bytes.len());
+        if remaining == 0 {
+            return Ok(LimitedOutput {
+                bytes,
+                truncated: true,
+            });
+        }
+
+        let read_len = remaining.min(buffer.len());
+        let read = stream.read(&mut buffer[..read_len]).await?;
+        if read == 0 {
+            return Ok(LimitedOutput {
+                bytes,
+                truncated: false,
+            });
+        }
+
+        bytes.extend_from_slice(&buffer[..read]);
+        if bytes.len() > output_limit_bytes {
+            bytes.truncate(output_limit_bytes);
+            return Ok(LimitedOutput {
+                bytes,
+                truncated: true,
+            });
+        }
     }
 }
 
