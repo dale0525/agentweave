@@ -1,5 +1,5 @@
 use super::{
-    CommandMode, RuntimeConfig, RuntimeMode, ToolDefinition, ToolPermission, path,
+    CommandMode, RuntimeConfig, RuntimeMode, ToolDefinition, ToolPermission, ToolSource, path,
     process::read_limited_child_output,
     result::{ToolError, ToolResult, ToolResultMetadata},
 };
@@ -13,6 +13,7 @@ const COMMAND_RESULT_ENVELOPE_RESERVE_BYTES: usize = 512;
 pub fn definition() -> ToolDefinition {
     ToolDefinition {
         name: EXEC_COMMAND.to_string(),
+        namespace: None,
         description: "Execute a development command inside the workspace.".to_string(),
         input_schema: json!({
             "type": "object",
@@ -24,7 +25,9 @@ pub fn definition() -> ToolDefinition {
             "required": ["cmd"],
             "additionalProperties": false
         }),
+        output_schema: None,
         permission: ToolPermission::ExecuteCommand,
+        source: ToolSource::BuiltIn,
     }
 }
 

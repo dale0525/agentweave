@@ -1,5 +1,5 @@
 use super::{
-    CommandMode, RuntimeConfig, ToolDefinition, ToolPermission, command, patch, path,
+    CommandMode, RuntimeConfig, ToolDefinition, ToolPermission, ToolSource, command, patch, path,
     permission_allowed,
     result::{ToolError, ToolResult, ToolResultMetadata},
     search,
@@ -387,9 +387,12 @@ fn tool_definition(
 ) -> ToolDefinition {
     ToolDefinition {
         name: name.to_string(),
+        namespace: None,
         description: description.to_string(),
         input_schema,
+        output_schema: None,
         permission,
+        source: ToolSource::BuiltIn,
     }
 }
 

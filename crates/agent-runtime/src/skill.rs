@@ -105,6 +105,25 @@ impl SkillRegistry {
             .collect()
     }
 
+    pub fn tools_with_skill_names(&self) -> Vec<(String, SkillTool)> {
+        self.skills
+            .iter()
+            .flat_map(|skill| {
+                skill
+                    .manifest
+                    .tools
+                    .clone()
+                    .into_iter()
+                    .map(|tool| (skill.manifest.name.clone(), tool))
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn empty_for_tests() -> Self {
+        Self { skills: Vec::new() }
+    }
+
     pub async fn execute(&self, tool_name: &str, input: Value) -> anyhow::Result<Value> {
         self.execute_with_output_limit(tool_name, input, usize::MAX)
             .await

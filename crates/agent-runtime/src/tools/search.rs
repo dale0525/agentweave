@@ -1,5 +1,5 @@
 use super::{
-    RuntimeConfig, ToolDefinition, ToolPermission,
+    RuntimeConfig, ToolDefinition, ToolPermission, ToolSource,
     result::{ToolError, ToolResult, ToolResultMetadata},
 };
 use serde_json::{Value, json};
@@ -21,6 +21,7 @@ const MAX_MATCH_TEXT_BYTES: usize = 4_096;
 pub fn definition() -> ToolDefinition {
     ToolDefinition {
         name: SEARCH_FILES.to_string(),
+        namespace: None,
         description: "Search for text matches inside the workspace.".to_string(),
         input_schema: json!({
             "type": "object",
@@ -32,7 +33,9 @@ pub fn definition() -> ToolDefinition {
             "required": ["pattern"],
             "additionalProperties": false
         }),
+        output_schema: None,
         permission: ToolPermission::ReadWorkspace,
+        source: ToolSource::BuiltIn,
     }
 }
 

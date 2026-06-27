@@ -1,5 +1,5 @@
 use super::{
-    RuntimeConfig, ToolDefinition, ToolPermission,
+    RuntimeConfig, ToolDefinition, ToolPermission, ToolSource,
     result::{ToolError, ToolResult, ToolResultMetadata},
 };
 use serde_json::{Value, json};
@@ -15,6 +15,7 @@ pub const APPLY_PATCH: &str = "apply_patch";
 pub fn definition() -> ToolDefinition {
     ToolDefinition {
         name: APPLY_PATCH.to_string(),
+        namespace: None,
         description: "Apply a minimal patch inside the workspace.".to_string(),
         input_schema: json!({
             "type": "object",
@@ -24,7 +25,9 @@ pub fn definition() -> ToolDefinition {
             "required": ["patch"],
             "additionalProperties": false
         }),
+        output_schema: None,
         permission: ToolPermission::WriteWorkspace,
+        source: ToolSource::BuiltIn,
     }
 }
 

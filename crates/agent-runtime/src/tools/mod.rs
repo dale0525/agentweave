@@ -4,11 +4,13 @@ pub mod patch;
 pub mod path;
 pub mod process;
 pub mod result;
+pub mod schema;
 pub mod search;
 
 use crate::skill::SkillRegistry;
 use builtin::BuiltInTools;
 use result::{ToolError, ToolResult, ToolResultMetadata};
+use schema::{ToolDiagnostic, validate_tool_definition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -78,9 +80,18 @@ pub enum ToolPermission {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ToolDefinition {
     pub name: String,
+    pub namespace: Option<String>,
     pub description: String,
     pub input_schema: Value,
+    pub output_schema: Option<Value>,
     pub permission: ToolPermission,
+    pub source: ToolSource,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ToolSource {
+    BuiltIn,
+    RuntimeSkill { skill_name: String },
 }
 
 pub fn permission_allowed(
@@ -117,13 +128,40 @@ impl ToolRegistry {
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = self.builtins.definitions();
-        definitions.extend(self.skills.tools().into_iter().map(|tool| ToolDefinition {
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.input_schema,
-            permission: ToolPermission::ReadWorkspace,
-        }));
+        definitions.extend(self.skills.tools_with_skill_names().into_iter().map(
+            |(skill_name, tool)| ToolDefinition {
+                name: tool.name,
+                namespace: None,
+                description: tool.description,
+                input_schema: tool.input_schema,
+                output_schema: None,
+                permission: ToolPermission::ReadWorkspace,
+                source: ToolSource::RuntimeSkill { skill_name },
+            },
+        ));
         definitions
+    }
+
+    pub fn diagnostics(&self) -> Vec<ToolDiagnostic> {
+        let mut diagnostics: Vec<_> = self
+            .definitions()
+            .into_iter()
+            .map(|definition| ToolDiagnostic {
+                name: definition.name.clone(),
+                namespace: definition.namespace.clone(),
+                description: definition.description.clone(),
+                permission: definition.permission,
+                source: definition.source.clone(),
+                schema: validate_tool_definition(&definition),
+            })
+            .collect();
+
+        diagnostics.sort_by(|left, right| {
+            left.namespace
+                .cmp(&right.namespace)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        diagnostics
     }
 
     pub async fn execute(&self, name: &str, call_id: &str, arguments: Value) -> ToolResult {
@@ -269,6 +307,54 @@ mod tests {
     use super::*;
     use crate::skill::SkillRegistry;
     use std::path::PathBuf;
+
+    #[test]
+    fn tool_definitions_include_source_and_schema_diagnostics() {
+        let workspace_root = PathBuf::from("/workspace");
+        let config = RuntimeConfig::workspace_write(workspace_root.clone(), workspace_root);
+        let registry = ToolRegistry::new(SkillRegistry::empty_for_tests(), &config);
+
+        let diagnostics = registry.diagnostics();
+        let create_directory = diagnostics
+            .iter()
+            .find(|tool| tool.name == "create_directory")
+            .expect("create_directory diagnostic should exist");
+
+        assert_eq!(create_directory.source, ToolSource::BuiltIn);
+        assert_eq!(create_directory.permission, ToolPermission::WriteWorkspace);
+        assert!(create_directory.schema.valid);
+        assert_eq!(create_directory.namespace, None);
+    }
+
+    #[tokio::test]
+    async fn runtime_skill_diagnostics_include_skill_source() {
+        let root = unique_test_dir("runtime-source-diagnostics");
+        write_skill(
+            &root,
+            "echoer",
+            "echoer_echo",
+            "process.stdin.resume();\nprocess.stdin.on('data', (chunk) => process.stdout.write(chunk));\n",
+        )
+        .await;
+        let skills = SkillRegistry::load_development(&root).await.unwrap();
+        let config = RuntimeConfig::workspace_write(root.clone(), root.clone());
+        let registry = ToolRegistry::new(skills, &config);
+
+        let diagnostic = registry
+            .diagnostics()
+            .into_iter()
+            .find(|tool| tool.name == "echoer_echo")
+            .unwrap();
+
+        assert_eq!(
+            diagnostic.source,
+            ToolSource::RuntimeSkill {
+                skill_name: "echoer".into()
+            }
+        );
+        assert!(diagnostic.schema.valid);
+        remove_test_dir(root).await;
+    }
 
     #[test]
     fn read_only_blocks_workspace_writes() {
