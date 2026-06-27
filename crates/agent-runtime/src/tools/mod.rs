@@ -221,6 +221,14 @@ impl ToolRegistry {
             })
     }
 
+    pub fn parallel_safe(&self, name: &str) -> bool {
+        self.definitions().into_iter().any(|definition| {
+            definition.name == name
+                && definition.permission == ToolPermission::ReadWorkspace
+                && matches!(definition.source, ToolSource::BuiltIn)
+        })
+    }
+
     pub fn discovery(&self) -> ToolDiscovery {
         let mut tools: Vec<_> = self
             .definitions()

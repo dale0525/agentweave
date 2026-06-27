@@ -286,6 +286,41 @@ async fn deferred_mcp_tools_are_discoverable_but_not_model_visible() {
 }
 
 #[tokio::test]
+async fn read_only_builtin_tools_are_parallel_safe() {
+    let root = unique_test_dir("parallel-safe-read");
+    std::fs::create_dir_all(&root).unwrap();
+    let registry = ToolRegistry::new(
+        SkillRegistry::empty_for_tests(),
+        &RuntimeConfig::workspace_write(root.clone(), root.clone()),
+    );
+
+    assert!(registry.parallel_safe("read_text_file"));
+    assert!(registry.parallel_safe("list_directory"));
+    remove_test_dir(root).await;
+}
+
+#[tokio::test]
+async fn write_command_runtime_and_external_tools_are_not_parallel_safe_by_default() {
+    let root = unique_test_dir("parallel-unsafe");
+    std::fs::create_dir_all(&root).unwrap();
+    let config = RuntimeConfig {
+        external_tools: vec![crate::tools::discovery::ExternalToolConfig::mcp(
+            "search",
+            "lookup",
+            "Search.",
+            serde_json::json!({ "type": "object" }),
+            crate::tools::discovery::ExternalToolVisibility::Immediate,
+        )],
+        ..RuntimeConfig::workspace_write(root.clone(), root.clone())
+    };
+    let registry = ToolRegistry::new(SkillRegistry::empty_for_tests(), &config);
+
+    assert!(!registry.parallel_safe("create_directory"));
+    assert!(!registry.parallel_safe("mcp__search__lookup"));
+    remove_test_dir(root).await;
+}
+
+#[tokio::test]
 async fn tool_registry_applies_skill_output_limit() {
     let root = unique_test_dir("registry-output-limit");
     write_skill(
