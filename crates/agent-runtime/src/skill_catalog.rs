@@ -597,12 +597,102 @@ Use checklists.
         assert!(catalog.triggered_skill_names("shared").is_empty());
     }
 
+    #[tokio::test]
+    async fn runtime_skill_and_instruction_skill_can_coexist() {
+        let root = unique_test_dir("coexist");
+        write_skill_md(
+            &root,
+            "coexist",
+            "---\nname: coexist\ndescription: Both forms.\n---\n\n# Coexist",
+        )
+        .await;
+        write_runtime_skill_json(&root, "coexist", "coexist_echo").await;
+
+        let catalog = SkillCatalog::load_development(&root).await.unwrap();
+        let registry = crate::skill::SkillRegistry::load_development(&root)
+            .await
+            .unwrap();
+
+        assert!(
+            catalog
+                .summaries()
+                .iter()
+                .any(|summary| summary.name == "coexist")
+        );
+        assert!(
+            registry
+                .tools()
+                .iter()
+                .any(|tool| tool.name == "coexist_echo")
+        );
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_tool_without_skill_md_still_executes() {
+        let root = unique_test_dir("runtime-only");
+        write_runtime_skill_json(&root, "runtime-only", "runtime_only_echo").await;
+
+        let catalog = SkillCatalog::load_development(&root).await.unwrap();
+        let registry = crate::skill::SkillRegistry::load_development(&root)
+            .await
+            .unwrap();
+        let result = registry
+            .execute("runtime_only_echo", serde_json::json!({ "text": "ok" }))
+            .await
+            .unwrap();
+
+        assert!(catalog.summaries().is_empty());
+        assert_eq!(result["text"], "ok");
+        remove_test_dir(root).await;
+    }
+
     async fn write_skill_md(root: &Path, folder: &str, content: &str) {
         let skill_dir = root.join(folder);
         fs::create_dir_all(&skill_dir).await.unwrap();
         fs::write(skill_dir.join("SKILL.md"), content)
             .await
             .unwrap();
+    }
+
+    async fn write_runtime_skill_json(root: &Path, folder: &str, tool_name: &str) {
+        let skill_dir = root.join(folder);
+        fs::create_dir_all(&skill_dir).await.unwrap();
+        fs::write(
+            skill_dir.join("skill.json"),
+            serde_json::json!({
+                "name": folder,
+                "description": "Echo a text payload.",
+                "version": "0.1.0",
+                "entry": {
+                    "type": "command",
+                    "command": "node",
+                    "args": ["index.js"]
+                },
+                "tools": [
+                    {
+                        "name": tool_name,
+                        "description": "Return the provided text.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "text": { "type": "string" }
+                            },
+                            "required": ["text"]
+                        }
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        fs::write(
+            skill_dir.join("index.js"),
+            "process.stdin.resume();\nprocess.stdin.on('data', (chunk) => process.stdout.write(chunk));\n",
+        )
+        .await
+        .unwrap();
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {
