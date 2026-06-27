@@ -4,6 +4,7 @@ use crate::skill::SkillRegistry;
 use crate::skill_catalog::SkillCatalog;
 use crate::tools::result::{ToolError, ToolResult, ToolResultMetadata};
 use crate::tools::{RuntimeConfig, ToolDefinition, ToolRegistry};
+use crate::turn_request::{BudgetPolicy, TurnRequest};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use model_gateway::responses::{GatewayEvent, GatewayRequest, GatewayTool};
@@ -62,14 +63,19 @@ where
     }
 
     pub async fn run(&self, user_text: &str) -> anyhow::Result<Vec<RuntimeEvent>> {
+        self.run_request(TurnRequest::new(user_text)).await
+    }
+
+    pub async fn run_request(&self, request: TurnRequest) -> anyhow::Result<Vec<RuntimeEvent>> {
         let turn_id = Uuid::new_v4().to_string();
         let mut events = vec![RuntimeEvent::TurnStarted {
             turn_id: turn_id.clone(),
         }];
+        let mut budget = BudgetPolicy::new(request.token_budget);
         let mut instruction_config =
             InstructionConfig::new(self.config.workspace_root.clone(), self.config.cwd.clone());
         instruction_config.skill_summaries = self.skill_catalog.summaries().to_vec();
-        let triggered_skill_names = self.skill_catalog.triggered_skill_names(user_text);
+        let triggered_skill_names = self.skill_catalog.triggered_skill_names(&request.user_text);
         if !triggered_skill_names.is_empty() {
             match self
                 .skill_catalog
@@ -89,7 +95,17 @@ where
             }
         }
         let instruction_context = InstructionContext::load(instruction_config)?;
-        let mut input = instruction_context.model_input(user_text);
+        let mut input = instruction_context.model_input(&request.user_text);
+        if let Some(goal) = &request.goal {
+            let insert_at = input.len().saturating_sub(1);
+            input.insert(
+                insert_at,
+                serde_json::json!({
+                    "role": "developer",
+                    "content": format!("<active_goal>\n{}\n</active_goal>", goal.objective)
+                }),
+            );
+        }
         let tools = gateway_tools(self.tools.definitions());
         let mut final_text = String::new();
         let mut tool_calls = 0usize;
@@ -210,7 +226,26 @@ where
                         });
                         return Ok(events);
                     }
-                    GatewayEvent::ResponseStarted { .. } | GatewayEvent::Usage { .. } => {}
+                    GatewayEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        let usage = budget.record_usage(input_tokens, output_tokens);
+                        events.push(RuntimeEvent::UsageReported {
+                            input_tokens: usage.input_tokens,
+                            output_tokens: usage.output_tokens,
+                            total_tokens: usage.total_tokens,
+                            exceeded: usage.exceeded,
+                        });
+                        if usage.exceeded {
+                            events.push(RuntimeEvent::TurnFailed {
+                                turn_id: turn_id.clone(),
+                                message: "token budget exceeded".into(),
+                            });
+                            return Ok(events);
+                        }
+                    }
+                    GatewayEvent::ResponseStarted { .. } => {}
                 }
             }
 

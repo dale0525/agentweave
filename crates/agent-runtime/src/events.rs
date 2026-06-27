@@ -30,6 +30,12 @@ pub enum RuntimeEvent {
         call_id: String,
         result: Value,
     },
+    UsageReported {
+        input_tokens: u64,
+        output_tokens: u64,
+        total_tokens: u64,
+        exceeded: bool,
+    },
     AssistantMessageFinished {
         text: String,
     },

@@ -425,6 +425,72 @@ async fn deferred_external_tools_are_not_sent_as_model_tool_schemas() {
 }
 
 #[tokio::test]
+async fn goal_context_is_injected_into_turn_input() {
+    let workspace = test_workspace("goal-context");
+    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let runner = TurnRunner::new_with_config(
+        ScriptedModel {
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+            responses: vec![vec![GatewayEvent::Completed]],
+        },
+        skills,
+        RuntimeConfig::workspace_write(workspace.clone(), workspace.clone()),
+    );
+
+    let request = crate::turn_request::TurnRequest::new("continue")
+        .with_goal(crate::turn_request::TurnGoal::new("finish phase 7"));
+    let _events = runner.run_request(request).await.unwrap();
+    let requests = runner.model.requests.lock().unwrap();
+
+    assert!(requests[0].input.iter().any(|item| {
+        item["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("<active_goal>")
+    }));
+    remove_workspace(&workspace);
+}
+
+#[tokio::test]
+async fn usage_budget_accumulates_gateway_usage_and_stops_turn() {
+    let workspace = test_workspace("usage-budget");
+    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let runner = TurnRunner::new_with_config(
+        ScriptedModel {
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+            responses: vec![vec![
+                GatewayEvent::Usage {
+                    input_tokens: 6,
+                    output_tokens: 5,
+                },
+                GatewayEvent::Completed,
+            ]],
+        },
+        skills,
+        RuntimeConfig::workspace_write(workspace.clone(), workspace.clone()),
+    );
+
+    let request = crate::turn_request::TurnRequest::new("hello").with_token_budget(10);
+    let events = runner.run_request(request).await.unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::UsageReported {
+            total_tokens: 11,
+            exceeded: true,
+            ..
+        }
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::TurnFailed { message, .. } if message.contains("token budget exceeded")
+    )));
+    remove_workspace(&workspace);
+}
+
+#[tokio::test]
 async fn phase_three_injects_summary_and_triggered_skill_instruction() {
     let workspace = test_workspace("phase-three-skill-instructions");
     let skills_root = workspace.join("skills");
