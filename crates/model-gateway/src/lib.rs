@@ -3,3 +3,4 @@ pub mod bridge;
 pub mod chat;
 pub mod provider;
 pub mod responses;
+pub mod streaming;
