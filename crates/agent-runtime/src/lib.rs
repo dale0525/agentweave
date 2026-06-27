@@ -6,6 +6,7 @@ pub mod session;
 pub mod skill;
 pub mod skill_catalog;
 pub mod storage;
+pub mod subagent;
 pub mod tools;
 pub mod turn;
 pub mod turn_request;

@@ -41,6 +41,17 @@ pub enum RuntimeEvent {
         compacted_items: usize,
         budget_bytes: usize,
     },
+    SubagentStarted {
+        subagent_id: String,
+        task: String,
+    },
+    SubagentFinished {
+        subagent_id: String,
+    },
+    SubagentFailed {
+        subagent_id: String,
+        message: String,
+    },
     AssistantMessageFinished {
         text: String,
     },
