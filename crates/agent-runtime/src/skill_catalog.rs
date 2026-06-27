@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Component;
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncReadExt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillSummary {
@@ -10,6 +11,16 @@ pub struct SkillSummary {
     pub description: String,
     pub aliases: Vec<String>,
     pub source: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillInstructionDocument {
+    pub name: String,
+    pub source: PathBuf,
+    pub content: String,
+    pub truncated: bool,
+    pub read_bytes: usize,
+    pub original_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +108,61 @@ impl SkillCatalog {
 
     pub fn root(&self) -> Option<&Path> {
         self.root.as_deref()
+    }
+
+    pub async fn load_instruction_documents(
+        &self,
+        names: &[String],
+        max_instruction_bytes: usize,
+    ) -> anyhow::Result<Vec<SkillInstructionDocument>> {
+        let root = self
+            .root
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("skill catalog has no filesystem root"))?;
+        let mut documents = Vec::new();
+
+        for name in names {
+            let summary = self
+                .summaries
+                .iter()
+                .find(|summary| summary.name == *name)
+                .ok_or_else(|| anyhow::anyhow!("unknown instruction skill: {name}"))?;
+            let path = root.join(&summary.source);
+            let canonical_path = tokio::fs::canonicalize(&path)
+                .await
+                .with_context(|| format!("failed to resolve {}", path.display()))?;
+            if !canonical_path.starts_with(root) {
+                anyhow::bail!(
+                    "unsafe skill instruction path: {}",
+                    summary.source.display()
+                );
+            }
+
+            let original_bytes = tokio::fs::metadata(&canonical_path)
+                .await
+                .with_context(|| format!("read metadata for {}", canonical_path.display()))?
+                .len() as usize;
+            let truncated = original_bytes > max_instruction_bytes;
+            let file = tokio::fs::File::open(&canonical_path)
+                .await
+                .with_context(|| format!("open {}", canonical_path.display()))?;
+            let mut bytes = Vec::with_capacity(max_instruction_bytes.min(original_bytes));
+            file.take(max_instruction_bytes as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .with_context(|| format!("read {}", canonical_path.display()))?;
+
+            documents.push(SkillInstructionDocument {
+                name: summary.name.clone(),
+                source: summary.source.clone(),
+                content: String::from_utf8_lossy(&bytes).into_owned(),
+                truncated,
+                read_bytes: bytes.len(),
+                original_bytes,
+            });
+        }
+
+        Ok(documents)
     }
 }
 
@@ -364,6 +430,36 @@ description: Excluded instructions.
             .collect();
 
         assert_eq!(names, vec!["included"]);
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn loads_full_instruction_for_triggered_skill_with_truncation_metadata() {
+        let root = unique_test_dir("load-full-instruction");
+        write_skill_md(
+            &root,
+            "planning",
+            r#"---
+name: planning
+description: Write plans.
+---
+
+# Planning
+Use checklists.
+"#,
+        )
+        .await;
+        let catalog = SkillCatalog::load_development(&root).await.unwrap();
+
+        let instructions = catalog
+            .load_instruction_documents(&["planning".to_string()], 32)
+            .await
+            .unwrap();
+
+        assert_eq!(instructions[0].name, "planning");
+        assert_eq!(instructions[0].source, PathBuf::from("planning/SKILL.md"));
+        assert!(instructions[0].content.contains("---"));
+        assert!(instructions[0].truncated);
         remove_test_dir(root).await;
     }
 

@@ -1,3 +1,4 @@
+use crate::skill_catalog::{SkillInstructionDocument, SkillSummary};
 use anyhow::{Context, bail};
 use serde_json::json;
 use std::fs;
@@ -11,6 +12,8 @@ pub struct InstructionConfig {
     pub max_instruction_bytes: usize,
     pub base_instructions: String,
     pub developer_instructions: Option<String>,
+    pub skill_summaries: Vec<SkillSummary>,
+    pub skill_instructions: Vec<SkillInstructionDocument>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +41,8 @@ impl InstructionConfig {
                 "GeneralAgent is a Codex-like runtime. Use tools for concrete workspace actions."
                     .into(),
             developer_instructions: None,
+            skill_summaries: Vec::new(),
+            skill_instructions: Vec::new(),
         }
     }
 }
@@ -128,6 +133,37 @@ impl InstructionContext {
             ));
             context.push_str(&document.content);
             context.push_str("\n</project_instructions>");
+        }
+
+        if !self.config.skill_summaries.is_empty() {
+            context.push_str("\n\n");
+            context.push_str(&format!(
+                "<available_skills count=\"{}\">\n",
+                self.config.skill_summaries.len()
+            ));
+            for summary in &self.config.skill_summaries {
+                context.push_str(&format!("- name: {}\n", summary.name));
+                context.push_str(&format!("  description: {}\n", summary.description));
+                if !summary.aliases.is_empty() {
+                    context.push_str(&format!("  aliases: {}\n", summary.aliases.join(", ")));
+                }
+                context.push_str(&format!("  source: {}\n", display_path(&summary.source)));
+            }
+            context.push_str("</available_skills>");
+        }
+
+        for document in &self.config.skill_instructions {
+            context.push_str("\n\n");
+            context.push_str(&format!(
+                "<skill_instructions name=\"{}\" source=\"{}\" bytes=\"{}\" original_bytes=\"{}\" truncated=\"{}\">\n",
+                document.name,
+                display_path(&document.source),
+                document.read_bytes,
+                document.original_bytes,
+                document.truncated
+            ));
+            context.push_str(&document.content);
+            context.push_str("\n</skill_instructions>");
         }
 
         context
@@ -258,6 +294,36 @@ mod tests {
             input[2],
             serde_json::json!({ "role": "user", "content": "hello" })
         );
+    }
+
+    #[test]
+    fn renders_skill_summaries_and_selected_skill_instructions() {
+        let root = temp_workspace();
+        let mut config = InstructionConfig::new(&root, &root);
+        config.skill_summaries = vec![crate::skill_catalog::SkillSummary {
+            name: "planning".into(),
+            description: "Write implementation plans.".into(),
+            aliases: vec!["planner".into()],
+            source: PathBuf::from("planning/SKILL.md"),
+        }];
+        config.skill_instructions = vec![crate::skill_catalog::SkillInstructionDocument {
+            name: "planning".into(),
+            source: PathBuf::from("planning/SKILL.md"),
+            content: "# Planning\nUse checklists.".into(),
+            truncated: false,
+            read_bytes: 25,
+            original_bytes: 25,
+        }];
+
+        let context = InstructionContext::load(config).unwrap();
+        let input = context.model_input("use $planning");
+        let developer = input[1]["content"].as_str().unwrap();
+
+        assert!(developer.contains("<available_skills count=\"1\">"));
+        assert!(developer.contains("name: planning"));
+        assert!(developer.contains("aliases: planner"));
+        assert!(developer.contains("<skill_instructions name=\"planning\""));
+        assert!(developer.contains("# Planning"));
     }
 
     #[test]
