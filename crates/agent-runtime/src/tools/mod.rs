@@ -99,6 +99,12 @@ pub enum ToolSource {
     RuntimeSkill { skill_name: String },
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ApprovalRequirement {
+    pub permission: ToolPermission,
+    pub policy: ApprovalPolicy,
+}
+
 pub fn permission_allowed(
     mode: RuntimeMode,
     command_mode: CommandMode,
@@ -119,6 +125,7 @@ pub struct ToolRegistry {
     skills: SkillRegistry,
     tool_timeout: Duration,
     output_limit_bytes: usize,
+    approval_policy: ApprovalPolicy,
 }
 
 impl ToolRegistry {
@@ -128,6 +135,7 @@ impl ToolRegistry {
             skills,
             tool_timeout: Duration::from_millis(config.tool_timeout_ms),
             output_limit_bytes: config.output_limit_bytes,
+            approval_policy: config.approval_policy,
         }
     }
 
@@ -167,6 +175,19 @@ impl ToolRegistry {
                 .then_with(|| left.name.cmp(&right.name))
         });
         diagnostics
+    }
+
+    pub fn approval_requirement(&self, name: &str) -> Option<ApprovalRequirement> {
+        let definition = self
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == name)?;
+        self.approval_policy
+            .requires_approval(definition.permission)
+            .then_some(ApprovalRequirement {
+                permission: definition.permission,
+                policy: self.approval_policy,
+            })
     }
 
     pub async fn execute(&self, name: &str, call_id: &str, arguments: Value) -> ToolResult {
@@ -447,6 +468,24 @@ mod tests {
             .with_command_mode(CommandMode::Allowed);
 
         assert_eq!(config.command_mode, CommandMode::Allowed);
+    }
+
+    #[tokio::test]
+    async fn tool_registry_reports_approval_requirement_for_write_tools() {
+        let root = unique_test_dir("approval-requirement");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = RuntimeConfig::workspace_write(root.clone(), root.clone());
+        config.approval_policy = crate::policy::ApprovalPolicy::OnWorkspaceWrite;
+        let registry = ToolRegistry::new(SkillRegistry::empty_for_tests(), &config);
+
+        let requirement = registry.approval_requirement("create_directory").unwrap();
+
+        assert_eq!(requirement.permission, ToolPermission::WriteWorkspace);
+        assert_eq!(
+            requirement.policy,
+            crate::policy::ApprovalPolicy::OnWorkspaceWrite
+        );
+        remove_test_dir(root).await;
     }
 
     #[tokio::test]

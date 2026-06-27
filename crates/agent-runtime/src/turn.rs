@@ -2,6 +2,7 @@ use crate::events::RuntimeEvent;
 use crate::instructions::{InstructionConfig, InstructionContext};
 use crate::skill::SkillRegistry;
 use crate::skill_catalog::SkillCatalog;
+use crate::tools::result::{ToolError, ToolResult, ToolResultMetadata};
 use crate::tools::{RuntimeConfig, ToolDefinition, ToolRegistry};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -125,6 +126,48 @@ where
                                 message: "max tool calls exceeded".into(),
                             });
                             return Ok(events);
+                        }
+                        if let Some(requirement) = self.tools.approval_requirement(&name) {
+                            events.push(RuntimeEvent::ApprovalRequired {
+                                call_id: call_id.clone(),
+                                name: name.clone(),
+                                permission: requirement.permission,
+                                policy: requirement.policy,
+                            });
+                            let result = ToolResult::failure(
+                                name.clone(),
+                                call_id.clone(),
+                                ToolError {
+                                    code: "approval_required".into(),
+                                    message: "Tool call requires approval before execution.".into(),
+                                    retryable: false,
+                                },
+                                ToolResultMetadata::default(),
+                            )
+                            .into_value();
+                            events.push(RuntimeEvent::ToolCallFinished {
+                                call_id: call_id.clone(),
+                                result: result.clone(),
+                            });
+                            input.push(serde_json::json!({
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": call_id.clone(),
+                                        "type": "function",
+                                        "function": {
+                                            "name": name.clone(),
+                                            "arguments": "{}"
+                                        }
+                                    }
+                                ]
+                            }));
+                            input.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": result
+                            }));
+                            continue;
                         }
                         events.push(RuntimeEvent::ToolCallStarted {
                             call_id: call_id.clone(),
@@ -564,6 +607,41 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["tool"], "apply_patch");
         assert_eq!(result["data"]["changed_files"][0]["path"], "notes.txt");
+        remove_workspace(&workspace);
+    }
+
+    #[tokio::test]
+    async fn approval_required_blocks_tool_before_raw_arguments_event() {
+        let workspace = test_workspace("approval-required");
+        let skills = SkillRegistry::load(skills_root()).await.unwrap();
+        let mut config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
+        config.approval_policy = crate::policy::ApprovalPolicy::OnWorkspaceWrite;
+        let runner = TurnRunner::new_with_config(
+            FakePhaseTwoModel {
+                calls: AtomicUsize::new(0),
+                tool_name: "create_directory",
+                arguments: serde_json::json!({ "path": "blocked-secret-path" }),
+                requests: Mutex::new(Vec::new()),
+            },
+            skills,
+            config,
+        );
+
+        let events = runner.run("create a directory").await.unwrap();
+
+        assert!(!workspace.join("blocked-secret-path").exists());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::ApprovalRequired { name, .. } if name == "create_directory"
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::ToolCallStarted { arguments, .. }
+                if arguments.to_string().contains("blocked-secret-path")
+        )));
+        let result = tool_result(&events);
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"]["code"], "approval_required");
         remove_workspace(&workspace);
     }
 

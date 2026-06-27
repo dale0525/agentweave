@@ -1,3 +1,5 @@
+use crate::policy::ApprovalPolicy;
+use crate::tools::ToolPermission;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,6 +14,12 @@ pub enum RuntimeEvent {
     },
     ReasoningDelta {
         text: String,
+    },
+    ApprovalRequired {
+        call_id: String,
+        name: String,
+        permission: ToolPermission,
+        policy: ApprovalPolicy,
     },
     ToolCallStarted {
         call_id: String,
