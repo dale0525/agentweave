@@ -1,7 +1,10 @@
 mod api;
 
 use agent_runtime::{
-    skill::SkillRegistry, storage::Storage, tools::RuntimeConfig, turn::TurnRunner,
+    skill::SkillRegistry,
+    storage::Storage,
+    tools::{CommandMode, RuntimeConfig},
+    turn::TurnRunner,
 };
 use model_gateway::{
     provider::{EndpointType, ProviderProfile},
@@ -43,7 +46,11 @@ fn runtime_config_from_env() -> RuntimeConfig {
     let workspace_root = std::env::var("GENERAL_AGENT_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    RuntimeConfig::workspace_write(workspace_root.clone(), workspace_root)
+    let mut config = RuntimeConfig::workspace_write(workspace_root.clone(), workspace_root);
+    if std::env::var("GENERAL_AGENT_COMMAND_MODE").as_deref() == Ok("allowed") {
+        config = config.with_command_mode(CommandMode::Allowed);
+    }
+    config
 }
 
 async fn load_runtime_skills() -> anyhow::Result<SkillRegistry> {
