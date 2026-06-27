@@ -155,6 +155,36 @@ Known acceptable deviations:
 - Browser font rendering and real Vite content differ slightly from Stitch screenshots.
 - The Settings screen does not include extra informational footer content from Stitch; the current implementation intentionally stays within the existing MVP model connection form.
 
+## Codex-Like Runtime Phase 1 Verification
+
+Date: 2026-06-27
+
+Source design:
+
+- `docs/superpowers/specs/2026-06-27-codex-like-runtime-migration-design.md`
+
+Implementation plan:
+
+- `docs/superpowers/plans/2026-06-27-codex-like-runtime-phase-1.md`
+
+Automated checks:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 57/57, `agent-server` 10/10, `model-gateway` 15/15, doc tests 0 failures. |
+| `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy completed for `model-gateway`, `agent-runtime`, and `agent-server` with no warnings. |
+| `pixi run cargo fmt --all --check` | PASS | Rust formatting check passed. |
+| `git diff --check HEAD` | PASS | Whitespace check exited 0. |
+| Source line budget | PASS | Edited and created source files were checked; largest checked source file was `crates/agent-server/src/api.rs` at 891 physical lines. |
+
+Runtime behavior verified:
+
+- Built-in `create_directory` can create a workspace directory through the turn loop.
+- `read_only` runtime mode blocks write tools with a structured `permission_denied` result.
+- The first model request includes base instructions, tool schemas, and AGENTS.md project instructions.
+- Completion endpoints reject non-empty tool schemas with `model_endpoint_does_not_support_tools`.
+- Server model-settings turns use the configured runtime workspace root and include workspace instruction context.
+
 ## Known Gaps
 
 - The assistant reply is deterministic and local: `MVP agent received: ...`; it does not call a real model provider.
