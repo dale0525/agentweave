@@ -1,6 +1,7 @@
 use crate::events::RuntimeEvent;
 use crate::instructions::{InstructionConfig, InstructionContext};
 use crate::skill::SkillRegistry;
+use crate::skill_catalog::SkillCatalog;
 use crate::tools::{RuntimeConfig, ToolDefinition, ToolRegistry};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -23,6 +24,7 @@ pub trait AgentRunner: Send + Sync {
 pub struct TurnRunner<C> {
     model: C,
     tools: ToolRegistry,
+    skill_catalog: SkillCatalog,
     config: RuntimeConfig,
     max_steps: usize,
 }
@@ -38,11 +40,21 @@ where
     }
 
     pub fn new_with_config(model: C, skills: SkillRegistry, config: RuntimeConfig) -> Self {
+        Self::new_with_catalog_and_config(model, skills, SkillCatalog::empty(), config)
+    }
+
+    pub fn new_with_catalog_and_config(
+        model: C,
+        skills: SkillRegistry,
+        skill_catalog: SkillCatalog,
+        config: RuntimeConfig,
+    ) -> Self {
         let max_steps = config.max_tool_calls_per_turn.saturating_add(1);
         let tools = ToolRegistry::new(skills, &config);
         Self {
             model,
             tools,
+            skill_catalog,
             config,
             max_steps,
         }
@@ -53,10 +65,29 @@ where
         let mut events = vec![RuntimeEvent::TurnStarted {
             turn_id: turn_id.clone(),
         }];
-        let instruction_context = InstructionContext::load(InstructionConfig::new(
-            self.config.workspace_root.clone(),
-            self.config.cwd.clone(),
-        ))?;
+        let mut instruction_config =
+            InstructionConfig::new(self.config.workspace_root.clone(), self.config.cwd.clone());
+        instruction_config.skill_summaries = self.skill_catalog.summaries().to_vec();
+        let triggered_skill_names = self.skill_catalog.triggered_skill_names(user_text);
+        if !triggered_skill_names.is_empty() {
+            match self
+                .skill_catalog
+                .load_instruction_documents(&triggered_skill_names, self.config.output_limit_bytes)
+                .await
+            {
+                Ok(documents) => {
+                    instruction_config.skill_instructions = documents;
+                }
+                Err(error) => {
+                    events.push(RuntimeEvent::TurnFailed {
+                        turn_id,
+                        message: error.to_string(),
+                    });
+                    return Ok(events);
+                }
+            }
+        }
+        let instruction_context = InstructionContext::load(instruction_config)?;
         let mut input = instruction_context.model_input(user_text);
         let tools = gateway_tools(self.tools.definitions());
         let mut final_text = String::new();
@@ -533,6 +564,47 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["tool"], "apply_patch");
         assert_eq!(result["data"]["changed_files"][0]["path"], "notes.txt");
+        remove_workspace(&workspace);
+    }
+
+    #[tokio::test]
+    async fn phase_three_injects_summary_and_triggered_skill_instruction() {
+        let workspace = test_workspace("phase-three-skill-instructions");
+        let skills_root = workspace.join("skills");
+        fs::create_dir_all(skills_root.join("planning")).unwrap();
+        fs::write(
+            skills_root.join("planning").join("SKILL.md"),
+            "---\nname: planning\ndescription: Write plans.\n---\n\n# Planning\nUse checklists.",
+        )
+        .unwrap();
+        let catalog = crate::skill_catalog::SkillCatalog::load_development(&skills_root)
+            .await
+            .unwrap();
+        let skills = SkillRegistry::load_development(&skills_root).await.unwrap();
+        let config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
+        let runner = TurnRunner::new_with_catalog_and_config(
+            ScriptedModel {
+                calls: AtomicUsize::new(0),
+                requests: Mutex::new(Vec::new()),
+                responses: vec![vec![
+                    GatewayEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    GatewayEvent::Completed,
+                ]],
+            },
+            skills,
+            catalog,
+            config,
+        );
+
+        let _events = runner.run("use $planning").await.unwrap();
+        let requests = runner.model.requests.lock().unwrap();
+        let developer = requests[0].input[1]["content"].as_str().unwrap();
+
+        assert!(developer.contains("<available_skills count=\"1\">"));
+        assert!(developer.contains("<skill_instructions name=\"planning\""));
+        assert!(developer.contains("Use checklists."));
         remove_workspace(&workspace);
     }
 

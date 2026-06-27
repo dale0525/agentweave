@@ -110,6 +110,42 @@ impl SkillCatalog {
         self.root.as_deref()
     }
 
+    pub fn triggered_skill_names(&self, user_text: &str) -> Vec<String> {
+        let tokens = trigger_tokens(user_text);
+        let dollar_tokens: HashSet<_> = tokens
+            .iter()
+            .filter_map(|token| token.strip_prefix('$'))
+            .collect();
+        let plain_tokens: HashSet<_> = tokens
+            .iter()
+            .filter(|token| !token.starts_with('$'))
+            .map(String::as_str)
+            .collect();
+        let mut triggered = HashSet::new();
+
+        for summary in &self.summaries {
+            if dollar_tokens.contains(summary.name.to_ascii_lowercase().as_str()) {
+                triggered.insert(summary.name.clone());
+            }
+        }
+
+        for token in plain_tokens {
+            let matches: Vec<_> = self
+                .summaries
+                .iter()
+                .filter(|summary| summary.matches_plain_token(token))
+                .map(|summary| summary.name.clone())
+                .collect();
+            if matches.len() == 1 {
+                triggered.insert(matches[0].clone());
+            }
+        }
+
+        let mut names: Vec<_> = triggered.into_iter().collect();
+        names.sort();
+        names
+    }
+
     pub async fn load_instruction_documents(
         &self,
         names: &[String],
@@ -163,6 +199,16 @@ impl SkillCatalog {
         }
 
         Ok(documents)
+    }
+}
+
+impl SkillSummary {
+    fn matches_plain_token(&self, token: &str) -> bool {
+        self.name.eq_ignore_ascii_case(token)
+            || self
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(token))
     }
 }
 
@@ -304,6 +350,27 @@ fn is_safe_catalog_path(path: &Path) -> bool {
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn trigger_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars() {
+        if ch == '$' && current.is_empty() {
+            current.push(ch);
+        } else if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            current.push(ch.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
 }
 
 #[cfg(test)]
@@ -461,6 +528,73 @@ Use checklists.
         assert!(instructions[0].content.contains("---"));
         assert!(instructions[0].truncated);
         remove_test_dir(root).await;
+    }
+
+    #[test]
+    fn trigger_policy_matches_explicit_dollar_skill() {
+        let catalog = SkillCatalog {
+            root: None,
+            summaries: vec![SkillSummary {
+                name: "planning".into(),
+                description: "Write plans.".into(),
+                aliases: vec![],
+                source: PathBuf::from("planning/SKILL.md"),
+            }],
+        };
+
+        assert_eq!(
+            catalog.triggered_skill_names("please use $planning"),
+            vec!["planning".to_string()]
+        );
+    }
+
+    #[test]
+    fn trigger_policy_matches_unique_plain_text_name_or_alias() {
+        let catalog = SkillCatalog {
+            root: None,
+            summaries: vec![
+                SkillSummary {
+                    name: "planning".into(),
+                    description: "Write plans.".into(),
+                    aliases: vec!["planner".into()],
+                    source: PathBuf::from("planning/SKILL.md"),
+                },
+                SkillSummary {
+                    name: "debugging".into(),
+                    description: "Debug issues.".into(),
+                    aliases: vec![],
+                    source: PathBuf::from("debugging/SKILL.md"),
+                },
+            ],
+        };
+
+        assert_eq!(
+            catalog.triggered_skill_names("planner should help"),
+            vec!["planning".to_string()]
+        );
+    }
+
+    #[test]
+    fn trigger_policy_ignores_ambiguous_plain_text_mentions() {
+        let catalog = SkillCatalog {
+            root: None,
+            summaries: vec![
+                SkillSummary {
+                    name: "plan".into(),
+                    description: "Plan A.".into(),
+                    aliases: vec!["shared".into()],
+                    source: PathBuf::from("a/SKILL.md"),
+                },
+                SkillSummary {
+                    name: "planning".into(),
+                    description: "Plan B.".into(),
+                    aliases: vec!["shared".into()],
+                    source: PathBuf::from("b/SKILL.md"),
+                },
+            ],
+        };
+
+        assert!(catalog.triggered_skill_names("shared").is_empty());
     }
 
     async fn write_skill_md(root: &Path, folder: &str, content: &str) {

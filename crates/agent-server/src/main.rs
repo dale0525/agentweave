@@ -2,6 +2,7 @@ mod api;
 
 use agent_runtime::{
     skill::SkillRegistry,
+    skill_catalog::SkillCatalog,
     storage::Storage,
     tools::{CommandMode, RuntimeConfig},
     turn::TurnRunner,
@@ -26,10 +27,17 @@ async fn main() -> anyhow::Result<()> {
     let database_url =
         std::env::var("GENERAL_AGENT_DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.into());
     let storage = Storage::connect(&database_url).await?;
-    let skills = load_runtime_skills().await?;
+    let skills_root = skills_root_from_env();
+    let skills = load_runtime_skills(&skills_root).await?;
+    let skill_catalog = load_instruction_skills(&skills_root).await;
     let model = GatewayHttpClient::new(model_profile_from_env());
     let runtime_config = runtime_config_from_env();
-    let runner = TurnRunner::new_with_config(model, skills.clone(), runtime_config.clone());
+    let runner = TurnRunner::new_with_catalog_and_config(
+        model,
+        skills.clone(),
+        skill_catalog,
+        runtime_config.clone(),
+    );
     let app = api::router(Arc::new(
         api::AppState::new_with_agent_and_skills(storage, Arc::new(runner), skills)
             .with_runtime_config(runtime_config),
@@ -53,16 +61,31 @@ fn runtime_config_from_env() -> RuntimeConfig {
     config
 }
 
-async fn load_runtime_skills() -> anyhow::Result<SkillRegistry> {
-    let root = std::env::var("GENERAL_AGENT_SKILLS_ROOT")
+fn skills_root_from_env() -> PathBuf {
+    std::env::var("GENERAL_AGENT_SKILLS_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_SKILLS_ROOT));
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_SKILLS_ROOT))
+}
 
+async fn load_runtime_skills(root: &PathBuf) -> anyhow::Result<SkillRegistry> {
     if root.join("skill-bundle.json").is_file() {
         SkillRegistry::load_packaged(root).await
     } else {
         SkillRegistry::load_development(root).await
     }
+}
+
+async fn load_instruction_skills(root: &PathBuf) -> SkillCatalog {
+    let result = if root.join("skill-bundle.json").is_file() {
+        SkillCatalog::load_packaged(root).await
+    } else {
+        SkillCatalog::load_development(root).await
+    };
+
+    result.unwrap_or_else(|error| {
+        tracing::warn!(?error, "failed to load instruction skill catalog");
+        SkillCatalog::empty()
+    })
 }
 
 fn model_profile_from_env() -> ProviderProfile {
