@@ -1,4 +1,5 @@
 mod api;
+mod dev_api;
 
 use agent_runtime::{
     skill::SkillRegistry,
@@ -38,10 +39,15 @@ async fn main() -> anyhow::Result<()> {
         skill_catalog,
         runtime_config.clone(),
     );
-    let app = api::router(Arc::new(
+    let state = Arc::new(
         api::AppState::new_with_agent_and_skills(storage, Arc::new(runner), skills)
             .with_runtime_config(runtime_config),
-    ));
+    );
+    let app = if std::env::var("GENERAL_AGENT_DEV_API").as_deref() == Ok("1") {
+        api::router_with_dev_routes(state)
+    } else {
+        api::router(state)
+    };
     let addr = SocketAddr::from(([127, 0, 0, 1], 49321));
     let listener = tokio::net::TcpListener::bind(addr).await?;
 

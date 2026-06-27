@@ -184,6 +184,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+pub fn router_with_dev_routes(state: Arc<AppState>) -> Router {
+    router(state.clone()).merge(crate::dev_api::router(state))
+}
+
+impl AppState {
+    pub(crate) fn skills(&self) -> Option<SkillRegistry> {
+        self.skills.clone()
+    }
+
+    pub(crate) fn runtime_config(&self) -> RuntimeConfig {
+        self.runtime_config.clone()
+    }
+}
+
 fn desktop_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin([
