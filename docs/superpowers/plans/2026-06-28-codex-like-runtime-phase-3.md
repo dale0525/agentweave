@@ -110,7 +110,7 @@ If `include_instructions` is missing or false, `SkillCatalog::load_packaged` mus
 - Create: `crates/agent-runtime/src/skill_catalog.rs`
 - Modify: `crates/agent-runtime/src/lib.rs`
 
-- [ ] **Step 1: Write failing parser tests**
+- [x] **Step 1: Write failing parser tests**
 
 Add this initial module and tests to `crates/agent-runtime/src/skill_catalog.rs`:
 
@@ -215,7 +215,7 @@ Add this export to `crates/agent-runtime/src/lib.rs`:
 pub mod skill_catalog;
 ```
 
-- [ ] **Step 2: Run parser tests to verify they fail**
+- [x] **Step 2: Run parser tests to verify they fail**
 
 Run:
 
@@ -225,7 +225,7 @@ pixi run cargo test -p agent-runtime skill_catalog::tests -- --nocapture
 
 Expected: tests fail because `parse_skill_front_matter` is not implemented.
 
-- [ ] **Step 3: Implement minimal front matter parser**
+- [x] **Step 3: Implement minimal front matter parser**
 
 Replace `parse_skill_front_matter` with a small deterministic parser that supports the YAML subset needed by Codex-style skill metadata:
 
@@ -290,7 +290,7 @@ fn unquote_scalar(value: &str) -> String {
 }
 ```
 
-- [ ] **Step 4: Run parser tests to verify they pass**
+- [x] **Step 4: Run parser tests to verify they pass**
 
 Run:
 
@@ -300,7 +300,7 @@ pixi run cargo test -p agent-runtime skill_catalog::tests -- --nocapture
 
 Expected: parser tests pass.
 
-- [ ] **Step 5: Commit parser task**
+- [x] **Step 5: Commit parser task**
 
 Run:
 
@@ -314,7 +314,7 @@ git commit -m "feat: add skill catalog front matter parser"
 **Files:**
 - Modify: `crates/agent-runtime/src/skill_catalog.rs`
 
-- [ ] **Step 1: Write failing discovery tests**
+- [x] **Step 1: Write failing discovery tests**
 
 Add these tests:
 
@@ -395,7 +395,7 @@ description: Excluded instructions.
 }
 ```
 
-- [ ] **Step 2: Run discovery tests to verify they fail**
+- [x] **Step 2: Run discovery tests to verify they fail**
 
 Run:
 
@@ -405,7 +405,7 @@ pixi run cargo test -p agent-runtime skill_catalog::tests -- --nocapture
 
 Expected: tests fail because loading functions do not exist.
 
-- [ ] **Step 3: Implement development and packaged discovery**
+- [x] **Step 3: Implement development and packaged discovery**
 
 Add these types and functions:
 
@@ -481,7 +481,7 @@ impl SkillCatalog {
 
 Add safe path, summary, and test helper implementations in the same module. Reuse the packaged path safety rules from `skill.rs`: relative, normal components only, canonical result must stay under root.
 
-- [ ] **Step 4: Run discovery tests to verify they pass**
+- [x] **Step 4: Run discovery tests to verify they pass**
 
 Run:
 
@@ -491,7 +491,7 @@ pixi run cargo test -p agent-runtime skill_catalog::tests -- --nocapture
 
 Expected: discovery and parser tests pass.
 
-- [ ] **Step 5: Commit discovery task**
+- [x] **Step 5: Commit discovery task**
 
 Run:
 
@@ -506,7 +506,7 @@ git commit -m "feat: discover instruction skill catalog"
 - Modify: `crates/agent-runtime/src/skill_catalog.rs`
 - Modify: `crates/agent-runtime/src/instructions.rs`
 
-- [ ] **Step 1: Write failing injection tests**
+- [x] **Step 1: Write failing injection tests**
 
 Add a unit test in `crates/agent-runtime/src/instructions.rs`:
 
@@ -576,7 +576,7 @@ Use checklists.
 }
 ```
 
-- [ ] **Step 2: Run injection tests to verify they fail**
+- [x] **Step 2: Run injection tests to verify they fail**
 
 Run:
 
@@ -586,7 +586,7 @@ pixi run cargo test -p agent-runtime instructions::tests::renders_skill_summarie
 
 Expected: tests fail because instruction data fields and full loading are missing.
 
-- [ ] **Step 3: Implement instruction documents and rendering**
+- [x] **Step 3: Implement instruction documents and rendering**
 
 Add this public document type to `skill_catalog.rs`:
 
@@ -615,7 +615,7 @@ Initialize both to empty in `InstructionConfig::new`.
 
 Render summaries before selected full instructions in `developer_context`.
 
-- [ ] **Step 4: Run injection tests to verify they pass**
+- [x] **Step 4: Run injection tests to verify they pass**
 
 Run:
 
@@ -625,7 +625,7 @@ pixi run cargo test -p agent-runtime instructions::tests::renders_skill_summarie
 
 Expected: both tests pass.
 
-- [ ] **Step 5: Commit rendering task**
+- [x] **Step 5: Commit rendering task**
 
 Run:
 
@@ -641,7 +641,7 @@ git commit -m "feat: inject instruction skill context"
 - Modify: `crates/agent-runtime/src/turn.rs`
 - Modify: `crates/agent-server/src/main.rs`
 
-- [ ] **Step 1: Write failing trigger tests**
+- [x] **Step 1: Write failing trigger tests**
 
 Add tests to `skill_catalog.rs`:
 
@@ -757,7 +757,7 @@ async fn phase_three_injects_summary_and_triggered_skill_instruction() {
 }
 ```
 
-- [ ] **Step 2: Run trigger tests to verify they fail**
+- [x] **Step 2: Run trigger tests to verify they fail**
 
 Run:
 
@@ -767,7 +767,7 @@ pixi run cargo test -p agent-runtime skill_catalog::tests::trigger_policy turn::
 
 Expected: tests fail because trigger policy and new constructor are missing.
 
-- [ ] **Step 3: Implement trigger policy and turn wiring**
+- [x] **Step 3: Implement trigger policy and turn wiring**
 
 Implement `SkillCatalog::triggered_skill_names(&self, user_text: &str) -> Vec<String>`.
 
@@ -790,7 +790,7 @@ If the catalog cannot load a selected full instruction, fail the turn with `Turn
 
 Do not add skill-root state to `RuntimeConfig`; `SkillCatalog` owns the canonical root that it discovered or loaded from packaged metadata.
 
-- [ ] **Step 4: Wire server startup**
+- [x] **Step 4: Wire server startup**
 
 In `crates/agent-server/src/main.rs`, load the catalog from the configured skills root:
 
@@ -805,7 +805,7 @@ let skill_catalog = SkillCatalog::load_development(&skills_root)
 
 Use `TurnRunner::new_with_catalog_and_config`.
 
-- [ ] **Step 5: Run trigger tests to verify they pass**
+- [x] **Step 5: Run trigger tests to verify they pass**
 
 Run:
 
@@ -815,7 +815,7 @@ pixi run cargo test -p agent-runtime skill_catalog::tests::trigger_policy turn::
 
 Expected: trigger and turn tests pass.
 
-- [ ] **Step 6: Commit trigger task**
+- [x] **Step 6: Commit trigger task**
 
 Run:
 
@@ -831,7 +831,7 @@ git commit -m "feat: trigger instruction skills in turns"
 - Modify: `crates/agent-runtime/src/skill.rs`
 - Modify: `crates/agent-runtime/src/turn.rs`
 
-- [ ] **Step 1: Write compatibility tests**
+- [x] **Step 1: Write compatibility tests**
 
 Add tests proving the Phase 3 acceptance criteria:
 
@@ -868,7 +868,7 @@ async fn runtime_tool_without_skill_md_still_executes() {
 }
 ```
 
-- [ ] **Step 2: Run compatibility tests**
+- [x] **Step 2: Run compatibility tests**
 
 Run:
 
@@ -878,11 +878,11 @@ pixi run cargo test -p agent-runtime skill_catalog::tests::runtime_skill_and_ins
 
 Expected: tests pass once helper functions are added.
 
-- [ ] **Step 3: Add helper functions and any missing validation**
+- [x] **Step 3: Add helper functions and any missing validation**
 
 Add test helpers that write both `SKILL.md` and `skill.json` with `index.js`. Ensure `SkillCatalog::load_development` skips folders without `SKILL.md`, while `SkillRegistry::load_development` skips folders without `skill.json`.
 
-- [ ] **Step 4: Run full Phase 3 focused tests**
+- [x] **Step 4: Run full Phase 3 focused tests**
 
 Run:
 
@@ -894,7 +894,7 @@ pixi run cargo test -p agent-runtime turn::tests::phase_three_injects_summary_an
 
 Expected: all focused Phase 3 tests pass.
 
-- [ ] **Step 5: Commit compatibility task**
+- [x] **Step 5: Commit compatibility task**
 
 Run:
 
@@ -909,7 +909,7 @@ git commit -m "test: cover instruction skill compatibility"
 - Modify: `docs/mvp-verification.md`
 - Modify: `docs/superpowers/plans/2026-06-28-codex-like-runtime-phase-3.md`
 
-- [ ] **Step 1: Run full verification**
+- [x] **Step 1: Run full verification**
 
 Run:
 
@@ -929,7 +929,7 @@ Expected:
 - Whitespace check exits 0.
 - No edited/new source file exceeds 1000 physical lines.
 
-- [ ] **Step 2: Append verification record**
+- [x] **Step 2: Append verification record**
 
 Append a `Codex-Like Runtime Phase 3 Verification` section to `docs/mvp-verification.md` with exact commands and observed results.
 
@@ -951,7 +951,7 @@ Full verification:
 - Source line budget: PASS
 ```
 
-- [ ] **Step 3: Commit documentation**
+- [x] **Step 3: Commit documentation**
 
 Run:
 

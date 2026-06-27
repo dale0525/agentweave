@@ -77,7 +77,7 @@ No desktop UI files should change in Phase 4.
 - Modify: `crates/agent-runtime/src/tools/builtin.rs`
 - Modify: `crates/agent-runtime/src/skill.rs`
 
-- [ ] **Step 1: Write failing tool metadata tests**
+- [x] **Step 1: Write failing tool metadata tests**
 
 Add tests in `crates/agent-runtime/src/tools/mod.rs`:
 
@@ -135,7 +135,7 @@ async fn runtime_skill_diagnostics_include_skill_source() {
 }
 ```
 
-- [ ] **Step 2: Run metadata tests to verify they fail**
+- [x] **Step 2: Run metadata tests to verify they fail**
 
 Run:
 
@@ -145,7 +145,7 @@ pixi run cargo test -p agent-runtime tools::tests::tool_definitions_include_sour
 
 Expected: fail because `ToolSource`, diagnostics, and test helpers are missing.
 
-- [ ] **Step 3: Implement metadata and schema diagnostics**
+- [x] **Step 3: Implement metadata and schema diagnostics**
 
 Add to `tools/mod.rs`:
 
@@ -177,7 +177,7 @@ Add `ToolSchemaDiagnostic` and `ToolDiagnostic` in `tools/schema.rs`, plus `vali
 
 Add `ToolRegistry::diagnostics() -> Vec<ToolDiagnostic>`, sorted by `(namespace, name)`.
 
-- [ ] **Step 4: Run metadata tests to verify they pass**
+- [x] **Step 4: Run metadata tests to verify they pass**
 
 Run:
 
@@ -188,7 +188,7 @@ pixi run cargo test -p agent-runtime tools::tests::runtime_skill_diagnostics_inc
 
 Expected: both tests pass.
 
-- [ ] **Step 5: Commit metadata task**
+- [x] **Step 5: Commit metadata task**
 
 Run:
 
@@ -204,7 +204,7 @@ git commit -m "feat: add runtime tool diagnostics metadata"
 - Modify: `crates/agent-server/src/api.rs`
 - Modify: `crates/agent-server/src/main.rs`
 
-- [ ] **Step 1: Write failing server tests**
+- [x] **Step 1: Write failing server tests**
 
 Add tests in `dev_api.rs`:
 
@@ -245,7 +245,7 @@ async fn dev_tools_route_returns_tool_diagnostics_when_enabled() {
 }
 ```
 
-- [ ] **Step 2: Run server tests to verify they fail**
+- [x] **Step 2: Run server tests to verify they fail**
 
 Run:
 
@@ -255,7 +255,7 @@ pixi run cargo test -p agent-server dev_api::tests -- --nocapture
 
 Expected: fail because `dev_api` and `router_with_dev_routes` do not exist.
 
-- [ ] **Step 3: Implement `dev_api.rs` and router mounting**
+- [x] **Step 3: Implement `dev_api.rs` and router mounting**
 
 Add `pub mod dev_api;` in `main.rs` and `#[cfg(test)] mod dev_api;` support as needed for tests.
 
@@ -286,7 +286,7 @@ This wraps the normal production routes and merges `dev_api::router(state.clone(
 
 Use `RuntimeConfig` plus `SkillRegistry` from `AppState` to build a `ToolRegistry` and call `diagnostics()`.
 
-- [ ] **Step 4: Wire env-gated startup**
+- [x] **Step 4: Wire env-gated startup**
 
 In `main.rs`, choose:
 
@@ -298,7 +298,7 @@ let router = if std::env::var("GENERAL_AGENT_DEV_API").as_deref() == Ok("1") {
 };
 ```
 
-- [ ] **Step 5: Run dev tools tests**
+- [x] **Step 5: Run dev tools tests**
 
 Run:
 
@@ -309,7 +309,7 @@ pixi run cargo test -p agent-server api::tests::production_router_does_not_expos
 
 Expected: dev route exists only through explicit dev router; production router stays closed.
 
-- [ ] **Step 6: Commit dev tools task**
+- [x] **Step 6: Commit dev tools task**
 
 Run:
 
@@ -324,7 +324,7 @@ git commit -m "feat: add dev tool diagnostics endpoint"
 - Modify: `crates/agent-server/src/dev_api.rs`
 - Modify: `crates/agent-server/src/api.rs`
 
-- [ ] **Step 1: Write failing preview tests**
+- [x] **Step 1: Write failing preview tests**
 
 Add a dev API test:
 
@@ -368,7 +368,7 @@ async fn dev_instructions_preview_returns_project_and_skill_context() {
 }
 ```
 
-- [ ] **Step 2: Run preview test to verify it fails**
+- [x] **Step 2: Run preview test to verify it fails**
 
 Run:
 
@@ -378,7 +378,7 @@ pixi run cargo test -p agent-server dev_api::tests::dev_instructions_preview_ret
 
 Expected: fail because preview route and `AppState` catalog accessors do not exist.
 
-- [ ] **Step 3: Implement preview route**
+- [x] **Step 3: Implement preview route**
 
 `POST /dev/instructions/preview` accepts:
 
@@ -404,7 +404,7 @@ pub struct InstructionsPreviewResponse {
 
 Extract these strings from `InstructionContext::model_input`.
 
-- [ ] **Step 4: Run preview tests**
+- [x] **Step 4: Run preview tests**
 
 Run:
 
@@ -415,7 +415,7 @@ pixi run cargo test -p agent-server dev_api::tests -- --nocapture
 
 Expected: dev preview and dev tools tests pass.
 
-- [ ] **Step 5: Commit preview task**
+- [x] **Step 5: Commit preview task**
 
 Run:
 
@@ -430,7 +430,7 @@ git commit -m "feat: add dev instruction preview endpoint"
 - Modify: `docs/mvp-verification.md`
 - Modify: `docs/superpowers/plans/2026-06-28-codex-like-runtime-phase-4.md`
 
-- [ ] **Step 1: Run full verification**
+- [x] **Step 1: Run full verification**
 
 Run:
 
@@ -444,7 +444,7 @@ find crates apps scripts -type f \( -name '*.rs' -o -name '*.ts' -o -name '*.tsx
 
 Expected: all checks pass and no edited/new source file exceeds 1000 lines.
 
-- [ ] **Step 2: Append verification record**
+- [x] **Step 2: Append verification record**
 
 Append a `Codex-Like Runtime Phase 4 Verification` section to `docs/mvp-verification.md` with exact command results and notes:
 
@@ -453,7 +453,7 @@ Append a `Codex-Like Runtime Phase 4 Verification` section to `docs/mvp-verifica
 - Production router remains free of skill/tool management endpoints.
 - Persistent runtime diagnostics are intentionally deferred.
 
-- [ ] **Step 3: Commit documentation**
+- [x] **Step 3: Commit documentation**
 
 Run:
 
