@@ -640,8 +640,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_patch_skeleton_returns_not_implemented() {
-        let root = unique_test_dir("patch-skeleton");
+    async fn apply_patch_dispatch_adds_file() {
+        let root = unique_test_dir("patch-dispatch");
         std::fs::create_dir_all(&root).unwrap();
         let tools = BuiltInTools::new(RuntimeConfig::workspace_write(&root, &root));
 
@@ -649,12 +649,21 @@ mod tests {
             .execute(
                 "apply_patch",
                 "call-1",
-                json!({ "patch": "*** Begin Patch\n" }),
+                json!({
+                    "patch": "*** Begin Patch\n*** Add File: notes/hello.txt\n+hello\n*** End Patch\n"
+                }),
             )
             .await;
 
-        assert!(!result.ok);
-        assert_eq!(result.error.unwrap().code, "not_implemented");
+        assert!(result.ok);
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes").join("hello.txt")).unwrap(),
+            "hello\n"
+        );
+        assert_eq!(
+            result.data.unwrap()["changed_files"][0]["path"],
+            "notes/hello.txt"
+        );
         remove_test_dir(root);
     }
 
