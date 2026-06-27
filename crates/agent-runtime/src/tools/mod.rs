@@ -81,7 +81,7 @@ pub fn permission_allowed(mode: RuntimeMode, permission: ToolPermission) -> bool
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ToolRegistry {
     builtins: BuiltInTools,
     skills: SkillRegistry,
@@ -111,6 +111,32 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, name: &str, call_id: &str, arguments: Value) -> ToolResult {
+        let started = Instant::now();
+        let execution = tokio::time::timeout(
+            self.tool_timeout,
+            self.execute_without_timeout(name, call_id, arguments, started),
+        );
+
+        match execution.await {
+            Ok(result) => self.apply_output_limit(result),
+            Err(_) => registry_failure(
+                name,
+                call_id,
+                "timeout",
+                "tool execution timed out",
+                true,
+                registry_metadata(started),
+            ),
+        }
+    }
+
+    async fn execute_without_timeout(
+        &self,
+        name: &str,
+        call_id: &str,
+        arguments: Value,
+        started: Instant,
+    ) -> ToolResult {
         if BuiltInTools::handles(name) {
             return self.builtins.execute(name, call_id, arguments).await;
         }
@@ -131,12 +157,9 @@ impl ToolRegistry {
             );
         }
 
-        let started = Instant::now();
-        let execution =
-            tokio::time::timeout(self.tool_timeout, self.skills.execute(name, arguments));
-        match execution.await {
-            Ok(Ok(value)) => self.skill_success(name, call_id, value, started),
-            Ok(Err(error)) => registry_failure(
+        match self.skills.execute(name, arguments).await {
+            Ok(value) => ToolResult::success(name, call_id, value, registry_metadata(started)),
+            Err(error) => registry_failure(
                 name,
                 call_id,
                 skill_error_code(&error.to_string()),
@@ -144,45 +167,42 @@ impl ToolRegistry {
                 false,
                 registry_metadata(started),
             ),
-            Err(_) => registry_failure(
-                name,
-                call_id,
-                "timeout",
-                "tool execution timed out",
-                true,
-                registry_metadata(started),
-            ),
         }
     }
 
-    fn skill_success(
-        &self,
-        name: &str,
-        call_id: &str,
-        value: Value,
-        started: Instant,
-    ) -> ToolResult {
-        let metadata = registry_metadata(started);
-        if serde_json::to_vec(&value)
-            .map(|bytes| bytes.len())
-            .unwrap_or(usize::MAX)
-            > self.output_limit_bytes
+    fn apply_output_limit(&self, result: ToolResult) -> ToolResult {
+        if !result.ok {
+            return result;
+        }
+
+        let data_exceeds_limit = result
+            .data
+            .as_ref()
+            .map(|data| serialized_len(data) > self.output_limit_bytes)
+            .unwrap_or(false);
+        let result_exceeds_limit = serialized_len(&result) > self.output_limit_bytes;
+        if data_exceeds_limit || result_exceeds_limit
         {
+            let mut metadata = result.metadata;
+            metadata.output_truncated = true;
             return registry_failure(
-                name,
-                call_id,
+                &result.tool,
+                &result.call_id,
                 "output_limit_exceeded",
                 "tool output exceeded runtime output limit",
                 false,
-                ToolResultMetadata {
-                    output_truncated: true,
-                    ..metadata
-                },
+                metadata,
             );
         }
 
-        ToolResult::success(name, call_id, value, metadata)
+        result
     }
+}
+
+fn serialized_len<T: Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX)
 }
 
 fn registry_metadata(started: Instant) -> ToolResultMetadata {
@@ -294,6 +314,35 @@ mod tests {
 
         let result = registry
             .execute("large_output", "call-1", serde_json::json!({}))
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "output_limit_exceeded");
+        assert!(result.metadata.output_truncated);
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn tool_registry_applies_builtin_output_limit() {
+        let root = unique_test_dir("registry-builtin-output-limit");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(root.join("big.txt"), "abcdef")
+            .await
+            .unwrap();
+        let skills = SkillRegistry::load_development(&root).await.unwrap();
+        let config = RuntimeConfig {
+            workspace_root: root.clone(),
+            cwd: root.clone(),
+            mode: RuntimeMode::WorkspaceWrite,
+            command_mode: CommandMode::Disabled,
+            max_tool_calls_per_turn: 16,
+            tool_timeout_ms: 30_000,
+            output_limit_bytes: 4,
+        };
+        let registry = ToolRegistry::new(skills, &config);
+
+        let result = registry
+            .execute("read_text_file", "call-1", serde_json::json!({ "path": "big.txt" }))
             .await;
 
         assert!(!result.ok);
