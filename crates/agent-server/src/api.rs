@@ -2,6 +2,7 @@ use agent_runtime::{
     events::RuntimeEvent,
     session::Message,
     skill::SkillRegistry,
+    skill_catalog::SkillCatalog,
     storage::Storage,
     tools::RuntimeConfig,
     turn::{AgentRunner, TurnRunner},
@@ -28,6 +29,7 @@ pub struct AppState {
     storage: Storage,
     agent: Arc<dyn AgentRunner>,
     skills: Option<SkillRegistry>,
+    skill_catalog: SkillCatalog,
     runtime_config: RuntimeConfig,
 }
 
@@ -43,6 +45,7 @@ impl AppState {
             storage,
             agent,
             skills: None,
+            skill_catalog: SkillCatalog::empty(),
             runtime_config: default_runtime_config(),
         }
     }
@@ -56,12 +59,18 @@ impl AppState {
             storage,
             agent,
             skills: Some(skills),
+            skill_catalog: SkillCatalog::empty(),
             runtime_config: default_runtime_config(),
         }
     }
 
     pub fn with_runtime_config(mut self, runtime_config: RuntimeConfig) -> Self {
         self.runtime_config = runtime_config;
+        self
+    }
+
+    pub fn with_skill_catalog(mut self, skill_catalog: SkillCatalog) -> Self {
+        self.skill_catalog = skill_catalog;
         self
     }
 }
@@ -196,6 +205,10 @@ impl AppState {
     pub(crate) fn runtime_config(&self) -> RuntimeConfig {
         self.runtime_config.clone()
     }
+
+    pub(crate) fn skill_catalog(&self) -> SkillCatalog {
+        self.skill_catalog.clone()
+    }
 }
 
 fn desktop_cors_layer() -> CorsLayer {
@@ -283,9 +296,10 @@ async fn run_agent_turn(
             .clone()
             .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("runtime skills unavailable")))?;
         let profile = provider_profile_from_request(model_settings)?;
-        let runner = TurnRunner::new_with_config(
+        let runner = TurnRunner::new_with_catalog_and_config(
             GatewayHttpClient::new(profile),
             skills,
+            state.skill_catalog.clone(),
             state.runtime_config.clone(),
         );
 

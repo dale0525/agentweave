@@ -36,12 +36,13 @@ async fn main() -> anyhow::Result<()> {
     let runner = TurnRunner::new_with_catalog_and_config(
         model,
         skills.clone(),
-        skill_catalog,
+        skill_catalog.clone(),
         runtime_config.clone(),
     );
     let state = Arc::new(
         api::AppState::new_with_agent_and_skills(storage, Arc::new(runner), skills)
-            .with_runtime_config(runtime_config),
+            .with_runtime_config(runtime_config)
+            .with_skill_catalog(skill_catalog),
     );
     let app = if std::env::var("GENERAL_AGENT_DEV_API").as_deref() == Ok("1") {
         api::router_with_dev_routes(state)
