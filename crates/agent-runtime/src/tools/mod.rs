@@ -195,6 +195,9 @@ impl ToolRegistry {
         if !result.ok {
             return result;
         }
+        if result.tool == command::EXEC_COMMAND && result.metadata.output_truncated {
+            return result;
+        }
 
         let data_exceeds_limit = result
             .data
@@ -444,6 +447,39 @@ mod tests {
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "output_limit_exceeded");
         assert!(result.metadata.output_truncated);
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn tool_registry_preserves_truncated_exec_command_success() {
+        let root = unique_test_dir("registry-command-truncated-success");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let skills = SkillRegistry::load_development(&root).await.unwrap();
+        let config = RuntimeConfig {
+            workspace_root: root.clone(),
+            cwd: root.clone(),
+            mode: RuntimeMode::WorkspaceWrite,
+            command_mode: CommandMode::Allowed,
+            max_tool_calls_per_turn: 16,
+            tool_timeout_ms: 30_000,
+            output_limit_bytes: 512,
+        };
+        let registry = ToolRegistry::new(skills, &config);
+
+        let result = registry
+            .execute(
+                "exec_command",
+                "call-1",
+                serde_json::json!({ "cmd": "printf '%*s' 2048 '' | tr ' ' x" }),
+            )
+            .await;
+
+        assert!(result.ok);
+        assert!(result.metadata.stdout_truncated);
+        assert!(result.metadata.output_truncated);
+        let data = result.data.unwrap();
+        assert_eq!(data["terminated_by_runtime"], true);
+        assert_eq!(data["exit_code"], Value::Null);
         remove_test_dir(root).await;
     }
 

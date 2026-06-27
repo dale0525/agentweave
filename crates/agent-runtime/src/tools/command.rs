@@ -167,11 +167,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn denylist_blocks_chained_and_variant_destructive_commands() {
+        let root = unique_test_dir("command-denylist-variants");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = allowed_config(&root);
+
+        for cmd in [
+            "true; sudo true",
+            "true && reboot",
+            "cd tmp && mkfs.ext4 disk",
+            "rm -fr /",
+            "rm -rf -- /",
+            "git clean -fdx",
+        ] {
+            let result = execute(&config, "call-1", json!({ "cmd": cmd }), Instant::now()).await;
+
+            assert!(!result.ok, "{cmd} should be denied");
+            assert_eq!(result.error.unwrap().code, "command_denied");
+        }
+        remove_test_dir(root);
+    }
+
+    #[tokio::test]
+    async fn exec_command_rejects_unknown_arguments() {
+        let root = unique_test_dir("command-unknown-args");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = allowed_config(&root);
+
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "cmd": "printf hello", "unexpected": true }),
+            Instant::now(),
+        )
+        .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "invalid_arguments");
+        remove_test_dir(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_timeout_above_internal_max_returns_invalid_arguments() {
+        let root = unique_test_dir("command-timeout-max");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = allowed_config(&root);
+        config.tool_timeout_ms = 200;
+
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "cmd": "printf hello", "timeout_ms": 101 }),
+            Instant::now(),
+        )
+        .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "invalid_arguments");
+        remove_test_dir(root);
+    }
+
+    #[tokio::test]
     async fn exec_command_times_out_and_stops_child() {
         let root = unique_test_dir("command-timeout");
         std::fs::create_dir_all(&root).unwrap();
         let mut config = allowed_config(&root);
-        config.tool_timeout_ms = 50;
+        config.tool_timeout_ms = 200;
 
         let result = execute(
             &config,
@@ -189,6 +250,32 @@ mod tests {
         assert_eq!(error.code, "timeout");
         assert!(error.retryable);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!root.join("late.txt").exists());
+        remove_test_dir(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_command_timeout_stops_background_process_group() {
+        let root = unique_test_dir("command-timeout-process-group");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = allowed_config(&root);
+        config.tool_timeout_ms = 200;
+
+        let result = execute(
+            &config,
+            "call-1",
+            json!({
+                "cmd": "(sleep 0.2; printf late > late.txt) & sleep 1",
+                "timeout_ms": 25
+            }),
+            Instant::now(),
+        )
+        .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "timeout");
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
         assert!(!root.join("late.txt").exists());
         remove_test_dir(root);
     }
@@ -215,6 +302,30 @@ mod tests {
         assert_eq!(data["stdout"], "abcd");
         assert_eq!(data["exit_code"], Value::Null);
         assert_eq!(data["terminated_by_runtime"], true);
+        remove_test_dir(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_command_truncation_stops_background_process_group() {
+        let root = unique_test_dir("command-truncate-process-group");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = allowed_config(&root);
+        config.output_limit_bytes = 4;
+        config.tool_timeout_ms = 500;
+
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "cmd": "printf abcdef; (sleep 0.2; printf late > late.txt) & sleep 1" }),
+            Instant::now(),
+        )
+        .await;
+
+        assert!(result.ok);
+        assert!(result.metadata.stdout_truncated);
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        assert!(!root.join("late.txt").exists());
         remove_test_dir(root);
     }
 
@@ -297,10 +408,17 @@ struct CommandRequest {
 }
 
 impl CommandRequest {
-    fn parse(arguments: &Value, max_timeout_ms: u64) -> Result<Self, String> {
+    fn parse(arguments: &Value, tool_timeout_ms: u64) -> Result<Self, String> {
         let object = arguments
             .as_object()
             .ok_or_else(|| "arguments must be an object".to_string())?;
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "cmd" | "cwd" | "timeout_ms"))
+        {
+            return Err("unknown command argument".to_string());
+        }
+
         let cmd = object
             .get("cmd")
             .and_then(Value::as_str)
@@ -323,6 +441,7 @@ impl CommandRequest {
             None => ".".to_string(),
         };
 
+        let max_timeout_ms = internal_timeout_limit_ms(tool_timeout_ms);
         let timeout_ms = match object.get("timeout_ms") {
             Some(value) => value.as_u64().ok_or_else(|| {
                 "timeout_ms must be an integer from 1 to the configured maximum".to_string()
@@ -341,6 +460,10 @@ impl CommandRequest {
     }
 }
 
+fn internal_timeout_limit_ms(tool_timeout_ms: u64) -> u64 {
+    tool_timeout_ms.saturating_sub(100).max(1)
+}
+
 async fn run_command(
     config: &RuntimeConfig,
     call_id: &str,
@@ -356,6 +479,7 @@ async fn run_command(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env_clear();
+    configure_process_group(&mut command);
     apply_allowed_env(&mut command);
 
     let mut child = command.spawn()?;
@@ -374,7 +498,7 @@ async fn run_command(
         output = &mut output => {
             let output = output?;
             if output.stdout_truncated || output.stderr_truncated {
-                let _ = child.kill().await;
+                terminate_child(&mut child).await;
                 let _ = child.wait().await;
                 return Ok(success(
                     call_id,
@@ -399,7 +523,7 @@ async fn run_command(
             ))
         }
         _ = tokio::time::sleep(std::time::Duration::from_millis(request.timeout_ms)) => {
-            let _ = child.kill().await;
+            terminate_child(&mut child).await;
             let _ = child.wait().await;
             Ok(failure(
                 call_id,
@@ -414,7 +538,7 @@ async fn run_command(
 
 #[cfg(unix)]
 fn shell_command(cmd: &str) -> Command {
-    let mut command = Command::new("sh");
+    let mut command = Command::new("/bin/sh");
     command.arg("-c").arg(cmd);
     command
 }
@@ -424,6 +548,47 @@ fn shell_command(cmd: &str) -> Command {
     let mut command = Command::new("cmd");
     command.arg("/C").arg(cmd);
     command
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+async fn terminate_child(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let group = format!("-{pid}");
+        let _ = Command::new("/bin/kill")
+            .arg("-TERM")
+            .arg(&group)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let _ = Command::new("/bin/kill")
+            .arg("-KILL")
+            .arg(&group)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+    let _ = child.kill().await;
+}
+
+#[cfg(not(unix))]
+async fn terminate_child(child: &mut tokio::process::Child) {
+    let _ = child.kill().await;
 }
 
 fn apply_allowed_env(command: &mut Command) {
@@ -449,31 +614,31 @@ const DENY_RULES: &[DenyRule] = &[
     },
     DenyRule {
         name: "git clean -fd",
-        denied: |cmd| contains_words(cmd, &["git", "clean", "-fd"]),
+        denied: git_clean_denied,
     },
     DenyRule {
         name: "rm -rf /",
-        denied: |cmd| contains_words(cmd, &["rm", "-rf", "/"]),
+        denied: |cmd| rm_force_recursive_target_denied(cmd, "/"),
     },
     DenyRule {
         name: "rm -rf .",
-        denied: |cmd| contains_words(cmd, &["rm", "-rf", "."]),
+        denied: |cmd| rm_force_recursive_target_denied(cmd, "."),
     },
     DenyRule {
         name: "sudo",
-        denied: |cmd| starts_with_word(cmd, "sudo"),
+        denied: |cmd| contains_token(cmd, "sudo"),
     },
     DenyRule {
         name: "shutdown",
-        denied: |cmd| starts_with_word(cmd, "shutdown"),
+        denied: |cmd| contains_token(cmd, "shutdown"),
     },
     DenyRule {
         name: "reboot",
-        denied: |cmd| starts_with_word(cmd, "reboot"),
+        denied: |cmd| contains_token(cmd, "reboot"),
     },
     DenyRule {
         name: "mkfs",
-        denied: |cmd| first_word_starts_with(cmd, "mkfs"),
+        denied: |cmd| contains_token_prefix(cmd, "mkfs"),
     },
 ];
 
@@ -489,16 +654,37 @@ fn contains_words(cmd: &str, words: &[&str]) -> bool {
     tokens.windows(words.len()).any(|window| window == words)
 }
 
-fn starts_with_word(cmd: &str, word: &str) -> bool {
+fn git_clean_denied(cmd: &str) -> bool {
     command_tokens(cmd)
-        .first()
-        .is_some_and(|token| token == word)
+        .windows(3)
+        .any(|window| window[0] == "git" && window[1] == "clean" && window[2].starts_with("-fd"))
 }
 
-fn first_word_starts_with(cmd: &str, prefix: &str) -> bool {
+fn rm_force_recursive_target_denied(cmd: &str, target: &str) -> bool {
+    let tokens = command_tokens(cmd);
+    tokens.iter().enumerate().any(|(index, token)| {
+        if token != "rm" {
+            return false;
+        }
+        let rest = &tokens[index + 1..];
+        rest.iter()
+            .any(|candidate| is_force_recursive_rm_option(candidate))
+            && rest.iter().any(|candidate| candidate == target)
+    })
+}
+
+fn is_force_recursive_rm_option(token: &str) -> bool {
+    token.starts_with('-') && token.contains('r') && token.contains('f')
+}
+
+fn contains_token(cmd: &str, word: &str) -> bool {
+    command_tokens(cmd).iter().any(|token| token == word)
+}
+
+fn contains_token_prefix(cmd: &str, prefix: &str) -> bool {
     command_tokens(cmd)
-        .first()
-        .is_some_and(|token| token.starts_with(prefix))
+        .iter()
+        .any(|token| token.starts_with(prefix))
 }
 
 fn command_tokens(cmd: &str) -> Vec<String> {
