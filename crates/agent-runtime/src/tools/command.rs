@@ -8,6 +8,7 @@ use std::{ffi::OsStr, process::Stdio, time::Instant};
 use tokio::process::Command;
 
 pub const EXEC_COMMAND: &str = "exec_command";
+const COMMAND_RESULT_ENVELOPE_RESERVE_BYTES: usize = 512;
 
 pub fn definition() -> ToolDefinition {
     ToolDefinition {
@@ -179,6 +180,9 @@ mod tests {
             "rm -fr /",
             "rm -rf -- /",
             "git clean -fdx",
+            "git clean -df",
+            "git clean -xfd",
+            "(sudo true)",
         ] {
             let result = execute(&config, "call-1", json!({ "cmd": cmd }), Instant::now()).await;
 
@@ -491,7 +495,8 @@ async fn run_command(
         .stderr
         .take()
         .ok_or_else(|| anyhow::anyhow!("command stderr unavailable"))?;
-    let output = read_limited_child_output(stdout, stderr, config.output_limit_bytes);
+    let output_limit_bytes = command_capture_limit_bytes(config.output_limit_bytes);
+    let output = read_limited_child_output(stdout, stderr, output_limit_bytes);
     tokio::pin!(output);
 
     tokio::select! {
@@ -655,9 +660,13 @@ fn contains_words(cmd: &str, words: &[&str]) -> bool {
 }
 
 fn git_clean_denied(cmd: &str) -> bool {
-    command_tokens(cmd)
-        .windows(3)
-        .any(|window| window[0] == "git" && window[1] == "clean" && window[2].starts_with("-fd"))
+    command_tokens(cmd).windows(3).any(|window| {
+        window[0] == "git" && window[1] == "clean" && is_git_clean_force_delete(&window[2])
+    })
+}
+
+fn is_git_clean_force_delete(token: &str) -> bool {
+    token.starts_with('-') && token.contains('f') && token.contains('d')
 }
 
 fn rm_force_recursive_target_denied(cmd: &str, target: &str) -> bool {
@@ -690,8 +699,22 @@ fn contains_token_prefix(cmd: &str, prefix: &str) -> bool {
 fn command_tokens(cmd: &str) -> Vec<String> {
     cmd.split(|character: char| character.is_whitespace() || matches!(character, ';' | '&' | '|'))
         .filter(|token| !token.is_empty())
-        .map(|token| token.to_ascii_lowercase())
+        .map(normalize_command_token)
         .collect()
+}
+
+fn normalize_command_token(token: &str) -> String {
+    token
+        .trim_matches(|character: char| matches!(character, '(' | ')' | '{' | '}' | '[' | ']'))
+        .to_ascii_lowercase()
+}
+
+fn command_capture_limit_bytes(output_limit_bytes: usize) -> usize {
+    if output_limit_bytes > COMMAND_RESULT_ENVELOPE_RESERVE_BYTES {
+        output_limit_bytes - COMMAND_RESULT_ENVELOPE_RESERVE_BYTES
+    } else {
+        output_limit_bytes.max(1)
+    }
 }
 
 fn success(

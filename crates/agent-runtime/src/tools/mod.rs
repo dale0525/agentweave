@@ -195,9 +195,6 @@ impl ToolRegistry {
         if !result.ok {
             return result;
         }
-        if result.tool == command::EXEC_COMMAND && result.metadata.output_truncated {
-            return result;
-        }
 
         let data_exceeds_limit = result
             .data
@@ -462,7 +459,7 @@ mod tests {
             command_mode: CommandMode::Allowed,
             max_tool_calls_per_turn: 16,
             tool_timeout_ms: 30_000,
-            output_limit_bytes: 512,
+            output_limit_bytes: 2048,
         };
         let registry = ToolRegistry::new(skills, &config);
 
@@ -477,6 +474,7 @@ mod tests {
         assert!(result.ok);
         assert!(result.metadata.stdout_truncated);
         assert!(result.metadata.output_truncated);
+        assert!(serde_json::to_vec(&result).unwrap().len() <= config.output_limit_bytes);
         let data = result.data.unwrap();
         assert_eq!(data["terminated_by_runtime"], true);
         assert_eq!(data["exit_code"], Value::Null);
