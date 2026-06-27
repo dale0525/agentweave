@@ -47,7 +47,7 @@ struct SkillBundleEntry {
     path: PathBuf,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SkillRegistry {
     skills: Vec<InstalledSkill>,
 }
