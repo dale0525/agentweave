@@ -189,6 +189,44 @@ Runtime behavior verified:
 - Server model-settings turns use the configured runtime workspace root and include workspace instruction context.
 - Server message turns return a clear bad request when completion endpoints are selected for tool-using runtime turns.
 
+## Codex-Like Runtime Phase 2 Verification
+
+Date: 2026-06-27
+
+Source design:
+
+- `docs/superpowers/specs/2026-06-27-codex-like-runtime-migration-design.md`
+
+Implementation plan:
+
+- `docs/superpowers/plans/2026-06-27-codex-like-runtime-phase-2.md`
+
+Automated checks:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 110/110, `agent-server` 11/11, `model-gateway` 15/15, doc tests 0 failures. |
+| `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy completed for `agent-runtime` and `agent-server` with no warnings. |
+| `pixi run cargo fmt --all --check` | PASS | Rust formatting check passed. |
+| `git diff --check HEAD` | PASS | Whitespace check exited 0. |
+| Source line budget | PASS | Edited and created source files were checked; largest checked source files were `crates/agent-runtime/src/tools/builtin.rs` and `crates/agent-server/src/api.rs` at 943 physical lines. |
+
+Focused runtime checks:
+
+- `search_files` searches workspace text through `rg` when available and a shell-free fallback when missing.
+- `search_files` rejects workspace escapes, caps result count, and truncates long match text safely.
+- `exec_command` is hidden by default and requires `workspace_write` plus `command_allowed` mode.
+- `exec_command` validates cwd inside the workspace, rejects unknown arguments, applies deny rules, enforces command timeouts, terminates Unix process groups where supported, and returns bounded stdout/stderr metadata.
+- `apply_patch` adds, updates, and deletes workspace files through the turn loop.
+- `apply_patch` rejects outside-workspace paths, symlink parent escapes, malformed patches, no-anchor hunks, ambiguous duplicate context, and conflicting multi-operation patches.
+- Turn-loop tests prove `search_files`, `exec_command`, and `apply_patch` can execute through model tool calls.
+
+Notes:
+
+- `exec_command` remains development-only and non-interactive in Phase 2.
+- `apply_patch` intentionally implements a minimal text patch grammar. Moves, binary patches, and full no-final-newline fidelity remain out of scope.
+- Approval workflows, stronger sandbox profiles, network policy, MCP, connectors, and Codex-style skill catalog behavior remain later phases.
+
 ## Known Gaps
 
 - The assistant reply is deterministic and local: `MVP agent received: ...`; it does not call a real model provider.

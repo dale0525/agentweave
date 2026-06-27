@@ -2385,3 +2385,51 @@ git commit -m "docs: record codex-like runtime phase 2 verification"
 - [ ] Turn-loop tests prove Phase 2 tools execute through model tool calls.
 - [ ] `docs/mvp-verification.md` records Phase 2 verification evidence.
 - [ ] No edited/new source file exceeds 1000 physical lines.
+
+## Codex-Like Runtime Phase 2 Completion Evidence
+
+Completed: 2026-06-27
+
+Commits:
+- `5c8f147` feat: add phase 2 tool registration plumbing
+- `d4b3ab5` fix: gate command tool registration by runtime mode
+- `792778c` docs: add codex-like runtime phase 2 plan
+- `e3860ec` fix: make phase 2 skeleton tools fail explicitly
+- `f4842d7` feat: add workspace search tool
+- `c7e9b4b` fix: bound workspace search output
+- `bd9efd6` feat: add development command tool
+- `61e943d` fix: harden command execution cleanup
+- `ddf2704` fix: keep truncated command results bounded
+- `966ab6f` fix: tighten command deny policy
+- `dc79d0c` fix: match command deny basenames
+- `956ba3e` feat: add workspace patch tool
+- `14c7cd7` test: update patch built-in dispatch coverage
+- `d305a2b` fix: harden patch validation
+- `6b0b24c` test: split patch tool tests
+- `695882e` fix: validate malformed patch hunk lines
+- `14898f1` test: cover phase 2 runtime tools
+
+Focused verification:
+- `pixi run cargo test -p agent-runtime tools::search::tests -- --nocapture`: PASS, 6/6
+- `pixi run cargo test -p agent-runtime tools::command::tests -- --nocapture`: PASS, 13/13
+- `pixi run cargo test -p agent-runtime tools::patch::patch_tests -- --nocapture`: PASS, 18/18
+- `pixi run cargo test -p agent-runtime turn::tests::phase_two_search_files_executes_through_turn_loop`: PASS
+- `pixi run cargo test -p agent-runtime turn::tests::phase_two_exec_command_is_advertised_only_when_allowed`: PASS
+- `pixi run cargo test -p agent-runtime turn::tests::phase_two_apply_patch_executes_through_turn_loop`: PASS
+
+Full verification:
+- `pixi run cargo test --workspace`: PASS, `agent-runtime` 110/110, `agent-server` 11/11, `model-gateway` 15/15
+- `pixi run cargo clippy --workspace --all-targets -- -D warnings`: PASS
+- `pixi run cargo fmt --all --check`: PASS
+- `git diff --check HEAD`: PASS
+- Line count check: PASS, no edited/new source file exceeds 1000 physical lines; largest checked files were `crates/agent-runtime/src/tools/builtin.rs` and `crates/agent-server/src/api.rs` at 943 lines.
+
+Review:
+- Task 1 spec compliance reviewer: PASS after command registration was gated by runtime mode.
+- Task 1 code quality reviewer: PASS after skeleton tools returned explicit failures.
+- Task 2 spec compliance reviewer: PASS.
+- Task 2 code quality reviewer: PASS after search output was bounded and `rg` streaming was added.
+- Task 3 spec compliance reviewer: PASS after process cleanup, timeout, and deny-rule fixes.
+- Task 3 code quality reviewer: PASS after command process groups, bounded registry results, command substitution denial, and basename matching fixes.
+- Task 4 spec compliance reviewer: PASS after strict patch validation and malformed hunk handling.
+- Task 4 code quality reviewer: PASS after conflict detection and patch test split.
