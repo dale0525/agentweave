@@ -6,11 +6,17 @@ use serde_json::{Value, json};
 use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
+    process::Stdio,
     time::Instant,
 };
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::Command,
+};
 
 pub const SEARCH_FILES: &str = "search_files";
+const MAX_SEARCH_RESULTS: usize = 1_000;
+const MAX_MATCH_TEXT_BYTES: usize = 4_096;
 
 pub fn definition() -> ToolDefinition {
     ToolDefinition {
@@ -146,8 +152,12 @@ fn parse_args(arguments: &Value) -> anyhow::Result<SearchArgs> {
             if limit == 0 {
                 anyhow::bail!("invalid arguments: limit must be a positive integer");
             }
-            usize::try_from(limit)
-                .map_err(|_| anyhow::anyhow!("invalid arguments: limit is too large"))?
+            let limit = usize::try_from(limit)
+                .map_err(|_| anyhow::anyhow!("invalid arguments: limit is too large"))?;
+            if limit > MAX_SEARCH_RESULTS {
+                anyhow::bail!("invalid arguments: limit must be at most {MAX_SEARCH_RESULTS}");
+            }
+            limit
         }
         None => 100,
     };
@@ -165,32 +175,31 @@ async fn rg_search(
     pattern: &str,
     limit: usize,
 ) -> anyhow::Result<Option<(Vec<SearchMatch>, bool)>> {
-    let output = match Command::new("rg")
+    let mut child = match Command::new("rg")
         .arg("--json")
         .arg("--color")
         .arg("never")
         .arg("--")
         .arg(pattern)
         .arg(absolute)
-        .output()
-        .await
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
     {
-        Ok(output) => output,
+        Ok(child) => child,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-
-    if !output.status.success() && output.status.code() != Some(1) {
-        anyhow::bail!(
-            "rg failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("rg stdout was not captured"))?;
+    let mut lines = BufReader::new(stdout).lines();
 
     let mut matches = Vec::new();
     let mut truncated = false;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let event: Value = match serde_json::from_str(line) {
+    while let Some(line) = lines.next_line().await? {
+        let event: Value = match serde_json::from_str(&line) {
             Ok(event) => event,
             Err(_) => continue,
         };
@@ -223,8 +232,22 @@ async fn rg_search(
             path: relative_path(&display_path),
             line: data["line_number"].as_u64().unwrap_or(1) as usize,
             column,
-            text: line_text.to_string(),
+            text: truncate_match_text(line_text),
         });
+    }
+
+    if truncated {
+        drop(lines);
+        child.kill().await?;
+        return Ok(Some((matches, true)));
+    }
+
+    let output = child.wait_with_output().await?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        anyhow::bail!(
+            "rg failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 
     Ok(Some((matches, truncated)))
@@ -259,7 +282,7 @@ async fn fallback_search(
                     path: relative_path(&relative_file),
                     line: line_index + 1,
                     column: column_index + 1,
-                    text: line.to_string(),
+                    text: truncate_match_text(line),
                 });
             }
         }
@@ -338,6 +361,18 @@ fn relative_path(path: &Path) -> String {
     } else {
         value
     }
+}
+
+fn truncate_match_text(text: &str) -> String {
+    if text.len() <= MAX_MATCH_TEXT_BYTES {
+        return text.to_string();
+    }
+
+    let mut end = MAX_MATCH_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 #[cfg(test)]
@@ -443,6 +478,46 @@ mod tests {
 
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "invalid_arguments");
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn search_files_rejects_limit_above_maximum() {
+        let root = unique_test_dir("search-limit-above-max");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let config = RuntimeConfig::workspace_write(&root, &root);
+
+        let result = execute(
+            &config,
+            "call-1",
+            json!({ "pattern": "needle", "limit": 1001 }),
+            std::time::Instant::now(),
+        )
+        .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "invalid_arguments");
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn fallback_search_truncates_long_match_text() {
+        let root = unique_test_dir("search-long-text");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let long_line = format!("needle{}尾", "a".repeat(5000));
+        tokio::fs::write(root.join("long.txt"), format!("{long_line}\n"))
+            .await
+            .unwrap();
+
+        let (matches, truncated) = fallback_search(&root, Path::new(""), "needle", 10)
+            .await
+            .unwrap();
+
+        assert!(!truncated);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].text.len() <= 4096);
+        assert!(matches[0].text.starts_with("needle"));
+        assert!(matches[0].text.is_char_boundary(matches[0].text.len()));
         remove_test_dir(root).await;
     }
 
