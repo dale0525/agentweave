@@ -304,6 +304,42 @@ mod tests {
         }
     }
 
+    struct FakePhaseTwoModel {
+        calls: AtomicUsize,
+        tool_name: &'static str,
+        arguments: serde_json::Value,
+        requests: Mutex<Vec<model_gateway::responses::GatewayRequest>>,
+    }
+
+    #[async_trait]
+    impl ModelClient for FakePhaseTwoModel {
+        async fn stream(
+            &self,
+            request: model_gateway::responses::GatewayRequest,
+        ) -> anyhow::Result<ModelEventStream> {
+            self.requests.lock().unwrap().push(request);
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = if call == 0 {
+                vec![
+                    Ok(GatewayEvent::ToolCall {
+                        call_id: "call-1".into(),
+                        name: self.tool_name.into(),
+                        arguments: self.arguments.clone(),
+                    }),
+                    Ok(GatewayEvent::Completed),
+                ]
+            } else {
+                vec![
+                    Ok(GatewayEvent::TextDelta {
+                        text: "done".into(),
+                    }),
+                    Ok(GatewayEvent::Completed),
+                ]
+            };
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
     fn skills_root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -321,6 +357,20 @@ mod tests {
 
     fn remove_workspace(root: &Path) {
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn tool_result(events: &[RuntimeEvent]) -> serde_json::Value {
+        events
+            .iter()
+            .find_map(|event| match event {
+                RuntimeEvent::ToolCallFinished { result, .. } => Some(result.clone()),
+                _ => None,
+            })
+            .expect("tool result event should be present")
+    }
+
+    fn request_has_tool(request: &model_gateway::responses::GatewayRequest, name: &str) -> bool {
+        request.tools.iter().any(|tool| tool.name == name)
     }
 
     #[tokio::test]
@@ -368,6 +418,121 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["tool"], "create_directory");
         assert_eq!(result["data"]["path"], "made-by-tool");
+        remove_workspace(&workspace);
+    }
+
+    #[tokio::test]
+    async fn phase_two_search_files_executes_through_turn_loop() {
+        let workspace = test_workspace("phase-two-search-files");
+        fs::write(workspace.join("notes.txt"), "find me\n").unwrap();
+        let skills = SkillRegistry::load(skills_root()).await.unwrap();
+        let config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
+        let runner = TurnRunner::new_with_config(
+            FakePhaseTwoModel {
+                calls: AtomicUsize::new(0),
+                tool_name: "search_files",
+                arguments: serde_json::json!({ "pattern": "find" }),
+                requests: Mutex::new(Vec::new()),
+            },
+            skills,
+            config,
+        );
+
+        let events = runner.run("search for find").await.unwrap();
+
+        let result = tool_result(&events);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["tool"], "search_files");
+        assert_eq!(result["data"]["matches"][0]["path"], "notes.txt");
+        remove_workspace(&workspace);
+    }
+
+    #[tokio::test]
+    async fn phase_two_exec_command_is_advertised_only_when_allowed() {
+        let disabled_workspace = test_workspace("phase-two-command-disabled");
+        let disabled_skills = SkillRegistry::load(skills_root()).await.unwrap();
+        let disabled_config =
+            RuntimeConfig::workspace_write(disabled_workspace.clone(), disabled_workspace.clone());
+        let disabled_runner = TurnRunner::new_with_config(
+            ScriptedModel {
+                calls: AtomicUsize::new(0),
+                requests: Mutex::new(Vec::new()),
+                responses: vec![vec![
+                    GatewayEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    GatewayEvent::Completed,
+                ]],
+            },
+            disabled_skills,
+            disabled_config,
+        );
+
+        let _events = disabled_runner
+            .run("what tools are available?")
+            .await
+            .unwrap();
+        {
+            let disabled_requests = disabled_runner.model.requests.lock().unwrap();
+            assert!(!request_has_tool(&disabled_requests[0], "exec_command"));
+        }
+        remove_workspace(&disabled_workspace);
+
+        let workspace = test_workspace("phase-two-command-allowed");
+        let skills = SkillRegistry::load(skills_root()).await.unwrap();
+        let config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone())
+            .with_command_mode(crate::tools::CommandMode::Allowed);
+        let runner = TurnRunner::new_with_config(
+            FakePhaseTwoModel {
+                calls: AtomicUsize::new(0),
+                tool_name: "exec_command",
+                arguments: serde_json::json!({ "cmd": "printf hello" }),
+                requests: Mutex::new(Vec::new()),
+            },
+            skills,
+            config,
+        );
+
+        let events = runner.run("run printf").await.unwrap();
+
+        let requests = runner.model.requests.lock().unwrap();
+        assert!(request_has_tool(&requests[0], "exec_command"));
+        drop(requests);
+        let result = tool_result(&events);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["tool"], "exec_command");
+        assert_eq!(result["data"]["stdout"], "hello");
+        remove_workspace(&workspace);
+    }
+
+    #[tokio::test]
+    async fn phase_two_apply_patch_executes_through_turn_loop() {
+        let workspace = test_workspace("phase-two-apply-patch");
+        let skills = SkillRegistry::load(skills_root()).await.unwrap();
+        let config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
+        let runner = TurnRunner::new_with_config(
+            FakePhaseTwoModel {
+                calls: AtomicUsize::new(0),
+                tool_name: "apply_patch",
+                arguments: serde_json::json!({
+                    "patch": "*** Begin Patch\n*** Add File: notes.txt\n+patched\n*** End Patch\n"
+                }),
+                requests: Mutex::new(Vec::new()),
+            },
+            skills,
+            config,
+        );
+
+        let events = runner.run("apply a patch").await.unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.join("notes.txt")).unwrap(),
+            "patched\n"
+        );
+        let result = tool_result(&events);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["tool"], "apply_patch");
+        assert_eq!(result["data"]["changed_files"][0]["path"], "notes.txt");
         remove_workspace(&workspace);
     }
 
