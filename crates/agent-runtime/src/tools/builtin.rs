@@ -46,7 +46,24 @@ impl BuiltInTools {
         let started = Instant::now();
 
         if name == command::EXEC_COMMAND && self.config.command_mode == CommandMode::Disabled {
-            return command::execute(call_id, arguments, started).await;
+            return command::execute(&self.config, call_id, arguments, started).await;
+        }
+
+        if name == command::EXEC_COMMAND
+            && !permission_allowed(
+                self.config.mode,
+                self.config.command_mode,
+                ToolPermission::ExecuteCommand,
+            )
+        {
+            return failure(
+                name,
+                call_id,
+                "permission_denied",
+                "tool is not allowed in the current runtime mode",
+                false,
+                started,
+            );
         }
 
         let Some(definition) = self
@@ -85,9 +102,15 @@ impl BuiltInTools {
             FILE_METADATA => self.file_metadata(call_id, arguments, started).await,
             READ_TEXT_FILE => self.read_text_file(call_id, arguments, started).await,
             WRITE_TEXT_FILE => self.write_text_file(call_id, arguments, started).await,
-            search::SEARCH_FILES => Ok(search::execute(call_id, arguments, started).await),
-            command::EXEC_COMMAND => Ok(command::execute(call_id, arguments, started).await),
-            patch::APPLY_PATCH => Ok(patch::execute(call_id, arguments, started).await),
+            search::SEARCH_FILES => {
+                Ok(search::execute(&self.config, call_id, arguments, started).await)
+            }
+            command::EXEC_COMMAND => {
+                Ok(command::execute(&self.config, call_id, arguments, started).await)
+            }
+            patch::APPLY_PATCH => {
+                Ok(patch::execute(&self.config, call_id, arguments, started).await)
+            }
             _ => Ok(failure(
                 name,
                 call_id,
@@ -578,6 +601,57 @@ mod tests {
 
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "command_disabled");
+        remove_test_dir(root);
+    }
+
+    #[tokio::test]
+    async fn read_only_allowed_exec_command_returns_permission_failure_if_forced() {
+        let root = unique_test_dir("command-read-only-forced");
+        std::fs::create_dir_all(&root).unwrap();
+        let tools = BuiltInTools::new(
+            RuntimeConfig::read_only(&root, &root).with_command_mode(CommandMode::Allowed),
+        );
+
+        let result = tools
+            .execute("exec_command", "call-1", json!({ "cmd": "printf hello" }))
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "permission_denied");
+        remove_test_dir(root);
+    }
+
+    #[tokio::test]
+    async fn search_files_skeleton_returns_not_implemented() {
+        let root = unique_test_dir("search-skeleton");
+        std::fs::create_dir_all(&root).unwrap();
+        let tools = BuiltInTools::new(RuntimeConfig::workspace_write(&root, &root));
+
+        let result = tools
+            .execute("search_files", "call-1", json!({ "pattern": "needle" }))
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "not_implemented");
+        remove_test_dir(root);
+    }
+
+    #[tokio::test]
+    async fn apply_patch_skeleton_returns_not_implemented() {
+        let root = unique_test_dir("patch-skeleton");
+        std::fs::create_dir_all(&root).unwrap();
+        let tools = BuiltInTools::new(RuntimeConfig::workspace_write(&root, &root));
+
+        let result = tools
+            .execute(
+                "apply_patch",
+                "call-1",
+                json!({ "patch": "*** Begin Patch\n" }),
+            )
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "not_implemented");
         remove_test_dir(root);
     }
 

@@ -1,5 +1,5 @@
 use super::{
-    ToolDefinition, ToolPermission,
+    RuntimeConfig, ToolDefinition, ToolPermission,
     result::{ToolError, ToolResult, ToolResultMetadata},
 };
 use serde_json::{Value, json};
@@ -25,7 +25,12 @@ pub fn definition() -> ToolDefinition {
     }
 }
 
-pub async fn execute(call_id: &str, _arguments: Value, started: Instant) -> ToolResult {
+pub async fn execute(
+    _config: &RuntimeConfig,
+    call_id: &str,
+    _arguments: Value,
+    started: Instant,
+) -> ToolResult {
     ToolResult::failure(
         EXEC_COMMAND,
         call_id,

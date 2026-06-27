@@ -1,4 +1,7 @@
-use super::{ToolDefinition, ToolPermission, result::ToolResult};
+use super::{
+    RuntimeConfig, ToolDefinition, ToolPermission,
+    result::{ToolError, ToolResult, ToolResultMetadata},
+};
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -20,14 +23,23 @@ pub fn definition() -> ToolDefinition {
     }
 }
 
-pub async fn execute(call_id: &str, _arguments: Value, started: Instant) -> ToolResult {
-    ToolResult::success(
+pub async fn execute(
+    _config: &RuntimeConfig,
+    call_id: &str,
+    _arguments: Value,
+    started: Instant,
+) -> ToolResult {
+    ToolResult::failure(
         APPLY_PATCH,
         call_id,
-        json!({ "changed_files": [] }),
-        super::result::ToolResultMetadata {
+        ToolError {
+            code: "not_implemented".to_string(),
+            message: "apply_patch is registered but not implemented yet".to_string(),
+            retryable: false,
+        },
+        ToolResultMetadata {
             duration_ms: started.elapsed().as_millis() as u64,
-            ..super::result::ToolResultMetadata::default()
+            ..ToolResultMetadata::default()
         },
     )
 }
