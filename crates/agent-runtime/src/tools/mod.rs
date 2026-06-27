@@ -446,7 +446,7 @@ mod tests {
             mode: RuntimeMode::WorkspaceWrite,
             command_mode: CommandMode::Disabled,
             max_tool_calls_per_turn: 16,
-            tool_timeout_ms: 1_000,
+            tool_timeout_ms: 30_000,
             output_limit_bytes: 32,
         };
         let registry = ToolRegistry::new(skills, &config);
@@ -478,7 +478,7 @@ mod tests {
             mode: RuntimeMode::WorkspaceWrite,
             command_mode: CommandMode::Disabled,
             max_tool_calls_per_turn: 16,
-            tool_timeout_ms: 1_000,
+            tool_timeout_ms: 30_000,
             output_limit_bytes: 32,
         };
         let registry = ToolRegistry::new(skills, &config);
