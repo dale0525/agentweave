@@ -388,6 +388,45 @@ Notes:
 - Connector auth state is metadata only. Real authentication, installation, secret handling, and schema materialization remain later work.
 - `crates/agent-runtime/src/tools/mod.rs` is now close to the 1000-line source limit and should be split before further substantial tool-registry changes.
 
+## Codex-Like Runtime Phase 7 Verification
+
+Date: 2026-06-28
+
+Source design:
+
+- `docs/superpowers/specs/2026-06-27-codex-like-runtime-migration-design.md`
+
+Implementation plan:
+
+- `docs/superpowers/plans/2026-06-28-codex-like-runtime-phase-7.md`
+
+Automated checks:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 146/146, `agent-server` 15/15, `model-gateway` 17/17, doc tests 0 failures. |
+| `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy completed for `model-gateway`, `agent-runtime`, and `agent-server` with no warnings. |
+| `pixi run cargo fmt --all --check` | PASS | Rust formatting check exited 0. |
+| `git diff --check HEAD` | PASS | Whitespace check exited 0. |
+| Source line budget | PASS | Checked `crates`, `apps`, and `scripts` source files; largest checked source file is `crates/agent-server/src/api.rs` at 971 physical lines. |
+
+Focused runtime checks:
+
+- Streaming tool-call argument assembly is covered by `model-gateway` tests and keeps parallel tool-call indices separate before producing completed calls.
+- `TurnRequest` can carry a turn-local active goal, and turn tests verify the active goal context is injected into model input.
+- Gateway usage events are reported as `RuntimeEvent::UsageReported`.
+- Token budget excess accumulates usage and stops the turn with a structured `TurnFailed` event.
+- Deterministic context compaction preserves leading authority blocks and the current user message.
+- Context-budget turns emit `RuntimeEvent::ContextCompacted`.
+- The subagent lifecycle service shell emits structured started, finished, and failed events.
+- `ToolRegistry::parallel_safe` is intentionally conservative: built-in read-workspace tools can be parallel-safe, while write, command, runtime skill, and external tools are not parallel-safe by default.
+- `tools/mod.rs` was split before adding behavior and is now 475 physical lines; `tools/registry_tests.rs` is 559 physical lines.
+
+Notes:
+
+- Phase 7 adds foundations for streaming assembly, goal and budget request modeling, deterministic compaction, subagent lifecycle events, and parallel-safety metadata.
+- Real HTTP SSE streaming, real subagent process management, real parallel tool scheduling, persistent goals/budgets, model-summarized compaction, and plugin installation remain later work.
+
 ## Known Gaps
 
 - Production server startup now wires `TurnRunner` to the model gateway and the runtime skill registry. Local unit tests still use a deterministic agent stub where isolated API behavior is under test.

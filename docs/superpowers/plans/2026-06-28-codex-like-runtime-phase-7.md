@@ -70,7 +70,7 @@ Modify:
 - Create: `crates/agent-runtime/src/tools/registry_tests.rs`
 - Modify: `crates/agent-runtime/src/tools/mod.rs`
 
-- [ ] **Step 1: Run current tools tests as refactor baseline**
+- [x] **Step 1: Run current tools tests as refactor baseline**
 
 Run:
 
@@ -81,7 +81,7 @@ wc -l crates/agent-runtime/src/tools/mod.rs
 
 Expected: tests pass; `tools/mod.rs` is close to 1000 lines.
 
-- [ ] **Step 2: Move tests without behavior changes**
+- [x] **Step 2: Move tests without behavior changes**
 
 Replace the inline module footer in `tools/mod.rs`:
 
@@ -109,7 +109,7 @@ use std::path::PathBuf;
 
 Keep test names unchanged.
 
-- [ ] **Step 3: Run moved tests**
+- [x] **Step 3: Run moved tests**
 
 Run:
 
@@ -121,7 +121,7 @@ wc -l crates/agent-runtime/src/tools/mod.rs crates/agent-runtime/src/tools/regis
 
 Expected: tests pass; both source files are below 1000 physical lines.
 
-- [ ] **Step 4: Commit test split**
+- [x] **Step 4: Commit test split**
 
 Run:
 
@@ -136,7 +136,7 @@ git commit -m "refactor: split tool registry tests"
 - Create: `crates/model-gateway/src/streaming.rs`
 - Modify: `crates/model-gateway/src/lib.rs`
 
-- [ ] **Step 1: Write failing streaming assembler tests**
+- [x] **Step 1: Write failing streaming assembler tests**
 
 Add tests in `streaming.rs`:
 
@@ -194,7 +194,7 @@ fn assembler_keeps_parallel_tool_indices_separate() {
 }
 ```
 
-- [ ] **Step 2: Run streaming tests to verify they fail**
+- [x] **Step 2: Run streaming tests to verify they fail**
 
 Run:
 
@@ -204,7 +204,7 @@ pixi run cargo test -p model-gateway streaming::tests -- --nocapture
 
 Expected: fail because the streaming module does not exist.
 
-- [ ] **Step 3: Implement assembler**
+- [x] **Step 3: Implement assembler**
 
 Add:
 
@@ -238,7 +238,7 @@ Export in `model-gateway/src/lib.rs`:
 pub mod streaming;
 ```
 
-- [ ] **Step 4: Run streaming tests to verify they pass**
+- [x] **Step 4: Run streaming tests to verify they pass**
 
 Run:
 
@@ -246,7 +246,7 @@ Run:
 pixi run cargo test -p model-gateway streaming::tests -- --nocapture
 ```
 
-- [ ] **Step 5: Commit streaming assembler**
+- [x] **Step 5: Commit streaming assembler**
 
 Run:
 
@@ -263,7 +263,7 @@ git commit -m "feat: add streaming tool call assembler"
 - Modify: `crates/agent-runtime/src/events.rs`
 - Modify: `crates/agent-runtime/src/turn.rs`
 
-- [ ] **Step 1: Write failing goal and usage tests**
+- [x] **Step 1: Write failing goal and usage tests**
 
 Add tests in `turn_request.rs`:
 
@@ -340,7 +340,7 @@ async fn usage_budget_accumulates_gateway_usage_and_stops_turn() {
 }
 ```
 
-- [ ] **Step 2: Run goal/budget tests to verify they fail**
+- [x] **Step 2: Run goal/budget tests to verify they fail**
 
 Run:
 
@@ -352,7 +352,7 @@ pixi run cargo test -p agent-runtime turn::tests::usage_budget_accumulates_gatew
 
 Expected: fail because turn requests, usage events, and goal injection do not exist.
 
-- [ ] **Step 3: Implement turn request and usage events**
+- [x] **Step 3: Implement turn request and usage events**
 
 Add:
 
@@ -377,7 +377,7 @@ Implement `TurnRunner::run_request(request)` and have `run(user_text)` call it w
 
 On `GatewayEvent::Usage`, accumulate budget, emit `UsageReported`, and return `TurnFailed` when the request budget is exceeded.
 
-- [ ] **Step 4: Run goal/budget tests to verify they pass**
+- [x] **Step 4: Run goal/budget tests to verify they pass**
 
 Run:
 
@@ -387,7 +387,7 @@ pixi run cargo test -p agent-runtime turn::tests::goal_context_is_injected_into_
 pixi run cargo test -p agent-runtime turn::tests::usage_budget_accumulates_gateway_usage_and_stops_turn -- --nocapture
 ```
 
-- [ ] **Step 5: Commit turn request and budget**
+- [x] **Step 5: Commit turn request and budget**
 
 Run:
 
@@ -404,7 +404,7 @@ git commit -m "feat: add turn goals and usage budgets"
 - Modify: `crates/agent-runtime/src/events.rs`
 - Modify: `crates/agent-runtime/src/turn.rs`
 
-- [ ] **Step 1: Write failing compaction tests**
+- [x] **Step 1: Write failing compaction tests**
 
 Add tests in `context.rs`:
 
@@ -458,7 +458,7 @@ async fn context_compaction_emits_event_when_budget_applies() {
 }
 ```
 
-- [ ] **Step 2: Run compaction tests to verify they fail**
+- [x] **Step 2: Run compaction tests to verify they fail**
 
 Run:
 
@@ -467,7 +467,7 @@ pixi run cargo test -p agent-runtime context::tests -- --nocapture
 pixi run cargo test -p agent-runtime turn::tests::context_compaction_emits_event_when_budget_applies -- --nocapture
 ```
 
-- [ ] **Step 3: Implement deterministic compaction**
+- [x] **Step 3: Implement deterministic compaction**
 
 Add `compact_model_input(input, budget_bytes)` that:
 
@@ -480,7 +480,7 @@ Add `RuntimeEvent::ContextCompacted { original_items, compacted_items, budget_by
 
 Call compaction in `TurnRunner::run_request` after goal injection and before the first model request when `context_budget_bytes` is set.
 
-- [ ] **Step 4: Run compaction tests to verify they pass**
+- [x] **Step 4: Run compaction tests to verify they pass**
 
 Run:
 
@@ -489,7 +489,7 @@ pixi run cargo test -p agent-runtime context::tests -- --nocapture
 pixi run cargo test -p agent-runtime turn::tests::context_compaction_emits_event_when_budget_applies -- --nocapture
 ```
 
-- [ ] **Step 5: Commit compaction foundation**
+- [x] **Step 5: Commit compaction foundation**
 
 Run:
 
@@ -505,7 +505,7 @@ git commit -m "feat: add deterministic context compaction"
 - Modify: `crates/agent-runtime/src/lib.rs`
 - Modify: `crates/agent-runtime/src/events.rs`
 
-- [ ] **Step 1: Write failing subagent lifecycle tests**
+- [x] **Step 1: Write failing subagent lifecycle tests**
 
 Add tests in `subagent.rs`:
 
@@ -533,7 +533,7 @@ async fn subagent_service_emits_failed_on_error() {
 }
 ```
 
-- [ ] **Step 2: Run subagent tests to verify they fail**
+- [x] **Step 2: Run subagent tests to verify they fail**
 
 Run:
 
@@ -541,7 +541,7 @@ Run:
 pixi run cargo test -p agent-runtime subagent::tests -- --nocapture
 ```
 
-- [ ] **Step 3: Implement subagent service shell**
+- [x] **Step 3: Implement subagent service shell**
 
 Add `RuntimeEvent` variants:
 
@@ -553,7 +553,7 @@ SubagentFailed { subagent_id: String, message: String },
 
 Add `SubagentService` that returns deterministic lifecycle event vectors for fake local tasks. This is a runtime service shell only; it does not spawn real agents.
 
-- [ ] **Step 4: Run subagent tests to verify they pass**
+- [x] **Step 4: Run subagent tests to verify they pass**
 
 Run:
 
@@ -561,7 +561,7 @@ Run:
 pixi run cargo test -p agent-runtime subagent::tests -- --nocapture
 ```
 
-- [ ] **Step 5: Commit subagent lifecycle shell**
+- [x] **Step 5: Commit subagent lifecycle shell**
 
 Run:
 
@@ -576,7 +576,7 @@ git commit -m "feat: add subagent lifecycle shell"
 - Modify: `crates/agent-runtime/src/tools/mod.rs`
 - Modify: `crates/agent-runtime/src/tools/registry_tests.rs`
 
-- [ ] **Step 1: Write failing parallel policy tests**
+- [x] **Step 1: Write failing parallel policy tests**
 
 Add tests in `tools/registry_tests.rs`:
 
@@ -615,7 +615,7 @@ fn write_command_runtime_and_external_tools_are_not_parallel_safe_by_default() {
 }
 ```
 
-- [ ] **Step 2: Run parallel policy tests to verify they fail**
+- [x] **Step 2: Run parallel policy tests to verify they fail**
 
 Run:
 
@@ -624,7 +624,7 @@ pixi run cargo test -p agent-runtime tools::registry_tests::read_only_builtin_to
 pixi run cargo test -p agent-runtime tools::registry_tests::write_command_runtime_and_external_tools_are_not_parallel_safe_by_default -- --nocapture
 ```
 
-- [ ] **Step 3: Implement conservative parallel policy**
+- [x] **Step 3: Implement conservative parallel policy**
 
 Add:
 
@@ -642,7 +642,7 @@ impl ToolRegistry {
 
 This is intentionally conservative: runtime skills and external tools are not parallel-safe even when they declare read permission.
 
-- [ ] **Step 4: Run parallel policy tests to verify they pass**
+- [x] **Step 4: Run parallel policy tests to verify they pass**
 
 Run:
 
@@ -651,7 +651,7 @@ pixi run cargo test -p agent-runtime tools::registry_tests::read_only_builtin_to
 pixi run cargo test -p agent-runtime tools::registry_tests::write_command_runtime_and_external_tools_are_not_parallel_safe_by_default -- --nocapture
 ```
 
-- [ ] **Step 5: Commit parallel policy**
+- [x] **Step 5: Commit parallel policy**
 
 Run:
 
@@ -666,7 +666,7 @@ git commit -m "feat: add conservative tool parallel policy"
 - Modify: `docs/mvp-verification.md`
 - Modify: `docs/superpowers/plans/2026-06-28-codex-like-runtime-phase-7.md`
 
-- [ ] **Step 1: Run full verification**
+- [x] **Step 1: Run full verification**
 
 Run:
 
@@ -678,7 +678,7 @@ git diff --check HEAD
 find crates apps scripts -type f \( -name '*.rs' -o -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' -o -name '*.css' -o -name '*.mjs' \) -not -path '*/target/*' -not -path '*/node_modules/*' -print0 | xargs -0 wc -l | sort -nr | head -20
 ```
 
-- [ ] **Step 2: Append verification record**
+- [x] **Step 2: Append verification record**
 
 Record:
 
@@ -689,7 +689,7 @@ Record:
 - Parallel-safe policy is conservative and excludes runtime skills/external tools by default.
 - Real parallel scheduler, real subagents, real SSE, persistent goals, and plugin install remain later work.
 
-- [ ] **Step 3: Commit documentation**
+- [x] **Step 3: Commit documentation**
 
 Run:
 
@@ -700,14 +700,14 @@ git commit -m "docs: record codex-like runtime phase 7 verification"
 
 ## Phase 7 Acceptance Checklist
 
-- [ ] Streaming tool-call arguments can be assembled before execution.
-- [ ] Parallel-safe policy exists and is conservative.
-- [ ] Runtime skills and external tools are not parallel-safe by default.
-- [ ] Turn requests can carry an active goal.
-- [ ] Active goal context is injected into model input.
-- [ ] Gateway usage events are reported as runtime events.
-- [ ] Token budget excess stops the turn with a structured failure.
-- [ ] Deterministic context compaction preserves authority blocks.
-- [ ] Subagent lifecycle shell emits started, finished, and failed events.
-- [ ] Documentation states real SSE, real subagents, real parallel scheduling, and plugin install remain later work.
-- [ ] No edited/new source file exceeds 1000 physical lines.
+- [x] Streaming tool-call arguments can be assembled before execution.
+- [x] Parallel-safe policy exists and is conservative.
+- [x] Runtime skills and external tools are not parallel-safe by default.
+- [x] Turn requests can carry an active goal.
+- [x] Active goal context is injected into model input.
+- [x] Gateway usage events are reported as runtime events.
+- [x] Token budget excess stops the turn with a structured failure.
+- [x] Deterministic context compaction preserves authority blocks.
+- [x] Subagent lifecycle shell emits started, finished, and failed events.
+- [x] Documentation states real SSE, real subagents, real parallel scheduling, and plugin install remain later work.
+- [x] No edited/new source file exceeds 1000 physical lines.
