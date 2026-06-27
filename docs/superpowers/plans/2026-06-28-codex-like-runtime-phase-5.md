@@ -58,7 +58,7 @@ Modify:
 - Modify: `crates/agent-runtime/src/lib.rs`
 - Modify: `crates/agent-runtime/src/tools/mod.rs`
 
-- [ ] **Step 1: Write failing policy tests**
+- [x] **Step 1: Write failing policy tests**
 
 Add tests in `policy.rs`:
 
@@ -89,7 +89,7 @@ assert_eq!(workspace_write.approval_policy, ApprovalPolicy::Never);
 assert_eq!(workspace_write.sandbox_profile.network, NetworkPolicy::UnrestrictedPlaceholder);
 ```
 
-- [ ] **Step 2: Run policy tests to verify they fail**
+- [x] **Step 2: Run policy tests to verify they fail**
 
 Run:
 
@@ -99,7 +99,7 @@ pixi run cargo test -p agent-runtime policy::tests tools::tests::runtime_config_
 
 Expected: fail because policy module and runtime config fields do not exist.
 
-- [ ] **Step 3: Implement policy types**
+- [x] **Step 3: Implement policy types**
 
 Add:
 
@@ -136,7 +136,7 @@ pub struct SandboxProfile {
 
 Default sandbox profile is workspace-only filesystem, development-only command, unrestricted network placeholder.
 
-- [ ] **Step 4: Run policy tests to verify they pass**
+- [x] **Step 4: Run policy tests to verify they pass**
 
 Run:
 
@@ -145,7 +145,7 @@ pixi run cargo test -p agent-runtime policy::tests -- --nocapture
 pixi run cargo test -p agent-runtime tools::tests::runtime_config_defaults_to_command_disabled -- --nocapture
 ```
 
-- [ ] **Step 5: Commit policy task**
+- [x] **Step 5: Commit policy task**
 
 Run:
 
@@ -161,7 +161,7 @@ git commit -m "feat: add runtime approval and sandbox policy types"
 - Modify: `crates/agent-runtime/src/events.rs`
 - Modify: `crates/agent-runtime/src/turn.rs`
 
-- [ ] **Step 1: Write failing approval tests**
+- [x] **Step 1: Write failing approval tests**
 
 Add a tool registry test:
 
@@ -221,7 +221,7 @@ async fn approval_required_blocks_tool_before_raw_arguments_event() {
 }
 ```
 
-- [ ] **Step 2: Run approval tests to verify they fail**
+- [x] **Step 2: Run approval tests to verify they fail**
 
 Run:
 
@@ -232,7 +232,7 @@ pixi run cargo test -p agent-runtime turn::tests::approval_required_blocks_tool_
 
 Expected: fail because approval requirement and event are missing.
 
-- [ ] **Step 3: Implement approval requirement and event**
+- [x] **Step 3: Implement approval requirement and event**
 
 Add:
 
@@ -265,7 +265,7 @@ In `TurnRunner`, when a model emits a tool call:
 4. Append the failure observation to model input.
 5. Do not emit `ToolCallStarted` with raw arguments.
 
-- [ ] **Step 4: Run approval tests to verify they pass**
+- [x] **Step 4: Run approval tests to verify they pass**
 
 Run:
 
@@ -274,7 +274,7 @@ pixi run cargo test -p agent-runtime tools::tests::tool_registry_reports_approva
 pixi run cargo test -p agent-runtime turn::tests::approval_required_blocks_tool_before_raw_arguments_event -- --nocapture
 ```
 
-- [ ] **Step 5: Commit approval blocking task**
+- [x] **Step 5: Commit approval blocking task**
 
 Run:
 
@@ -289,7 +289,7 @@ git commit -m "feat: block approval-required tool calls"
 - Modify: `docs/mvp-verification.md`
 - Modify: `docs/superpowers/plans/2026-06-28-codex-like-runtime-phase-5.md`
 
-- [ ] **Step 1: Run full verification**
+- [x] **Step 1: Run full verification**
 
 Run:
 
@@ -301,7 +301,7 @@ git diff --check HEAD
 find crates apps scripts -type f \( -name '*.rs' -o -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' -o -name '*.css' -o -name '*.mjs' \) -not -path '*/target/*' -not -path '*/node_modules/*' -print0 | xargs -0 wc -l | sort -nr | head -20
 ```
 
-- [ ] **Step 2: Append verification record**
+- [x] **Step 2: Append verification record**
 
 Record:
 
@@ -311,7 +311,7 @@ Record:
 - Network policy is a placeholder and does not claim isolation.
 - API-visible approval-required results do not include raw tool arguments.
 
-- [ ] **Step 3: Commit documentation**
+- [x] **Step 3: Commit documentation**
 
 Run:
 
@@ -322,13 +322,13 @@ git commit -m "docs: record codex-like runtime phase 5 verification"
 
 ## Phase 5 Acceptance Checklist
 
-- [ ] Runtime has approval policy data structures.
-- [ ] Runtime has explicit sandbox profile and network policy placeholder.
-- [ ] Runtime can request approval without executing blocked actions.
-- [ ] Approval-required outcomes are represented in structured events.
-- [ ] Approval-required tool results use `approval_required`.
-- [ ] Blocked approval-required calls do not emit raw tool arguments in `ToolCallStarted`.
-- [ ] API can report approval-required result through runtime events/tool result.
-- [ ] Documentation states that real sandbox/network isolation remains later work.
-- [ ] `docs/mvp-verification.md` records Phase 5 verification evidence.
-- [ ] No edited/new source file exceeds 1000 physical lines.
+- [x] Runtime has approval policy data structures.
+- [x] Runtime has explicit sandbox profile and network policy placeholder.
+- [x] Runtime can request approval without executing blocked actions.
+- [x] Approval-required outcomes are represented in structured events.
+- [x] Approval-required tool results use `approval_required`.
+- [x] Blocked approval-required calls do not emit raw tool arguments in `ToolCallStarted`.
+- [x] API can report approval-required result through runtime events/tool result.
+- [x] Documentation states that real sandbox/network isolation remains later work.
+- [x] `docs/mvp-verification.md` records Phase 5 verification evidence.
+- [x] No edited/new source file exceeds 1000 physical lines.

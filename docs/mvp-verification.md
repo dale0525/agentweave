@@ -306,6 +306,46 @@ Notes:
 - Dev endpoints are developer diagnostics only and are not mounted in the production router by default.
 - Approval workflow, sandbox profiles, MCP/connectors, deferred tools, and advanced Codex parity remain later phases.
 
+## Codex-Like Runtime Phase 5 Verification
+
+Date: 2026-06-28
+
+Source design:
+
+- `docs/superpowers/specs/2026-06-27-codex-like-runtime-migration-design.md`
+
+Implementation plan:
+
+- `docs/superpowers/plans/2026-06-28-codex-like-runtime-phase-5.md`
+
+Automated checks:
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 129/129, `agent-server` 14/14, `model-gateway` 15/15, doc tests 0 failures. |
+| `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy completed for `agent-runtime` and `agent-server` with no warnings. |
+| `pixi run cargo fmt --all --check` | PASS | Rust formatting check passed. |
+| `git diff --check HEAD` | PASS | Whitespace check exited 0. |
+| Source line budget | PASS | Checked `crates`, `apps`, and `scripts` source files; largest checked source file is `crates/agent-server/src/api.rs` at 971 physical lines. |
+
+Focused runtime checks:
+
+- `ApprovalPolicy` declares `Never`, `OnWorkspaceWrite`, and `OnCommand`, with tests proving which tool permissions require approval.
+- `SandboxProfile` explicitly declares filesystem, command, and network policy fields.
+- The default sandbox profile is workspace-only filesystem, development-only command, and `UnrestrictedPlaceholder` network policy.
+- `RuntimeConfig` stores approval policy and sandbox profile fields with explicit defaults.
+- `ToolRegistry::approval_requirement` reports approval requirements from tool permission metadata and the configured policy.
+- `TurnRunner` emits `ApprovalRequired` runtime events before blocked tool execution.
+- Approval-required tool calls return a structured tool result with error code `approval_required`.
+- Approval-required write actions are not executed, and blocked calls do not emit `ToolCallStarted` events containing raw arguments.
+- The API-visible runtime event stream can report approval-required outcomes through `ApprovalRequired` plus `ToolCallFinished`.
+
+Notes:
+
+- Phase 5 adds policy declarations and approval-required blocking, not an interactive approval UI.
+- `NetworkPolicy::UnrestrictedPlaceholder` is intentionally a declaration placeholder and does not claim network isolation.
+- Real OS sandboxing, persistent approval decisions, and end-user approval controls remain later work.
+
 ## Known Gaps
 
 - Production server startup now wires `TurnRunner` to the model gateway and the runtime skill registry. Local unit tests still use a deterministic agent stub where isolated API behavior is under test.
