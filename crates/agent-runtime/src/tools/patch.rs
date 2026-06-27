@@ -349,12 +349,16 @@ impl PatchParser {
             if line == "@@" || line.starts_with("@@ ") || is_boundary(line) {
                 break;
             }
-            let (prefix, content) = line.split_at(1);
+            let Some((&prefix, content)) = line.as_bytes().split_first() else {
+                return Err("hunk lines must start with space, -, or +".to_string());
+            };
+            let content = std::str::from_utf8(content)
+                .map_err(|_| "hunk lines must start with space, -, or +".to_string())?;
             let content = format!("{content}\n");
             let hunk_line = match prefix {
-                " " => HunkLine::Context(content),
-                "+" => HunkLine::Add(content),
-                "-" => HunkLine::Remove(content),
+                b' ' => HunkLine::Context(content),
+                b'+' => HunkLine::Add(content),
+                b'-' => HunkLine::Remove(content),
                 _ => return Err("hunk lines must start with space, -, or +".to_string()),
             };
             lines.push(hunk_line);

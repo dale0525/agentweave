@@ -195,6 +195,40 @@ async fn invalid_patch_returns_invalid_patch() {
     remove_test_dir(root);
 }
 #[tokio::test]
+async fn malformed_update_hunk_with_empty_line_returns_invalid_patch() {
+    let root = unique_test_dir("patch-empty-hunk-line");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("example.txt"), "alpha\n").unwrap();
+    let config = RuntimeConfig::workspace_write(&root, &root);
+    let result = execute(
+        &config,
+        "call-1",
+        json!({ "patch": "*** Begin Patch\n*** Update File: example.txt\n@@\n\n*** End Patch\n" }),
+        Instant::now(),
+    )
+    .await;
+    assert!(!result.ok);
+    assert_eq!(result.error.unwrap().code, "invalid_patch");
+    remove_test_dir(root);
+}
+#[tokio::test]
+async fn malformed_update_hunk_with_non_ascii_leading_char_returns_invalid_patch() {
+    let root = unique_test_dir("patch-non-ascii-hunk-line");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("example.txt"), "alpha\n").unwrap();
+    let config = RuntimeConfig::workspace_write(&root, &root);
+    let result = execute(
+        &config,
+        "call-1",
+        json!({ "patch": "*** Begin Patch\n*** Update File: example.txt\n@@\n你bad\n*** End Patch\n" }),
+        Instant::now(),
+    )
+    .await;
+    assert!(!result.ok);
+    assert_eq!(result.error.unwrap().code, "invalid_patch");
+    remove_test_dir(root);
+}
+#[tokio::test]
 async fn apply_patch_rejects_unknown_arguments() {
     let root = unique_test_dir("patch-unknown-args");
     std::fs::create_dir_all(&root).unwrap();
