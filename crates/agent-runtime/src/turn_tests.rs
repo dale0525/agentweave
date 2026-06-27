@@ -491,6 +491,31 @@ async fn usage_budget_accumulates_gateway_usage_and_stops_turn() {
 }
 
 #[tokio::test]
+async fn context_compaction_emits_event_when_budget_applies() {
+    let workspace = test_workspace("context-compaction");
+    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let runner = TurnRunner::new_with_config(
+        ScriptedModel {
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+            responses: vec![vec![GatewayEvent::Completed]],
+        },
+        skills,
+        RuntimeConfig::workspace_write(workspace.clone(), workspace.clone()),
+    );
+
+    let request = crate::turn_request::TurnRequest::new("hello").with_context_budget_bytes(64);
+    let events = runner.run_request(request).await.unwrap();
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::ContextCompacted { .. }))
+    );
+    remove_workspace(&workspace);
+}
+
+#[tokio::test]
 async fn phase_three_injects_summary_and_triggered_skill_instruction() {
     let workspace = test_workspace("phase-three-skill-instructions");
     let skills_root = workspace.join("skills");

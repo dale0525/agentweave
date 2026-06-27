@@ -1,3 +1,4 @@
+use crate::context::{compact_model_input_with_stats, exceeds_budget};
 use crate::events::RuntimeEvent;
 use crate::instructions::{InstructionConfig, InstructionContext};
 use crate::skill::SkillRegistry;
@@ -105,6 +106,17 @@ where
                     "content": format!("<active_goal>\n{}\n</active_goal>", goal.objective)
                 }),
             );
+        }
+        if let Some(context_budget_bytes) = request.context_budget_bytes
+            && exceeds_budget(&input, context_budget_bytes)?
+        {
+            let compacted = compact_model_input_with_stats(input, context_budget_bytes)?;
+            events.push(RuntimeEvent::ContextCompacted {
+                original_items: compacted.original_items,
+                compacted_items: compacted.compacted_items,
+                budget_bytes: context_budget_bytes,
+            });
+            input = compacted.input;
         }
         let tools = gateway_tools(self.tools.definitions());
         let mut final_text = String::new();

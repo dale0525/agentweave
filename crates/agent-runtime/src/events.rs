@@ -36,6 +36,11 @@ pub enum RuntimeEvent {
         total_tokens: u64,
         exceeded: bool,
     },
+    ContextCompacted {
+        original_items: usize,
+        compacted_items: usize,
+        budget_bytes: usize,
+    },
     AssistantMessageFinished {
         text: String,
     },
