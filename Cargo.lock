@@ -27,7 +27,10 @@ version = "0.1.0"
 dependencies = [
  "agent-runtime",
  "anyhow",
+ "async-trait",
  "axum",
+ "futures",
+ "model-gateway",
  "serde",
  "serde_json",
  "tokio",

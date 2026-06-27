@@ -7,7 +7,9 @@ license.workspace = true
 [dependencies]
 agent-runtime = { path = "../agent-runtime" }
 anyhow.workspace = true
+async-trait.workspace = true
 axum.workspace = true
+model-gateway = { path = "../model-gateway" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -16,3 +18,6 @@ tracing-subscriber.workspace = true
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 uuid.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
