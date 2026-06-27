@@ -171,19 +171,23 @@ Automated checks:
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| `pixi run cargo test --workspace` | PASS | Rust workspace tests passed: `agent-runtime` 57/57, `agent-server` 10/10, `model-gateway` 15/15, doc tests 0 failures. |
+| `pixi run cargo test --workspace` | PASS | Clean archive Rust workspace tests passed: `agent-runtime` 57/57, `agent-server` 11/11, `model-gateway` 15/15, doc tests 0 failures. |
 | `pixi run cargo clippy --workspace --all-targets -- -D warnings` | PASS | Clippy completed for `model-gateway`, `agent-runtime`, and `agent-server` with no warnings. |
 | `pixi run cargo fmt --all --check` | PASS | Rust formatting check passed. |
 | `git diff --check HEAD` | PASS | Whitespace check exited 0. |
-| Source line budget | PASS | Edited and created source files were checked; largest checked source file was `crates/agent-server/src/api.rs` at 891 physical lines. |
+| Source line budget | PASS | Edited and created source files were checked in a clean archive; largest checked source file was `crates/agent-server/src/api.rs` at 943 physical lines. |
 
 Runtime behavior verified:
 
 - Built-in `create_directory` can create a workspace directory through the turn loop.
 - `read_only` runtime mode blocks write tools with a structured `permission_denied` result.
+- Timed-out runtime skill processes are killed before they can continue writing after timeout.
+- Runtime skill stdout and stderr are bounded by the configured output limit before JSON parsing.
+- Built-in `read_text_file` rejects files larger than the configured output limit before reading them into memory.
 - The first model request includes base instructions, tool schemas, and AGENTS.md project instructions.
 - Completion endpoints reject non-empty tool schemas with `model_endpoint_does_not_support_tools`.
 - Server model-settings turns use the configured runtime workspace root and include workspace instruction context.
+- Server message turns return a clear bad request when completion endpoints are selected for tool-using runtime turns.
 
 ## Known Gaps
 
