@@ -1,6 +1,10 @@
 use agent_runtime::{
     instructions::{InstructionConfig, InstructionContext},
-    tools::{ToolRegistry, schema::ToolDiagnostic},
+    tools::{
+        ToolRegistry,
+        discovery::{ConnectorMetadata, ToolDiscoveryItem},
+        schema::ToolDiagnostic,
+    },
 };
 use axum::{
     Json, Router,
@@ -16,6 +20,12 @@ use crate::api::AppState;
 #[derive(Debug, Serialize)]
 struct DevToolsResponse {
     tools: Vec<ToolDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct DevToolDiscoveryResponse {
+    tools: Vec<ToolDiscoveryItem>,
+    connectors: Vec<ConnectorMetadata>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +45,7 @@ struct InstructionsPreviewResponse {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/dev/tools", get(list_tools))
+        .route("/dev/tool-discovery", get(discover_tools))
         .route("/dev/instructions/preview", post(preview_instructions))
         .with_state(state)
 }
@@ -47,6 +58,19 @@ async fn list_tools(
 
     Ok(Json(DevToolsResponse {
         tools: registry.diagnostics(),
+    }))
+}
+
+async fn discover_tools(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DevToolDiscoveryResponse>, StatusCode> {
+    let skills = state.skills().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let registry = ToolRegistry::new(skills, &state.runtime_config());
+    let discovery = registry.discovery();
+
+    Ok(Json(DevToolDiscoveryResponse {
+        tools: discovery.tools,
+        connectors: discovery.connectors,
     }))
 }
 
@@ -158,6 +182,64 @@ mod tests {
         assert!(tools.iter().any(|tool| tool["name"] == "create_directory"));
         assert!(tools.iter().all(|tool| tool.get("schema").is_some()));
         remove_test_dir(skills_root).await;
+    }
+
+    #[tokio::test]
+    async fn dev_tool_discovery_returns_deferred_tools_and_connectors() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let workspace = unique_test_dir("tool-discovery");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let skills_root = workspace.join("skills");
+        tokio::fs::create_dir_all(&skills_root).await.unwrap();
+        let skills = SkillRegistry::load_development(&skills_root).await.unwrap();
+        let mut config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
+        config
+            .external_tools
+            .push(agent_runtime::tools::discovery::ExternalToolConfig::mcp(
+                "search",
+                "expensive_lookup",
+                "Search a remote corpus.",
+                serde_json::json!({ "type": "object" }),
+                agent_runtime::tools::discovery::ExternalToolVisibility::Deferred {
+                    summary: "Remote corpus lookup.".into(),
+                },
+            ));
+        config
+            .connectors
+            .push(agent_runtime::tools::discovery::ConnectorMetadata {
+                id: "search".into(),
+                name: "Search MCP".into(),
+                description: "Remote search connector.".into(),
+                version: "0.1.0".into(),
+                permissions: vec![agent_runtime::tools::ToolPermission::ReadWorkspace],
+                auth_state: agent_runtime::tools::discovery::ConnectorAuthState::NotRequired,
+                tool_count: 1,
+            });
+        let state = Arc::new(
+            crate::api::AppState::new_with_agent_and_skills(storage, Arc::new(TestAgent), skills)
+                .with_runtime_config(config),
+        );
+        let app = crate::api::router_with_dev_routes(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/dev/tool-discovery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert!(body["tools"].as_array().unwrap().iter().any(|tool| {
+            tool["name"] == "mcp__search__expensive_lookup"
+                && tool["deferred"] == true
+                && tool["schema_loaded"] == false
+        }));
+        assert_eq!(body["connectors"][0]["id"], "search");
+        remove_test_dir(workspace).await;
     }
 
     #[tokio::test]

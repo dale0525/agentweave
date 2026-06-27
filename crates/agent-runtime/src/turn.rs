@@ -646,6 +646,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deferred_external_tools_are_not_sent_as_model_tool_schemas() {
+        let workspace = test_workspace("deferred-tools-hidden");
+        let skills = SkillRegistry::load(skills_root()).await.unwrap();
+        let config = RuntimeConfig {
+            external_tools: vec![crate::tools::discovery::ExternalToolConfig::mcp(
+                "search",
+                "expensive_lookup",
+                "Search a remote corpus.",
+                serde_json::json!({ "type": "object" }),
+                crate::tools::discovery::ExternalToolVisibility::Deferred {
+                    summary: "Remote corpus lookup.".into(),
+                },
+            )],
+            ..RuntimeConfig::workspace_write(workspace.clone(), workspace.clone())
+        };
+        let runner = TurnRunner::new_with_config(
+            ScriptedModel {
+                calls: AtomicUsize::new(0),
+                requests: Mutex::new(Vec::new()),
+                responses: vec![vec![
+                    GatewayEvent::TextDelta {
+                        text: "done".into(),
+                    },
+                    GatewayEvent::Completed,
+                ]],
+            },
+            skills,
+            config,
+        );
+
+        let _events = runner.run("hello").await.unwrap();
+        let requests = runner.model.requests.lock().unwrap();
+
+        assert!(!request_has_tool(
+            &requests[0],
+            "mcp__search__expensive_lookup"
+        ));
+        remove_workspace(&workspace);
+    }
+
+    #[tokio::test]
     async fn phase_three_injects_summary_and_triggered_skill_instruction() {
         let workspace = test_workspace("phase-three-skill-instructions");
         let skills_root = workspace.join("skills");
