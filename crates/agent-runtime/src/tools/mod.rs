@@ -1,6 +1,10 @@
 pub mod builtin;
+pub mod command;
+pub mod patch;
 pub mod path;
+pub mod process;
 pub mod result;
+pub mod search;
 
 use crate::skill::SkillRegistry;
 use builtin::BuiltInTools;
@@ -17,6 +21,7 @@ const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum CommandMode {
     Disabled,
+    Allowed,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -50,6 +55,11 @@ impl RuntimeConfig {
             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
         }
     }
+
+    pub fn with_command_mode(mut self, command_mode: CommandMode) -> Self {
+        self.command_mode = command_mode;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -62,6 +72,7 @@ pub enum RuntimeMode {
 pub enum ToolPermission {
     ReadWorkspace,
     WriteWorkspace,
+    ExecuteCommand,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -72,12 +83,17 @@ pub struct ToolDefinition {
     pub permission: ToolPermission,
 }
 
-pub fn permission_allowed(mode: RuntimeMode, permission: ToolPermission) -> bool {
-    match (mode, permission) {
-        (RuntimeMode::ReadOnly, ToolPermission::WriteWorkspace) => false,
-        (RuntimeMode::ReadOnly, ToolPermission::ReadWorkspace)
-        | (RuntimeMode::WorkspaceWrite, ToolPermission::ReadWorkspace)
-        | (RuntimeMode::WorkspaceWrite, ToolPermission::WriteWorkspace) => true,
+pub fn permission_allowed(
+    mode: RuntimeMode,
+    command_mode: CommandMode,
+    permission: ToolPermission,
+) -> bool {
+    match permission {
+        ToolPermission::ReadWorkspace => true,
+        ToolPermission::WriteWorkspace => mode == RuntimeMode::WorkspaceWrite,
+        ToolPermission::ExecuteCommand => {
+            mode == RuntimeMode::WorkspaceWrite && command_mode == CommandMode::Allowed
+        }
     }
 }
 
@@ -258,19 +274,47 @@ mod tests {
     fn read_only_blocks_workspace_writes() {
         assert!(permission_allowed(
             RuntimeMode::ReadOnly,
+            CommandMode::Disabled,
             ToolPermission::ReadWorkspace
         ));
         assert!(!permission_allowed(
             RuntimeMode::ReadOnly,
+            CommandMode::Disabled,
             ToolPermission::WriteWorkspace
         ));
         assert!(permission_allowed(
             RuntimeMode::WorkspaceWrite,
+            CommandMode::Disabled,
             ToolPermission::ReadWorkspace
         ));
         assert!(permission_allowed(
             RuntimeMode::WorkspaceWrite,
+            CommandMode::Disabled,
             ToolPermission::WriteWorkspace
+        ));
+    }
+
+    #[test]
+    fn command_permission_requires_workspace_write_and_command_allowed() {
+        assert!(!permission_allowed(
+            RuntimeMode::ReadOnly,
+            CommandMode::Disabled,
+            ToolPermission::ExecuteCommand
+        ));
+        assert!(!permission_allowed(
+            RuntimeMode::ReadOnly,
+            CommandMode::Allowed,
+            ToolPermission::ExecuteCommand
+        ));
+        assert!(!permission_allowed(
+            RuntimeMode::WorkspaceWrite,
+            CommandMode::Disabled,
+            ToolPermission::ExecuteCommand
+        ));
+        assert!(permission_allowed(
+            RuntimeMode::WorkspaceWrite,
+            CommandMode::Allowed,
+            ToolPermission::ExecuteCommand
         ));
     }
 
@@ -294,6 +338,16 @@ mod tests {
         assert_eq!(read_only.max_tool_calls_per_turn, 16);
         assert_eq!(read_only.tool_timeout_ms, 30_000);
         assert_eq!(read_only.output_limit_bytes, 64 * 1024);
+    }
+
+    #[test]
+    fn runtime_config_can_enable_development_command_mode() {
+        let workspace_root = PathBuf::from("/workspace");
+        let cwd = workspace_root.join("project");
+        let config = RuntimeConfig::workspace_write(workspace_root, cwd)
+            .with_command_mode(CommandMode::Allowed);
+
+        assert_eq!(config.command_mode, CommandMode::Allowed);
     }
 
     #[tokio::test]

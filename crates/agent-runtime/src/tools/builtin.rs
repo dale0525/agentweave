@@ -1,6 +1,8 @@
 use super::{
-    RuntimeConfig, ToolDefinition, ToolPermission, path, permission_allowed,
+    CommandMode, RuntimeConfig, ToolDefinition, ToolPermission, command, patch, path,
+    permission_allowed,
     result::{ToolError, ToolResult, ToolResultMetadata},
+    search,
 };
 use serde_json::{Value, json};
 use std::io::ErrorKind;
@@ -23,18 +25,30 @@ impl BuiltInTools {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        definitions()
+        definitions(self.config.command_mode)
     }
 
     pub fn handles(name: &str) -> bool {
         matches!(
             name,
-            CREATE_DIRECTORY | LIST_DIRECTORY | FILE_METADATA | READ_TEXT_FILE | WRITE_TEXT_FILE
+            CREATE_DIRECTORY
+                | LIST_DIRECTORY
+                | FILE_METADATA
+                | READ_TEXT_FILE
+                | WRITE_TEXT_FILE
+                | search::SEARCH_FILES
+                | command::EXEC_COMMAND
+                | patch::APPLY_PATCH
         )
     }
 
     pub async fn execute(&self, name: &str, call_id: &str, arguments: Value) -> ToolResult {
         let started = Instant::now();
+
+        if name == command::EXEC_COMMAND && self.config.command_mode == CommandMode::Disabled {
+            return command::execute(call_id, arguments, started).await;
+        }
+
         let Some(definition) = self
             .definitions()
             .into_iter()
@@ -50,7 +64,11 @@ impl BuiltInTools {
             );
         };
 
-        if !permission_allowed(self.config.mode, definition.permission) {
+        if !permission_allowed(
+            self.config.mode,
+            self.config.command_mode,
+            definition.permission,
+        ) {
             return failure(
                 name,
                 call_id,
@@ -67,6 +85,9 @@ impl BuiltInTools {
             FILE_METADATA => self.file_metadata(call_id, arguments, started).await,
             READ_TEXT_FILE => self.read_text_file(call_id, arguments, started).await,
             WRITE_TEXT_FILE => self.write_text_file(call_id, arguments, started).await,
+            search::SEARCH_FILES => Ok(search::execute(call_id, arguments, started).await),
+            command::EXEC_COMMAND => Ok(command::execute(call_id, arguments, started).await),
+            patch::APPLY_PATCH => Ok(patch::execute(call_id, arguments, started).await),
             _ => Ok(failure(
                 name,
                 call_id,
@@ -260,8 +281,8 @@ impl BuiltInTools {
     }
 }
 
-fn definitions() -> Vec<ToolDefinition> {
-    vec![
+fn definitions(command_mode: CommandMode) -> Vec<ToolDefinition> {
+    let mut definitions = vec![
         tool_definition(
             CREATE_DIRECTORY,
             "Create a directory inside the workspace.",
@@ -324,7 +345,15 @@ fn definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         ),
-    ]
+        search::definition(),
+        patch::definition(),
+    ];
+
+    if command_mode == CommandMode::Allowed {
+        definitions.push(command::definition());
+    }
+
+    definitions
 }
 
 fn tool_definition(
@@ -468,7 +497,7 @@ fn relative_path(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::RuntimeConfig;
+    use crate::tools::{CommandMode, RuntimeConfig};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -489,6 +518,47 @@ mod tests {
         assert!(result.ok);
         assert!(root.join("src").join("generated").is_dir());
         assert_eq!(result.data.unwrap()["path"], "src/generated");
+        remove_test_dir(root);
+    }
+
+    #[tokio::test]
+    async fn definitions_include_exec_command_only_when_command_mode_allowed() {
+        let root = unique_test_dir("command-definitions");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let disabled_tools = BuiltInTools::new(RuntimeConfig::workspace_write(&root, &root));
+        assert!(
+            !disabled_tools
+                .definitions()
+                .iter()
+                .any(|tool| tool.name == "exec_command")
+        );
+
+        let allowed_tools = BuiltInTools::new(
+            RuntimeConfig::workspace_write(&root, &root).with_command_mode(CommandMode::Allowed),
+        );
+        assert!(
+            allowed_tools
+                .definitions()
+                .iter()
+                .any(|tool| tool.name == "exec_command")
+        );
+
+        remove_test_dir(root);
+    }
+
+    #[tokio::test]
+    async fn disabled_exec_command_returns_structured_failure_if_forced() {
+        let root = unique_test_dir("command-disabled-forced");
+        std::fs::create_dir_all(&root).unwrap();
+        let tools = BuiltInTools::new(RuntimeConfig::workspace_write(&root, &root));
+
+        let result = tools
+            .execute("exec_command", "call-1", json!({ "cmd": "printf hello" }))
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "command_disabled");
         remove_test_dir(root);
     }
 
