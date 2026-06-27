@@ -622,17 +622,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_files_skeleton_returns_not_implemented() {
-        let root = unique_test_dir("search-skeleton");
+    async fn search_files_dispatch_returns_matches() {
+        let root = unique_test_dir("search-dispatch");
         std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notes.txt"), "alpha\nneedle\n").unwrap();
         let tools = BuiltInTools::new(RuntimeConfig::workspace_write(&root, &root));
 
         let result = tools
             .execute("search_files", "call-1", json!({ "pattern": "needle" }))
             .await;
 
-        assert!(!result.ok);
-        assert_eq!(result.error.unwrap().code, "not_implemented");
+        assert!(result.ok);
+        let data = result.data.unwrap();
+        assert_eq!(data["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(data["matches"][0]["path"], "notes.txt");
         remove_test_dir(root);
     }
 
