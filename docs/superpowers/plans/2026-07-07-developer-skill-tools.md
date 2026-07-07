@@ -16,6 +16,7 @@
 - Use `pixi` for all project commands.
 - Current branch is `main`; develop in the main branch and do not create a worktree.
 - Do not revert unrelated uncommitted changes already present in the worktree.
+- When committing from a file that had pre-existing unrelated changes, stage only the hunks created by the current task and verify `git diff --cached` before committing.
 - Configure git identity as `Logic Tan <logictan89@gmail.com>` before commits.
 - Development routes must remain absent unless `GENERAL_AGENT_DEV_API=1` mounts `router_with_dev_routes`.
 - UI implementation must follow these Stitch screens:
