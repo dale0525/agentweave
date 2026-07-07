@@ -67,11 +67,11 @@ pub async fn scan_skill_packages(root: impl AsRef<Path>) -> anyhow::Result<DevSk
     let mut entries = tokio::fs::read_dir(&canonical_root).await?;
 
     while let Some(entry) = entries.next_entry().await? {
-        let file_type = entry.file_type().await?;
-        if !file_type.is_dir() {
+        let package_path = entry.path();
+        if !is_safe_package_entry_for_scan(&canonical_root, &package_path).await? {
             continue;
         }
-        packages.push(scan_one_package(&canonical_root, entry.path()).await);
+        packages.push(scan_one_package(&canonical_root, package_path).await);
     }
 
     packages.sort_by(|left, right| left.id.cmp(&right.id));
@@ -92,14 +92,10 @@ pub async fn delete_skill_package(
     let canonical_root = ensure_skills_root(root).await?;
     validate_package_id(id)?;
     let target = canonical_root.join(id);
-    let canonical_target = tokio::fs::canonicalize(&target).await?;
-    if !canonical_target.starts_with(&canonical_root) {
-        anyhow::bail!("unsafe skill package path: {id}");
+    match classify_package_entry_for_delete(&canonical_root, &target, id).await? {
+        PackageEntryKind::Directory => tokio::fs::remove_dir_all(&target).await?,
+        PackageEntryKind::Symlink => tokio::fs::remove_file(&target).await?,
     }
-    if !tokio::fs::metadata(&canonical_target).await?.is_dir() {
-        anyhow::bail!("skill package is not a directory: {id}");
-    }
-    tokio::fs::remove_dir_all(&canonical_target).await?;
     scan_skill_packages(&canonical_root).await
 }
 
@@ -117,6 +113,68 @@ async fn ensure_skills_root(root: &Path) -> anyhow::Result<PathBuf> {
         );
     }
     Ok(canonical_root)
+}
+
+async fn is_safe_package_entry_for_scan(root: &Path, package_path: &Path) -> anyhow::Result<bool> {
+    let file_type = tokio::fs::symlink_metadata(package_path)
+        .await
+        .with_context(|| format!("failed to read package entry {}", package_path.display()))?
+        .file_type();
+    if file_type.is_dir() {
+        return Ok(true);
+    }
+    if !file_type.is_symlink() {
+        return Ok(false);
+    }
+
+    let canonical_path = match tokio::fs::canonicalize(package_path).await {
+        Ok(path) => path,
+        Err(_) => return Ok(false),
+    };
+    if !canonical_path.starts_with(root) {
+        return Ok(false);
+    }
+
+    Ok(tokio::fs::metadata(&canonical_path)
+        .await
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackageEntryKind {
+    Directory,
+    Symlink,
+}
+
+async fn classify_package_entry_for_delete(
+    root: &Path,
+    target: &Path,
+    id: &str,
+) -> anyhow::Result<PackageEntryKind> {
+    let metadata = tokio::fs::symlink_metadata(target)
+        .await
+        .with_context(|| format!("failed to read skill package entry {}", target.display()))?;
+    let file_type = metadata.file_type();
+    if !file_type.is_dir() && !file_type.is_symlink() {
+        anyhow::bail!("skill package is not a directory: {id}");
+    }
+
+    let canonical_target = tokio::fs::canonicalize(target)
+        .await
+        .with_context(|| format!("failed to resolve skill package {}", target.display()))?;
+    if !canonical_target.starts_with(root) {
+        anyhow::bail!("unsafe skill package path: {id}");
+    }
+    if !tokio::fs::metadata(&canonical_target).await?.is_dir() {
+        anyhow::bail!("skill package is not a directory: {id}");
+    }
+
+    if file_type.is_symlink() {
+        Ok(PackageEntryKind::Symlink)
+    } else {
+        Ok(PackageEntryKind::Directory)
+    }
 }
 
 async fn scan_one_package(root: &Path, package_path: PathBuf) -> DevSkillPackage {
@@ -324,6 +382,8 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::os::unix::fs as unix_fs;
     use tokio::fs;
 
     #[tokio::test]
@@ -393,6 +453,79 @@ mod tests {
         remove_test_dir(root).await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scan_includes_symlinked_package_inside_root() {
+        let root = unique_test_dir("scan-safe-symlink");
+        let storage_root = root.join("storage");
+        write_runtime_skill(&storage_root, "target-package", "target-package", "echo").await;
+        create_dir_symlink(
+            storage_root.join("target-package"),
+            root.join("linked-package"),
+        );
+
+        let inventory = scan_skill_packages(&root).await.unwrap();
+        let packages = packages_by_id(&inventory);
+
+        assert_eq!(
+            packages["linked-package"].package_kind,
+            DevSkillPackageKind::Runtime
+        );
+        assert!(packages["linked-package"].has_runtime_manifest);
+        assert_eq!(packages["linked-package"].runtime_tools, vec!["echo"]);
+        remove_test_dir(root).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_symlinked_package_removes_link_only() {
+        let root = unique_test_dir("delete-safe-symlink");
+        let storage_root = root.join("storage");
+        write_runtime_skill(&storage_root, "target-package", "target-package", "echo").await;
+        create_dir_symlink(
+            storage_root.join("target-package"),
+            root.join("linked-package"),
+        );
+
+        let inventory = delete_skill_package(&root, "linked-package").await.unwrap();
+        let packages = packages_by_id(&inventory);
+
+        assert!(!packages.contains_key("linked-package"));
+        assert!(!root.join("linked-package").exists());
+        assert!(
+            root.join("storage")
+                .join("target-package")
+                .join("skill.json")
+                .exists()
+        );
+        remove_test_dir(root).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_escape_is_not_scanned_or_deleted() {
+        let root = unique_test_dir("scan-escape-symlink");
+        let outside_root = unique_test_dir("scan-escape-target");
+        write_runtime_skill(&outside_root, "outside-package", "outside-package", "echo").await;
+        fs::create_dir_all(&root).await.unwrap();
+        create_dir_symlink(
+            outside_root.join("outside-package"),
+            root.join("escape-package"),
+        );
+
+        let inventory = scan_skill_packages(&root).await.unwrap();
+        let packages = packages_by_id(&inventory);
+        assert!(!packages.contains_key("escape-package"));
+
+        let error = delete_skill_package(&root, "escape-package").await.unwrap_err();
+        assert!(error.to_string().contains("unsafe skill package path"));
+        assert!(root.join("escape-package").exists());
+        assert!(outside_root.join("outside-package").join("skill.json").exists());
+
+        remove_test_dir(root).await;
+        remove_test_dir(outside_root).await;
+    }
+
     fn packages_by_id(inventory: &DevSkillInventory) -> BTreeMap<String, DevSkillPackage> {
         inventory
             .packages
@@ -452,6 +585,11 @@ mod tests {
             "general-agent-dev-skills-{name}-{}",
             uuid::Uuid::new_v4()
         ))
+    }
+
+    #[cfg(unix)]
+    fn create_dir_symlink(target: PathBuf, link: PathBuf) {
+        unix_fs::symlink(&target, &link).unwrap();
     }
 
     async fn remove_test_dir(path: PathBuf) {
