@@ -1,13 +1,18 @@
 import { ArrowLeft } from "lucide-react";
 
 import { AppIconButton } from "../components/AppIconButton";
+import { SettingsDeveloperTools } from "../components/SettingsDeveloperTools";
 import { SettingsModel } from "../components/SettingsModel";
 
 type SettingsProps = {
   onBack: () => void;
+  onOpenDeveloperTools: () => void;
 };
 
-export function Settings({ onBack }: SettingsProps): JSX.Element {
+export function Settings({
+  onBack,
+  onOpenDeveloperTools
+}: SettingsProps): JSX.Element {
   return (
     <main className="settings-screen" aria-label="Settings">
       <header className="top-bar settings-top-bar">
@@ -21,6 +26,7 @@ export function Settings({ onBack }: SettingsProps): JSX.Element {
       </header>
       <div className="settings-shell">
         <SettingsModel />
+        <SettingsDeveloperTools onOpenDeveloperTools={onOpenDeveloperTools} />
       </div>
     </main>
   );

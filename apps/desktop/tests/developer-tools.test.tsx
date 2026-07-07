@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DevSkillPackage } from "../src/renderer/api";
+import App from "../src/renderer/App";
 import {
   buildCreateSkillPrompt,
   buildModifySkillPrompt
@@ -11,6 +12,7 @@ import { DeveloperTools } from "../src/renderer/screens/DeveloperTools";
 
 afterEach(() => {
   cleanup();
+  window.history.replaceState(null, "", "/");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -53,6 +55,52 @@ describe("developer skill prompts", () => {
 });
 
 describe("DeveloperTools", () => {
+  it("routes #developer to the developer tools screen", async () => {
+    window.history.replaceState(null, "", "/#developer");
+    mockFetch([
+      jsonResponse({
+        root: "/repo/skills",
+        packages: []
+      })
+    ]);
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("main", { name: "Developer Tools" })
+    ).toBeInTheDocument();
+  });
+
+  it("shows settings developer entry only when the dev API is available", async () => {
+    const user = userEvent.setup();
+    mockFetch([
+      jsonResponse({ root: "/repo/skills", packages: [] }),
+      jsonResponse({ root: "/repo/skills", packages: [] })
+    ]);
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+
+    expect(
+      await screen.findByRole("button", { name: "Open developer tools" })
+    ).toBeInTheDocument();
+  });
+
+  it("hides settings developer entry when the dev API is unavailable", async () => {
+    mockFetch([new Response(JSON.stringify({ error: "not found" }), { status: 404 })]);
+
+    render(<App />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: "Open developer tools" })
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("treats runtime-only missing SKILL.md diagnostics as informational", async () => {
     mockFetch([
       jsonResponse({
