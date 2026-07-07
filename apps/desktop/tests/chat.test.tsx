@@ -346,6 +346,7 @@ describe("App navigation", () => {
   it("tests the configured model connection from settings", async () => {
     const user = userEvent.setup();
     const fetchMock = mockFetch([
+      new Response(JSON.stringify({ error: "not found" }), { status: 404 }),
       jsonResponse({ ok: true, message: "Connection succeeded" })
     ]);
     window.history.replaceState(null, "", "/#settings");
