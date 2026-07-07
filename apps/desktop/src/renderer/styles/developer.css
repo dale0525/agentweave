@@ -393,6 +393,7 @@
 
 .developer-prompt-preview {
   display: grid;
+  flex: 0 0 auto;
   gap: 0;
   overflow: hidden;
   max-height: 196px;
