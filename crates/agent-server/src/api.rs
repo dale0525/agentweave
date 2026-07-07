@@ -29,6 +29,7 @@ pub struct AppState {
     storage: Storage,
     agent: Arc<dyn AgentRunner>,
     skills: Option<SkillRegistry>,
+    skills_root: Option<PathBuf>,
     skill_catalog: SkillCatalog,
     runtime_config: RuntimeConfig,
 }
@@ -45,6 +46,7 @@ impl AppState {
             storage,
             agent,
             skills: None,
+            skills_root: None,
             skill_catalog: SkillCatalog::empty(),
             runtime_config: default_runtime_config(),
         }
@@ -59,6 +61,7 @@ impl AppState {
             storage,
             agent,
             skills: Some(skills),
+            skills_root: None,
             skill_catalog: SkillCatalog::empty(),
             runtime_config: default_runtime_config(),
         }
@@ -71,6 +74,11 @@ impl AppState {
 
     pub fn with_skill_catalog(mut self, skill_catalog: SkillCatalog) -> Self {
         self.skill_catalog = skill_catalog;
+        self
+    }
+
+    pub fn with_skills_root(mut self, skills_root: PathBuf) -> Self {
+        self.skills_root = Some(skills_root);
         self
     }
 }
@@ -209,6 +217,10 @@ impl AppState {
     pub(crate) fn skill_catalog(&self) -> SkillCatalog {
         self.skill_catalog.clone()
     }
+
+    pub(crate) fn skills_root(&self) -> Option<PathBuf> {
+        self.skills_root.clone()
+    }
 }
 
 fn desktop_cors_layer() -> CorsLayer {
@@ -217,7 +229,7 @@ fn desktop_cors_layer() -> CorsLayer {
             HeaderValue::from_static("http://127.0.0.1:5173"),
             HeaderValue::from_static("http://localhost:5173"),
         ])
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([header::CONTENT_TYPE])
 }
 

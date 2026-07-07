@@ -8,14 +8,15 @@ use agent_runtime::{
 };
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::api::AppState;
+use crate::dev_skills::DevSkillInventory;
 
 #[derive(Debug, Serialize)]
 struct DevToolsResponse {
@@ -47,6 +48,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/dev/tools", get(list_tools))
         .route("/dev/tool-discovery", get(discover_tools))
         .route("/dev/instructions/preview", post(preview_instructions))
+        .route("/dev/skills", get(list_skills))
+        .route("/dev/skills/validate", post(validate_skills))
+        .route("/dev/skills/reload", post(reload_skills))
+        .route("/dev/skills/{skill_id}", delete(delete_skill))
         .with_state(state)
 }
 
@@ -112,6 +117,54 @@ fn input_content(input: &[serde_json::Value], index: usize) -> String {
         .to_string()
 }
 
+async fn list_skills(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DevSkillInventory>, StatusCode> {
+    let root = state.skills_root().ok_or(StatusCode::NOT_FOUND)?;
+    crate::dev_skills::scan_skill_packages(root)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn validate_skills(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DevSkillInventory>, StatusCode> {
+    list_skills(State(state)).await
+}
+
+async fn reload_skills(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DevSkillInventory>, StatusCode> {
+    list_skills(State(state)).await
+}
+
+async fn delete_skill(
+    Path(skill_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DevSkillInventory>, StatusCode> {
+    let root = state.skills_root().ok_or(StatusCode::NOT_FOUND)?;
+    crate::dev_skills::delete_skill_package(root, &skill_id)
+        .await
+        .map(Json)
+        .map_err(dev_skill_delete_status)
+}
+
+fn dev_skill_delete_status(error: anyhow::Error) -> StatusCode {
+    let message = error.to_string();
+    if message.contains("unsafe")
+        || message.contains("invalid")
+        || message.contains("single path segment")
+        || message.contains("must not be empty")
+    {
+        StatusCode::BAD_REQUEST
+    } else if message.contains("No such file") || message.contains("not found") {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use agent_runtime::{
@@ -155,6 +208,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dev_skills_route_is_not_mounted_by_default() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let app = crate::api::router(Arc::new(crate::api::AppState::new(storage)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/dev/skills")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn dev_tools_route_returns_tool_diagnostics_when_enabled() {
         let storage = Storage::connect("sqlite::memory:").await.unwrap();
         let skills_root = development_skills().await;
@@ -181,6 +252,90 @@ mod tests {
         let tools = body["tools"].as_array().unwrap();
         assert!(tools.iter().any(|tool| tool["name"] == "create_directory"));
         assert!(tools.iter().all(|tool| tool.get("schema").is_some()));
+        remove_test_dir(skills_root).await;
+    }
+
+    #[tokio::test]
+    async fn dev_skills_route_returns_inventory_when_enabled() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let skills_root = development_skills().await;
+        let skills = SkillRegistry::load_development(&skills_root).await.unwrap();
+        let state = Arc::new(
+            crate::api::AppState::new_with_agent_and_skills(storage, Arc::new(TestAgent), skills)
+                .with_skills_root(skills_root.clone()),
+        );
+        let app = crate::api::router_with_dev_routes(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/dev/skills")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["packages"][0]["id"], "echo");
+        assert_eq!(body["packages"][0]["packageKind"], "runtime");
+        remove_test_dir(skills_root).await;
+    }
+
+    #[tokio::test]
+    async fn dev_delete_skill_rejects_unsafe_id() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let skills_root = development_skills().await;
+        let skills = SkillRegistry::load_development(&skills_root).await.unwrap();
+        let state = Arc::new(
+            crate::api::AppState::new_with_agent_and_skills(storage, Arc::new(TestAgent), skills)
+                .with_skills_root(skills_root.clone()),
+        );
+        let app = crate::api::router_with_dev_routes(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/dev/skills/..%2Fecho")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(skills_root.join("echo").exists());
+        remove_test_dir(skills_root).await;
+    }
+
+    #[tokio::test]
+    async fn dev_delete_skill_removes_package_and_returns_inventory() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let skills_root = development_skills().await;
+        let skills = SkillRegistry::load_development(&skills_root).await.unwrap();
+        let state = Arc::new(
+            crate::api::AppState::new_with_agent_and_skills(storage, Arc::new(TestAgent), skills)
+                .with_skills_root(skills_root.clone()),
+        );
+        let app = crate::api::router_with_dev_routes(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/dev/skills/echo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!skills_root.join("echo").exists());
+        let body = read_json(response).await;
+        assert_eq!(body["packages"].as_array().unwrap().len(), 0);
         remove_test_dir(skills_root).await;
     }
 

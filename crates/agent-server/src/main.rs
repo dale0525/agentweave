@@ -43,7 +43,8 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(
         api::AppState::new_with_agent_and_skills(storage, Arc::new(runner), skills)
             .with_runtime_config(runtime_config)
-            .with_skill_catalog(skill_catalog),
+            .with_skill_catalog(skill_catalog)
+            .with_skills_root(skills_root.clone()),
     );
     let app = if std::env::var("GENERAL_AGENT_DEV_API").as_deref() == Ok("1") {
         api::router_with_dev_routes(state)
