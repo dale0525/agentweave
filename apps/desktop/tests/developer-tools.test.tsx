@@ -1,10 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { DevSkillPackage } from "../src/renderer/api";
 import {
   buildCreateSkillPrompt,
   buildModifySkillPrompt
 } from "../src/renderer/devSkillPrompts";
-import { DevSkillPackage } from "../src/renderer/api";
+import { DeveloperTools } from "../src/renderer/screens/DeveloperTools";
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("developer skill prompts", () => {
   it("builds a create prompt for Codex skill-creator", () => {
@@ -42,3 +51,134 @@ describe("developer skill prompts", () => {
     expect(prompt).toContain("missing SKILL.md is informational only");
   });
 });
+
+describe("DeveloperTools", () => {
+  it("renders package inventory and selected runtime-only details", async () => {
+    mockFetch([
+      jsonResponse({
+        root: "/repo/skills",
+        packages: [
+          {
+            id: "echo",
+            path: "echo",
+            name: "echo",
+            description: "Echo a text payload.",
+            hasSkillMd: false,
+            hasRuntimeManifest: true,
+            runtimeTools: ["echo"],
+            packageKind: "runtime",
+            bundleReady: true,
+            validation: { ok: true, errors: [], warnings: [] }
+          }
+        ]
+      })
+    ]);
+
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    expect(await screen.findByRole("heading", { name: "Skill packages" })).toBeInTheDocument();
+    const list = screen.getByRole("list", { name: "Skill packages" });
+    expect(within(list).getByRole("button", { name: /echo/i })).toBeInTheDocument();
+    expect(screen.getByText("skills/echo")).toBeInTheDocument();
+    expect(screen.getByText("SKILL.md missing")).toBeInTheDocument();
+    expect(screen.queryByText("Broken")).not.toBeInTheDocument();
+  });
+
+  it("shows a disabled state when the development API is unavailable", async () => {
+    mockFetch([new Response(JSON.stringify({ error: "not found" }), { status: 404 })]);
+
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    expect(
+      await screen.findByText("Development API is not available")
+    ).toBeInTheDocument();
+  });
+
+  it("opens a skill-creator prompt dialog for a selected package", async () => {
+    const user = userEvent.setup();
+    mockFetch([
+      jsonResponse({
+        root: "/repo/skills",
+        packages: [
+          {
+            id: "echo",
+            path: "echo",
+            name: "echo",
+            description: "Echo a text payload.",
+            hasSkillMd: false,
+            hasRuntimeManifest: true,
+            runtimeTools: ["echo"],
+            packageKind: "runtime",
+            bundleReady: true,
+            validation: { ok: true, errors: [], warnings: [] }
+          }
+        ]
+      })
+    ]);
+
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Modify with skill-creator" })
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "skill-creator prompt" });
+    expect(dialog).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/Use the existing skill-creator skill/)
+    ).toBeInTheDocument();
+  });
+
+  it("deletes a package after confirmation and refreshes inventory", async () => {
+    const user = userEvent.setup();
+    const fetchMock = mockFetch([
+      jsonResponse({
+        root: "/repo/skills",
+        packages: [
+          {
+            id: "echo",
+            path: "echo",
+            name: "echo",
+            description: "Echo a text payload.",
+            hasSkillMd: false,
+            hasRuntimeManifest: true,
+            runtimeTools: ["echo"],
+            packageKind: "runtime",
+            bundleReady: true,
+            validation: { ok: true, errors: [], warnings: [] }
+          }
+        ]
+      }),
+      jsonResponse({ root: "/repo/skills", packages: [] })
+    ]);
+
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await user.click(await screen.findByRole("button", { name: "Delete package" }));
+    await user.click(screen.getByRole("button", { name: "Delete echo" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("No skill packages found")).toBeInTheDocument();
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "http://127.0.0.1:49321/dev/skills/echo",
+      expect.objectContaining({ method: "DELETE" })
+    );
+  });
+});
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    headers: { "Content-Type": "application/json" },
+    status: 200
+  });
+}
+
+function mockFetch(responses: Array<Response | Promise<Response>>) {
+  const fetchMock = vi.fn();
+  for (const response of responses) {
+    fetchMock.mockResolvedValueOnce(response);
+  }
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
