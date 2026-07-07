@@ -3,6 +3,10 @@ import { useState } from "react";
 
 import { DevSkillInventory, DevSkillPackage, DevSkillPackageKind } from "../../api";
 import { buildModifySkillPrompt } from "../../devSkillPrompts";
+import {
+  packageHasBlockingDiagnostics,
+  packageValidationHeading
+} from "./skillPackageDiagnostics";
 
 type SkillPackageDetailProps = {
   inventory: DevSkillInventory | null;
@@ -43,6 +47,8 @@ export function SkillPackageDetail({
   const prompt = buildModifySkillPrompt(inventory.root, skillPackage);
   const diagnosticsCount =
     skillPackage.validation.errors.length + skillPackage.validation.warnings.length;
+  const hasBlockingDiagnostics = packageHasBlockingDiagnostics(skillPackage);
+  const validationHeading = packageValidationHeading(skillPackage);
 
   const copyPrompt = async () => {
     try {
@@ -94,19 +100,15 @@ export function SkillPackageDetail({
         <section className="developer-detail-section">
           <header className="developer-section-heading">
             <h3>Validation</h3>
-            <button className="developer-link-button" onClick={onReload} type="button">
-              <RefreshCw aria-hidden="true" size={14} />
-              <span>Reload diagnostics</span>
-            </button>
           </header>
           <div
             className={`developer-validation-panel${
-              skillPackage.validation.ok ? " developer-validation-panel-pass" : ""
+              hasBlockingDiagnostics ? "" : " developer-validation-panel-pass"
             }`}
           >
-            <strong>{skillPackage.validation.ok ? "PASS" : "Needs attention"}</strong>
+            <strong>{validationHeading}</strong>
             <p>
-              {skillPackage.validation.ok
+              {!hasBlockingDiagnostics
                 ? `Bundle readiness: ${skillPackage.bundleReady ? "ready" : "not ready"}`
                 : `${diagnosticsCount} diagnostic item(s) reported`}
             </p>
@@ -155,13 +157,21 @@ export function SkillPackageDetail({
       </div>
 
       <div className="developer-detail-actions">
-        <button className="developer-primary-button" onClick={() => onModify(skillPackage)} type="button">
+        <button
+          className="developer-primary-button"
+          onClick={() => onModify(skillPackage)}
+          type="button"
+        >
           <ShieldAlert aria-hidden="true" size={16} />
           <span>Modify with skill-creator</span>
         </button>
         <button className="developer-secondary-button" onClick={() => void copyPrompt()} type="button">
           <Copy aria-hidden="true" size={16} />
           <span>{copyLabel}</span>
+        </button>
+        <button className="developer-secondary-button" onClick={onReload} type="button">
+          <RefreshCw aria-hidden="true" size={16} />
+          <span>Reload diagnostics</span>
         </button>
       </div>
 

@@ -53,6 +53,40 @@ describe("developer skill prompts", () => {
 });
 
 describe("DeveloperTools", () => {
+  it("treats runtime-only missing SKILL.md diagnostics as informational", async () => {
+    mockFetch([
+      jsonResponse({
+        root: "/repo/skills",
+        packages: [
+          {
+            id: "echo",
+            path: "echo",
+            name: "echo",
+            description: "Echo a text payload.",
+            hasSkillMd: false,
+            hasRuntimeManifest: true,
+            runtimeTools: ["echo"],
+            packageKind: "runtime",
+            bundleReady: true,
+            validation: {
+              ok: false,
+              errors: ["missing SKILL.md is informational only"],
+              warnings: []
+            }
+          }
+        ]
+      })
+    ]);
+
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    expect(await screen.findByRole("heading", { name: "Skill packages" })).toBeInTheDocument();
+    expect(screen.getAllByText("Runtime only")).toHaveLength(2);
+    expect(screen.getByText("SKILL.md missing")).toBeInTheDocument();
+    expect(screen.queryByText("Validation issues")).not.toBeInTheDocument();
+    expect(screen.queryByText("Needs attention")).not.toBeInTheDocument();
+  });
+
   it("renders package inventory and selected runtime-only details", async () => {
     mockFetch([
       jsonResponse({
@@ -164,6 +198,39 @@ describe("DeveloperTools", () => {
       "http://127.0.0.1:49321/dev/skills/echo",
       expect.objectContaining({ method: "DELETE" })
     );
+  });
+
+  it("keeps the current inventory visible when reloading diagnostics fails", async () => {
+    const user = userEvent.setup();
+    mockFetch([
+      jsonResponse({
+        root: "/repo/skills",
+        packages: [
+          {
+            id: "echo",
+            path: "echo",
+            name: "echo",
+            description: "Echo a text payload.",
+            hasSkillMd: false,
+            hasRuntimeManifest: true,
+            runtimeTools: ["echo"],
+            packageKind: "runtime",
+            bundleReady: true,
+            validation: { ok: true, errors: [], warnings: [] }
+          }
+        ]
+      }),
+      new Response(JSON.stringify({ error: "reload failed" }), { status: 500 })
+    ]);
+
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await screen.findByRole("button", { name: "Modify with skill-creator" });
+    await user.click(screen.getByRole("button", { name: "Reload diagnostics" }));
+
+    expect(await screen.findByText("Action failed. Keep the current inventory and try again.")).toBeInTheDocument();
+    expect(screen.getAllByText("echo").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Development API is not available")).not.toBeInTheDocument();
   });
 });
 

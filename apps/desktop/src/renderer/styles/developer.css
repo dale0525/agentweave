@@ -28,6 +28,15 @@
   background: var(--color-surface-muted);
 }
 
+.developer-status-banner {
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-danger-surface) 72%, var(--color-surface));
+  color: var(--color-text);
+  font-size: 13px;
+  line-height: 18px;
+}
+
 .developer-list-pane,
 .developer-detail-pane {
   min-height: 0;
@@ -371,6 +380,7 @@
 
 .developer-detail-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -385,16 +395,18 @@
   display: grid;
   gap: 0;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--color-text) 20%, var(--color-border));
+  max-height: 196px;
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-content);
-  background: #2e3132;
-  color: #f0f1f2;
+  background: var(--color-surface);
+  color: var(--color-text);
 }
 
 .developer-prompt-preview-header {
-  padding: 10px 12px;
-  border-bottom: 1px solid rgba(240, 241, 242, 0.16);
-  color: #b7bfbe;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
   font-size: 12px;
   font-weight: 600;
   line-height: 16px;
@@ -404,9 +416,9 @@
 .developer-dialog-prompt {
   margin: 0;
   overflow: auto;
-  padding: 14px;
+  padding: 10px 12px;
   font-size: 12px;
-  line-height: 18px;
+  line-height: 17px;
   white-space: pre-wrap;
 }
 
@@ -487,6 +499,10 @@
 }
 
 @media (max-width: 760px) {
+  .developer-status-banner {
+    padding: 10px 16px;
+  }
+
   .developer-workbench {
     grid-template-columns: 1fr;
   }
@@ -503,8 +519,7 @@
 
   .developer-detail-title-row,
   .developer-section-heading,
-  .developer-danger-zone,
-  .developer-detail-actions {
+  .developer-danger-zone {
     grid-template-columns: 1fr;
     flex-direction: column;
     align-items: stretch;
@@ -527,14 +542,30 @@
     position: sticky;
     bottom: -24px;
     z-index: 2;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     margin: 0 -16px;
     padding: 16px;
     border-top: 1px solid var(--color-border);
     background: var(--color-surface);
   }
 
+  .developer-detail-actions .developer-primary-button {
+    grid-column: 1 / -1;
+  }
+
+  .developer-detail-actions .developer-primary-button,
+  .developer-detail-actions .developer-secondary-button {
+    width: 100%;
+    min-width: 0;
+  }
+
   .developer-danger-zone {
     padding-top: 16px;
+  }
+
+  .developer-prompt-preview {
+    max-height: 164px;
   }
 
   .developer-dialog-content {

@@ -2,6 +2,7 @@ import { Plus, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { DevSkillInventory, DevSkillPackage, DevSkillPackageKind } from "../../api";
+import { packageStateLabel } from "./skillPackageDiagnostics";
 
 type SkillPackageListProps = {
   inventory: DevSkillInventory | null;
@@ -93,11 +94,7 @@ function SkillPackageRow(props: {
   skillPackage: DevSkillPackage;
 }): JSX.Element {
   const { isSelected, onSelect, skillPackage } = props;
-  const stateText = !skillPackage.validation.ok
-    ? "Validation issues"
-    : skillPackage.hasSkillMd || skillPackage.packageKind !== "runtime"
-      ? "Ready"
-      : "Runtime only";
+  const stateText = packageStateLabel(skillPackage);
 
   return (
     <button

@@ -1,5 +1,5 @@
 import { ArrowLeft, RefreshCw, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   deleteDevSkill,
@@ -22,10 +22,16 @@ type DeveloperToolsProps = {
 export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
   const [inventory, setInventory] = useState<DevSkillInventory | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [promptPackage, setPromptPackage] = useState<DevSkillPackage | "new" | null>(null);
   const [deletePackage, setDeletePackage] = useState<DevSkillPackage | null>(null);
+  const inventoryRef = useRef<DevSkillInventory | null>(null);
+
+  useEffect(() => {
+    inventoryRef.current = inventory;
+  }, [inventory]);
 
   const selectedPackage = useMemo(
     () => inventory?.packages.find((item) => item.id === selectedId) ?? inventory?.packages[0] ?? null,
@@ -33,12 +39,19 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
   );
 
   const loadInventory = useCallback(
-    async (loader: () => Promise<DevSkillInventory> = listDevSkills) => {
+    async (
+      loader: () => Promise<DevSkillInventory> = listDevSkills,
+      options?: { failureMessage?: string; preserveInventoryOnError?: boolean }
+    ) => {
       setIsLoading(true);
-      setError(null);
+      setActionError(null);
+      if (!options?.preserveInventoryOnError) {
+        setLoadError(null);
+      }
       try {
         const nextInventory = await loader();
         setInventory(nextInventory);
+        setLoadError(null);
         setSelectedId((current) => {
           if (current && nextInventory.packages.some((item) => item.id === current)) {
             return current;
@@ -46,9 +59,16 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
           return nextInventory.packages[0]?.id ?? null;
         });
       } catch {
+        if (options?.preserveInventoryOnError && inventoryRef.current) {
+          setActionError(
+            options.failureMessage ?? "Action failed. Keep the current inventory and try again."
+          );
+          return;
+        }
+
         setInventory(null);
         setSelectedId(null);
-        setError("Development API is not available");
+        setLoadError("Development API is not available");
       } finally {
         setIsLoading(false);
       }
@@ -61,10 +81,15 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
   }, [loadInventory]);
 
   const handleDelete = useCallback(async (skillPackage: DevSkillPackage) => {
-    const nextInventory = await deleteDevSkill(skillPackage.id);
-    setInventory(nextInventory);
-    setSelectedId(nextInventory.packages[0]?.id ?? null);
-    setDeletePackage(null);
+    setActionError(null);
+    try {
+      const nextInventory = await deleteDevSkill(skillPackage.id);
+      setInventory(nextInventory);
+      setSelectedId(nextInventory.packages[0]?.id ?? null);
+      setDeletePackage(null);
+    } catch {
+      setActionError("Action failed. Keep the current inventory and try again.");
+    }
   }, []);
 
   return (
@@ -75,13 +100,16 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
         </AppIconButton>
         <div className="top-bar-title">
           <h1>Developer Tools</h1>
-          <p>{error ? "Development API disconnected" : "Development API connected"}</p>
+          <p>{loadError ? "Development API disconnected" : "Development API connected"}</p>
         </div>
         <div className="developer-top-bar-actions">
           <AppIconButton
             label="Refresh skill packages"
             onClick={() => {
-              void loadInventory();
+              void loadInventory(listDevSkills, {
+                failureMessage: "Action failed. Keep the current inventory and try again.",
+                preserveInventoryOnError: inventory !== null
+              });
             }}
           >
             <RefreshCw aria-hidden="true" size={18} />
@@ -89,7 +117,10 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
           <AppIconButton
             label="Validate all skill packages"
             onClick={() => {
-              void loadInventory(validateDevSkills);
+              void loadInventory(validateDevSkills, {
+                failureMessage: "Action failed. Keep the current inventory and try again.",
+                preserveInventoryOnError: true
+              });
             }}
           >
             <ShieldCheck aria-hidden="true" size={18} />
@@ -97,8 +128,14 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
         </div>
       </header>
 
+      {actionError ? (
+        <div aria-live="polite" className="developer-status-banner" role="status">
+          {actionError}
+        </div>
+      ) : null}
+
       <section className="developer-workbench" aria-busy={isLoading}>
-        {error ? (
+        {loadError ? (
           <div className="developer-empty-state">
             <h2>Development API is not available</h2>
             <p>Start the server with GENERAL_AGENT_DEV_API=1 to manage local skills.</p>
@@ -116,7 +153,10 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
               onDelete={setDeletePackage}
               onModify={setPromptPackage}
               onReload={() => {
-                void loadInventory(reloadDevSkills);
+                void loadInventory(reloadDevSkills, {
+                  failureMessage: "Action failed. Keep the current inventory and try again.",
+                  preserveInventoryOnError: true
+                });
               }}
               skillPackage={selectedPackage}
             />
