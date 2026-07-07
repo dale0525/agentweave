@@ -89,6 +89,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
       setDeletePackage(null);
     } catch {
       setActionError("Action failed. Keep the current inventory and try again.");
+      setDeletePackage(null);
     }
   }, []);
 

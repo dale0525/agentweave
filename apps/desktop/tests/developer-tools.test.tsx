@@ -248,6 +248,41 @@ describe("DeveloperTools", () => {
     );
   });
 
+  it("closes the delete dialog and shows an error when deletion fails", async () => {
+    const user = userEvent.setup();
+    mockFetch([
+      jsonResponse({
+        root: "/repo/skills",
+        packages: [
+          {
+            id: "echo",
+            path: "echo",
+            name: "echo",
+            description: "Echo a text payload.",
+            hasSkillMd: false,
+            hasRuntimeManifest: true,
+            runtimeTools: ["echo"],
+            packageKind: "runtime",
+            bundleReady: true,
+            validation: { ok: true, errors: [], warnings: [] }
+          }
+        ]
+      }),
+      new Response(JSON.stringify({ error: "delete failed" }), { status: 500 })
+    ]);
+
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await user.click(await screen.findByRole("button", { name: "Delete package" }));
+    await user.click(screen.getByRole("button", { name: "Delete echo" }));
+
+    expect(
+      await screen.findByText("Action failed. Keep the current inventory and try again.")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete echo" })).not.toBeInTheDocument();
+    expect(screen.getAllByText("echo").length).toBeGreaterThan(0);
+  });
+
   it("keeps the current inventory visible when reloading diagnostics fails", async () => {
     const user = userEvent.setup();
     mockFetch([
