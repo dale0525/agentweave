@@ -34,6 +34,37 @@ export type ModelConnectionTestResponse = {
   message: string;
 };
 
+export type DevSkillPackageKind =
+  | "runtime"
+  | "instruction"
+  | "combined"
+  | "empty"
+  | "invalid";
+
+export type DevSkillValidation = {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+};
+
+export type DevSkillPackage = {
+  id: string;
+  path: string;
+  name: string;
+  description: string;
+  hasSkillMd: boolean;
+  hasRuntimeManifest: boolean;
+  runtimeTools: string[];
+  packageKind: DevSkillPackageKind;
+  bundleReady: boolean;
+  validation: DevSkillValidation;
+};
+
+export type DevSkillInventory = {
+  root: string;
+  packages: DevSkillPackage[];
+};
+
 type ErrorPayload = {
   error?: string;
 };
@@ -65,6 +96,28 @@ export async function testModelConnection(
   return requestJson<ModelConnectionTestResponse>("/model/test", {
     body: JSON.stringify(settings),
     method: "POST"
+  });
+}
+
+export async function listDevSkills(): Promise<DevSkillInventory> {
+  return requestJson<DevSkillInventory>("/dev/skills", { method: "GET" });
+}
+
+export async function validateDevSkills(): Promise<DevSkillInventory> {
+  return requestJson<DevSkillInventory>("/dev/skills/validate", {
+    method: "POST"
+  });
+}
+
+export async function reloadDevSkills(): Promise<DevSkillInventory> {
+  return requestJson<DevSkillInventory>("/dev/skills/reload", {
+    method: "POST"
+  });
+}
+
+export async function deleteDevSkill(id: string): Promise<DevSkillInventory> {
+  return requestJson<DevSkillInventory>(`/dev/skills/${encodeURIComponent(id)}`, {
+    method: "DELETE"
   });
 }
 
