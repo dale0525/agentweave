@@ -202,7 +202,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 pub fn router_with_dev_routes(state: Arc<AppState>) -> Router {
-    router(state.clone()).merge(crate::dev_api::router(state))
+    router(state.clone()).merge(crate::dev_api::router(state).layer(desktop_cors_layer()))
 }
 
 impl AppState {
@@ -223,7 +223,7 @@ impl AppState {
     }
 }
 
-fn desktop_cors_layer() -> CorsLayer {
+pub(crate) fn desktop_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin([
             HeaderValue::from_static("http://127.0.0.1:5173"),

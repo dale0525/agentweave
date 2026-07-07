@@ -174,7 +174,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, StatusCode},
+        http::{Request, StatusCode, header},
     };
     use serde_json::{Value, json};
     use std::{path::PathBuf, sync::Arc};
@@ -336,6 +336,51 @@ mod tests {
         assert!(!skills_root.join("echo").exists());
         let body = read_json(response).await;
         assert_eq!(body["packages"].as_array().unwrap().len(), 0);
+        remove_test_dir(skills_root).await;
+    }
+
+    #[tokio::test]
+    async fn dev_delete_skill_supports_desktop_cors_preflight() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let skills_root = development_skills().await;
+        let skills = SkillRegistry::load_development(&skills_root).await.unwrap();
+        let state = Arc::new(
+            crate::api::AppState::new_with_agent_and_skills(storage, Arc::new(TestAgent), skills)
+                .with_skills_root(skills_root.clone()),
+        );
+        let app = crate::api::router_with_dev_routes(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/dev/skills/echo")
+                    .header(header::ORIGIN, "http://127.0.0.1:5173")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "DELETE")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "http://127.0.0.1:5173"
+        );
+        assert!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_METHODS]
+                .to_str()
+                .unwrap()
+                .contains("DELETE")
+        );
+        assert!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                .to_str()
+                .unwrap()
+                .contains("content-type")
+        );
         remove_test_dir(skills_root).await;
     }
 
