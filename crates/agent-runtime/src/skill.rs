@@ -75,6 +75,10 @@ impl SkillRegistry {
         Ok(Self { skills })
     }
 
+    pub async fn load_development_skill(root: impl AsRef<Path>) -> anyhow::Result<InstalledSkill> {
+        Self::load_skill(root.as_ref().to_path_buf()).await
+    }
+
     pub async fn load_packaged(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         let root = root.as_ref();
         let bytes = tokio::fs::read(root.join("skill-bundle.json"))
@@ -455,6 +459,20 @@ mod tests {
         let registry = SkillRegistry::load(skills_root).await.unwrap();
 
         assert!(registry.tools().iter().any(|tool| tool.name == "echo"));
+    }
+
+    #[tokio::test]
+    async fn load_development_skill_validates_one_runtime_package() {
+        let root = unique_test_dir("single-runtime-package");
+        write_echo_skill(&root, "echo", "echo").await;
+
+        let skill = SkillRegistry::load_development_skill(root.join("echo"))
+            .await
+            .unwrap();
+
+        assert_eq!(skill.manifest.name, "echo");
+        assert_eq!(skill.manifest.tools[0].name, "echo");
+        remove_test_dir(root).await;
     }
 
     #[tokio::test]

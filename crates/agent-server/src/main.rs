@@ -1,5 +1,6 @@
 mod api;
 mod dev_api;
+mod dev_skills;
 
 use agent_runtime::{
     skill::SkillRegistry,

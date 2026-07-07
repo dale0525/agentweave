@@ -69,6 +69,17 @@ impl SkillCatalog {
         })
     }
 
+    pub async fn read_development_skill_summary(
+        root: impl AsRef<Path>,
+        skill_path: impl AsRef<Path>,
+    ) -> anyhow::Result<SkillSummary> {
+        let root = root.as_ref();
+        let canonical_root = tokio::fs::canonicalize(root)
+            .await
+            .with_context(|| format!("failed to resolve skill root {}", root.display()))?;
+        read_skill_summary(&canonical_root, skill_path.as_ref()).await
+    }
+
     pub async fn load_packaged(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         let root = root.as_ref();
         let canonical_root = tokio::fs::canonicalize(root)
@@ -446,6 +457,28 @@ description: Write plans.
             catalog.summaries()[0].source,
             PathBuf::from("planning/SKILL.md")
         );
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn read_development_skill_summary_validates_one_skill_file() {
+        let root = unique_test_dir("single-instruction-package");
+        write_skill_md(
+            &root,
+            "planning",
+            "---\nname: planning\ndescription: Plan work.\n---\n\n# Planning",
+        )
+        .await;
+
+        let summary = SkillCatalog::read_development_skill_summary(
+            &root,
+            root.join("planning").join("SKILL.md"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.name, "planning");
+        assert_eq!(summary.source, PathBuf::from("planning/SKILL.md"));
         remove_test_dir(root).await;
     }
 
