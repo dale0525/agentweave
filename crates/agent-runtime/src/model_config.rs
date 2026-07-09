@@ -46,6 +46,11 @@ fn is_sensitive_header_name(name: &str) -> bool {
         .filter(|ch| *ch != '-' && *ch != '_' && !ch.is_whitespace())
         .collect();
     compact.contains("apikey")
+        || compact.contains("authtoken")
+        || compact.contains("accesstoken")
+        || compact.contains("apitoken")
+        || compact.contains("sessiontoken")
+        || compact.contains("token")
 }
 
 #[cfg(test)]
@@ -108,5 +113,37 @@ mod tests {
         };
 
         assert!(safe_config.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_token_bearing_header_names() {
+        let base = StoredModelConfig {
+            provider_id: "remote".into(),
+            provider_name: "Remote".into(),
+            endpoint_type: EndpointType::Responses,
+            base_url: "https://example.com".into(),
+            model_name: "gpt-test".into(),
+            secret_id: Some("secret-1".into()),
+            headers: BTreeMap::new(),
+        };
+
+        for header_name in [
+            "X-Auth-Token",
+            "X-Access-Token",
+            "Api-Token",
+            "Session-Token",
+        ] {
+            let config = StoredModelConfig {
+                headers: BTreeMap::from([(header_name.into(), "secret".into())]),
+                ..base.clone()
+            };
+
+            assert_eq!(
+                config.validate().unwrap_err(),
+                format!(
+                    "header `{header_name}` must not contain secrets; store API keys in secure storage"
+                )
+            );
+        }
     }
 }

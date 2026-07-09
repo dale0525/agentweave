@@ -27,6 +27,8 @@ pub struct MobileRuntimeDiagnostics {
     pub capabilities: CapabilitySet,
     pub built_in_tools_enabled: bool,
     pub registered_skill_tool_count: usize,
+    pub configured_external_tool_count: usize,
+    pub configured_connector_count: usize,
 }
 
 #[async_trait::async_trait]
@@ -93,6 +95,8 @@ where
             capabilities: self.init.capabilities.clone(),
             built_in_tools_enabled: self.runtime_config.built_in_tools_enabled,
             registered_skill_tool_count: self.skills.tools().len(),
+            configured_external_tool_count: self.runtime_config.external_tools.len(),
+            configured_connector_count: self.runtime_config.connectors.len(),
         }
     }
 
@@ -124,10 +128,13 @@ where
 
 fn mobile_safe_runtime_config(
     init: &MobileRuntimeInit,
-    runtime_config: RuntimeConfig,
+    mut runtime_config: RuntimeConfig,
 ) -> RuntimeConfig {
     if init.platform == PlatformId::Android {
-        runtime_config.without_builtin_tools()
+        runtime_config = runtime_config.without_builtin_tools();
+        runtime_config.external_tools.clear();
+        runtime_config.connectors.clear();
+        runtime_config
     } else {
         runtime_config
     }
@@ -185,6 +192,9 @@ mod tests {
     use crate::skill::SkillRegistry;
     use crate::skill_catalog::SkillCatalog;
     use crate::storage::Storage;
+    use crate::tools::discovery::{
+        ConnectorAuthState, ConnectorMetadata, ExternalToolConfig, ExternalToolVisibility,
+    };
     use crate::tools::RuntimeConfig;
     use futures::stream;
     use model_gateway::responses::GatewayEvent;
@@ -255,6 +265,51 @@ mod tests {
         );
 
         assert!(!host.diagnostics().built_in_tools_enabled);
+    }
+
+    #[tokio::test]
+    async fn android_host_strips_external_tools_and_connectors_from_runtime_config() {
+        let dir = tempdir().unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("ga.db").display());
+        let storage = Storage::connect(&db_url).await.unwrap();
+        let runtime_config = RuntimeConfig {
+            external_tools: vec![ExternalToolConfig::mcp(
+                "filesystem",
+                "read_file",
+                "Read a file through MCP.",
+                json!({ "type": "object" }),
+                ExternalToolVisibility::Immediate,
+            )],
+            connectors: vec![ConnectorMetadata {
+                id: "desktop-drive".into(),
+                name: "Desktop Drive".into(),
+                description: "Desktop-only connector".into(),
+                version: "1.0.0".into(),
+                permissions: vec![],
+                auth_state: ConnectorAuthState::Connected,
+                tool_count: 1,
+            }],
+            ..RuntimeConfig::workspace_write(dir.path(), dir.path())
+        };
+
+        let host = MobileRuntimeHost::new_for_test(
+            storage,
+            FakeModel,
+            SkillRegistry::empty(),
+            SkillCatalog::empty(),
+            runtime_config,
+            MobileRuntimeInit {
+                platform: PlatformId::Android,
+                capabilities: CapabilitySet::android_mvp(),
+            },
+        );
+
+        let diagnostics = host.diagnostics();
+
+        assert!(host.runtime_config.external_tools.is_empty());
+        assert!(host.runtime_config.connectors.is_empty());
+        assert_eq!(diagnostics.configured_external_tool_count, 0);
+        assert_eq!(diagnostics.configured_connector_count, 0);
     }
 
     #[tokio::test]
