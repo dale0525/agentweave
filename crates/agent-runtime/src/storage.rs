@@ -77,9 +77,12 @@ impl Storage {
         role: &str,
         content: &str,
     ) -> anyhow::Result<Message> {
-        let message = build_message(session_id, role, content, Utc::now());
-
-        insert_message(&self.pool, &message).await?;
+        let created_at = Utc::now();
+        let message = build_message(session_id, role, content, created_at);
+        let mut tx = self.pool.begin().await?;
+        insert_message(&mut *tx, &message).await?;
+        touch_session(&mut *tx, session_id, created_at).await?;
+        tx.commit().await?;
 
         Ok(message)
     }
@@ -103,6 +106,7 @@ impl Storage {
 
         insert_message(&mut *tx, &user_message).await?;
         insert_message(&mut *tx, &assistant_message).await?;
+        touch_session(&mut *tx, session_id, assistant_created_at).await?;
         tx.commit().await?;
 
         Ok((user_message, assistant_message))
@@ -139,6 +143,41 @@ impl Storage {
 
         Ok(messages)
     }
+
+    pub async fn list_sessions(&self) -> anyhow::Result<Vec<Session>> {
+        let rows = sqlx::query(
+            "SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC, created_at DESC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut sessions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let created_at: String = row.try_get("created_at")?;
+            let updated_at: String = row.try_get("updated_at")?;
+            sessions.push(Session {
+                id: row.try_get("id")?,
+                title: row.try_get("title")?,
+                created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+            });
+        }
+        Ok(sessions)
+    }
+
+    pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM messages WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 fn build_message(
@@ -170,6 +209,23 @@ where
     .bind(message.created_at.to_rfc3339())
     .execute(executor)
     .await?;
+
+    Ok(())
+}
+
+async fn touch_session<'a, E>(
+    executor: E,
+    session_id: &str,
+    updated_at: DateTime<Utc>,
+) -> anyhow::Result<()>
+where
+    E: Executor<'a, Database = Sqlite>,
+{
+    sqlx::query("UPDATE sessions SET updated_at = ? WHERE id = ?")
+        .bind(updated_at.to_rfc3339())
+        .bind(session_id)
+        .execute(executor)
+        .await?;
 
     Ok(())
 }
@@ -260,5 +316,33 @@ mod tests {
         assert!(result.is_err());
         let messages = storage.list_messages(&session.id).await.unwrap();
         assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_newest_updated_first() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let first = storage.create_session("First").await.unwrap();
+        let second = storage.create_session("Second").await.unwrap();
+        storage.append_message(&first.id, "user", "hello").await.unwrap();
+
+        let sessions = storage.list_sessions().await.unwrap();
+
+        assert_eq!(sessions[0].id, first.id);
+        assert_eq!(sessions[1].id, second.id);
+    }
+
+    #[tokio::test]
+    async fn delete_session_removes_messages() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let session = storage.create_session("Delete me").await.unwrap();
+        storage
+            .append_turn(&session.id, "user", "assistant")
+            .await
+            .unwrap();
+
+        storage.delete_session(&session.id).await.unwrap();
+
+        assert!(!storage.session_exists(&session.id).await.unwrap());
+        assert!(storage.list_messages(&session.id).await.unwrap().is_empty());
     }
 }

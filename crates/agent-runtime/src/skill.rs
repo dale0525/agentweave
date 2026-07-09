@@ -77,6 +77,13 @@ struct SkillAvailabilityContext {
 }
 
 impl SkillRegistry {
+    pub fn empty() -> Self {
+        Self {
+            skills: Vec::new(),
+            availability: None,
+        }
+    }
+
     pub async fn load(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         Self::load_development(root).await
     }
@@ -157,10 +164,7 @@ impl SkillRegistry {
 
     #[cfg(test)]
     pub fn empty_for_tests() -> Self {
-        Self {
-            skills: Vec::new(),
-            availability: None,
-        }
+        Self::empty()
     }
 
     pub fn with_platform_capabilities(

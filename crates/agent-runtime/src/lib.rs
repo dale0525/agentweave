@@ -1,6 +1,8 @@
 pub mod context;
 pub mod events;
 pub mod instructions;
+pub mod mobile_host;
+pub mod model_config;
 pub mod platform;
 pub mod policy;
 pub mod session;
