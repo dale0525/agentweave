@@ -8,6 +8,7 @@ pub mod skill;
 pub mod skill_availability;
 pub mod skill_catalog;
 pub mod storage;
+pub mod vfs;
 pub mod subagent;
 pub mod tools;
 pub mod turn;
