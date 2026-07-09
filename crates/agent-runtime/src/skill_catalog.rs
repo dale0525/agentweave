@@ -461,6 +461,26 @@ description: Write plans.
     }
 
     #[tokio::test]
+    async fn project_catalog_loads_release_ready_project_instruction_skills() {
+        let skills_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("skills");
+
+        let catalog = SkillCatalog::load_development(skills_root).await.unwrap();
+        let names: Vec<_> = catalog
+            .summaries()
+            .iter()
+            .map(|summary| summary.name.as_str())
+            .collect();
+
+        assert!(names.contains(&"filesystem"));
+        assert!(names.contains(&"skill-creator"));
+        assert!(!names.contains(&"test-driven-development"));
+    }
+
+    #[tokio::test]
     async fn read_development_skill_summary_validates_one_skill_file() {
         let root = unique_test_dir("single-instruction-package");
         write_skill_md(

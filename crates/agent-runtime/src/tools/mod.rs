@@ -9,7 +9,7 @@ pub mod schema;
 pub mod search;
 
 use crate::policy::{ApprovalPolicy, SandboxProfile};
-use crate::skill::SkillRegistry;
+use crate::skill::{SkillExecutionContext, SkillRegistry};
 use builtin::BuiltInTools;
 use discovery::{ConnectorMetadata, ExternalToolConfig, ExternalToolExecution, ToolDiscoveryItem};
 use result::{ToolError, ToolResult, ToolResultMetadata};
@@ -36,6 +36,8 @@ pub struct RuntimeConfig {
     pub cwd: PathBuf,
     pub mode: RuntimeMode,
     pub command_mode: CommandMode,
+    #[serde(default = "default_built_in_tools_enabled")]
+    pub built_in_tools_enabled: bool,
     pub max_tool_calls_per_turn: usize,
     pub tool_timeout_ms: u64,
     pub output_limit_bytes: usize,
@@ -60,6 +62,7 @@ impl RuntimeConfig {
             cwd: cwd.into(),
             mode,
             command_mode: CommandMode::Disabled,
+            built_in_tools_enabled: true,
             max_tool_calls_per_turn: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
             tool_timeout_ms: DEFAULT_TOOL_TIMEOUT_MS,
             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
@@ -74,6 +77,15 @@ impl RuntimeConfig {
         self.command_mode = command_mode;
         self
     }
+
+    pub fn without_builtin_tools(mut self) -> Self {
+        self.built_in_tools_enabled = false;
+        self
+    }
+}
+
+fn default_built_in_tools_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -83,6 +95,7 @@ pub enum RuntimeMode {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolPermission {
     ReadWorkspace,
     WriteWorkspace,
@@ -137,11 +150,16 @@ pub fn permission_allowed(
 #[derive(Debug)]
 pub struct ToolRegistry {
     builtins: BuiltInTools,
+    built_in_tools_enabled: bool,
     skills: SkillRegistry,
     external_tools: Vec<ExternalToolConfig>,
     external_definitions: Vec<ToolDefinition>,
     external_discovery: Vec<ToolDiscoveryItem>,
     connectors: Vec<ConnectorMetadata>,
+    workspace_root: PathBuf,
+    cwd: PathBuf,
+    mode: RuntimeMode,
+    command_mode: CommandMode,
     tool_timeout: Duration,
     output_limit_bytes: usize,
     approval_policy: ApprovalPolicy,
@@ -157,11 +175,16 @@ impl ToolRegistry {
         let external_discovery = external_discovery(&config.external_tools)?;
         Self {
             builtins: BuiltInTools::new(config.clone()),
+            built_in_tools_enabled: config.built_in_tools_enabled,
             skills,
             external_tools: config.external_tools.clone(),
             external_definitions,
             external_discovery,
             connectors: config.connectors.clone(),
+            workspace_root: config.workspace_root.clone(),
+            cwd: config.cwd.clone(),
+            mode: config.mode,
+            command_mode: config.command_mode,
             tool_timeout: Duration::from_millis(config.tool_timeout_ms),
             output_limit_bytes: config.output_limit_bytes,
             approval_policy: config.approval_policy,
@@ -170,16 +193,26 @@ impl ToolRegistry {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = self.builtins.definitions();
-        definitions.extend(self.skills.tools_with_skill_names().into_iter().map(
-            |(skill_name, tool)| ToolDefinition {
-                name: tool.name,
-                namespace: None,
-                description: tool.description,
-                input_schema: tool.input_schema,
-                output_schema: None,
-                permission: ToolPermission::ReadWorkspace,
-                source: ToolSource::RuntimeSkill { skill_name },
+        let mut definitions = if self.built_in_tools_enabled {
+            self.builtins.definitions()
+        } else {
+            Vec::new()
+        };
+        definitions.extend(self.skills.tools_with_skill_names().into_iter().filter_map(
+            |(skill_name, tool)| {
+                if self.built_in_tools_enabled && BuiltInTools::handles(&tool.name) {
+                    return None;
+                }
+
+                Some(ToolDefinition {
+                    name: tool.name,
+                    namespace: None,
+                    description: tool.description,
+                    input_schema: tool.input_schema,
+                    output_schema: None,
+                    permission: tool.permission,
+                    source: ToolSource::RuntimeSkill { skill_name },
+                })
             },
         ));
         definitions.extend(self.external_definitions.clone());
@@ -289,7 +322,7 @@ impl ToolRegistry {
         arguments: Value,
         started: Instant,
     ) -> ToolResult {
-        if BuiltInTools::handles(name) {
+        if self.built_in_tools_enabled && BuiltInTools::handles(name) {
             return self.builtins.execute(name, call_id, arguments).await;
         }
 
@@ -297,12 +330,8 @@ impl ToolRegistry {
             return self.execute_external_tool(tool, name, call_id, started);
         }
 
-        if !self
-            .skills
-            .tools()
-            .iter()
-            .any(|tool| tool.name.as_str() == name)
-        {
+        let skill_tools = self.skills.tools();
+        let Some(skill_tool) = skill_tools.iter().find(|tool| tool.name.as_str() == name) else {
             return registry_failure(
                 name,
                 call_id,
@@ -311,11 +340,30 @@ impl ToolRegistry {
                 false,
                 ToolResultMetadata::default(),
             );
+        };
+
+        if !permission_allowed(self.mode, self.command_mode, skill_tool.permission) {
+            return registry_failure(
+                name,
+                call_id,
+                "permission_denied",
+                "tool is not allowed in the current runtime mode",
+                false,
+                registry_metadata(started),
+            );
         }
 
         match self
             .skills
-            .execute_with_output_limit(name, arguments, self.output_limit_bytes)
+            .execute_with_context(
+                name,
+                arguments,
+                SkillExecutionContext {
+                    workspace_root: self.workspace_root.clone(),
+                    cwd: self.cwd.clone(),
+                    output_limit_bytes: self.output_limit_bytes,
+                },
+            )
             .await
         {
             Ok(value) => ToolResult::success(name, call_id, value, registry_metadata(started)),

@@ -19,10 +19,11 @@ afterEach(() => {
 
 describe("developer skill prompts", () => {
   it("builds a create prompt for Codex skill-creator", () => {
-    const prompt = buildCreateSkillPrompt("/repo/skills");
+    const prompt = buildCreateSkillPrompt("/home/developer/projects/GeneralAgent/skills");
 
     expect(prompt).toContain("Use the existing skill-creator skill");
-    expect(prompt).toContain("/repo/skills");
+    expect(prompt).toContain("skills/");
+    expect(prompt).not.toContain("/home/developer");
     expect(prompt).toContain("SKILL.md is a development authoring asset");
     expect(prompt).toContain("skill.json is the GeneralAgent runtime contract");
   });
@@ -38,6 +39,13 @@ describe("developer skill prompts", () => {
       runtimeTools: ["echo"],
       packageKind: "runtime",
       bundleReady: true,
+      runtimeReady: true,
+      instructionReady: false,
+      releaseReady: true,
+      readinessIssues: [],
+      requiredRuntimeTools: [],
+      requiredConnectors: [],
+      hasPackageMetadata: false,
       validation: {
         ok: false,
         errors: ["missing SKILL.md is informational only"],
@@ -45,11 +53,18 @@ describe("developer skill prompts", () => {
       }
     };
 
-    const prompt = buildModifySkillPrompt("/repo/skills", skillPackage);
+    const prompt = buildModifySkillPrompt(
+      "/home/developer/projects/GeneralAgent/skills",
+      skillPackage
+    );
 
     expect(prompt).toContain("Use the existing skill-creator skill");
-    expect(prompt).toContain("/repo/skills/echo");
+    expect(prompt).toContain("Package path: skills/echo");
+    expect(prompt).not.toContain("/home/developer");
     expect(prompt).toContain("runtime tools: echo");
+    expect(prompt).toContain("Runtime ready: true");
+    expect(prompt).toContain("Instruction ready: false");
+    expect(prompt).toContain("Release ready: true");
     expect(prompt).toContain("missing SKILL.md is informational only");
   });
 });

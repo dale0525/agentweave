@@ -1,7 +1,3 @@
-mod api;
-mod dev_api;
-mod dev_skills;
-
 use agent_runtime::{
     skill::SkillRegistry,
     skill_catalog::SkillCatalog,
@@ -9,6 +5,7 @@ use agent_runtime::{
     tools::{CommandMode, RuntimeConfig},
     turn::TurnRunner,
 };
+use agent_server::api;
 use model_gateway::{
     provider::{EndpointType, ProviderProfile},
     responses::GatewayHttpClient,
@@ -63,7 +60,8 @@ fn runtime_config_from_env() -> RuntimeConfig {
     let workspace_root = std::env::var("GENERAL_AGENT_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let mut config = RuntimeConfig::workspace_write(workspace_root.clone(), workspace_root);
+    let mut config = RuntimeConfig::workspace_write(workspace_root.clone(), workspace_root)
+        .without_builtin_tools();
     if std::env::var("GENERAL_AGENT_COMMAND_MODE").as_deref() == Ok("allowed") {
         config = config.with_command_mode(CommandMode::Allowed);
     }
@@ -119,5 +117,15 @@ fn model_endpoint_type_from_env() -> EndpointType {
         "responses" => EndpointType::Responses,
         "completion" => EndpointType::Completion,
         _ => EndpointType::ChatCompletions,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_runtime_config_disables_builtin_tools_by_default() {
+        assert!(!runtime_config_from_env().built_in_tools_enabled);
     }
 }

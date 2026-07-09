@@ -57,6 +57,13 @@ export type DevSkillPackage = {
   runtimeTools: string[];
   packageKind: DevSkillPackageKind;
   bundleReady: boolean;
+  runtimeReady: boolean;
+  instructionReady: boolean;
+  releaseReady: boolean;
+  readinessIssues: string[];
+  requiredRuntimeTools: string[];
+  requiredConnectors: string[];
+  hasPackageMetadata: boolean;
   validation: DevSkillValidation;
 };
 

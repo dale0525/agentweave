@@ -109,6 +109,7 @@ fn runtime_config_defaults_to_command_disabled() {
     assert_eq!(workspace_write.cwd, cwd);
     assert_eq!(workspace_write.mode, RuntimeMode::WorkspaceWrite);
     assert_eq!(workspace_write.command_mode, CommandMode::Disabled);
+    assert!(workspace_write.built_in_tools_enabled);
     assert_eq!(workspace_write.max_tool_calls_per_turn, 16);
     assert_eq!(workspace_write.tool_timeout_ms, 30_000);
     assert_eq!(workspace_write.output_limit_bytes, 64 * 1024);
@@ -136,6 +137,162 @@ fn runtime_config_can_enable_development_command_mode() {
         RuntimeConfig::workspace_write(workspace_root, cwd).with_command_mode(CommandMode::Allowed);
 
     assert_eq!(config.command_mode, CommandMode::Allowed);
+}
+
+#[tokio::test]
+async fn disabled_builtin_tools_leave_runtime_skills_model_visible() {
+    let root = unique_test_dir("disabled-builtins");
+    write_skill(
+        &root,
+        "echoer",
+        "echoer_echo",
+        "process.stdin.resume();\nprocess.stdin.on('data', (chunk) => process.stdout.write(chunk));\n",
+    )
+    .await;
+    let skills = SkillRegistry::load_development(&root).await.unwrap();
+    let config = RuntimeConfig::workspace_write(root.clone(), root.clone()).without_builtin_tools();
+    let registry = ToolRegistry::new(skills, &config);
+    let definitions = registry.definitions();
+
+    assert!(definitions.iter().any(|tool| tool.name == "echoer_echo"));
+    assert!(
+        !definitions
+            .iter()
+            .any(|tool| tool.name == "create_directory")
+    );
+    assert!(!definitions.iter().any(|tool| tool.name == "read_text_file"));
+    assert!(!definitions.iter().any(|tool| tool.name == "apply_patch"));
+    remove_test_dir(root).await;
+}
+
+#[tokio::test]
+async fn enabled_builtin_tools_take_precedence_over_duplicate_runtime_skill_names() {
+    let root = unique_test_dir("duplicate-builtin-skill-name");
+    write_skill(
+        &root,
+        "filesystem",
+        "read_text_file",
+        "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ text: 'skill' })));\n",
+    )
+    .await;
+    let skills = SkillRegistry::load_development(&root).await.unwrap();
+    let config = RuntimeConfig::workspace_write(root.clone(), root.clone());
+    let registry = ToolRegistry::new(skills, &config);
+    let definitions: Vec<_> = registry
+        .definitions()
+        .into_iter()
+        .filter(|tool| tool.name == "read_text_file")
+        .collect();
+
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].source, ToolSource::BuiltIn);
+    remove_test_dir(root).await;
+}
+
+#[tokio::test]
+async fn disabled_builtin_tools_do_not_execute_builtin_names() {
+    let root = unique_test_dir("disabled-builtins-execution");
+    tokio::fs::create_dir_all(&root).await.unwrap();
+    let skills = SkillRegistry::load_development(&root).await.unwrap();
+    let config = RuntimeConfig::workspace_write(root.clone(), root.clone()).without_builtin_tools();
+    let registry = ToolRegistry::new(skills, &config);
+
+    let result = registry
+        .execute(
+            "read_text_file",
+            "call-1",
+            serde_json::json!({ "path": "notes.txt" }),
+        )
+        .await;
+
+    assert!(!result.ok);
+    assert_eq!(result.error.unwrap().code, "unknown_tool");
+    remove_test_dir(root).await;
+}
+
+#[tokio::test]
+async fn runtime_skill_definitions_use_manifest_permissions() {
+    let root = unique_test_dir("skill-permissions");
+    write_skill_with_permission(
+        &root,
+        "writer",
+        "write_file",
+        "write_workspace",
+        "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ ok: true })));\n",
+    )
+    .await;
+    let skills = SkillRegistry::load_development(&root).await.unwrap();
+    let config = RuntimeConfig::workspace_write(root.clone(), root.clone()).without_builtin_tools();
+    let registry = ToolRegistry::new(skills, &config);
+
+    let definition = registry
+        .definitions()
+        .into_iter()
+        .find(|tool| tool.name == "write_file")
+        .unwrap();
+
+    assert_eq!(definition.permission, ToolPermission::WriteWorkspace);
+    remove_test_dir(root).await;
+}
+
+#[tokio::test]
+async fn project_filesystem_skill_executes_when_builtin_tools_are_disabled() {
+    let workspace = unique_test_dir("project-filesystem-skill");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let skills = SkillRegistry::load_development(project_skills_root())
+        .await
+        .unwrap();
+    let config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone())
+        .without_builtin_tools();
+    let registry = ToolRegistry::new(skills, &config);
+    let definition = registry
+        .definitions()
+        .into_iter()
+        .find(|tool| tool.name == "write_text_file")
+        .unwrap();
+    assert_eq!(
+        definition.source,
+        ToolSource::RuntimeSkill {
+            skill_name: "filesystem".to_string()
+        }
+    );
+    assert_eq!(definition.permission, ToolPermission::WriteWorkspace);
+
+    let write_result = registry
+        .execute(
+            "write_text_file",
+            "call-write",
+            serde_json::json!({ "path": "notes.txt", "text": "hello\nneedle\n" }),
+        )
+        .await;
+    assert!(write_result.ok);
+
+    let read_result = registry
+        .execute(
+            "read_text_file",
+            "call-read",
+            serde_json::json!({ "path": "notes.txt" }),
+        )
+        .await;
+    assert_eq!(read_result.data.unwrap()["text"], "hello\nneedle\n");
+
+    let patch_result = registry
+        .execute(
+            "apply_patch",
+            "call-patch",
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Add File: patched.txt\n+patched\n*** End Patch\n"
+            }),
+        )
+        .await;
+    assert!(patch_result.ok);
+    assert_eq!(
+        tokio::fs::read_to_string(workspace.join("patched.txt"))
+            .await
+            .unwrap(),
+        "patched\n"
+    );
+    remove_test_dir(workspace).await;
 }
 
 #[tokio::test]
@@ -548,8 +705,54 @@ async fn write_skill(root: &std::path::Path, folder: &str, tool_name: &str, scri
         .unwrap();
 }
 
+async fn write_skill_with_permission(
+    root: &std::path::Path,
+    folder: &str,
+    tool_name: &str,
+    permission: &str,
+    script: &str,
+) {
+    let skill_dir = root.join(folder);
+    tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+    tokio::fs::write(
+        skill_dir.join("skill.json"),
+        serde_json::json!({
+            "name": folder,
+            "description": "Test runtime skill.",
+            "version": "0.1.0",
+            "entry": {
+                "type": "command",
+                "command": "node",
+                "args": ["index.js"]
+            },
+            "tools": [
+                {
+                    "name": tool_name,
+                    "description": "Test tool.",
+                    "permission": permission,
+                    "input_schema": { "type": "object" }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(skill_dir.join("index.js"), script)
+        .await
+        .unwrap();
+}
+
 fn unique_test_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
+}
+
+fn project_skills_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join("skills")
 }
 
 async fn remove_test_dir(path: PathBuf) {

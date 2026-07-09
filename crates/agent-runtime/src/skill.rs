@@ -1,3 +1,4 @@
+use crate::tools::ToolPermission;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,7 +29,16 @@ pub struct SkillEntry {
 pub struct SkillTool {
     pub name: String,
     pub description: String,
+    #[serde(default = "default_tool_permission")]
+    pub permission: ToolPermission,
     pub input_schema: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillExecutionContext {
+    pub workspace_root: PathBuf,
+    pub cwd: PathBuf,
+    pub output_limit_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +149,25 @@ impl SkillRegistry {
         input: Value,
         output_limit_bytes: usize,
     ) -> anyhow::Result<Value> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        self.execute_with_context(
+            tool_name,
+            input,
+            SkillExecutionContext {
+                workspace_root: cwd.clone(),
+                cwd,
+                output_limit_bytes,
+            },
+        )
+        .await
+    }
+
+    pub async fn execute_with_context(
+        &self,
+        tool_name: &str,
+        input: Value,
+        context: SkillExecutionContext,
+    ) -> anyhow::Result<Value> {
         let skill = self
             .skills
             .iter()
@@ -154,6 +183,13 @@ impl SkillRegistry {
         let mut child = Command::new(&skill.manifest.entry.command)
             .args(&skill.manifest.entry.args)
             .current_dir(&skill.root)
+            .env("GENERAL_AGENT_TOOL_NAME", tool_name)
+            .env("GENERAL_AGENT_WORKSPACE_ROOT", &context.workspace_root)
+            .env("GENERAL_AGENT_CWD", &context.cwd)
+            .env(
+                "GENERAL_AGENT_OUTPUT_LIMIT_BYTES",
+                context.output_limit_bytes.to_string(),
+            )
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -177,7 +213,7 @@ impl SkillRegistry {
             .await?;
         drop(stdin);
 
-        let output = read_limited_child_output(stdout, stderr, output_limit_bytes).await?;
+        let output = read_limited_child_output(stdout, stderr, context.output_limit_bytes).await?;
         if output.stdout_truncated || output.stderr_truncated {
             child.kill().await?;
             let _ = child.wait().await;
@@ -204,6 +240,10 @@ impl SkillRegistry {
 
         Ok(InstalledSkill { root, manifest })
     }
+}
+
+fn default_tool_permission() -> ToolPermission {
+    ToolPermission::ReadWorkspace
 }
 
 struct LimitedOutput {

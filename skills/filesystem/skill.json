@@ -1,0 +1,108 @@
+{
+  "name": "filesystem",
+  "description": "Workspace filesystem operations packaged as GeneralAgent runtime skills.",
+  "version": "0.1.0",
+  "entry": {
+    "type": "command",
+    "command": "node",
+    "args": ["index.js"]
+  },
+  "tools": [
+    {
+      "name": "create_directory",
+      "description": "Create a directory inside the workspace.",
+      "permission": "write_workspace",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_directory",
+      "description": "List entries in a workspace directory.",
+      "permission": "read_workspace",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "limit": { "type": "integer", "minimum": 1 }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "file_metadata",
+      "description": "Return metadata for a workspace path.",
+      "permission": "read_workspace",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_text_file",
+      "description": "Read a UTF-8 text file inside the workspace.",
+      "permission": "read_workspace",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "write_text_file",
+      "description": "Write a UTF-8 text file inside the workspace.",
+      "permission": "write_workspace",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "text": { "type": "string" },
+          "overwrite": { "type": "boolean" }
+        },
+        "required": ["path", "text"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "search_files",
+      "description": "Search for text matches inside the workspace.",
+      "permission": "read_workspace",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string" },
+          "path": { "type": "string" },
+          "limit": { "type": "integer", "minimum": 1 }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "apply_patch",
+      "description": "Apply a minimal patch inside the workspace.",
+      "permission": "write_workspace",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "patch": { "type": "string" }
+        },
+        "required": ["patch"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

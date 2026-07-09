@@ -85,7 +85,7 @@ impl AppState {
 
 fn default_runtime_config() -> RuntimeConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    RuntimeConfig::workspace_write(cwd.clone(), cwd)
+    RuntimeConfig::workspace_write(cwd.clone(), cwd).without_builtin_tools()
 }
 
 #[cfg(test)]

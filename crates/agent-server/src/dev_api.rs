@@ -250,7 +250,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
         let tools = body["tools"].as_array().unwrap();
-        assert!(tools.iter().any(|tool| tool["name"] == "create_directory"));
+        assert!(tools.iter().any(|tool| tool["name"] == "echo"));
+        assert!(tools.iter().all(|tool| tool["name"] != "create_directory"));
         assert!(tools.iter().all(|tool| tool.get("schema").is_some()));
         remove_test_dir(skills_root).await;
     }

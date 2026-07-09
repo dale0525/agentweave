@@ -3,11 +3,14 @@ use agent_runtime::{
     skill_catalog::SkillCatalog,
 };
 use anyhow::Context;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
+    fmt,
     path::{Component, Path, PathBuf},
 };
+
+const PACKAGE_METADATA_FILE: &str = "general-agent.json";
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +31,13 @@ pub struct DevSkillPackage {
     pub runtime_tools: Vec<String>,
     pub package_kind: DevSkillPackageKind,
     pub bundle_ready: bool,
+    pub runtime_ready: bool,
+    pub instruction_ready: bool,
+    pub release_ready: bool,
+    pub readiness_issues: Vec<String>,
+    pub required_runtime_tools: Vec<String>,
+    pub required_connectors: Vec<String>,
+    pub has_package_metadata: bool,
     pub validation: DevSkillValidation,
     #[serde(skip)]
     instruction_skill_name: Option<String>,
@@ -51,14 +61,74 @@ pub struct DevSkillValidation {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DevSkillPackageMetadata {
+    #[serde(default)]
+    pub package: DevSkillPackageTargets,
+    #[serde(default)]
+    pub requires: DevSkillPackageRequirements,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DevSkillPackageTargets {
+    pub include_runtime: Option<bool>,
+    pub include_instructions: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DevSkillPackageRequirements {
+    #[serde(default)]
+    pub runtime_tools: Vec<String>,
+    #[serde(default)]
+    pub connectors: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SkillPackageMetadata {
     name: Option<String>,
     description: Option<String>,
     runtime_tools: Vec<String>,
     instruction_skill_name: Option<String>,
+    package_metadata: DevSkillPackageMetadata,
+    has_package_metadata: bool,
     validation: DevSkillValidation,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillPackageReleaseError {
+    pub inventory: DevSkillInventory,
+    message: String,
+}
+
+impl SkillPackageReleaseError {
+    fn not_ready(inventory: DevSkillInventory) -> Self {
+        Self {
+            inventory,
+            message: "skill packages are not release ready".to_string(),
+        }
+    }
+
+    fn scan_failed(error: anyhow::Error) -> Self {
+        Self {
+            inventory: DevSkillInventory {
+                root: String::new(),
+                packages: Vec::new(),
+            },
+            message: format!("failed to scan skill packages: {error}"),
+        }
+    }
+}
+
+impl fmt::Display for SkillPackageReleaseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SkillPackageReleaseError {}
 
 pub async fn scan_skill_packages(root: impl AsRef<Path>) -> anyhow::Result<DevSkillInventory> {
     let root = root.as_ref();
@@ -81,6 +151,23 @@ pub async fn scan_skill_packages(root: impl AsRef<Path>) -> anyhow::Result<DevSk
         root: canonical_root.display().to_string(),
         packages,
     })
+}
+
+pub async fn check_skill_packages(
+    root: impl AsRef<Path>,
+) -> Result<DevSkillInventory, SkillPackageReleaseError> {
+    let inventory = scan_skill_packages(root)
+        .await
+        .map_err(SkillPackageReleaseError::scan_failed)?;
+    if inventory
+        .packages
+        .iter()
+        .all(|package| package.release_ready)
+    {
+        Ok(inventory)
+    } else {
+        Err(SkillPackageReleaseError::not_ready(inventory))
+    }
 }
 
 #[allow(dead_code)]
@@ -190,17 +277,20 @@ async fn scan_one_package(root: &Path, package_path: PathBuf) -> DevSkillPackage
     let runtime_manifest_path = package_path.join("skill.json");
     let has_skill_md = path_is_file(&skill_md_path).await;
     let has_runtime_manifest = path_is_file(&runtime_manifest_path).await;
+    let package_metadata_path = package_path.join(PACKAGE_METADATA_FILE);
     let metadata = collect_package_metadata(
         root,
         &package_path,
         &skill_md_path,
+        &package_metadata_path,
         has_skill_md,
         has_runtime_manifest,
     )
     .await;
     let ok = metadata.validation.ok;
     let package_kind = compute_package_kind(has_skill_md, has_runtime_manifest, ok);
-    let bundle_ready = has_runtime_manifest && ok && !metadata.runtime_tools.is_empty();
+    let required_runtime_tools = metadata.package_metadata.requires.runtime_tools.clone();
+    let required_connectors = metadata.package_metadata.requires.connectors.clone();
 
     DevSkillPackage {
         id: id.clone(),
@@ -213,7 +303,14 @@ async fn scan_one_package(root: &Path, package_path: PathBuf) -> DevSkillPackage
         has_runtime_manifest,
         runtime_tools: metadata.runtime_tools,
         package_kind,
-        bundle_ready,
+        bundle_ready: false,
+        runtime_ready: false,
+        instruction_ready: false,
+        release_ready: false,
+        readiness_issues: Vec::new(),
+        required_runtime_tools,
+        required_connectors,
+        has_package_metadata: metadata.has_package_metadata,
         validation: metadata.validation,
         instruction_skill_name: metadata.instruction_skill_name,
     }
@@ -262,16 +359,75 @@ fn apply_duplicate_diagnostics(packages: &mut [DevSkillPackage]) {
         }
     }
 
-    for package in packages {
+    apply_readiness(packages);
+}
+
+fn apply_readiness(packages: &mut [DevSkillPackage]) {
+    for package in packages.iter_mut() {
         package.validation.ok = package.validation.errors.is_empty();
         package.package_kind = compute_package_kind(
             package.has_skill_md,
             package.has_runtime_manifest,
             package.validation.ok,
         );
-        package.bundle_ready = package.has_runtime_manifest
-            && package.validation.ok
+    }
+
+    let available_runtime_tools = packages
+        .iter()
+        .filter(|package| {
+            package.validation.ok
+                && package.has_runtime_manifest
+                && !package.runtime_tools.is_empty()
+        })
+        .flat_map(|package| package.runtime_tools.iter().cloned())
+        .collect::<BTreeSet<_>>();
+
+    for package in packages {
+        let mut readiness_issues = Vec::new();
+        let runtime_ready = package.validation.ok
+            && package.has_runtime_manifest
             && !package.runtime_tools.is_empty();
+
+        if package.has_runtime_manifest && package.runtime_tools.is_empty() {
+            readiness_issues.push("runtime manifest does not define any tools".to_string());
+        }
+
+        let mut instruction_ready =
+            package.validation.ok && package.has_skill_md && package.has_package_metadata;
+        if package.has_skill_md {
+            if !package.has_package_metadata {
+                readiness_issues.push(format!(
+                    "missing {PACKAGE_METADATA_FILE} metadata for instruction skill"
+                ));
+            }
+            for required_tool in &package.required_runtime_tools {
+                if !available_runtime_tools.contains(required_tool) {
+                    instruction_ready = false;
+                    readiness_issues
+                        .push(format!("missing required runtime tool: {required_tool}"));
+                }
+            }
+            for required_connector in &package.required_connectors {
+                instruction_ready = false;
+                readiness_issues.push(format!("missing required connector: {required_connector}"));
+            }
+        }
+
+        let has_package_assets = package.has_runtime_manifest || package.has_skill_md;
+        if !has_package_assets {
+            readiness_issues.push("package does not contain SKILL.md or skill.json".to_string());
+        }
+
+        let release_ready = package.validation.ok
+            && has_package_assets
+            && (!package.has_runtime_manifest || runtime_ready)
+            && (!package.has_skill_md || instruction_ready);
+
+        package.runtime_ready = runtime_ready;
+        package.instruction_ready = instruction_ready;
+        package.release_ready = release_ready;
+        package.bundle_ready = release_ready;
+        package.readiness_issues = readiness_issues;
     }
 }
 
@@ -314,6 +470,7 @@ async fn collect_package_metadata(
     root: &Path,
     package_path: &Path,
     skill_md_path: &Path,
+    package_metadata_path: &Path,
     has_skill_md: bool,
     has_runtime_manifest: bool,
 ) -> SkillPackageMetadata {
@@ -322,6 +479,13 @@ async fn collect_package_metadata(
     let mut runtime_tools = Vec::new();
     let mut instruction_skill_name = None;
     let mut errors = Vec::new();
+    let has_package_metadata = path_is_file(package_metadata_path).await;
+    let package_metadata = read_package_metadata(package_metadata_path)
+        .await
+        .unwrap_or_else(|error| {
+            errors.push(error);
+            DevSkillPackageMetadata::default()
+        });
 
     if has_runtime_manifest {
         match SkillRegistry::load_development_skill(package_path).await {
@@ -354,12 +518,25 @@ async fn collect_package_metadata(
         description,
         runtime_tools,
         instruction_skill_name,
+        package_metadata,
+        has_package_metadata,
         validation: DevSkillValidation {
             ok: errors.is_empty(),
             errors,
             warnings: Vec::new(),
         },
     }
+}
+
+async fn read_package_metadata(path: &Path) -> Result<DevSkillPackageMetadata, String> {
+    if !path_is_file(path).await {
+        return Ok(DevSkillPackageMetadata::default());
+    }
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|error| format!("failed to read {PACKAGE_METADATA_FILE}: {error}"))?;
+    serde_json::from_str(&content)
+        .map_err(|error| format!("failed to parse {PACKAGE_METADATA_FILE}: {error}"))
 }
 
 fn runtime_tool_names(manifest: &SkillManifest) -> Vec<String> {
@@ -420,8 +597,144 @@ mod tests {
             DevSkillPackageKind::Invalid
         );
         assert!(packages["runtime-only"].bundle_ready);
-        assert!(!packages["instruction-only"].bundle_ready);
+        assert!(packages["runtime-only"].runtime_ready);
+        assert!(!packages["runtime-only"].instruction_ready);
+        assert!(packages["runtime-only"].release_ready);
+        assert!(packages["instruction-only"].bundle_ready);
+        assert!(!packages["instruction-only"].runtime_ready);
+        assert!(packages["instruction-only"].instruction_ready);
+        assert!(packages["instruction-only"].release_ready);
         assert!(!packages["invalid"].validation.ok);
+        assert!(!packages["invalid"].release_ready);
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn instruction_dependency_on_project_runtime_tool_controls_readiness() {
+        let root = unique_test_dir("instruction-runtime-dependencies");
+        write_runtime_skill(&root, "filesystem", "filesystem", "read_text_file").await;
+        write_instruction_skill(&root, "reader", "reader", "Read project files.").await;
+        write_package_metadata(
+            &root,
+            "reader",
+            json!({
+                "requires": {
+                    "runtimeTools": ["read_text_file"]
+                }
+            }),
+        )
+        .await;
+        write_instruction_skill(&root, "browser", "browser", "Use a browser.").await;
+        write_package_metadata(
+            &root,
+            "browser",
+            json!({
+                "requires": {
+                    "runtimeTools": ["open_browser"]
+                }
+            }),
+        )
+        .await;
+
+        let inventory = scan_skill_packages(&root).await.unwrap();
+        let packages = packages_by_id(&inventory);
+
+        assert!(packages["reader"].validation.ok);
+        assert!(packages["reader"].instruction_ready);
+        assert!(packages["reader"].release_ready);
+        assert!(packages["reader"].readiness_issues.is_empty());
+        assert!(packages["browser"].validation.ok);
+        assert!(!packages["browser"].instruction_ready);
+        assert!(!packages["browser"].release_ready);
+        assert!(
+            packages["browser"]
+                .readiness_issues
+                .iter()
+                .any(|issue| issue.contains("missing required runtime tool: open_browser"))
+        );
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn instruction_skill_without_project_metadata_is_not_ready() {
+        let root = unique_test_dir("instruction-metadata-required");
+        write_instruction_skill_without_metadata(&root, "planning", "planning", "Plan work.").await;
+
+        let inventory = scan_skill_packages(&root).await.unwrap();
+        let packages = packages_by_id(&inventory);
+
+        assert!(packages["planning"].validation.ok);
+        assert!(!packages["planning"].instruction_ready);
+        assert!(!packages["planning"].release_ready);
+        assert!(
+            packages["planning"]
+                .readiness_issues
+                .iter()
+                .any(|issue| issue.contains("missing general-agent.json metadata"))
+        );
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn instruction_dependency_on_connector_is_not_ready_until_supported() {
+        let root = unique_test_dir("instruction-connector-dependencies");
+        write_instruction_skill(&root, "linear", "linear", "Manage Linear issues.").await;
+        write_package_metadata(
+            &root,
+            "linear",
+            json!({
+                "requires": {
+                    "connectors": ["linear"]
+                }
+            }),
+        )
+        .await;
+
+        let inventory = scan_skill_packages(&root).await.unwrap();
+        let packages = packages_by_id(&inventory);
+
+        assert!(packages["linear"].validation.ok);
+        assert!(!packages["linear"].instruction_ready);
+        assert!(!packages["linear"].release_ready);
+        assert!(
+            packages["linear"]
+                .readiness_issues
+                .iter()
+                .any(|issue| issue.contains("missing required connector: linear"))
+        );
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn release_check_fails_when_any_package_is_not_ready() {
+        let root = unique_test_dir("release-check");
+        write_instruction_skill(&root, "ready", "ready", "Ready instructions.").await;
+        write_instruction_skill(&root, "not-ready", "not-ready", "Needs a connector.").await;
+        write_package_metadata(
+            &root,
+            "not-ready",
+            json!({
+                "requires": {
+                    "connectors": ["browser"]
+                }
+            }),
+        )
+        .await;
+
+        let error = check_skill_packages(&root).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("skill packages are not release ready")
+        );
+        assert!(
+            error
+                .inventory
+                .packages
+                .iter()
+                .any(|package| package.id == "not-ready" && !package.release_ready)
+        );
         remove_test_dir(root).await;
     }
 
@@ -517,10 +830,17 @@ mod tests {
         let packages = packages_by_id(&inventory);
         assert!(!packages.contains_key("escape-package"));
 
-        let error = delete_skill_package(&root, "escape-package").await.unwrap_err();
+        let error = delete_skill_package(&root, "escape-package")
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("unsafe skill package path"));
         assert!(root.join("escape-package").exists());
-        assert!(outside_root.join("outside-package").join("skill.json").exists());
+        assert!(
+            outside_root
+                .join("outside-package")
+                .join("skill.json")
+                .exists()
+        );
 
         remove_test_dir(root).await;
         remove_test_dir(outside_root).await;
@@ -570,6 +890,16 @@ mod tests {
     }
 
     async fn write_instruction_skill(root: &Path, folder: &str, name: &str, description: &str) {
+        write_instruction_skill_without_metadata(root, folder, name, description).await;
+        write_package_metadata(root, folder, json!({ "requires": {} })).await;
+    }
+
+    async fn write_instruction_skill_without_metadata(
+        root: &Path,
+        folder: &str,
+        name: &str,
+        description: &str,
+    ) {
         let skill_dir = root.join(folder);
         fs::create_dir_all(&skill_dir).await.unwrap();
         fs::write(
@@ -578,6 +908,14 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    async fn write_package_metadata(root: &Path, folder: &str, metadata: serde_json::Value) {
+        let skill_dir = root.join(folder);
+        fs::create_dir_all(&skill_dir).await.unwrap();
+        fs::write(skill_dir.join("general-agent.json"), metadata.to_string())
+            .await
+            .unwrap();
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

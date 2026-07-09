@@ -1,0 +1,18 @@
+{
+  "package": {
+    "includeInstructions": true,
+    "includeRuntime": true
+  },
+  "requires": {
+    "runtimeTools": [
+      "create_directory",
+      "list_directory",
+      "file_metadata",
+      "read_text_file",
+      "write_text_file",
+      "search_files",
+      "apply_patch"
+    ],
+    "connectors": []
+  }
+}

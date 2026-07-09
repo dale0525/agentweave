@@ -8,7 +8,7 @@ export function createDevProcesses() {
     {
       name: "server",
       command: "cargo",
-      args: ["run", "-p", "agent-server"],
+      args: ["run", "-p", "agent-server", "--bin", "agent-server"],
       env: {
         GENERAL_AGENT_DEV_API: "1"
       }

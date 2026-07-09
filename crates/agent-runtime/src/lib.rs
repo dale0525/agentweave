@@ -10,3 +10,6 @@ pub mod subagent;
 pub mod tools;
 pub mod turn;
 pub mod turn_request;
+
+#[cfg(test)]
+mod skill_runtime_tests;
