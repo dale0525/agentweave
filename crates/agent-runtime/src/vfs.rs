@@ -99,12 +99,12 @@ fn ensure_existing_path_contained(root: &Path, resolved_path: &Path) -> Result<(
 }
 
 fn canonicalize_if_exists(path: &Path) -> Result<Option<PathBuf>, VfsError> {
-    if path.exists() {
-        fs::canonicalize(path)
+    match fs::symlink_metadata(path) {
+        Ok(_) => fs::canonicalize(path)
             .map(Some)
-            .map_err(|_| VfsError::PathEscape)
-    } else {
-        Ok(None)
+            .map_err(|_| VfsError::PathEscape),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(VfsError::PathEscape),
     }
 }
 
@@ -175,6 +175,29 @@ mod tests {
         let vfs = AppDataVfs::new(&documents_root, &cache_root);
         assert_eq!(
             vfs.resolve_uri("app://documents/link/secret.txt").unwrap_err(),
+            VfsError::PathEscape
+        );
+
+        fs::remove_dir_all(&temp_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_dangling_symlink_escape_inside_documents_root() {
+        let temp_root = make_temp_dir("vfs-dangling-symlink-escape");
+        let app_root = temp_root.join("app");
+        let documents_root = app_root.join("documents");
+        let cache_root = app_root.join("cache");
+        let outside_root = temp_root.join("outside-missing");
+        let link_path = documents_root.join("link");
+
+        fs::create_dir_all(&documents_root).unwrap();
+        fs::create_dir_all(&cache_root).unwrap();
+        symlink(&outside_root, &link_path).unwrap();
+
+        let vfs = AppDataVfs::new(&documents_root, &cache_root);
+        assert_eq!(
+            vfs.resolve_uri("app://documents/link/new.txt").unwrap_err(),
             VfsError::PathEscape
         );
 
