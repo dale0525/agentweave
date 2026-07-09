@@ -1,4 +1,8 @@
-use crate::skill_availability::SkillCapabilityMetadata;
+use crate::platform::{CapabilitySet, PlatformId};
+use crate::skill_availability::{
+    SkillAvailability, SkillAvailabilityStatus, SkillCapabilityMetadata,
+    evaluate_skill_availability,
+};
 use crate::tools::ToolPermission;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -63,6 +67,13 @@ struct SkillBundleEntry {
 #[derive(Debug, Clone)]
 pub struct SkillRegistry {
     skills: Vec<InstalledSkill>,
+    availability: Option<SkillAvailabilityContext>,
+}
+
+#[derive(Debug, Clone)]
+struct SkillAvailabilityContext {
+    platform: PlatformId,
+    capabilities: CapabilitySet,
 }
 
 impl SkillRegistry {
@@ -85,7 +96,10 @@ impl SkillRegistry {
         }
         validate_registry_tool_names(&skills)?;
 
-        Ok(Self { skills })
+        Ok(Self {
+            skills,
+            availability: None,
+        })
     }
 
     pub async fn load_development_skill(root: impl AsRef<Path>) -> anyhow::Result<InstalledSkill> {
@@ -112,12 +126,16 @@ impl SkillRegistry {
         }
         validate_registry_tool_names(&skills)?;
 
-        Ok(Self { skills })
+        Ok(Self {
+            skills,
+            availability: None,
+        })
     }
 
     pub fn tools(&self) -> Vec<SkillTool> {
         self.skills
             .iter()
+            .filter(|skill| self.skill_is_available(skill))
             .flat_map(|skill| skill.manifest.tools.clone())
             .collect()
     }
@@ -125,6 +143,7 @@ impl SkillRegistry {
     pub fn tools_with_skill_names(&self) -> Vec<(String, SkillTool)> {
         self.skills
             .iter()
+            .filter(|skill| self.skill_is_available(skill))
             .flat_map(|skill| {
                 skill
                     .manifest
@@ -138,7 +157,22 @@ impl SkillRegistry {
 
     #[cfg(test)]
     pub fn empty_for_tests() -> Self {
-        Self { skills: Vec::new() }
+        Self {
+            skills: Vec::new(),
+            availability: None,
+        }
+    }
+
+    pub fn with_platform_capabilities(
+        mut self,
+        platform: PlatformId,
+        capabilities: CapabilitySet,
+    ) -> Self {
+        self.availability = Some(SkillAvailabilityContext {
+            platform,
+            capabilities,
+        });
+        self
     }
 
     pub async fn execute(&self, tool_name: &str, input: Value) -> anyhow::Result<Value> {
@@ -182,6 +216,11 @@ impl SkillRegistry {
                     .any(|tool| tool.name == tool_name)
             })
             .ok_or_else(|| anyhow::anyhow!("unknown tool: {tool_name}"))?;
+
+        let availability = self.skill_availability(skill);
+        if availability.status != SkillAvailabilityStatus::Available {
+            anyhow::bail!("{}", availability.reason);
+        }
 
         let mut child = Command::new(&skill.manifest.entry.command)
             .args(&skill.manifest.entry.args)
@@ -242,6 +281,28 @@ impl SkillRegistry {
         validate_manifest(&root, &manifest)?;
 
         Ok(InstalledSkill { root, manifest })
+    }
+
+    fn skill_is_available(&self, skill: &InstalledSkill) -> bool {
+        self.skill_availability(skill).status == SkillAvailabilityStatus::Available
+    }
+
+    fn skill_availability(&self, skill: &InstalledSkill) -> SkillAvailability {
+        match &self.availability {
+            Some(context) => evaluate_skill_availability(
+                &skill.manifest.name,
+                &skill.manifest.capabilities,
+                context.platform,
+                &context.capabilities,
+                !skill.manifest.tools.is_empty(),
+            ),
+            None => SkillAvailability {
+                skill_id: skill.manifest.name.clone(),
+                status: SkillAvailabilityStatus::Available,
+                missing_capabilities: Vec::new(),
+                reason: "Available on this platform.".into(),
+            },
+        }
     }
 }
 

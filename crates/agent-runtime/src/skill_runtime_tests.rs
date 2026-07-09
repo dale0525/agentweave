@@ -1,4 +1,5 @@
 use crate::{
+    platform::{CapabilitySet, PlatformId},
     skill::{SkillExecutionContext, SkillRegistry},
     tools::ToolPermission,
 };
@@ -180,6 +181,70 @@ async fn skill_process_receives_called_tool_name() {
         .unwrap();
 
     assert_eq!(result["tool"].as_str(), Some("second_tool"));
+    remove_test_dir(root).await;
+}
+
+#[tokio::test]
+async fn android_registry_hides_and_rejects_runtime_tool_without_required_capability() {
+    let root = unique_test_dir("android-skill-availability");
+    write_skill_manifest(
+        &root,
+        "desktop-only",
+        json!({
+            "name": "desktop-only",
+            "description": "Requires desktop automation.",
+            "version": "0.1.0",
+            "capabilities": {
+                "requires": ["browser.headless"]
+            },
+            "entry": { "type": "command", "command": "node", "args": ["index.js"] },
+            "tools": [
+                {
+                    "name": "desktop_only_tool",
+                    "description": "Desktop only tool.",
+                    "input_schema": { "type": "object" }
+                }
+            ]
+        }),
+    )
+    .await;
+    tokio::fs::write(
+        root.join("desktop-only").join("index.js"),
+        "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ ran: true })));\n",
+    )
+    .await
+    .unwrap();
+
+    let registry = SkillRegistry::load_development(&root)
+        .await
+        .unwrap()
+        .with_platform_capabilities(PlatformId::Android, CapabilitySet::android_mvp());
+
+    assert!(
+        !registry
+            .tools()
+            .iter()
+            .any(|tool| tool.name == "desktop_only_tool")
+    );
+
+    let error = registry
+        .execute_with_context(
+            "desktop_only_tool",
+            json!({}),
+            SkillExecutionContext {
+                workspace_root: root.clone(),
+                cwd: root.clone(),
+                output_limit_bytes: 8192,
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("Missing required capability: browser.headless")
+    );
     remove_test_dir(root).await;
 }
 
