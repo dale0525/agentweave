@@ -10,7 +10,10 @@ test("dev command starts the API server and desktop app", () => {
     {
       name: "server",
       command: "cargo",
-      args: ["run", "-p", "agent-server"]
+      args: ["run", "-p", "agent-server"],
+      env: {
+        GENERAL_AGENT_DEV_API: "1"
+      }
     },
     {
       name: "desktop",
@@ -24,7 +27,8 @@ test("dev command starts the API server and desktop app", () => {
         "--host",
         "127.0.0.1",
         "--port",
-        "5173"
+        "5173",
+        "--strictPort"
       ]
     }
   ]);

@@ -8,7 +8,10 @@ export function createDevProcesses() {
     {
       name: "server",
       command: "cargo",
-      args: ["run", "-p", "agent-server"]
+      args: ["run", "-p", "agent-server"],
+      env: {
+        GENERAL_AGENT_DEV_API: "1"
+      }
     },
     {
       name: "desktop",
@@ -22,7 +25,8 @@ export function createDevProcesses() {
         "--host",
         "127.0.0.1",
         "--port",
-        "5173"
+        "5173",
+        "--strictPort"
       ]
     }
   ];
@@ -40,7 +44,10 @@ function runDev() {
   for (const processConfig of createDevProcesses()) {
     const child = spawn(processConfig.command, processConfig.args, {
       cwd: process.cwd(),
-      env: process.env,
+      env: {
+        ...process.env,
+        ...processConfig.env
+      },
       stdio: ["ignore", "pipe", "pipe"]
     });
     children.push({ child, name: processConfig.name });
