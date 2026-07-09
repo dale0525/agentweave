@@ -97,6 +97,9 @@ mod tests {
             "filesystem.app_data",
         ]);
 
-        assert_eq!(capabilities.names(), &["filesystem.app_data", "network.http"]);
+        assert_eq!(
+            capabilities.names(),
+            &["filesystem.app_data", "network.http"]
+        );
     }
 }
