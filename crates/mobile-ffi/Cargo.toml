@@ -1,0 +1,19 @@
+[package]
+name = "mobile-ffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+agent-runtime = { path = "../agent-runtime" }
+anyhow.workspace = true
+model-gateway = { path = "../model-gateway" }
+serde.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

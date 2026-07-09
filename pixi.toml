@@ -5,6 +5,7 @@ platforms = ["osx-arm64", "osx-64", "linux-64"]
 [tasks]
 fmt = "cargo fmt --all"
 test = "cargo test --workspace"
+mobile-ffi-test = "cargo test -p mobile-ffi"
 server = "cargo run -p agent-server --bin agent-server"
 dev = "node scripts/dev.mjs"
 check-skills = "cargo run -p agent-server --bin check-skills -- --root skills"

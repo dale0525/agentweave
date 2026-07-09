@@ -1118,6 +1118,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mobile-ffi"
+version = "0.1.0"
+dependencies = [
+ "agent-runtime",
+ "anyhow",
+ "model-gateway",
+ "serde",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "model-gateway"
 version = "0.1.0"
 dependencies = [

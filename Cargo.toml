@@ -4,6 +4,7 @@ members = [
   "crates/model-gateway",
   "crates/agent-runtime",
   "crates/agent-server",
+  "crates/mobile-ffi",
 ]
 
 [workspace.package]
