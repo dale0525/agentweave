@@ -1,6 +1,7 @@
 pub mod context;
 pub mod events;
 pub mod instructions;
+pub mod platform;
 pub mod policy;
 pub mod session;
 pub mod skill;
