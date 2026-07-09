@@ -1,4 +1,4 @@
-use model_gateway::provider::EndpointType;
+use model_gateway::provider::{EndpointType, ProviderProfile};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -33,6 +33,18 @@ impl StoredModelConfig {
         }
         Ok(())
     }
+
+    pub fn to_provider_profile(&self, api_key: Option<String>) -> ProviderProfile {
+        ProviderProfile {
+            id: self.provider_id.clone(),
+            name: self.provider_name.clone(),
+            endpoint_type: self.endpoint_type,
+            base_url: self.base_url.clone(),
+            model: self.model_name.clone(),
+            api_key,
+            headers: self.headers.clone(),
+        }
+    }
 }
 
 fn is_sensitive_header_name(name: &str) -> bool {
@@ -56,6 +68,7 @@ fn is_sensitive_header_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use model_gateway::provider::ProviderProfile;
 
     #[test]
     fn validates_required_fields() {
@@ -145,5 +158,35 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn provider_profile_uses_runtime_secret_without_persisting_it() {
+        let config = StoredModelConfig {
+            provider_id: "openai".into(),
+            provider_name: "OpenAI".into(),
+            endpoint_type: EndpointType::Responses,
+            base_url: "https://api.openai.com/v1".into(),
+            model_name: "gpt-5.4".into(),
+            secret_id: Some("model.openai.default".into()),
+            headers: BTreeMap::new(),
+        };
+
+        let profile = config.to_provider_profile(Some("sk-runtime".into()));
+        let stored_json = serde_json::to_string(&config).unwrap();
+
+        assert_eq!(
+            profile,
+            ProviderProfile {
+                id: "openai".into(),
+                name: "OpenAI".into(),
+                endpoint_type: EndpointType::Responses,
+                base_url: "https://api.openai.com/v1".into(),
+                model: "gpt-5.4".into(),
+                api_key: Some("sk-runtime".into()),
+                headers: BTreeMap::new(),
+            }
+        );
+        assert!(!stored_json.contains("sk-runtime"));
     }
 }
