@@ -323,7 +323,10 @@ mod tests {
         let storage = Storage::connect("sqlite::memory:").await.unwrap();
         let first = storage.create_session("First").await.unwrap();
         let second = storage.create_session("Second").await.unwrap();
-        storage.append_message(&first.id, "user", "hello").await.unwrap();
+        storage
+            .append_message(&first.id, "user", "hello")
+            .await
+            .unwrap();
 
         let sessions = storage.list_sessions().await.unwrap();
 

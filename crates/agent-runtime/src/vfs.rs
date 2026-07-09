@@ -82,7 +82,10 @@ fn ensure_existing_path_contained(root: &Path, resolved_path: &Path) -> Result<(
     };
     let mut current = root.to_path_buf();
 
-    for component in resolved_path.strip_prefix(root).map_err(|_| VfsError::PathEscape)?.components()
+    for component in resolved_path
+        .strip_prefix(root)
+        .map_err(|_| VfsError::PathEscape)?
+        .components()
     {
         let Component::Normal(segment) = component else {
             return Err(VfsError::PathEscape);
@@ -143,7 +146,8 @@ mod tests {
     fn rejects_traversal() {
         let vfs = AppDataVfs::new("/app/files/documents", "/app/files/cache");
         assert_eq!(
-            vfs.resolve_uri("app://documents/../secrets.txt").unwrap_err(),
+            vfs.resolve_uri("app://documents/../secrets.txt")
+                .unwrap_err(),
             VfsError::PathTraversal
         );
     }
@@ -174,7 +178,8 @@ mod tests {
 
         let vfs = AppDataVfs::new(&documents_root, &cache_root);
         assert_eq!(
-            vfs.resolve_uri("app://documents/link/secret.txt").unwrap_err(),
+            vfs.resolve_uri("app://documents/link/secret.txt")
+                .unwrap_err(),
             VfsError::PathEscape
         );
 
