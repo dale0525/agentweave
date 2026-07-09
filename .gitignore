@@ -1,4 +1,6 @@
 .tool/
+.superpowers/
+docs/
 .pixi/
 target/
 node_modules/
