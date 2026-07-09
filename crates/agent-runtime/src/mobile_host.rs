@@ -55,6 +55,8 @@ where
         runtime_config: RuntimeConfig,
         init: MobileRuntimeInit,
     ) -> Self {
+        let runtime_config = mobile_safe_runtime_config(&init, runtime_config);
+        let skills = mobile_safe_skill_registry(&init, skills);
         Self {
             storage,
             model: Arc::new(model),
@@ -120,6 +122,25 @@ where
     }
 }
 
+fn mobile_safe_runtime_config(
+    init: &MobileRuntimeInit,
+    runtime_config: RuntimeConfig,
+) -> RuntimeConfig {
+    if init.platform == PlatformId::Android {
+        runtime_config.without_builtin_tools()
+    } else {
+        runtime_config
+    }
+}
+
+fn mobile_safe_skill_registry(init: &MobileRuntimeInit, skills: SkillRegistry) -> SkillRegistry {
+    if init.platform == PlatformId::Android {
+        skills.with_platform_capabilities(init.platform, init.capabilities.clone())
+    } else {
+        skills
+    }
+}
+
 pub(crate) fn assistant_text_from_events(events: &[RuntimeEvent]) -> String {
     events
         .iter()
@@ -167,6 +188,8 @@ mod tests {
     use crate::tools::RuntimeConfig;
     use futures::stream;
     use model_gateway::responses::GatewayEvent;
+    use serde_json::{Value, json};
+    use std::path::Path;
     use tempfile::tempdir;
 
     struct FakeModel;
@@ -210,5 +233,85 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].content, "hello from android");
+    }
+
+    #[tokio::test]
+    async fn android_host_disables_builtin_tools_even_for_workspace_write_config() {
+        let dir = tempdir().unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("ga.db").display());
+        let storage = Storage::connect(&db_url).await.unwrap();
+        let runtime_config = RuntimeConfig::workspace_write(dir.path(), dir.path());
+
+        let host = MobileRuntimeHost::new_for_test(
+            storage,
+            FakeModel,
+            SkillRegistry::empty(),
+            SkillCatalog::empty(),
+            runtime_config,
+            MobileRuntimeInit {
+                platform: PlatformId::Android,
+                capabilities: CapabilitySet::android_mvp(),
+            },
+        );
+
+        assert!(!host.diagnostics().built_in_tools_enabled);
+    }
+
+    #[tokio::test]
+    async fn android_host_hides_runtime_skill_tools_without_android_capability_support() {
+        let dir = tempdir().unwrap();
+        let skills_root = dir.path().join("skills");
+        write_skill_manifest(
+            &skills_root,
+            "desktop-only",
+            json!({
+                "name": "desktop-only",
+                "description": "Requires desktop automation.",
+                "version": "0.1.0",
+                "capabilities": {
+                    "requires": ["browser.headless"]
+                },
+                "entry": { "type": "command", "command": "node", "args": ["index.js"] },
+                "tools": [
+                    {
+                        "name": "desktop_only_tool",
+                        "description": "Desktop only tool.",
+                        "input_schema": { "type": "object" }
+                    }
+                ]
+            }),
+        )
+        .await;
+        tokio::fs::write(
+            skills_root.join("desktop-only").join("index.js"),
+            "process.stdin.resume();\n",
+        )
+        .await
+        .unwrap();
+
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("ga.db").display());
+        let storage = Storage::connect(&db_url).await.unwrap();
+        let skills = SkillRegistry::load_development(&skills_root).await.unwrap();
+        let host = MobileRuntimeHost::new_for_test(
+            storage,
+            FakeModel,
+            skills,
+            SkillCatalog::empty(),
+            RuntimeConfig::workspace_write(dir.path(), dir.path()),
+            MobileRuntimeInit {
+                platform: PlatformId::Android,
+                capabilities: CapabilitySet::android_mvp(),
+            },
+        );
+
+        assert_eq!(host.diagnostics().registered_skill_tool_count, 0);
+    }
+
+    async fn write_skill_manifest(root: &Path, folder: &str, manifest: Value) {
+        let skill_dir = root.join(folder);
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        tokio::fs::write(skill_dir.join("skill.json"), manifest.to_string())
+            .await
+            .unwrap();
     }
 }
