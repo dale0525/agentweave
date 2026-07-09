@@ -1,3 +1,4 @@
+use crate::skill_availability::SkillCapabilityMetadata;
 use crate::tools::ToolPermission;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,8 @@ pub struct SkillManifest {
     pub name: String,
     pub description: String,
     pub version: String,
+    #[serde(default)]
+    pub capabilities: SkillCapabilityMetadata,
     pub entry: SkillEntry,
     pub tools: Vec<SkillTool>,
 }
