@@ -142,6 +142,22 @@ fn descriptor_semantics_accept_valid_host_tools_only() {
 }
 
 #[test]
+fn instruction_only_deserialization_rejects_host_tool_requirements() {
+    for (field, requirement) in [
+        ("runtimeTools", "read_text_file"),
+        ("connectors", "calendar"),
+    ] {
+        let mut value = versioned_descriptor_value();
+        value["requires"][field] = json!([requirement]);
+
+        assert!(
+            serde_json::from_value::<SkillPackageDescriptor>(value).is_err(),
+            "accepted instruction-only descriptor with {field}"
+        );
+    }
+}
+
+#[test]
 fn programmatic_descriptor_validation_rejects_unsupported_schema() {
     let mut descriptor = programmatic_descriptor();
     descriptor.schema_version = 999;
@@ -160,6 +176,23 @@ fn programmatic_descriptor_validation_rejects_invalid_kind_targets() {
 #[test]
 fn programmatic_descriptor_validation_accepts_valid_descriptor() {
     assert!(programmatic_descriptor().validate().is_ok());
+}
+
+#[test]
+fn programmatic_instruction_only_validation_rejects_host_tool_requirements() {
+    let mut runtime_tool_descriptor = programmatic_descriptor();
+    runtime_tool_descriptor
+        .requires
+        .runtime_tools
+        .push("read_text_file".into());
+    assert!(runtime_tool_descriptor.validate().is_err());
+
+    let mut connector_descriptor = programmatic_descriptor();
+    connector_descriptor
+        .requires
+        .connectors
+        .push("calendar".into());
+    assert!(connector_descriptor.validate().is_err());
 }
 
 #[tokio::test]

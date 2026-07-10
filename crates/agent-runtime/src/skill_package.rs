@@ -314,9 +314,12 @@ impl SkillPackageDescriptor {
         }
         match self.kind {
             SkillPackageKind::InstructionOnly => {
-                if !self.package.include_instructions || self.package.include_runtime {
+                if !self.package.include_instructions
+                    || self.package.include_runtime
+                    || has_host_tool_requirements(&self.requires)
+                {
                     anyhow::bail!(
-                        "instruction-only packages must include instructions and exclude runtime"
+                        "instruction-only packages must include instructions and exclude runtime tools, connectors, and native runtime"
                     );
                 }
             }
