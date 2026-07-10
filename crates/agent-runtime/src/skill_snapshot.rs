@@ -1,3 +1,4 @@
+use crate::platform::{CapabilitySet, PlatformId};
 use crate::skill::SkillRegistry;
 use crate::skill_catalog::{SkillCatalog, SkillCatalogEntry};
 use crate::skill_resolver::{ResolvedSkillPackage, ResolvedSkillSet};
@@ -56,6 +57,17 @@ impl SkillSnapshot {
 
     pub fn catalog(&self) -> &SkillCatalog {
         &self.catalog
+    }
+
+    pub(crate) fn with_platform_capabilities(
+        mut self,
+        platform: PlatformId,
+        capabilities: CapabilitySet,
+    ) -> Self {
+        self.registry = self
+            .registry
+            .with_platform_capabilities(platform, capabilities);
+        self
     }
 }
 

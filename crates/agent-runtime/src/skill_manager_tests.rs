@@ -387,6 +387,63 @@ async fn package_targets_control_registry_and_catalog() {
 }
 
 #[tokio::test]
+async fn dynamic_android_snapshots_filter_runtime_manifest_capabilities_after_reload() {
+    let root = tempdir().unwrap();
+    write_runtime_package_with_capabilities(
+        root.path(),
+        "undeclared",
+        "com.example.undeclared",
+        "undeclared_tool",
+        None,
+    )
+    .await;
+    write_runtime_package_with_capabilities(
+        root.path(),
+        "network",
+        "com.example.network",
+        "network_tool",
+        Some(&["network.http"]),
+    )
+    .await;
+    let manager = SkillManager::new(SkillManagerConfig {
+        sources: vec![Arc::new(DirectorySkillSource::new(
+            SkillLayer::Builtin,
+            root.path(),
+        ))],
+        platform: PlatformId::Android,
+        capabilities: CapabilitySet::android_mvp(),
+        protected_packages: Vec::new(),
+        allowed_overrides: Vec::new(),
+        runtime_version: Version::new(0, 3, 0),
+    })
+    .await
+    .unwrap();
+
+    assert!(manager.current_snapshot().registry().tools().is_empty());
+
+    write_runtime_package_with_capabilities(
+        root.path(),
+        "undeclared",
+        "com.example.undeclared",
+        "undeclared_tool_v2",
+        None,
+    )
+    .await;
+    write_runtime_package_with_capabilities(
+        root.path(),
+        "network",
+        "com.example.network",
+        "network_tool_v2",
+        Some(&["network.http"]),
+    )
+    .await;
+    manager.reload().await.unwrap();
+
+    assert_eq!(manager.current_snapshot().generation(), 2);
+    assert!(manager.current_snapshot().registry().tools().is_empty());
+}
+
+#[tokio::test]
 async fn duplicate_instruction_names_reject_candidate_snapshot() {
     let root = tempdir().unwrap();
     write_instruction_package(
@@ -605,6 +662,16 @@ async fn write_runtime_package(
     id: &str,
     tool_name: &str,
 ) -> std::path::PathBuf {
+    write_runtime_package_with_capabilities(root, folder, id, tool_name, None).await
+}
+
+async fn write_runtime_package_with_capabilities(
+    root: &Path,
+    folder: &str,
+    id: &str,
+    tool_name: &str,
+    capabilities: Option<&[&str]>,
+) -> std::path::PathBuf {
     let package_root = root.join(folder);
     tokio::fs::create_dir_all(&package_root).await.unwrap();
     tokio::fs::write(
@@ -624,27 +691,27 @@ async fn write_runtime_package(
     )
     .await
     .unwrap();
-    tokio::fs::write(
-        package_root.join("skill.json"),
-        serde_json::json!({
-            "name": folder,
-            "description": "Runtime skill.",
-            "version": "1.0.0",
-            "entry": {
-                "type": "command",
-                "command": "node",
-                "args": ["index.js"]
-            },
-            "tools": [{
-                "name": tool_name,
-                "description": "Test tool.",
-                "input_schema": { "type": "object" }
-            }]
-        })
-        .to_string(),
-    )
-    .await
-    .unwrap();
+    let mut manifest = serde_json::json!({
+        "name": folder,
+        "description": "Runtime skill.",
+        "version": "1.0.0",
+        "entry": {
+            "type": "command",
+            "command": "node",
+            "args": ["index.js"]
+        },
+        "tools": [{
+            "name": tool_name,
+            "description": "Test tool.",
+            "input_schema": { "type": "object" }
+        }]
+    });
+    if let Some(requires) = capabilities {
+        manifest["capabilities"] = serde_json::json!({ "requires": requires });
+    }
+    tokio::fs::write(package_root.join("skill.json"), manifest.to_string())
+        .await
+        .unwrap();
     tokio::fs::write(package_root.join("index.js"), "process.stdin.resume();\n")
         .await
         .unwrap();

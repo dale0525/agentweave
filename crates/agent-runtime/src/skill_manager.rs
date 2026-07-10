@@ -135,5 +135,7 @@ async fn build_snapshot(
         allowed_overrides: config.allowed_overrides.clone(),
         runtime_version: config.runtime_version.clone(),
     })?;
-    SkillSnapshot::build(generation, resolved).await
+    Ok(SkillSnapshot::build(generation, resolved)
+        .await?
+        .with_platform_capabilities(config.platform, config.capabilities.clone()))
 }

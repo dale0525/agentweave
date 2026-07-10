@@ -114,7 +114,8 @@ where
     }
 
     pub fn diagnostics(&self) -> MobileRuntimeDiagnostics {
-        let snapshot = self.skill_manager.current_snapshot();
+        let skill_manager = mobile_safe_snapshot_manager(&self.init, &self.skill_manager);
+        let snapshot = skill_manager.current_snapshot();
         mobile_runtime_diagnostics(&self.init, &self.runtime_config, snapshot.registry())
     }
 
@@ -129,9 +130,10 @@ where
         self.storage
             .append_message(session_id, "user", content)
             .await?;
+        let skill_manager = mobile_safe_snapshot_manager(&self.init, &self.skill_manager);
         let runner = TurnRunner::new_with_manager_and_config(
             self.model.clone(),
-            self.skill_manager.clone(),
+            skill_manager,
             self.runtime_config.clone(),
         );
         let events = runner.run(content).await?;
@@ -220,7 +222,8 @@ where
     }
 
     pub fn diagnostics(&self) -> MobileRuntimeDiagnostics {
-        let snapshot = self.skill_manager.current_snapshot();
+        let skill_manager = mobile_safe_snapshot_manager(&self.init, &self.skill_manager);
+        let snapshot = skill_manager.current_snapshot();
         mobile_runtime_diagnostics(&self.init, &self.runtime_config, snapshot.registry())
     }
 
@@ -249,9 +252,10 @@ where
             .map_err(|message| anyhow::anyhow!(message))?;
         let api_key = resolve_model_api_key(&self.model_config, &self.secret_resolver).await?;
         let profile = self.model_config.to_provider_profile(api_key);
+        let skill_manager = mobile_safe_snapshot_manager(&self.init, &self.skill_manager);
         let runner = TurnRunner::new_with_manager_and_config(
             model_gateway::responses::GatewayHttpClient::new(profile),
-            self.skill_manager.clone(),
+            skill_manager,
             self.runtime_config.clone(),
         );
         let events = runner.run(content).await?;
@@ -286,6 +290,15 @@ fn mobile_safe_skill_registry(init: &MobileRuntimeInit, skills: SkillRegistry) -
     } else {
         skills
     }
+}
+
+fn mobile_safe_snapshot_manager(
+    init: &MobileRuntimeInit,
+    skill_manager: &SkillManager,
+) -> SkillManager {
+    let snapshot = skill_manager.current_snapshot();
+    let registry = mobile_safe_skill_registry(init, snapshot.registry().clone());
+    SkillManager::from_registry_and_catalog(registry, snapshot.catalog().clone())
 }
 
 fn mobile_runtime_diagnostics(
@@ -391,6 +404,30 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(request.tools.into_iter().map(|tool| tool.name).collect());
+            Ok(Box::pin(stream::iter(vec![Ok(GatewayEvent::TextDelta {
+                text: "done".into(),
+            })])))
+        }
+    }
+
+    struct InstructionCapturingModel {
+        developer_inputs: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::turn::ModelClient for InstructionCapturingModel {
+        async fn stream(
+            &self,
+            request: model_gateway::responses::GatewayRequest,
+        ) -> anyhow::Result<crate::turn::ModelEventStream> {
+            let developer = request
+                .input
+                .iter()
+                .find(|item| item["role"] == "developer")
+                .and_then(|item| item["content"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            self.developer_inputs.lock().unwrap().push(developer);
             Ok(Box::pin(stream::iter(vec![Ok(GatewayEvent::TextDelta {
                 text: "done".into(),
             })])))
@@ -554,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mobile_turns_read_the_current_skill_manager_snapshot() {
+    async fn mobile_turns_filter_a_desktop_manager_before_and_after_reload() {
         let dir = tempdir().unwrap();
         let skills_root = dir.path().join("skills");
         let package_root = skills_root.join("dynamic");
@@ -564,8 +601,8 @@ mod tests {
                 SkillLayer::Builtin,
                 &skills_root,
             ))],
-            platform: PlatformId::Android,
-            capabilities: CapabilitySet::android_mvp(),
+            platform: PlatformId::Desktop,
+            capabilities: CapabilitySet::desktop_runtime(),
             protected_packages: Vec::new(),
             allowed_overrides: Vec::new(),
             runtime_version: "0.1.0".parse().unwrap(),
@@ -589,17 +626,74 @@ mod tests {
         );
         let session = host.create_session("Dynamic mobile").await.unwrap();
 
+        assert_eq!(manager.current_snapshot().registry().tools().len(), 1);
+        assert_eq!(host.diagnostics().registered_skill_tool_count, 0);
         host.send_message(&session.id, "first").await.unwrap();
         write_dynamic_mobile_skill(&package_root, "second_tool").await;
         manager.reload().await.unwrap();
+        assert_eq!(
+            manager.current_snapshot().registry().tools()[0].name,
+            "second_tool"
+        );
+        assert_eq!(host.diagnostics().registered_skill_tool_count, 0);
         host.send_message(&session.id, "second").await.unwrap();
 
         let requests = tool_names.lock().unwrap();
-        assert!(requests[0].iter().any(|name| name == "first_tool"));
-        assert!(!requests[0].iter().any(|name| name == "second_tool"));
-        assert!(requests[1].iter().any(|name| name == "second_tool"));
-        assert!(!requests[1].iter().any(|name| name == "first_tool"));
+        assert!(requests[0].iter().all(|name| name != "first_tool"));
+        assert!(requests[1].iter().all(|name| name != "second_tool"));
         assert!(!host.diagnostics().built_in_tools_enabled);
+    }
+
+    #[tokio::test]
+    async fn mobile_instruction_view_updates_after_manager_reload() {
+        let dir = tempdir().unwrap();
+        let skills_root = dir.path().join("skills");
+        let package_root = skills_root.join("instructions");
+        write_mobile_instruction_package(&package_root, "First mobile body").await;
+        let manager = SkillManager::new(SkillManagerConfig {
+            sources: vec![Arc::new(DirectorySkillSource::new(
+                SkillLayer::Builtin,
+                &skills_root,
+            ))],
+            platform: PlatformId::Android,
+            capabilities: CapabilitySet::android_mvp(),
+            protected_packages: Vec::new(),
+            allowed_overrides: Vec::new(),
+            runtime_version: "0.1.0".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("ga.db").display());
+        let storage = Storage::connect(&db_url).await.unwrap();
+        let developer_inputs = Arc::new(Mutex::new(Vec::new()));
+        let host = MobileRuntimeHost::new_for_test_with_manager(
+            storage,
+            InstructionCapturingModel {
+                developer_inputs: developer_inputs.clone(),
+            },
+            manager.clone(),
+            RuntimeConfig::workspace_write(dir.path(), dir.path()),
+            MobileRuntimeInit {
+                platform: PlatformId::Android,
+                capabilities: CapabilitySet::android_mvp(),
+            },
+        );
+        let session = host.create_session("Instructions").await.unwrap();
+
+        host.send_message(&session.id, "use $mobile-instructions")
+            .await
+            .unwrap();
+        write_mobile_instruction_package(&package_root, "Second mobile body").await;
+        manager.reload().await.unwrap();
+        host.send_message(&session.id, "use $mobile-instructions")
+            .await
+            .unwrap();
+
+        let inputs = developer_inputs.lock().unwrap();
+        assert!(inputs[0].contains("First mobile body"));
+        assert!(!inputs[0].contains("Second mobile body"));
+        assert!(inputs[1].contains("Second mobile body"));
+        assert!(!inputs[1].contains("First mobile body"));
     }
 
     #[tokio::test]
@@ -706,6 +800,50 @@ mod tests {
         assert_eq!(diagnostics.configured_connector_count, 0);
     }
 
+    #[tokio::test]
+    async fn http_mobile_manager_constructor_filters_desktop_runtime_tools() {
+        let dir = tempdir().unwrap();
+        let skills_root = dir.path().join("skills");
+        write_dynamic_mobile_skill(&skills_root.join("dynamic"), "desktop_tool").await;
+        let manager = SkillManager::new(SkillManagerConfig {
+            sources: vec![Arc::new(DirectorySkillSource::new(
+                SkillLayer::Builtin,
+                &skills_root,
+            ))],
+            platform: PlatformId::Desktop,
+            capabilities: CapabilitySet::desktop_runtime(),
+            protected_packages: Vec::new(),
+            allowed_overrides: Vec::new(),
+            runtime_version: "0.1.0".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("ga.db").display());
+        let storage = Storage::connect(&db_url).await.unwrap();
+        let host = HttpMobileRuntimeHost::new_with_manager(
+            storage,
+            manager.clone(),
+            RuntimeConfig::workspace_write(dir.path(), dir.path()),
+            MobileRuntimeInit {
+                platform: PlatformId::Android,
+                capabilities: CapabilitySet::android_mvp(),
+            },
+            StoredModelConfig {
+                provider_id: "openai".into(),
+                provider_name: "OpenAI".into(),
+                endpoint_type: EndpointType::Responses,
+                base_url: "https://api.openai.com/v1".into(),
+                model_name: "gpt-5.4".into(),
+                secret_id: None,
+                headers: BTreeMap::new(),
+            },
+            StaticSecretResolver,
+        );
+
+        assert_eq!(manager.current_snapshot().registry().tools().len(), 1);
+        assert_eq!(host.diagnostics().registered_skill_tool_count, 0);
+    }
+
     async fn write_skill_manifest(root: &Path, folder: &str, manifest: Value) {
         let skill_dir = root.join(folder);
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
@@ -752,5 +890,34 @@ mod tests {
         tokio::fs::write(package_root.join("index.js"), "process.stdin.resume();\n")
             .await
             .unwrap();
+    }
+
+    async fn write_mobile_instruction_package(package_root: &Path, body: &str) {
+        tokio::fs::create_dir_all(package_root).await.unwrap();
+        tokio::fs::write(
+            package_root.join("general-agent.json"),
+            json!({
+                "schemaVersion": 1,
+                "id": "com.example.mobile-instructions",
+                "version": "1.0.0",
+                "displayName": "Mobile instructions",
+                "kind": "instruction_only",
+                "package": {
+                    "includeInstructions": true,
+                    "includeRuntime": false
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            package_root.join("SKILL.md"),
+            format!(
+                "---\nname: mobile-instructions\ndescription: Mobile instructions.\n---\n\n# Mobile instructions\n{body}\n"
+            ),
+        )
+        .await
+        .unwrap();
     }
 }
