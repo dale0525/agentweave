@@ -51,8 +51,18 @@ pub struct SkillExecutionContext {
 
 #[derive(Debug, Clone)]
 pub struct InstalledSkill {
-    pub root: PathBuf,
-    pub manifest: SkillManifest,
+    pub(crate) root: PathBuf,
+    pub(crate) manifest: SkillManifest,
+}
+
+impl InstalledSkill {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn manifest(&self) -> &SkillManifest {
+        &self.manifest
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

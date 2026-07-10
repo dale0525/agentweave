@@ -501,9 +501,10 @@ async fn collect_package_metadata(
         match runtime_package {
             Ok(path) => match SkillRegistry::load_development_skill(path).await {
                 Ok(skill) => {
-                    name = Some(skill.manifest.name.clone());
-                    description = Some(skill.manifest.description.clone());
-                    runtime_tools = runtime_tool_names(&skill.manifest);
+                    let manifest = skill.manifest();
+                    name = Some(manifest.name.clone());
+                    description = Some(manifest.description.clone());
+                    runtime_tools = runtime_tool_names(manifest);
                 }
                 Err(error) => errors.push(error.to_string()),
             },

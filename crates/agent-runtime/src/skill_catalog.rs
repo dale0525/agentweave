@@ -53,6 +53,9 @@ impl SkillCatalog {
     }
 
     pub fn from_entries(mut entries: Vec<SkillCatalogEntry>) -> anyhow::Result<Self> {
+        for entry in &entries {
+            validate_catalog_entry(entry)?;
+        }
         entries.sort_by(|left, right| left.summary.name.cmp(&right.summary.name));
         let summaries = entries
             .iter()
@@ -229,7 +232,7 @@ impl SkillCatalog {
                 .find(|entry| entry.summary.name == *name)
                 .ok_or_else(|| anyhow::anyhow!("unknown instruction skill: {name}"))?;
             let mut document = entry.document.clone();
-            if document.original_bytes > max_instruction_bytes {
+            if document.content.len() > max_instruction_bytes {
                 let boundary = previous_char_boundary(&document.content, max_instruction_bytes);
                 document.content.truncate(boundary);
                 document.read_bytes = boundary;
@@ -396,6 +399,48 @@ fn previous_char_boundary(content: &str, limit: usize) -> usize {
         boundary -= 1;
     }
     boundary
+}
+
+fn validate_catalog_entry(entry: &SkillCatalogEntry) -> anyhow::Result<()> {
+    if entry.summary.name != entry.document.name {
+        anyhow::bail!(
+            "instruction entry summary name does not match document name: {} != {}",
+            entry.summary.name,
+            entry.document.name
+        );
+    }
+    if entry.summary.source != entry.document.source {
+        anyhow::bail!(
+            "instruction entry summary source does not match document source for {}: {} != {}",
+            entry.summary.name,
+            entry.summary.source.display(),
+            entry.document.source.display()
+        );
+    }
+    if entry.document.truncated {
+        anyhow::bail!(
+            "instruction entry document must not be truncated: {}",
+            entry.summary.name
+        );
+    }
+    let content_bytes = entry.document.content.len();
+    if entry.document.read_bytes != content_bytes {
+        anyhow::bail!(
+            "instruction entry read_bytes must equal content length for {}: {} != {}",
+            entry.summary.name,
+            entry.document.read_bytes,
+            content_bytes
+        );
+    }
+    if entry.document.original_bytes != content_bytes {
+        anyhow::bail!(
+            "instruction entry original_bytes must equal content length for {}: {} != {}",
+            entry.summary.name,
+            entry.document.original_bytes,
+            content_bytes
+        );
+    }
+    Ok(())
 }
 
 fn validate_unique_skill_names(summaries: &[SkillSummary]) -> anyhow::Result<()> {

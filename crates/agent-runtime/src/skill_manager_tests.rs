@@ -1,11 +1,13 @@
 use crate::platform::{CapabilitySet, PlatformId};
 use crate::skill::SkillRegistry;
-use crate::skill_catalog::SkillCatalog;
+use crate::skill_catalog::{
+    SkillCatalog, SkillCatalogEntry, SkillInstructionDocument, SkillSummary,
+};
 use crate::skill_manager::{SkillManager, SkillManagerConfig};
 use crate::skill_source::{DirectorySkillSource, DiscoveredSkillPackage, SkillLayer, SkillSource};
 use async_trait::async_trait;
 use semver::Version;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tempfile::tempdir;
 
@@ -143,6 +145,75 @@ async fn instruction_byte_limit_preserves_utf8_boundaries_and_metadata() {
             .content
             .is_char_boundary(limited[0].content.len())
     );
+}
+
+#[test]
+fn catalog_rejects_mismatched_entry_names() {
+    let mut entry = complete_catalog_entry("planning", "Plan safely.");
+    entry.document.name = "other".into();
+
+    let error = SkillCatalog::from_entries(vec![entry]).unwrap_err();
+
+    assert!(error.to_string().contains("summary name"));
+    assert!(error.to_string().contains("document name"));
+}
+
+#[test]
+fn catalog_rejects_mismatched_entry_sources() {
+    let mut entry = complete_catalog_entry("planning", "Plan safely.");
+    entry.document.source = PathBuf::from("other/SKILL.md");
+
+    let error = SkillCatalog::from_entries(vec![entry]).unwrap_err();
+
+    assert!(error.to_string().contains("summary source"));
+    assert!(error.to_string().contains("document source"));
+}
+
+#[test]
+fn catalog_rejects_forged_complete_document_metadata() {
+    let mut truncated = complete_catalog_entry("truncated", "content");
+    truncated.document.truncated = true;
+    assert!(
+        SkillCatalog::from_entries(vec![truncated])
+            .unwrap_err()
+            .to_string()
+            .contains("truncated")
+    );
+
+    let mut short_read = complete_catalog_entry("short-read", "content");
+    short_read.document.read_bytes = 0;
+    assert!(
+        SkillCatalog::from_entries(vec![short_read])
+            .unwrap_err()
+            .to_string()
+            .contains("read_bytes")
+    );
+
+    let mut forged_original = complete_catalog_entry("forged-original", "content");
+    forged_original.document.original_bytes = 0;
+    assert!(
+        SkillCatalog::from_entries(vec![forged_original])
+            .unwrap_err()
+            .to_string()
+            .contains("original_bytes")
+    );
+}
+
+#[tokio::test]
+async fn zero_instruction_limit_returns_no_content() {
+    let catalog =
+        SkillCatalog::from_entries(vec![complete_catalog_entry("planning", "Plan safely.")])
+            .unwrap();
+
+    let documents = catalog
+        .load_instruction_documents(&["planning".into()], 0)
+        .await
+        .unwrap();
+
+    assert!(documents[0].content.is_empty());
+    assert!(documents[0].truncated);
+    assert_eq!(documents[0].read_bytes, 0);
+    assert_eq!(documents[0].original_bytes, "Plan safely.".len());
 }
 
 #[cfg(unix)]
@@ -596,6 +667,26 @@ async fn replace_with_external_symlink(path: &Path, outside: &Path) {
     tokio::fs::write(outside, content).await.unwrap();
     tokio::fs::remove_file(path).await.unwrap();
     std::os::unix::fs::symlink(outside, path).unwrap();
+}
+
+fn complete_catalog_entry(name: &str, content: &str) -> SkillCatalogEntry {
+    let source = PathBuf::from(format!("{name}/SKILL.md"));
+    SkillCatalogEntry {
+        summary: SkillSummary {
+            name: name.into(),
+            description: "Test instructions.".into(),
+            aliases: Vec::new(),
+            source: source.clone(),
+        },
+        document: SkillInstructionDocument {
+            name: name.into(),
+            source,
+            content: content.into(),
+            truncated: false,
+            read_bytes: content.len(),
+            original_bytes: content.len(),
+        },
+    }
 }
 
 fn skill_document(name: &str, body: &str) -> String {
