@@ -9,9 +9,12 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true
+hex.workspace = true
 model-gateway = { path = "../model-gateway" }
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
