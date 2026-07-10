@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 pub const SKILL_PACKAGE_SCHEMA_VERSION: u32 = 1;
 const MAX_SKILL_PACKAGE_ID_LENGTH: usize = 128;
-const LEGACY_PACKAGE_ID_PREFIX: &str = "legacy.local.";
+const LEGACY_LOSSLESS_ID_PREFIX: &str = "legacy.local.";
+const LEGACY_LOSSY_ID_PREFIX: &str = "legacy.lossy.";
 const LEGACY_PACKAGE_HASH_LENGTH: usize = 12;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -115,7 +116,7 @@ impl TryFrom<SkillPackageDescriptorWire> for SkillPackageDescriptor {
                 wire.schema_version
             );
         }
-        Ok(Self {
+        let descriptor = Self {
             schema_version: wire.schema_version,
             id: wire.id,
             version: wire.version,
@@ -124,7 +125,9 @@ impl TryFrom<SkillPackageDescriptorWire> for SkillPackageDescriptor {
             package: wire.package,
             compatibility: wire.compatibility,
             requires: wire.requires,
-        })
+        };
+        descriptor.validate_semantics()?;
+        Ok(descriptor)
     }
 }
 
@@ -153,37 +156,31 @@ pub struct LoadedPackageDescriptor {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPackageMetadata {
-    #[serde(default)]
-    package: Option<LegacyPackageTargets>,
-    #[serde(default)]
+    package: LegacyPackageTargets,
     requires: LegacyPackageRequirements,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPackageTargets {
-    #[serde(default)]
-    include_instructions: Option<bool>,
-    #[serde(default)]
-    include_runtime: Option<bool>,
+    include_instructions: bool,
+    include_runtime: bool,
 }
 
-impl LegacyPackageTargets {
-    fn resolve(self, inferred: &SkillPackageTargets) -> SkillPackageTargets {
-        SkillPackageTargets {
-            include_instructions: self
-                .include_instructions
-                .unwrap_or(inferred.include_instructions),
-            include_runtime: self.include_runtime.unwrap_or(inferred.include_runtime),
+impl From<LegacyPackageTargets> for SkillPackageTargets {
+    fn from(legacy: LegacyPackageTargets) -> Self {
+        Self {
+            include_instructions: legacy.include_instructions,
+            include_runtime: legacy.include_runtime,
         }
     }
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyPackageRequirements {
     #[serde(default)]
     packages: Vec<SkillPackageId>,
@@ -208,12 +205,20 @@ impl From<LegacyPackageRequirements> for SkillPackageRequirements {
 
 impl SkillPackageDescriptor {
     pub async fn load(package_root: &Path) -> anyhow::Result<LoadedPackageDescriptor> {
-        let root_metadata = tokio::fs::metadata(package_root).await.with_context(|| {
-            format!(
-                "failed to inspect skill package root {}",
+        let root_metadata = tokio::fs::symlink_metadata(package_root)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to inspect skill package root {}",
+                    package_root.display()
+                )
+            })?;
+        if root_metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "skill package root must not be a symlink: {}",
                 package_root.display()
-            )
-        })?;
+            );
+        }
         if !root_metadata.is_dir() {
             anyhow::bail!(
                 "skill package root must be a directory: {}",
@@ -265,38 +270,78 @@ async fn load_legacy_descriptor(
         include_runtime: runtime,
     };
     let (package, requires) = metadata
-        .map(|metadata| {
-            (
-                metadata
-                    .package
-                    .map(|package| package.resolve(&inferred_package))
-                    .unwrap_or_else(|| inferred_package.clone()),
-                metadata.requires.into(),
-            )
-        })
+        .map(|metadata| (metadata.package.into(), metadata.requires.into()))
         .unwrap_or((inferred_package, SkillPackageRequirements::default()));
+    if package.include_instructions && !instructions {
+        anyhow::bail!(
+            "legacy package declares instructions but SKILL.md is missing: {}",
+            package_root.display()
+        );
+    }
+    if package.include_runtime && !runtime {
+        anyhow::bail!(
+            "legacy package declares runtime but skill.json is missing: {}",
+            package_root.display()
+        );
+    }
+    let kind = if package.include_runtime {
+        SkillPackageKind::NativeRuntime
+    } else if has_host_tool_requirements(&requires) {
+        SkillPackageKind::HostToolsOnly
+    } else {
+        SkillPackageKind::InstructionOnly
+    };
     let descriptor = SkillPackageDescriptor {
         schema_version: SKILL_PACKAGE_SCHEMA_VERSION,
         id,
         version: legacy_version(runtime_manifest.as_deref())?,
         display_name: folder.to_string(),
-        kind: if package.include_runtime {
-            SkillPackageKind::NativeRuntime
-        } else if package.include_instructions {
-            SkillPackageKind::InstructionOnly
-        } else {
-            SkillPackageKind::HostToolsOnly
-        },
+        kind,
         package,
         compatibility: SkillCompatibility::default(),
         requires,
     };
+    descriptor.validate_semantics()?;
     Ok(LoadedPackageDescriptor {
         root: package_root.to_path_buf(),
         descriptor,
         source: DescriptorSource::LegacySynthesized,
         warnings: vec!["legacy package descriptor synthesized; add general-agent.json".into()],
     })
+}
+
+impl SkillPackageDescriptor {
+    fn validate_semantics(&self) -> anyhow::Result<()> {
+        match self.kind {
+            SkillPackageKind::InstructionOnly => {
+                if !self.package.include_instructions || self.package.include_runtime {
+                    anyhow::bail!(
+                        "instruction-only packages must include instructions and exclude runtime"
+                    );
+                }
+            }
+            SkillPackageKind::NativeRuntime => {
+                if !self.package.include_runtime {
+                    anyhow::bail!("native-runtime packages must include runtime");
+                }
+            }
+            SkillPackageKind::HostToolsOnly => {
+                if !self.package.include_instructions
+                    || self.package.include_runtime
+                    || !has_host_tool_requirements(&self.requires)
+                {
+                    anyhow::bail!(
+                        "host-tools-only packages must include instructions, exclude runtime, and require a runtime tool or connector"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn has_host_tool_requirements(requirements: &SkillPackageRequirements) -> bool {
+    !requirements.runtime_tools.is_empty() || !requirements.connectors.is_empty()
 }
 
 fn is_valid_package_id_segment(segment: &str) -> bool {
@@ -307,9 +352,10 @@ fn is_valid_package_id_segment(segment: &str) -> bool {
 }
 
 fn legacy_package_id(folder: &str) -> anyhow::Result<SkillPackageId> {
-    let maximum_suffix_length = MAX_SKILL_PACKAGE_ID_LENGTH - LEGACY_PACKAGE_ID_PREFIX.len();
-    if folder.len() <= maximum_suffix_length && is_valid_package_id_segment(folder) {
-        return SkillPackageId::parse(&format!("{LEGACY_PACKAGE_ID_PREFIX}{folder}"));
+    let maximum_lossless_suffix_length =
+        MAX_SKILL_PACKAGE_ID_LENGTH - LEGACY_LOSSLESS_ID_PREFIX.len();
+    if folder.len() <= maximum_lossless_suffix_length && is_valid_package_id_segment(folder) {
+        return SkillPackageId::parse(&format!("{LEGACY_LOSSLESS_ID_PREFIX}{folder}"));
     }
 
     let mut slug = String::with_capacity(folder.len());
@@ -328,7 +374,8 @@ fn legacy_package_id(folder: &str) -> anyhow::Result<SkillPackageId> {
 
     let digest = hex::encode(Sha256::digest(folder.as_bytes()));
     let short_hash = &digest[..LEGACY_PACKAGE_HASH_LENGTH];
-    let maximum_slug_length = maximum_suffix_length - short_hash.len() - 1;
+    let maximum_lossy_suffix_length = MAX_SKILL_PACKAGE_ID_LENGTH - LEGACY_LOSSY_ID_PREFIX.len();
+    let maximum_slug_length = maximum_lossy_suffix_length - short_hash.len() - 1;
     let trimmed = slug.trim_matches('-');
     let mut bounded_slug = if trimmed.is_empty() {
         "package".to_string()
@@ -343,7 +390,7 @@ fn legacy_package_id(folder: &str) -> anyhow::Result<SkillPackageId> {
     }
 
     SkillPackageId::parse(&format!(
-        "{LEGACY_PACKAGE_ID_PREFIX}{bounded_slug}-{short_hash}"
+        "{LEGACY_LOSSY_ID_PREFIX}{bounded_slug}-{short_hash}"
     ))
 }
 
@@ -358,13 +405,9 @@ async fn read_optional_file(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
     };
 
     if entry_metadata.file_type().is_symlink() {
-        let target_metadata = tokio::fs::metadata(path)
-            .await
-            .with_context(|| format!("failed to inspect package file target {}", path.display()))?;
-        if !target_metadata.is_file() {
-            anyhow::bail!("package path must be a file: {}", path.display());
-        }
-    } else if !entry_metadata.is_file() {
+        anyhow::bail!("package path must not be a symlink: {}", path.display());
+    }
+    if !entry_metadata.is_file() {
         anyhow::bail!("package path must be a file: {}", path.display());
     }
 
