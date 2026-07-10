@@ -6,7 +6,7 @@ use crate::skill_package::{
 use crate::skill_resolver::{SkillResolutionInput, SkillResolutionStatus, SkillResolver};
 use crate::skill_source::{
     DirectorySkillSource, DiscoveredSkillPackage, SkillLayer, SkillSource, canonical_relative_path,
-    hash_package_tree,
+    hash_package_tree, portable_collision_key,
 };
 use semver::Version;
 use std::path::{Path, PathBuf};
@@ -587,6 +587,81 @@ async fn package_tree_hash_matches_canonical_cross_platform_vector() {
         hash_package_tree(temporary.path()).await.unwrap(),
         "1ebf9a1719bd82b56780b7cf26f4799c73df44f177dcf34e7d7ee087cfe380d7"
     );
+}
+
+#[test]
+fn canonical_package_path_normalizes_nfd_components_to_nfc() {
+    let nfd = Path::new("cafe\u{301}.txt");
+
+    assert_eq!(
+        canonical_relative_path(nfd).unwrap(),
+        "caf\u{e9}.txt".as_bytes()
+    );
+}
+
+#[test]
+fn portable_collision_key_case_folds_the_complete_relative_path() {
+    assert_eq!(
+        portable_collision_key(Path::new("Root/Nested/A.txt")).unwrap(),
+        portable_collision_key(Path::new("root/nested/a.txt")).unwrap()
+    );
+}
+
+#[test]
+fn portable_collision_key_treats_nfc_and_nfd_paths_as_equal() {
+    assert_eq!(
+        portable_collision_key(Path::new("nested/caf\u{e9}.txt")).unwrap(),
+        portable_collision_key(Path::new("nested/cafe\u{301}.txt")).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn package_tree_hash_normalizes_a_single_nfd_path_to_nfc() {
+    let nfc_tree = tempfile::tempdir().unwrap();
+    let nfd_tree = tempfile::tempdir().unwrap();
+    tokio::fs::write(nfc_tree.path().join("caf\u{e9}.txt"), b"content")
+        .await
+        .unwrap();
+    tokio::fs::write(nfd_tree.path().join("cafe\u{301}.txt"), b"content")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        hash_package_tree(nfc_tree.path()).await.unwrap(),
+        hash_package_tree(nfd_tree.path()).await.unwrap()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn package_tree_hash_rejects_ascii_case_file_collisions() {
+    let temporary = tempfile::tempdir().unwrap();
+    tokio::fs::write(temporary.path().join("A"), b"upper")
+        .await
+        .unwrap();
+    tokio::fs::write(temporary.path().join("a"), b"lower")
+        .await
+        .unwrap();
+
+    let error = hash_package_tree(temporary.path()).await.unwrap_err();
+
+    assert!(error.to_string().contains("portable path collision"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn package_tree_hash_rejects_nfc_nfd_directory_collisions() {
+    let temporary = tempfile::tempdir().unwrap();
+    tokio::fs::create_dir(temporary.path().join("caf\u{e9}"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir(temporary.path().join("cafe\u{301}"))
+        .await
+        .unwrap();
+
+    let error = hash_package_tree(temporary.path()).await.unwrap_err();
+
+    assert!(error.to_string().contains("portable path collision"));
 }
 
 #[cfg(unix)]

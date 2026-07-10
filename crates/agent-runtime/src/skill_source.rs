@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use tokio::io::AsyncReadExt;
+use unicode_normalization::UnicodeNormalization;
 
 const TREE_HASH_DOMAIN: &[u8] = b"general-agent.skill-package-tree";
 const TREE_HASH_VERSION: u32 = 1;
@@ -131,6 +132,7 @@ struct CanonicalPackageFile {
 async fn collect_relative_files(root: &Path) -> anyhow::Result<Vec<CanonicalPackageFile>> {
     let mut files = Vec::new();
     let mut stack = vec![PathBuf::new()];
+    let mut portable_paths = BTreeMap::new();
     while let Some(relative_directory) = stack.pop() {
         let directory = root.join(&relative_directory);
         let mut entries = tokio::fs::read_dir(&directory)
@@ -146,14 +148,15 @@ async fn collect_relative_files(root: &Path) -> anyhow::Result<Vec<CanonicalPack
             if kind.is_symlink() {
                 anyhow::bail!("skill package cannot contain symlinks: {}", path.display());
             }
+            let identity = portable_path_identity(&relative)?;
+            register_portable_path(&mut portable_paths, &relative, &identity.collision_key)?;
             if kind.is_dir() {
-                canonical_relative_path(&relative)?;
                 stack.push(relative);
                 continue;
             }
             if kind.is_file() {
                 files.push(CanonicalPackageFile {
-                    canonical: canonical_relative_path(&relative)?,
+                    canonical: identity.canonical,
                     relative,
                 });
                 continue;
@@ -221,8 +224,25 @@ async fn hash_file_entry(
     Ok(())
 }
 
+#[derive(Debug)]
+struct PortablePathIdentity {
+    canonical: Vec<u8>,
+    collision_key: Vec<u8>,
+}
+
+#[cfg(test)]
 pub(crate) fn canonical_relative_path(relative: &Path) -> anyhow::Result<Vec<u8>> {
+    Ok(portable_path_identity(relative)?.canonical)
+}
+
+#[cfg(test)]
+pub(crate) fn portable_collision_key(relative: &Path) -> anyhow::Result<Vec<u8>> {
+    Ok(portable_path_identity(relative)?.collision_key)
+}
+
+fn portable_path_identity(relative: &Path) -> anyhow::Result<PortablePathIdentity> {
     let mut canonical = String::new();
+    let mut collision_key = String::new();
     for component in relative.components() {
         let Component::Normal(component) = component else {
             anyhow::bail!(
@@ -236,16 +256,45 @@ pub(crate) fn canonical_relative_path(relative: &Path) -> anyhow::Result<Vec<u8>
                 relative.display()
             )
         })?;
-        validate_portable_component(component, relative)?;
+        let component = component.nfc().collect::<String>();
+        validate_portable_component(&component, relative)?;
         if !canonical.is_empty() {
             canonical.push('/');
+            collision_key.push('/');
         }
-        canonical.push_str(component);
+        canonical.push_str(&component);
+        let folded = component
+            .chars()
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+            .nfc()
+            .collect::<String>();
+        collision_key.push_str(&folded);
     }
     if canonical.is_empty() {
         anyhow::bail!("package file path cannot be empty");
     }
-    Ok(canonical.into_bytes())
+    Ok(PortablePathIdentity {
+        canonical: canonical.into_bytes(),
+        collision_key: collision_key.into_bytes(),
+    })
+}
+
+fn register_portable_path(
+    portable_paths: &mut BTreeMap<Vec<u8>, PathBuf>,
+    relative: &Path,
+    collision_key: &[u8],
+) -> anyhow::Result<()> {
+    if let Some(previous) = portable_paths.insert(collision_key.to_vec(), relative.to_path_buf()) {
+        let mut paths = [previous, relative.to_path_buf()];
+        paths.sort();
+        anyhow::bail!(
+            "portable path collision: {} and {}",
+            paths[0].display(),
+            paths[1].display()
+        );
+    }
+    Ok(())
 }
 
 fn validate_portable_component(component: &str, relative: &Path) -> anyhow::Result<()> {
