@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MobileInitConfig {
@@ -41,6 +42,18 @@ pub struct MobileSkillDto {
     pub id: String,
     pub label: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MobileModelConfigDto {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub endpoint_type: String,
+    pub base_url: String,
+    pub model_name: String,
+    pub secret_id: Option<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

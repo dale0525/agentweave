@@ -1,3 +1,4 @@
+use crate::model_config::StoredModelConfig;
 use crate::session::{Message, Session};
 use chrono::{DateTime, Duration, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -27,6 +28,17 @@ impl Storage {
               title TEXT NOT NULL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS runtime_settings (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL
             );
             "#,
         )
@@ -178,6 +190,32 @@ impl Storage {
         tx.commit().await?;
         Ok(())
     }
+
+    pub async fn save_model_config(&self, config: &StoredModelConfig) -> anyhow::Result<()> {
+        config.validate().map_err(anyhow::Error::msg)?;
+        let value = serde_json::to_string(config)?;
+        sqlx::query(
+            r#"
+            INSERT INTO runtime_settings (key, value)
+            VALUES ('model_config', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            "#,
+        )
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn load_model_config(&self) -> anyhow::Result<Option<StoredModelConfig>> {
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT value FROM runtime_settings WHERE key = 'model_config'")
+                .fetch_optional(&self.pool)
+                .await?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
 }
 
 fn build_message(
@@ -233,6 +271,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_config::StoredModelConfig;
+    use model_gateway::provider::EndpointType;
+    use std::collections::BTreeMap;
 
     #[tokio::test]
     async fn stores_and_lists_messages() {
@@ -347,5 +388,23 @@ mod tests {
 
         assert!(!storage.session_exists(&session.id).await.unwrap());
         assert!(storage.list_messages(&session.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn persists_non_secret_model_config() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let config = StoredModelConfig {
+            provider_id: "openai".into(),
+            provider_name: "OpenAI".into(),
+            endpoint_type: EndpointType::Responses,
+            base_url: "https://api.openai.com/v1".into(),
+            model_name: "gpt-5.4".into(),
+            secret_id: Some("model.openai.default".into()),
+            headers: BTreeMap::from([("X-Client-Version".into(), "android-1".into())]),
+        };
+
+        storage.save_model_config(&config).await.unwrap();
+
+        assert_eq!(storage.load_model_config().await.unwrap(), Some(config));
     }
 }
