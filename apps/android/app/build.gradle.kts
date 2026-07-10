@@ -52,6 +52,9 @@ dependencies {
 
   testImplementation(libs.junit)
   testImplementation(libs.robolectric)
+  androidTestImplementation(libs.androidx.test.core)
+  androidTestImplementation(libs.androidx.test.runner)
+  androidTestImplementation(libs.junit)
 }
 
 val buildRustNativeDebug by tasks.registering(Exec::class) {

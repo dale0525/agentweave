@@ -1,6 +1,9 @@
 package com.generalagent.mobile.secrets
 
+import java.io.File
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import javax.crypto.KeyGenerator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -29,7 +32,8 @@ class ModelSecretStoreTest {
   fun encryptedStoreRoundTripsWithoutPersistingPlaintext() {
     val root = temporaryFolder.newFolder("model-secrets")
     val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
-    val store = AndroidKeystoreModelSecretStore(root) { key }
+    val syncedDirectories = mutableListOf<File>()
+    val store = AndroidKeystoreModelSecretStore(root, { key }, syncedDirectories::add)
 
     store.saveSecret("model.default", "sk-first")
     store.saveSecret("model.default", "sk-replaced")
@@ -46,13 +50,28 @@ class ModelSecretStoreTest {
 
     store.deleteSecret("model.default")
     assertNull(store.loadSecret("model.default"))
+    assertEquals(listOf(root, root, root), syncedDirectories)
+  }
+
+  @Test
+  fun encryptedStoreUsesFreshIvForEverySave() {
+    val root = temporaryFolder.newFolder("fresh-iv")
+    val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+    val store = AndroidKeystoreModelSecretStore(root, { key }) {}
+
+    store.saveSecret("model.default", "sk-same")
+    val firstEnvelope = root.listFiles().orEmpty().single().readBytes()
+    store.saveSecret("model.default", "sk-same")
+    val secondEnvelope = root.listFiles().orEmpty().single().readBytes()
+
+    assertFalse(firstEnvelope.contentEquals(secondEnvelope))
   }
 
   @Test
   fun encryptedStoreRejectsTamperedCiphertext() {
     val root = temporaryFolder.newFolder("tampered-secrets")
     val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
-    val store = AndroidKeystoreModelSecretStore(root) { key }
+    val store = AndroidKeystoreModelSecretStore(root, { key }) {}
     store.saveSecret("model.default", "sk-test")
     val encryptedFile = root.listFiles().orEmpty().single()
     val bytes = encryptedFile.readBytes()
@@ -61,6 +80,36 @@ class ModelSecretStoreTest {
 
     assertThrows(ModelSecretStoreException::class.java) {
       store.loadSecret("model.default")
+    }
+  }
+
+  @Test
+  fun encryptedStoreRejectsSwappedSecretIdAndMalformedEnvelope() {
+    val root = temporaryFolder.newFolder("invalid-envelopes")
+    val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+    val store = AndroidKeystoreModelSecretStore(root, { key }) {}
+    store.saveSecret("model.first", "sk-first")
+    val firstFile = root.listFiles().orEmpty().single()
+    val validEnvelope = firstFile.readBytes()
+    store.saveSecret("model.second", "sk-second")
+    val secondFile = root.listFiles().orEmpty().first { it != firstFile }
+    Files.copy(firstFile.toPath(), secondFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+
+    assertThrows(ModelSecretStoreException::class.java) {
+      store.loadSecret("model.second")
+    }
+
+    val malformedPayloads = listOf(
+      validEnvelope.clone().also { it[0] = 0x00 },
+      validEnvelope.clone().also { it[4] = 0x02 },
+      validEnvelope.clone().also { it[5] = 0x01 },
+      validEnvelope.copyOf(8),
+    )
+    malformedPayloads.forEach { payload ->
+      secondFile.writeBytes(payload)
+      assertThrows(ModelSecretStoreException::class.java) {
+        store.loadSecret("model.second")
+      }
     }
   }
 }

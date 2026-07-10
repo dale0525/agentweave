@@ -1876,6 +1876,9 @@ git commit -m "feat: scaffold android app"
 - Create: `apps/android/app/src/main/java/com/generalagent/mobile/model/ModelSettings.kt`
 - Create: `apps/android/app/src/test/java/com/generalagent/mobile/secrets/ModelSecretStoreTest.kt`
 - Create: `apps/android/app/src/test/java/com/generalagent/mobile/model/ModelSettingsTest.kt`
+- Create: `apps/android/app/src/androidTest/java/com/generalagent/mobile/secrets/AndroidKeystoreModelSecretStoreInstrumentedTest.kt`
+- Modify: `apps/android/gradle/libs.versions.toml`
+- Modify: `apps/android/app/build.gradle.kts`
 
 **Interfaces:**
 - Consumes: Android scaffold from Task 7
@@ -1975,6 +1978,8 @@ data class ModelSettings(
 
 `RuntimeModelConfig` intentionally has no API-key field, so plaintext secrets cannot enter the Rust persistence DTO by construction.
 
+Before creating the DTO, reject base URLs containing userinfo, query parameters, or fragments, and require secret references to use the `model.*` namespace.
+
 - [ ] **Step 4: Add secret store interface and test implementation**
 
 Create `apps/android/app/src/main/java/com/generalagent/mobile/secrets/ModelSecretStore.kt`:
@@ -2012,14 +2017,25 @@ Implement `AndroidKeystoreModelSecretStore` with platform APIs directly:
 - Bind ciphertext to its secret ID with GCM additional authenticated data.
 - Hash secret IDs before using them as filenames.
 - Store versioned ciphertext envelopes under `Context.noBackupFilesDir`.
-- Replace files atomically and reject malformed or tampered ciphertext.
+- Replace files atomically, fsync directory entries after save/delete, and reject malformed or tampered ciphertext.
 - Do not add `androidx.security:security-crypto`; its crypto APIs are deprecated in favor of direct platform APIs.
+- Add an instrumentation test that verifies the real AndroidKeyStore key is 256-bit and non-exportable, then round-trips ciphertext from the real no-backup directory.
 
 - [ ] **Step 6: Run tests**
 
 Run: `pixi run android-test`
 
 Expected: PASS.
+
+Run the instrumentation test on the arm64 API 36 emulator:
+
+```bash
+cd apps/android
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.generalagent.mobile.secrets.AndroidKeystoreModelSecretStoreInstrumentedTest
+```
+
+Expected: PASS on `GeneralAgent_API_36`.
 
 - [ ] **Step 7: Commit**
 

@@ -3,6 +3,8 @@ package com.generalagent.mobile.secrets
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -56,10 +58,12 @@ class InMemoryModelSecretStore : ModelSecretStore {
 class AndroidKeystoreModelSecretStore internal constructor(
   private val directory: File,
   private val keyProvider: () -> SecretKey,
+  private val directorySync: (File) -> Unit,
 ) : ModelSecretStore {
   constructor(context: Context) : this(
     directory = File(context.noBackupFilesDir, SECRET_DIRECTORY_NAME),
     keyProvider = AndroidKeystoreKeyProvider::getOrCreate,
+    directorySync = ::syncDirectory,
   )
 
   @Synchronized
@@ -117,15 +121,25 @@ class AndroidKeystoreModelSecretStore internal constructor(
   override fun deleteSecret(secretId: String) {
     requireValidSecretId(secretId)
     try {
-      Files.deleteIfExists(secretFile(secretId).toPath())
+      if (Files.deleteIfExists(secretFile(secretId).toPath())) {
+        directorySync(directory)
+      }
     } catch (error: Exception) {
       throw ModelSecretStoreException("failed to delete model secret", error)
     }
   }
 
   private fun ensureDirectory() {
-    if ((!directory.exists() && !directory.mkdirs()) || !directory.isDirectory) {
+    if (directory.isDirectory) return
+    if (directory.exists()) {
       throw ModelSecretStoreException("model secret directory is unavailable")
+    }
+    val created = directory.mkdirs()
+    if (!created && !directory.isDirectory) {
+      throw ModelSecretStoreException("model secret directory is unavailable")
+    }
+    if (created) {
+      directory.parentFile?.let(directorySync)
     }
   }
 
@@ -157,6 +171,7 @@ class AndroidKeystoreModelSecretStore internal constructor(
           StandardCopyOption.REPLACE_EXISTING,
         )
       }
+      directorySync(directory)
     } finally {
       temporary.delete()
     }
@@ -231,6 +246,19 @@ private object AndroidKeystoreKeyProvider {
         .build(),
     )
     return generator.generateKey()
+  }
+}
+
+private fun syncDirectory(directory: File) {
+  val descriptor = Os.open(
+    directory.absolutePath,
+    OsConstants.O_RDONLY,
+    0,
+  )
+  try {
+    Os.fsync(descriptor)
+  } finally {
+    Os.close(descriptor)
   }
 }
 
