@@ -615,6 +615,22 @@ fn portable_collision_key_treats_nfc_and_nfd_paths_as_equal() {
     );
 }
 
+#[test]
+fn portable_collision_key_full_folds_sigma_and_final_sigma() {
+    assert_eq!(
+        portable_collision_key(Path::new("nested/\u{3c3}.txt")).unwrap(),
+        portable_collision_key(Path::new("nested/\u{3c2}.txt")).unwrap()
+    );
+}
+
+#[test]
+fn portable_collision_key_full_folds_sharp_s_and_ss() {
+    assert_eq!(
+        portable_collision_key(Path::new("nested/\u{df}.txt")).unwrap(),
+        portable_collision_key(Path::new("nested/ss.txt")).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn package_tree_hash_normalizes_a_single_nfd_path_to_nfc() {
     let nfc_tree = tempfile::tempdir().unwrap();
@@ -656,6 +672,38 @@ async fn package_tree_hash_rejects_nfc_nfd_directory_collisions() {
         .await
         .unwrap();
     tokio::fs::create_dir(temporary.path().join("cafe\u{301}"))
+        .await
+        .unwrap();
+
+    let error = hash_package_tree(temporary.path()).await.unwrap_err();
+
+    assert!(error.to_string().contains("portable path collision"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn package_tree_hash_rejects_sigma_final_sigma_file_collisions() {
+    let temporary = tempfile::tempdir().unwrap();
+    tokio::fs::write(temporary.path().join("\u{3c3}.txt"), b"sigma")
+        .await
+        .unwrap();
+    tokio::fs::write(temporary.path().join("\u{3c2}.txt"), b"final sigma")
+        .await
+        .unwrap();
+
+    let error = hash_package_tree(temporary.path()).await.unwrap_err();
+
+    assert!(error.to_string().contains("portable path collision"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn package_tree_hash_rejects_sharp_s_ss_file_collisions() {
+    let temporary = tempfile::tempdir().unwrap();
+    tokio::fs::write(temporary.path().join("\u{df}.txt"), b"sharp s")
+        .await
+        .unwrap();
+    tokio::fs::write(temporary.path().join("ss.txt"), b"ss")
         .await
         .unwrap();
 

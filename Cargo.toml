@@ -31,5 +31,6 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-casefold = "0.2"
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }

@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use tokio::io::AsyncReadExt;
+use unicode_casefold::{Locale, UnicodeCaseFold, Variant};
 use unicode_normalization::UnicodeNormalization;
 
 const TREE_HASH_DOMAIN: &[u8] = b"general-agent.skill-package-tree";
@@ -264,8 +265,8 @@ fn portable_path_identity(relative: &Path) -> anyhow::Result<PortablePathIdentit
         }
         canonical.push_str(&component);
         let folded = component
-            .chars()
-            .flat_map(char::to_lowercase)
+            .as_str()
+            .case_fold_with(Variant::Full, Locale::NonTurkic)
             .collect::<String>()
             .nfc()
             .collect::<String>();
