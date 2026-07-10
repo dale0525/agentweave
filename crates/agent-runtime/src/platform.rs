@@ -61,6 +61,24 @@ impl CapabilitySet {
         ])
     }
 
+    pub fn desktop_runtime() -> Self {
+        Self::from_names([
+            "network.http",
+            "filesystem.workspace",
+            "shell.process",
+            "model.http_provider",
+        ])
+    }
+
+    pub fn server_runtime() -> Self {
+        Self::from_names([
+            "network.http",
+            "filesystem.workspace",
+            "shell.process",
+            "model.http_provider",
+        ])
+    }
+
     pub fn names(&self) -> &[String] {
         &self.names
     }
@@ -101,5 +119,27 @@ mod tests {
             capabilities.names(),
             &["filesystem.app_data", "network.http"]
         );
+    }
+
+    #[test]
+    fn desktop_runtime_registers_desktop_host_capabilities() {
+        let capabilities = CapabilitySet::desktop_runtime();
+
+        assert!(capabilities.contains_name("network.http"));
+        assert!(capabilities.contains_name("filesystem.workspace"));
+        assert!(capabilities.contains_name("shell.process"));
+        assert!(capabilities.contains_name("model.http_provider"));
+        assert!(!capabilities.contains_name("secure_storage"));
+    }
+
+    #[test]
+    fn server_runtime_registers_server_host_capabilities() {
+        let capabilities = CapabilitySet::server_runtime();
+
+        assert!(capabilities.contains_name("network.http"));
+        assert!(capabilities.contains_name("filesystem.workspace"));
+        assert!(capabilities.contains_name("shell.process"));
+        assert!(capabilities.contains_name("model.http_provider"));
+        assert!(!capabilities.contains_name("secure_storage"));
     }
 }

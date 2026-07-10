@@ -10,6 +10,8 @@ pub mod skill;
 pub mod skill_availability;
 pub mod skill_catalog;
 pub mod skill_package;
+pub mod skill_resolver;
+pub mod skill_source;
 pub mod storage;
 pub mod subagent;
 pub mod tools;
@@ -19,6 +21,9 @@ pub mod vfs;
 
 #[cfg(test)]
 mod skill_package_tests;
+
+#[cfg(test)]
+mod skill_resolver_tests;
 
 #[cfg(test)]
 mod skill_runtime_tests;
