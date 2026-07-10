@@ -41,6 +41,13 @@ class ModelSettingsTest {
     assertThrows(IllegalArgumentException::class.java) { settings.redactedForRust() }
   }
 
+  @Test
+  fun redactedSettingsAcceptUppercaseHttpScheme() {
+    val redacted = settings(baseUrl = "HTTPS://api.example.com/v1").redactedForRust()
+
+    assertEquals("HTTPS://api.example.com/v1", redacted.baseUrl)
+  }
+
   private fun settings(
     baseUrl: String = "https://api.example.com/v1",
     secretId: String = "model.example.default",

@@ -19,7 +19,10 @@ data class ModelSettings(
     } catch (error: Exception) {
       throw IllegalArgumentException("model base URL is invalid", error)
     }
-    require(uri.scheme == "https" || uri.scheme == "http") {
+    require(
+      uri.scheme.equals("https", ignoreCase = true) ||
+        uri.scheme.equals("http", ignoreCase = true),
+    ) {
       "model base URL must use HTTP or HTTPS"
     }
     require(!uri.host.isNullOrBlank()) { "model base URL host is required" }
