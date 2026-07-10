@@ -1,11 +1,11 @@
 use crate::skill_package::SkillPackageDescriptor;
 use anyhow::Context;
 use async_trait::async_trait;
+use icu_casemap::CaseMapper;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use tokio::io::AsyncReadExt;
-use unicode_casefold::{Locale, UnicodeCaseFold, Variant};
 use unicode_normalization::UnicodeNormalization;
 
 const TREE_HASH_DOMAIN: &[u8] = b"general-agent.skill-package-tree";
@@ -244,6 +244,7 @@ pub(crate) fn portable_collision_key(relative: &Path) -> anyhow::Result<Vec<u8>>
 fn portable_path_identity(relative: &Path) -> anyhow::Result<PortablePathIdentity> {
     let mut canonical = String::new();
     let mut collision_key = String::new();
+    let case_mapper = CaseMapper::new();
     for component in relative.components() {
         let Component::Normal(component) = component else {
             anyhow::bail!(
@@ -264,10 +265,9 @@ fn portable_path_identity(relative: &Path) -> anyhow::Result<PortablePathIdentit
             collision_key.push('/');
         }
         canonical.push_str(&component);
-        let folded = component
-            .as_str()
-            .case_fold_with(Variant::Full, Locale::NonTurkic)
-            .collect::<String>()
+        let folded = case_mapper
+            .fold_string(&component)
+            .as_ref()
             .nfc()
             .collect::<String>();
         collision_key.push_str(&folded);

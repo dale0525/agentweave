@@ -631,6 +631,14 @@ fn portable_collision_key_full_folds_sharp_s_and_ss() {
     );
 }
 
+#[test]
+fn portable_collision_key_folds_georgian_mtavruli_to_mkhedruli() {
+    assert_eq!(
+        portable_collision_key(Path::new("nested/\u{1c90}.txt")).unwrap(),
+        portable_collision_key(Path::new("nested/\u{10d0}.txt")).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn package_tree_hash_normalizes_a_single_nfd_path_to_nfc() {
     let nfc_tree = tempfile::tempdir().unwrap();
@@ -704,6 +712,22 @@ async fn package_tree_hash_rejects_sharp_s_ss_file_collisions() {
         .await
         .unwrap();
     tokio::fs::write(temporary.path().join("ss.txt"), b"ss")
+        .await
+        .unwrap();
+
+    let error = hash_package_tree(temporary.path()).await.unwrap_err();
+
+    assert!(error.to_string().contains("portable path collision"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn package_tree_hash_rejects_georgian_case_file_collisions() {
+    let temporary = tempfile::tempdir().unwrap();
+    tokio::fs::write(temporary.path().join("\u{1c90}.txt"), b"mtavruli")
+        .await
+        .unwrap();
+    tokio::fs::write(temporary.path().join("\u{10d0}.txt"), b"mkhedruli")
         .await
         .unwrap();
 

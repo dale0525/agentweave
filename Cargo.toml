@@ -19,6 +19,7 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 hex = "0.4"
+icu_casemap = { version = "2.1.1", features = ["compiled_data"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -31,6 +32,5 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-unicode-casefold = "0.2"
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
