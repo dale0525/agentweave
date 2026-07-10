@@ -326,11 +326,11 @@ async fn run_agent_turn(
 }
 
 fn agent_turn_error(error: anyhow::Error) -> ApiError {
-    if error
-        .to_string()
-        .contains("model_endpoint_does_not_support_tools")
-    {
+    let message = error.to_string();
+    if message.contains("model_endpoint_does_not_support_tools") {
         ApiError::BadRequest("model endpoint does not support runtime tools")
+    } else if message.contains("upstream model request failed") {
+        ApiError::ConnectionFailed(error)
     } else {
         ApiError::Internal(error)
     }
@@ -697,12 +697,17 @@ mod tests {
         assert_eq!(captured.body["model"], "qwen2.5");
         let messages = captured.body["messages"].as_array().unwrap();
         assert!(messages.iter().any(|message| message["role"] == "system"));
-        let developer = messages
+        let project_instruction = messages
             .iter()
-            .find(|message| message["role"] == "developer")
+            .find(|message| {
+                message["role"] == "system"
+                    && message["content"]
+                        .as_str()
+                        .is_some_and(|content| content.contains("Project instruction"))
+            })
             .and_then(|message| message["content"].as_str())
-            .expect("developer message should be present");
-        assert!(developer.contains("Project instruction from configured workspace"));
+            .expect("project instruction system message should be present");
+        assert!(project_instruction.contains("Project instruction from configured workspace"));
         assert!(messages.iter().any(|message| {
             message["role"] == "user" && message["content"] == "Use the configured provider"
         }));
@@ -780,6 +785,16 @@ mod tests {
         let response = ApiError::Internal(anyhow::anyhow!("storage unavailable")).into_response();
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn upstream_model_errors_return_bad_gateway() {
+        let response = agent_turn_error(anyhow::anyhow!(
+            "upstream model request failed: 400 Bad Request"
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]

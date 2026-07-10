@@ -76,7 +76,17 @@ impl GatewayHttpClient {
             builder = builder.header(name, value);
         }
 
-        let response = builder.send().await?.error_for_status()?.json().await?;
+        let response = builder.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let url = response.url().to_string();
+            let body = response.text().await.unwrap_or_else(|error| {
+                format!("<failed to read upstream response body: {error}>")
+            });
+            anyhow::bail!("{}", upstream_error_message(status, &url, &body));
+        }
+
+        let response = response.json().await?;
         let events = parse_gateway_response(&self.profile, response)?;
 
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
@@ -181,6 +191,12 @@ fn response_tool_output(output: Option<&Value>) -> String {
         Some(value) => value.to_string(),
         None => String::new(),
     }
+}
+
+fn upstream_error_message(status: reqwest::StatusCode, url: &str, body: &str) -> String {
+    let body = body.trim();
+    let body = if body.is_empty() { "<empty>" } else { body };
+    format!("upstream model request failed: {status} for url ({url}); body: {body}")
 }
 
 pub fn parse_gateway_response(
@@ -618,6 +634,20 @@ mod tests {
         assert_eq!(body["prompt"], "plain prompt");
         assert_eq!(body["stream"], false);
         assert_eq!(body["tools"], Value::Null);
+    }
+
+    #[test]
+    fn upstream_error_message_includes_status_url_and_body() {
+        let message = upstream_error_message(
+            reqwest::StatusCode::BAD_REQUEST,
+            "https://api.portkey.ai/v1/chat/completions",
+            "{\"error\":{\"message\":\"invalid model\"}}",
+        );
+
+        assert!(message.contains("upstream model request failed"));
+        assert!(message.contains("400 Bad Request"));
+        assert!(message.contains("https://api.portkey.ai/v1/chat/completions"));
+        assert!(message.contains("invalid model"));
     }
 
     #[test]

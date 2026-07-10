@@ -14,7 +14,7 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
                     let role = item.get("role")?.as_str()?;
 
                     let mut message = json!({
-                        "role": role,
+                        "role": chat_message_role(role),
                         "content": normalize_message_content(item.get("content")),
                     });
 
@@ -58,6 +58,13 @@ fn normalize_message_content(content: Option<&Value>) -> Value {
         Some(Value::String(text)) => Value::String(text.clone()),
         Some(value) => Value::String(value.to_string()),
         None => Value::String(String::new()),
+    }
+}
+
+fn chat_message_role(role: &str) -> &str {
+    match role {
+        "developer" => "system",
+        role => role,
     }
 }
 
@@ -133,5 +140,22 @@ mod tests {
             chat["tools"][0]["function"]["parameters"]["properties"]["text"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn converts_developer_messages_to_system_messages() {
+        let input = serde_json::json!({
+            "model": "test-model",
+            "input": [
+                { "role": "developer", "content": "Project instruction" },
+                { "role": "user", "content": "hello" }
+            ]
+        });
+
+        let chat = responses_to_chat_completions(input).unwrap();
+
+        assert_eq!(chat["messages"][0]["role"], "system");
+        assert_eq!(chat["messages"][0]["content"], "Project instruction");
+        assert_eq!(chat["messages"][1]["role"], "user");
     }
 }
