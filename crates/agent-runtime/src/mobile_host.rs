@@ -204,14 +204,23 @@ where
         if !self.storage.session_exists(session_id).await? {
             anyhow::bail!("session not found");
         }
+        self.storage
+            .append_message(session_id, "user", content)
+            .await?;
+        self.send_message_after_user_persisted(session_id, content)
+            .await
+    }
+
+    pub async fn send_message_after_user_persisted(
+        &self,
+        session_id: &str,
+        content: &str,
+    ) -> anyhow::Result<MobileTurnResult> {
         self.model_config
             .validate()
             .map_err(|message| anyhow::anyhow!(message))?;
         let api_key = resolve_model_api_key(&self.model_config, &self.secret_resolver).await?;
         let profile = self.model_config.to_provider_profile(api_key);
-        self.storage
-            .append_message(session_id, "user", content)
-            .await?;
         let runner = TurnRunner::new_with_catalog_and_config(
             model_gateway::responses::GatewayHttpClient::new(profile),
             self.skills.clone(),

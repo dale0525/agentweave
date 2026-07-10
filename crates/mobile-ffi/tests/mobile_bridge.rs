@@ -169,6 +169,27 @@ fn bridge_send_message_keeps_api_key_out_of_json_payloads() {
 }
 
 #[test]
+fn missing_model_config_preserves_submitted_user_message() {
+    let dir = tempdir().unwrap();
+    let runtime = MobileRuntime::initialize(init_config(dir.path())).unwrap();
+    let session = runtime.create_session("Unconfigured turn").unwrap();
+
+    let error = runtime
+        .send_message(&session.id, "keep before setup", None)
+        .unwrap_err();
+    let messages = runtime.get_messages(&session.id).unwrap();
+
+    assert!(
+        error
+            .to_string()
+            .contains("model configuration is required")
+    );
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, "user");
+    assert_eq!(messages[0].content, "keep before setup");
+}
+
+#[test]
 fn failed_http_turn_preserves_submitted_user_message() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

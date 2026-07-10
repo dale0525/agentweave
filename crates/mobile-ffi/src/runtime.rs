@@ -135,37 +135,52 @@ impl MobileRuntime {
         content: &str,
         api_key: Option<String>,
     ) -> Result<MobileTurnDto> {
-        let config = self
-            .tokio
-            .block_on(self.storage.load_model_config())?
-            .ok_or_else(|| anyhow::anyhow!("model configuration is required"))?;
-        if config.secret_id.is_some()
-            && api_key
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none()
-        {
-            anyhow::bail!("model API key is unavailable");
+        if self.cancellation.is_cancelled() {
+            anyhow::bail!("runtime closed");
         }
-        let host = HttpMobileRuntimeHost::new(
-            self.storage.clone(),
-            self.skills.clone(),
-            self.skill_catalog.clone(),
-            self.runtime_config.clone(),
-            self.init.clone(),
-            config,
-            TransientSecretResolver::new(api_key),
-        );
+        self.tokio.block_on(async {
+            if !self.storage.session_exists(session_id).await? {
+                anyhow::bail!("session not found");
+            }
+            self.storage
+                .append_message(session_id, "user", content)
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        })?;
+
         let cancellation = self.cancellation.clone();
         let result = self.tokio.block_on(async {
+            let turn = async {
+                let config = self
+                    .storage
+                    .load_model_config()
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("model configuration is required"))?;
+                if config.secret_id.is_some()
+                    && api_key
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .is_none()
+                {
+                    anyhow::bail!("model API key is unavailable");
+                }
+                let host = HttpMobileRuntimeHost::new(
+                    self.storage.clone(),
+                    self.skills.clone(),
+                    self.skill_catalog.clone(),
+                    self.runtime_config.clone(),
+                    self.init.clone(),
+                    config,
+                    TransientSecretResolver::new(api_key),
+                );
+                host.send_message_after_user_persisted(session_id, content)
+                    .await
+            };
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => anyhow::bail!("runtime closed"),
-                result = tokio::time::timeout(
-                    Duration::from_secs(60),
-                    host.send_message(session_id, content),
-                ) => match result {
+                result = tokio::time::timeout(Duration::from_secs(60), turn) => match result {
                     Ok(result) => result,
                     Err(_) => anyhow::bail!("model turn timed out"),
                 },
