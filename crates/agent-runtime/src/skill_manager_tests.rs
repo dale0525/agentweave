@@ -169,6 +169,79 @@ async fn read_package_entry_rejects_symlink_escape() {
     assert!(error.to_string().contains("symlink"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn manager_new_rejects_runtime_package_root_symlink() {
+    let root = tempdir().unwrap();
+    let links = tempdir().unwrap();
+    let (package_root, mut package) = discovered_runtime_package(root.path()).await;
+    let linked_root = links.path().join("runtime");
+    std::os::unix::fs::symlink(&package_root, &linked_root).unwrap();
+    package.root = linked_root;
+    let source = Arc::new(MutableSource::new(SkillLayer::Builtin, vec![package]));
+
+    let error = SkillManager::new(config(vec![source])).await.unwrap_err();
+
+    assert!(error.to_string().contains("symlink"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manager_new_rejects_runtime_manifest_symlink_escape() {
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let (package_root, package) = discovered_runtime_package(root.path()).await;
+    replace_with_external_symlink(
+        &package_root.join("skill.json"),
+        &outside.path().join("skill.json"),
+    )
+    .await;
+    let source = Arc::new(MutableSource::new(SkillLayer::Builtin, vec![package]));
+
+    let error = SkillManager::new(config(vec![source])).await.unwrap_err();
+
+    assert!(error.to_string().contains("symlink"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manager_new_rejects_runtime_entry_resource_symlink_escape() {
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let (package_root, package) = discovered_runtime_package(root.path()).await;
+    replace_with_external_symlink(
+        &package_root.join("index.js"),
+        &outside.path().join("index.js"),
+    )
+    .await;
+    let source = Arc::new(MutableSource::new(SkillLayer::Builtin, vec![package]));
+
+    let error = SkillManager::new(config(vec![source])).await.unwrap_err();
+
+    assert!(error.to_string().contains("symlink"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_resource_reload_failure_keeps_the_previous_snapshot() {
+    let root = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let (package_root, package) = discovered_runtime_package(root.path()).await;
+    let source = Arc::new(MutableSource::new(SkillLayer::Builtin, vec![package]));
+    let manager = SkillManager::new(config(vec![source])).await.unwrap();
+    let previous = manager.current_snapshot();
+    replace_with_external_symlink(
+        &package_root.join("index.js"),
+        &outside.path().join("index.js"),
+    )
+    .await;
+
+    let error = manager.reload().await.unwrap_err();
+
+    assert!(error.to_string().contains("symlink"));
+    assert!(Arc::ptr_eq(&previous, &manager.current_snapshot()));
+}
+
 #[tokio::test]
 async fn snapshot_builds_only_active_packages() {
     let builtin_root = tempdir().unwrap();
@@ -505,6 +578,24 @@ async fn write_runtime_package(
         .await
         .unwrap();
     package_root
+}
+
+async fn discovered_runtime_package(root: &Path) -> (std::path::PathBuf, DiscoveredSkillPackage) {
+    let package_root =
+        write_runtime_package(root, "runtime", "com.example.runtime", "runtime_tool").await;
+    let mut packages = DirectorySkillSource::new(SkillLayer::Builtin, root)
+        .discover()
+        .await
+        .unwrap();
+    (package_root, packages.pop().unwrap())
+}
+
+#[cfg(unix)]
+async fn replace_with_external_symlink(path: &Path, outside: &Path) {
+    let content = tokio::fs::read(path).await.unwrap();
+    tokio::fs::write(outside, content).await.unwrap();
+    tokio::fs::remove_file(path).await.unwrap();
+    std::os::unix::fs::symlink(outside, path).unwrap();
 }
 
 fn skill_document(name: &str, body: &str) -> String {

@@ -8,6 +8,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -294,14 +295,16 @@ impl SkillRegistry {
     }
 
     async fn load_skill(root: PathBuf) -> anyhow::Result<InstalledSkill> {
-        let manifest_path = root.join("skill.json");
+        let root = canonical_skill_root(&root).await?;
+        let manifest_path =
+            resolve_skill_package_file(&root, Path::new("skill.json"), "skill manifest").await?;
         let bytes = tokio::fs::read(&manifest_path).await.with_context(|| {
             format!("failed to read skill manifest {}", manifest_path.display())
         })?;
         let manifest: SkillManifest = serde_json::from_slice(&bytes).with_context(|| {
             format!("failed to parse skill manifest {}", manifest_path.display())
         })?;
-        validate_manifest(&root, &manifest)?;
+        validate_manifest(&root, &manifest).await?;
 
         Ok(InstalledSkill { root, manifest })
     }
@@ -430,7 +433,7 @@ async fn read_limited_stream(
     }
 }
 
-fn validate_manifest(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
+async fn validate_manifest(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
     if manifest.name.trim().is_empty() {
         anyhow::bail!("skill manifest name must not be empty");
     }
@@ -463,7 +466,7 @@ fn validate_manifest(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()
             anyhow::bail!("skill manifest tool name must be unique: {}", tool.name);
         }
     }
-    validate_entry_resources(root, manifest)?;
+    validate_entry_resources(root, manifest).await?;
 
     Ok(())
 }
@@ -495,7 +498,7 @@ fn is_tool_name(name: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
-fn validate_entry_resources(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
+async fn validate_entry_resources(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
     for arg in &manifest.entry.args {
         if !looks_like_entry_resource(arg) {
             continue;
@@ -506,13 +509,62 @@ fn validate_entry_resources(root: &Path, manifest: &SkillManifest) -> anyhow::Re
             anyhow::bail!("unsafe skill entry resource path: {arg}");
         }
 
-        let resource_path = root.join(path);
-        if !resource_path.is_file() {
-            anyhow::bail!("skill manifest entry resource does not exist: {arg}");
-        }
+        resolve_skill_package_file(root, path, "skill manifest entry resource").await?;
     }
 
     Ok(())
+}
+
+async fn canonical_skill_root(root: &Path) -> anyhow::Result<PathBuf> {
+    let metadata = tokio::fs::symlink_metadata(root)
+        .await
+        .with_context(|| format!("failed to inspect skill package root {}", root.display()))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "skill package root must not be a symlink: {}",
+            root.display()
+        );
+    }
+    if !metadata.is_dir() {
+        anyhow::bail!("skill package root must be a directory: {}", root.display());
+    }
+    tokio::fs::canonicalize(root)
+        .await
+        .with_context(|| format!("failed to resolve skill package root {}", root.display()))
+}
+
+async fn resolve_skill_package_file(
+    canonical_root: &Path,
+    relative: &Path,
+    label: &str,
+) -> anyhow::Result<PathBuf> {
+    let candidate = canonical_root.join(relative);
+    let metadata = match tokio::fs::symlink_metadata(&candidate).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            anyhow::bail!("{label} does not exist: {}", relative.display());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect {label} {}", candidate.display()));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("{label} must not be a symlink: {}", candidate.display());
+    }
+    if !metadata.is_file() {
+        anyhow::bail!("{label} must be a regular file: {}", candidate.display());
+    }
+    let canonical = tokio::fs::canonicalize(&candidate)
+        .await
+        .with_context(|| format!("failed to resolve {label} {}", candidate.display()))?;
+    if !canonical.starts_with(canonical_root) {
+        anyhow::bail!(
+            "{label} escapes skill package root: {}",
+            candidate.display()
+        );
+    }
+    Ok(canonical)
 }
 
 fn looks_like_entry_resource(arg: &str) -> bool {

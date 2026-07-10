@@ -488,12 +488,25 @@ async fn collect_package_metadata(
         });
 
     if has_runtime_manifest {
-        match SkillRegistry::load_development_skill(package_path).await {
-            Ok(skill) => {
-                name = Some(skill.manifest.name.clone());
-                description = Some(skill.manifest.description.clone());
-                runtime_tools = runtime_tool_names(&skill.manifest);
-            }
+        let runtime_package = tokio::fs::canonicalize(package_path)
+            .await
+            .with_context(|| format!("failed to resolve skill package {}", package_path.display()))
+            .and_then(|path| {
+                if path.starts_with(root) {
+                    Ok(path)
+                } else {
+                    anyhow::bail!("unsafe skill package path: {}", package_path.display())
+                }
+            });
+        match runtime_package {
+            Ok(path) => match SkillRegistry::load_development_skill(path).await {
+                Ok(skill) => {
+                    name = Some(skill.manifest.name.clone());
+                    description = Some(skill.manifest.description.clone());
+                    runtime_tools = runtime_tool_names(&skill.manifest);
+                }
+                Err(error) => errors.push(error.to_string()),
+            },
             Err(error) => errors.push(error.to_string()),
         }
     }
