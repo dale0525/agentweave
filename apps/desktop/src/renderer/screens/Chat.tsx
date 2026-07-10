@@ -3,9 +3,9 @@ import { Menu, Settings } from "lucide-react";
 
 import {
   createServerSession,
-  extractAssistantText,
   postSessionMessage
 } from "../api";
+import { buildAssistantTurnMessages } from "../chatEventMessages";
 import { AppIconButton } from "../components/AppIconButton";
 import { Composer } from "../components/Composer";
 import { ConversationDrawer } from "../components/ConversationDrawer";
@@ -53,6 +53,7 @@ export function Chat({
       return;
     }
 
+    const pendingReasoningId = createMessageId();
     setApiError(null);
     setMessages((current) => [
       ...current,
@@ -60,6 +61,13 @@ export function Chat({
         body: text,
         id: createMessageId(),
         role: "user"
+      },
+      {
+        id: pendingReasoningId,
+        kind: "reasoning",
+        role: "assistant",
+        status: "running",
+        text: "Working on your request."
       }
     ]);
     setDraft("");
@@ -88,19 +96,16 @@ export function Chat({
       if (!isCurrentRequest()) {
         return;
       }
-      const assistantText = extractAssistantText(response);
-      if (assistantText) {
-        setMessages((current) => [
-          ...current,
-          {
-            body: assistantText,
-            id: createMessageId(),
-            role: "assistant"
-          }
-        ]);
-      }
+      const assistantMessages = buildAssistantTurnMessages(response, createMessageId);
+      setMessages((current) => [
+        ...current.filter((message) => message.id !== pendingReasoningId),
+        ...assistantMessages
+      ]);
     } catch {
       if (isCurrentRequest()) {
+        setMessages((current) =>
+          current.filter((message) => message.id !== pendingReasoningId)
+        );
         setApiError("Could not send message. Check your model or service connection.");
       }
     } finally {

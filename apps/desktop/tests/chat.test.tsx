@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../src/renderer/App";
+import { buildAssistantTurnMessages } from "../src/renderer/chatEventMessages";
 import { Chat } from "../src/renderer/screens/Chat";
 
 describe("Chat", () => {
@@ -69,6 +70,163 @@ describe("Chat", () => {
         method: "POST"
       })
     );
+  });
+
+  it("renders response reasoning and tool events before the assistant response", async () => {
+    const user = userEvent.setup();
+    mockFetch([
+      jsonResponse({ id: "session-1", title: "Provider adapter MVP" }),
+      jsonResponse({
+        accepted: true,
+        assistant_message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: "The renderer can show the full turn."
+        },
+        events: [
+          { type: "turn_started", turn_id: "turn-1" },
+          {
+            type: "reasoning_delta",
+            text: "I should inspect the message rendering path."
+          },
+          {
+            type: "tool_call_started",
+            call_id: "call-search",
+            name: "search_files",
+            arguments: { query: "MessageList" }
+          },
+          {
+            type: "tool_call_finished",
+            call_id: "call-search",
+            result: {
+              ok: true,
+              tool: "search_files",
+              call_id: "call-search",
+              data: { summary: "2 matches" },
+              error: null,
+              metadata: {
+                duration_ms: 12,
+                output_truncated: false,
+                stderr_truncated: false,
+                stdout_truncated: false
+              }
+            }
+          },
+          {
+            type: "assistant_message_finished",
+            text: "The renderer can show the full turn."
+          },
+          { type: "turn_finished", turn_id: "turn-1" }
+        ]
+      })
+    ]);
+
+    render(<Chat />);
+
+    await user.type(
+      screen.getByLabelText("Message GeneralAgent"),
+      "Show the whole agent turn"
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(
+      await screen.findByText("The renderer can show the full turn.")
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Thought/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Search files/i })
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Thought/i }));
+    expect(
+      screen.getByText("I should inspect the message rendering path.")
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Search files/i }));
+    expect(screen.getByText(/"query": "MessageList"/)).toBeInTheDocument();
+    expect(screen.getByText(/"summary": "2 matches"/)).toBeInTheDocument();
+  });
+
+  it("shows a running agent thinking row while the response is in flight", async () => {
+    const user = userEvent.setup();
+    const pendingMessage = createDeferred<Response>();
+    mockFetch([
+      jsonResponse({ id: "session-1", title: "Provider adapter MVP" }),
+      pendingMessage.promise
+    ]);
+
+    render(<Chat />);
+
+    await user.type(screen.getByLabelText("Message GeneralAgent"), "Long task");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByText("Long task")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Thinking/i })
+    ).toBeInTheDocument();
+
+    pendingMessage.resolve(
+      jsonResponse({
+        accepted: true,
+        assistant_message: {
+          content: "Finished after loading",
+          created_at: "2026-06-28T00:00:00.000Z",
+          id: "assistant-1",
+          role: "assistant",
+          session_id: "session-1"
+        },
+        events: [
+          {
+            type: "assistant_message_finished",
+            text: "Finished after loading"
+          },
+          { type: "turn_finished", turn_id: "turn-1" }
+        ]
+      })
+    );
+
+    expect(await screen.findByText("Finished after loading")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Thinking/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps partial runtime events marked as streaming activity", () => {
+    const messages = buildAssistantTurnMessages(
+      {
+        accepted: true,
+        events: [
+          { type: "reasoning_delta", text: "Checking the current renderer." },
+          {
+            type: "tool_call_started",
+            call_id: "call-search",
+            name: "search_files",
+            arguments: { query: "MessageList" }
+          },
+          {
+            type: "assistant_text_delta",
+            text: "I am still assembling the answer."
+          }
+        ]
+      },
+      createStableId()
+    );
+
+    expect(messages).toMatchObject([
+      {
+        kind: "reasoning",
+        status: "running",
+        text: "Checking the current renderer."
+      },
+      {
+        kind: "tool_call",
+        name: "search_files",
+        status: "running"
+      },
+      {
+        body: "I am still assembling the answer.",
+        role: "assistant",
+        status: "streaming"
+      }
+    ]);
   });
 
   it("sends saved model settings with chat messages", async () => {
@@ -252,6 +410,8 @@ describe("Chat", () => {
     expect(entryCss).toContain('@import "./settings.css";');
     expect(css).toMatch(/--color-primary:\s*#0d9488/);
     expect(css).toMatch(/\.chat-shell[\s\S]*?\{/);
+    expect(css).toMatch(/\.chat-shell[\s\S]*?color-scheme:\s*light/);
+    expect(css).toMatch(/\.chat-shell[\s\S]*?--color-background:\s*#ffffff/);
     expect(css).toMatch(/\.top-bar[\s\S]*?\{/);
     expect(css).toMatch(/\.top-bar-title[\s\S]*?\{/);
     expect(css).toMatch(/\.message-list[\s\S]*?\{/);
@@ -473,4 +633,12 @@ function createDeferred<T>() {
   });
 
   return { promise, reject, resolve };
+}
+
+function createStableId() {
+  let index = 0;
+  return () => {
+    index += 1;
+    return `test-id-${index}`;
+  };
 }

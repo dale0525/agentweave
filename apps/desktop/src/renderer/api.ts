@@ -8,10 +8,14 @@ export type ServerSession = {
 };
 
 export type RuntimeEvent = {
-  type: string;
+  arguments?: unknown;
+  call_id?: string;
+  message?: string;
+  name?: string;
+  result?: unknown;
   text?: string;
   turn_id?: string;
-  message?: string;
+  type: string;
 };
 
 export type ServerMessage = {
