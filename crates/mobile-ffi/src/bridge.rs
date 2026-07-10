@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
-static RUNTIMES: OnceLock<Mutex<HashMap<i64, Arc<Mutex<MobileRuntime>>>>> = OnceLock::new();
+static RUNTIMES: OnceLock<Mutex<HashMap<i64, Arc<MobileRuntime>>>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -40,7 +40,7 @@ pub fn initialize_runtime_json(request_json: &str) -> String {
         runtimes()
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime registry is unavailable"))?
-            .insert(handle, Arc::new(Mutex::new(runtime)));
+            .insert(handle, Arc::new(runtime));
         Ok(json!({"handle": handle}))
     })();
     bridge_result(result)
@@ -50,9 +50,6 @@ pub fn invoke_runtime_json(handle: i64, request_json: &str) -> String {
     let result = (|| {
         let request: RuntimeRequest = serde_json::from_str(request_json)?;
         let runtime = runtime(handle)?;
-        let runtime = runtime
-            .lock()
-            .map_err(|_| anyhow::anyhow!("runtime handle is unavailable"))?;
         match request {
             RuntimeRequest::Diagnostics => serde_json::to_value(runtime.diagnostics()),
             RuntimeRequest::CreateSession { title } => {
@@ -81,9 +78,6 @@ pub fn send_message_json(handle: i64, request_json: &str, api_key: Option<String
     let result = (|| {
         let request: SendMessageRequest = serde_json::from_str(request_json)?;
         let runtime = runtime(handle)?;
-        let runtime = runtime
-            .lock()
-            .map_err(|_| anyhow::anyhow!("runtime handle is unavailable"))?;
         serde_json::to_value(runtime.send_message(
             &request.session_id,
             &request.content,
@@ -100,15 +94,14 @@ pub fn close_runtime(handle: i64) -> String {
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime registry is unavailable"))?
             .remove(&handle);
-        if removed.is_none() {
-            anyhow::bail!("runtime handle not found");
-        }
+        let runtime = removed.ok_or_else(|| anyhow::anyhow!("runtime handle not found"))?;
+        runtime.close();
         Ok(Value::Null)
     })();
     bridge_result(result)
 }
 
-fn runtime(handle: i64) -> anyhow::Result<Arc<Mutex<MobileRuntime>>> {
+fn runtime(handle: i64) -> anyhow::Result<Arc<MobileRuntime>> {
     runtimes()
         .lock()
         .map_err(|_| anyhow::anyhow!("runtime registry is unavailable"))?
@@ -117,7 +110,7 @@ fn runtime(handle: i64) -> anyhow::Result<Arc<Mutex<MobileRuntime>>> {
         .ok_or_else(|| anyhow::anyhow!("runtime handle not found"))
 }
 
-fn runtimes() -> &'static Mutex<HashMap<i64, Arc<Mutex<MobileRuntime>>>> {
+fn runtimes() -> &'static Mutex<HashMap<i64, Arc<MobileRuntime>>> {
     RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

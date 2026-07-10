@@ -115,6 +115,9 @@ where
         if !self.storage.session_exists(session_id).await? {
             anyhow::bail!("session not found");
         }
+        self.storage
+            .append_message(session_id, "user", content)
+            .await?;
         let runner = TurnRunner::new_with_catalog_and_config(
             self.model.clone(),
             self.skills.clone(),
@@ -124,7 +127,7 @@ where
         let events = runner.run(content).await?;
         let assistant_text = assistant_text_from_events(&events);
         self.storage
-            .append_turn(session_id, content, &assistant_text)
+            .append_message(session_id, "assistant", &assistant_text)
             .await?;
         Ok(MobileTurnResult {
             assistant_text,
@@ -206,6 +209,9 @@ where
             .map_err(|message| anyhow::anyhow!(message))?;
         let api_key = resolve_model_api_key(&self.model_config, &self.secret_resolver).await?;
         let profile = self.model_config.to_provider_profile(api_key);
+        self.storage
+            .append_message(session_id, "user", content)
+            .await?;
         let runner = TurnRunner::new_with_catalog_and_config(
             model_gateway::responses::GatewayHttpClient::new(profile),
             self.skills.clone(),
@@ -215,7 +221,7 @@ where
         let events = runner.run(content).await?;
         let assistant_text = assistant_text_from_events(&events);
         self.storage
-            .append_turn(session_id, content, &assistant_text)
+            .append_message(session_id, "assistant", &assistant_text)
             .await?;
         Ok(MobileTurnResult {
             assistant_text,
@@ -306,10 +312,10 @@ mod tests {
     use crate::skill::SkillRegistry;
     use crate::skill_catalog::SkillCatalog;
     use crate::storage::Storage;
+    use crate::tools::RuntimeConfig;
     use crate::tools::discovery::{
         ConnectorAuthState, ConnectorMetadata, ExternalToolConfig, ExternalToolVisibility,
     };
-    use crate::tools::RuntimeConfig;
     use futures::stream;
     use model_gateway::provider::EndpointType;
     use model_gateway::responses::GatewayEvent;

@@ -4,6 +4,7 @@ import android.content.Context
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -29,6 +30,25 @@ class RuntimeBridgeTest {
     assertEquals("android", request.getString("platform"))
     assertEquals(4, request.getJSONArray("capabilities").length())
     assertFalse(native.initializeRequest.contains("api_key", ignoreCase = true))
+  }
+
+  @Test
+  fun loadModelConfigPreservesNullSecretReference() {
+    val native = object : NativeRuntimeApi {
+      override fun initialize(requestJson: String): String = error("not used")
+
+      override fun invoke(handle: Long, requestJson: String): String =
+        """{"ok":true,"data":{"provider_id":"local","provider_name":"Local","endpoint_type":"responses","base_url":"http://localhost:11434/v1","model_name":"qwen","secret_id":null,"headers":{}}}"""
+
+      override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String =
+        error("not used")
+
+      override fun close(handle: Long): String = """{"ok":true,"data":null}"""
+    }
+
+    val config = RuntimeClient(9L, native).loadModelConfig()
+
+    assertNull(config?.secretId)
   }
 }
 

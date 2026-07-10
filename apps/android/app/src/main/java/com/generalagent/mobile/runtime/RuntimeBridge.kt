@@ -141,7 +141,7 @@ private fun JSONObject.toModelConfig(): RuntimeModelConfig =
     endpointType = getString("endpoint_type"),
     baseUrl = getString("base_url"),
     modelName = getString("model_name"),
-    secretId = optString("secret_id").takeIf { it.isNotEmpty() },
+    secretId = if (isNull("secret_id")) null else getString("secret_id"),
     headers = getJSONObject("headers").keys().asSequence().associateWith { key ->
       getJSONObject("headers").getString(key)
     },

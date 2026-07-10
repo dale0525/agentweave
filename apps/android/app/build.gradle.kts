@@ -29,8 +29,12 @@ android {
     unitTests.isIncludeAndroidResources = true
   }
 
-  sourceSets.named("main") {
-    jniLibs.directories.add("build/generated/rustJniLibs")
+  sourceSets.named("debug") {
+    jniLibs.directories.add("build/generated/rustJniLibs/debug")
+  }
+
+  sourceSets.named("release") {
+    jniLibs.directories.add("build/generated/rustJniLibs/release")
   }
 }
 
@@ -50,11 +54,22 @@ dependencies {
   testImplementation(libs.robolectric)
 }
 
-val buildRustNative by tasks.registering(Exec::class) {
+val buildRustNativeDebug by tasks.registering(Exec::class) {
   workingDir(rootProject.projectDir.resolve("../.."))
   commandLine("node", "scripts/build-android-rust.mjs")
+  environment("GENERAL_AGENT_ANDROID_RUST_PROFILE", "debug")
 }
 
-tasks.named("preBuild") {
-  dependsOn(buildRustNative)
+val buildRustNativeRelease by tasks.registering(Exec::class) {
+  workingDir(rootProject.projectDir.resolve("../.."))
+  commandLine("node", "scripts/build-android-rust.mjs")
+  environment("GENERAL_AGENT_ANDROID_RUST_PROFILE", "release")
+}
+
+tasks.matching { it.name == "preDebugBuild" }.configureEach {
+  dependsOn(buildRustNativeDebug)
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+  dependsOn(buildRustNativeRelease)
 }

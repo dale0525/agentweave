@@ -243,7 +243,7 @@ async fn android_registry_hides_and_rejects_runtime_tool_without_required_capabi
     assert!(
         error
             .to_string()
-            .contains("Missing required capability: browser.headless")
+            .contains("Missing required capabilities: browser.headless, shell.process")
     );
     remove_test_dir(root).await;
 }

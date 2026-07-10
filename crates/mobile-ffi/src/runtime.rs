@@ -14,7 +14,9 @@ use model_gateway::provider::EndpointType;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::runtime::Runtime;
+use tokio_util::sync::CancellationToken;
 
 pub struct MobileRuntime {
     tokio: Runtime,
@@ -26,6 +28,7 @@ pub struct MobileRuntime {
     database_ready: bool,
     skills_ready: bool,
     model_configured: AtomicBool,
+    cancellation: CancellationToken,
 }
 
 impl MobileRuntime {
@@ -72,6 +75,7 @@ impl MobileRuntime {
             database_ready: true,
             skills_ready: skills_path.is_dir(),
             model_configured: AtomicBool::new(model_configured),
+            cancellation: CancellationToken::new(),
         })
     }
 
@@ -153,12 +157,27 @@ impl MobileRuntime {
             config,
             TransientSecretResolver::new(api_key),
         );
-        let result = self
-            .tokio
-            .block_on(host.send_message(session_id, content))?;
+        let cancellation = self.cancellation.clone();
+        let result = self.tokio.block_on(async {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => anyhow::bail!("runtime closed"),
+                result = tokio::time::timeout(
+                    Duration::from_secs(60),
+                    host.send_message(session_id, content),
+                ) => match result {
+                    Ok(result) => result,
+                    Err(_) => anyhow::bail!("model turn timed out"),
+                },
+            }
+        })?;
         Ok(MobileTurnDto {
             assistant_text: result.assistant_text,
         })
+    }
+
+    pub fn close(&self) {
+        self.cancellation.cancel();
     }
 }
 

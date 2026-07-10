@@ -54,13 +54,15 @@ pub fn evaluate_skill_availability(
     capabilities: &CapabilitySet,
     contributes_runtime_tools: bool,
 ) -> SkillAvailability {
-    if let Some(override_status) = platform_override(metadata, platform) {
+    if let Some(override_status) = platform_override(metadata, platform)
+        && override_status.status != PlatformSkillStatus::Available
+    {
         return SkillAvailability {
             skill_id: skill_id.to_string(),
             status: match override_status.status {
-                PlatformSkillStatus::Available => SkillAvailabilityStatus::Available,
                 PlatformSkillStatus::Unavailable => SkillAvailabilityStatus::Unavailable,
                 PlatformSkillStatus::Unsupported => SkillAvailabilityStatus::Unsupported,
+                PlatformSkillStatus::Available => unreachable!(),
             },
             missing_capabilities: Vec::new(),
             reason: override_status.reason.clone(),
@@ -80,12 +82,19 @@ pub fn evaluate_skill_availability(
         };
     }
 
-    let missing: Vec<String> = metadata
+    let mut missing: Vec<String> = metadata
         .requires
         .iter()
         .filter(|name| !capabilities.contains_name(name))
         .cloned()
         .collect();
+    if platform == PlatformId::Android
+        && contributes_runtime_tools
+        && !capabilities.contains_name("shell.process")
+        && !missing.iter().any(|name| name == "shell.process")
+    {
+        missing.push("shell.process".into());
+    }
 
     if missing.is_empty() {
         return SkillAvailability {
@@ -186,5 +195,50 @@ mod tests {
             availability.reason,
             "Runtime tools must declare capability requirements on Android."
         );
+    }
+
+    #[test]
+    fn android_command_skill_implicitly_requires_shell_process() {
+        let metadata = SkillCapabilityMetadata {
+            requires: vec!["network.http".into()],
+            optional: vec![],
+            platforms: PlatformOverrides::default(),
+        };
+
+        let availability = evaluate_skill_availability(
+            "network-command",
+            &metadata,
+            PlatformId::Android,
+            &CapabilitySet::android_mvp(),
+            true,
+        );
+
+        assert_eq!(availability.status, SkillAvailabilityStatus::Unavailable);
+        assert_eq!(availability.missing_capabilities, vec!["shell.process"]);
+    }
+
+    #[test]
+    fn android_available_override_cannot_bypass_shell_process() {
+        let metadata = SkillCapabilityMetadata {
+            requires: vec!["network.http".into()],
+            optional: vec![],
+            platforms: PlatformOverrides {
+                android: Some(PlatformSkillOverride {
+                    status: PlatformSkillStatus::Available,
+                    reason: "Available on Android.".into(),
+                }),
+            },
+        };
+
+        let availability = evaluate_skill_availability(
+            "overridden-command",
+            &metadata,
+            PlatformId::Android,
+            &CapabilitySet::android_mvp(),
+            true,
+        );
+
+        assert_eq!(availability.status, SkillAvailabilityStatus::Unavailable);
+        assert_eq!(availability.missing_capabilities, vec!["shell.process"]);
     }
 }
