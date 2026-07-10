@@ -1,5 +1,6 @@
 use crate::skill_package::{
-    DescriptorSource, SkillPackageDescriptor, SkillPackageId, SkillPackageKind,
+    DescriptorSource, SkillCompatibility, SkillPackageDescriptor, SkillPackageId, SkillPackageKind,
+    SkillPackageRequirements, SkillPackageTargets,
 };
 use semver::Version;
 use serde_json::json;
@@ -17,6 +18,22 @@ fn versioned_descriptor_value() -> serde_json::Value {
         "compatibility": { "minimumRuntimeVersion": "0.3.0", "platforms": ["desktop"] },
         "requires": { "packages": [], "capabilities": [], "runtimeTools": [], "connectors": [] }
     })
+}
+
+fn programmatic_descriptor() -> SkillPackageDescriptor {
+    SkillPackageDescriptor {
+        schema_version: 1,
+        id: SkillPackageId::parse("com.example.programmatic").unwrap(),
+        version: Version::new(1, 0, 0),
+        display_name: "Programmatic".into(),
+        kind: SkillPackageKind::InstructionOnly,
+        package: SkillPackageTargets {
+            include_instructions: true,
+            include_runtime: false,
+        },
+        compatibility: SkillCompatibility::default(),
+        requires: SkillPackageRequirements::default(),
+    }
 }
 
 async fn create_legacy_instruction_package(parent: &Path, folder: &str) -> PathBuf {
@@ -122,6 +139,27 @@ fn descriptor_semantics_accept_valid_host_tools_only() {
     value["requires"]["runtimeTools"] = json!(["read_text_file"]);
 
     assert!(serde_json::from_value::<SkillPackageDescriptor>(value).is_ok());
+}
+
+#[test]
+fn programmatic_descriptor_validation_rejects_unsupported_schema() {
+    let mut descriptor = programmatic_descriptor();
+    descriptor.schema_version = 999;
+
+    assert!(descriptor.validate().is_err());
+}
+
+#[test]
+fn programmatic_descriptor_validation_rejects_invalid_kind_targets() {
+    let mut descriptor = programmatic_descriptor();
+    descriptor.kind = SkillPackageKind::NativeRuntime;
+
+    assert!(descriptor.validate().is_err());
+}
+
+#[test]
+fn programmatic_descriptor_validation_accepts_valid_descriptor() {
+    assert!(programmatic_descriptor().validate().is_ok());
 }
 
 #[tokio::test]

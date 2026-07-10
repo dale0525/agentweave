@@ -110,12 +110,6 @@ impl TryFrom<SkillPackageDescriptorWire> for SkillPackageDescriptor {
     type Error = anyhow::Error;
 
     fn try_from(wire: SkillPackageDescriptorWire) -> Result<Self, Self::Error> {
-        if wire.schema_version != SKILL_PACKAGE_SCHEMA_VERSION {
-            anyhow::bail!(
-                "unsupported skill package schema version: {}",
-                wire.schema_version
-            );
-        }
         let descriptor = Self {
             schema_version: wire.schema_version,
             id: wire.id,
@@ -126,7 +120,7 @@ impl TryFrom<SkillPackageDescriptorWire> for SkillPackageDescriptor {
             compatibility: wire.compatibility,
             requires: wire.requires,
         };
-        descriptor.validate_semantics()?;
+        descriptor.validate()?;
         Ok(descriptor)
     }
 }
@@ -301,7 +295,7 @@ async fn load_legacy_descriptor(
         compatibility: SkillCompatibility::default(),
         requires,
     };
-    descriptor.validate_semantics()?;
+    descriptor.validate()?;
     Ok(LoadedPackageDescriptor {
         root: package_root.to_path_buf(),
         descriptor,
@@ -311,7 +305,13 @@ async fn load_legacy_descriptor(
 }
 
 impl SkillPackageDescriptor {
-    fn validate_semantics(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema_version != SKILL_PACKAGE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported skill package schema version: {}",
+                self.schema_version
+            );
+        }
         match self.kind {
             SkillPackageKind::InstructionOnly => {
                 if !self.package.include_instructions || self.package.include_runtime {
