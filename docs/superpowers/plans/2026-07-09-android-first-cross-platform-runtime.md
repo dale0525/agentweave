@@ -1876,8 +1876,6 @@ git commit -m "feat: scaffold android app"
 - Create: `apps/android/app/src/main/java/com/generalagent/mobile/model/ModelSettings.kt`
 - Create: `apps/android/app/src/test/java/com/generalagent/mobile/secrets/ModelSecretStoreTest.kt`
 - Create: `apps/android/app/src/test/java/com/generalagent/mobile/model/ModelSettingsTest.kt`
-- Modify: `apps/android/gradle/libs.versions.toml`
-- Modify: `apps/android/app/build.gradle.kts`
 
 **Interfaces:**
 - Consumes: Android scaffold from Task 7
@@ -1891,7 +1889,7 @@ Create `apps/android/app/src/test/java/com/generalagent/mobile/model/ModelSettin
 package com.generalagent.mobile.model
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class ModelSettingsTest {
@@ -1911,7 +1909,7 @@ class ModelSettingsTest {
     val redacted = settings.redactedForRust()
 
     assertEquals("model.openai.default", redacted.secretId)
-    assertNull(redacted.apiKey)
+    assertFalse(redacted.toString().contains("sk-secret"))
   }
 }
 ```
@@ -1952,6 +1950,8 @@ Create `apps/android/app/src/main/java/com/generalagent/mobile/model/ModelSettin
 ```kotlin
 package com.generalagent.mobile.model
 
+import com.generalagent.mobile.runtime.RuntimeModelConfig
+
 data class ModelSettings(
   val providerId: String,
   val providerName: String,
@@ -1961,28 +1961,19 @@ data class ModelSettings(
   val secretId: String?,
   val apiKey: String?,
 ) {
-  fun redactedForRust(): RustModelSettings =
-    RustModelSettings(
+  fun redactedForRust(): RuntimeModelConfig =
+    RuntimeModelConfig(
       providerId = providerId,
       providerName = providerName,
       endpointType = endpointType,
       baseUrl = baseUrl,
       modelName = modelName,
       secretId = secretId,
-      apiKey = null,
     )
 }
-
-data class RustModelSettings(
-  val providerId: String,
-  val providerName: String,
-  val endpointType: String,
-  val baseUrl: String,
-  val modelName: String,
-  val secretId: String?,
-  val apiKey: String?,
-)
 ```
+
+`RuntimeModelConfig` intentionally has no API-key field, so plaintext secrets cannot enter the Rust persistence DTO by construction.
 
 - [ ] **Step 4: Add secret store interface and test implementation**
 
@@ -2014,48 +2005,15 @@ class InMemoryModelSecretStore : ModelSecretStore {
 
 - [ ] **Step 5: Add Android Keystore implementation**
 
-Append to `ModelSecretStore.kt`:
+Implement `AndroidKeystoreModelSecretStore` with platform APIs directly:
 
-```kotlin
-class AndroidKeystoreModelSecretStore(
-  context: android.content.Context,
-) : ModelSecretStore {
-  private val prefs =
-    androidx.security.crypto.EncryptedSharedPreferences.create(
-      context,
-      "generalagent-model-secrets",
-      androidx.security.crypto.MasterKey.Builder(context)
-        .setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM)
-        .build(),
-      androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-      androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
-
-  override fun saveSecret(secretId: String, value: String) {
-    prefs.edit().putString(secretId, value).apply()
-  }
-
-  override fun loadSecret(secretId: String): String? = prefs.getString(secretId, null)
-
-  override fun deleteSecret(secretId: String) {
-    prefs.edit().remove(secretId).apply()
-  }
-}
-```
-
-Modify `apps/android/gradle/libs.versions.toml`:
-
-```toml
-androidx-security = "1.1.0"
-
-androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "androidx-security" }
-```
-
-Modify `apps/android/app/build.gradle.kts`:
-
-```kotlin
-implementation(libs.androidx.security.crypto)
-```
+- Generate or load a non-exportable AES-256 key from the `AndroidKeyStore` provider.
+- Encrypt each value with `AES/GCM/NoPadding` and a fresh random IV.
+- Bind ciphertext to its secret ID with GCM additional authenticated data.
+- Hash secret IDs before using them as filenames.
+- Store versioned ciphertext envelopes under `Context.noBackupFilesDir`.
+- Replace files atomically and reject malformed or tampered ciphertext.
+- Do not add `androidx.security:security-crypto`; its crypto APIs are deprecated in favor of direct platform APIs.
 
 - [ ] **Step 6: Run tests**
 
