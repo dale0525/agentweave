@@ -91,6 +91,14 @@ impl SkillRegistry {
         }
     }
 
+    pub fn from_installed(skills: Vec<InstalledSkill>) -> anyhow::Result<Self> {
+        validate_registry_tool_names(&skills)?;
+        Ok(Self {
+            skills,
+            availability: None,
+        })
+    }
+
     pub async fn load(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         Self::load_development(root).await
     }
@@ -108,12 +116,7 @@ impl SkillRegistry {
 
             skills.push(Self::load_skill(path).await?);
         }
-        validate_registry_tool_names(&skills)?;
-
-        Ok(Self {
-            skills,
-            availability: None,
-        })
+        Self::from_installed(skills)
     }
 
     pub async fn load_development_skill(root: impl AsRef<Path>) -> anyhow::Result<InstalledSkill> {
@@ -138,12 +141,7 @@ impl SkillRegistry {
                 resolve_packaged_skill_path(root, &canonical_root, &entry.path).await?;
             skills.push(Self::load_skill(skill_root).await?);
         }
-        validate_registry_tool_names(&skills)?;
-
-        Ok(Self {
-            skills,
-            availability: None,
-        })
+        Self::from_installed(skills)
     }
 
     pub fn tools(&self) -> Vec<SkillTool> {

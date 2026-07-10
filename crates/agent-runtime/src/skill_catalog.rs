@@ -3,7 +3,6 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Component;
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncReadExt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillSummary {
@@ -24,8 +23,15 @@ pub struct SkillInstructionDocument {
 }
 
 #[derive(Clone, Debug)]
+pub struct SkillCatalogEntry {
+    pub summary: SkillSummary,
+    pub document: SkillInstructionDocument,
+}
+
+#[derive(Clone, Debug)]
 pub struct SkillCatalog {
     root: Option<PathBuf>,
+    entries: Vec<SkillCatalogEntry>,
     summaries: Vec<SkillSummary>,
 }
 
@@ -41,8 +47,23 @@ impl SkillCatalog {
     pub fn empty() -> Self {
         Self {
             root: None,
+            entries: Vec::new(),
             summaries: Vec::new(),
         }
+    }
+
+    pub fn from_entries(mut entries: Vec<SkillCatalogEntry>) -> anyhow::Result<Self> {
+        entries.sort_by(|left, right| left.summary.name.cmp(&right.summary.name));
+        let summaries = entries
+            .iter()
+            .map(|entry| entry.summary.clone())
+            .collect::<Vec<_>>();
+        validate_unique_skill_names(&summaries)?;
+        Ok(Self {
+            root: None,
+            entries,
+            summaries,
+        })
     }
 
     pub async fn load_development(root: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -50,23 +71,25 @@ impl SkillCatalog {
         let canonical_root = tokio::fs::canonicalize(root)
             .await
             .with_context(|| format!("failed to resolve skill root {}", root.display()))?;
-        let mut summaries = Vec::new();
+        let mut catalog_entries = Vec::new();
         let mut entries = tokio::fs::read_dir(root).await?;
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             let skill_path = path.join("SKILL.md");
             if skill_path.is_file() {
-                summaries.push(read_skill_summary(&canonical_root, &skill_path).await?);
+                let mut catalog_entry = Self::read_package_entry(&path).await?;
+                set_entry_source(
+                    &mut catalog_entry,
+                    PathBuf::from(entry.file_name()).join("SKILL.md"),
+                );
+                catalog_entries.push(catalog_entry);
             }
         }
 
-        summaries.sort_by(|left, right| left.name.cmp(&right.name));
-        validate_unique_skill_names(&summaries)?;
-        Ok(Self {
-            root: Some(canonical_root),
-            summaries,
-        })
+        let mut catalog = Self::from_entries(catalog_entries)?;
+        catalog.root = Some(canonical_root);
+        Ok(catalog)
     }
 
     pub async fn read_development_skill_summary(
@@ -77,7 +100,11 @@ impl SkillCatalog {
         let canonical_root = tokio::fs::canonicalize(root)
             .await
             .with_context(|| format!("failed to resolve skill root {}", root.display()))?;
-        read_skill_summary(&canonical_root, skill_path.as_ref()).await
+        Ok(
+            read_instruction_entry(&canonical_root, skill_path.as_ref(), None)
+                .await?
+                .summary,
+        )
     }
 
     pub async fn load_packaged(root: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -91,26 +118,57 @@ impl SkillCatalog {
                 format!("failed to read packaged skill index in {}", root.display())
             })?;
         let index: SkillBundleIndex = serde_json::from_slice(&bytes)?;
-        let mut summaries = Vec::new();
+        let mut catalog_entries = Vec::new();
 
         for entry in index.skills {
             if !entry.include_instructions {
                 continue;
             }
 
+            let source = entry.path.join("SKILL.md");
             let skill_root = resolve_safe_catalog_path(root, &canonical_root, &entry.path).await?;
             let skill_path = skill_root.join("SKILL.md");
             if skill_path.is_file() {
-                summaries.push(read_skill_summary(&canonical_root, &skill_path).await?);
+                let mut catalog_entry = Self::read_package_entry(&skill_root).await?;
+                set_entry_source(&mut catalog_entry, source);
+                catalog_entries.push(catalog_entry);
             }
         }
 
-        summaries.sort_by(|left, right| left.name.cmp(&right.name));
-        validate_unique_skill_names(&summaries)?;
-        Ok(Self {
-            root: Some(canonical_root),
-            summaries,
-        })
+        let mut catalog = Self::from_entries(catalog_entries)?;
+        catalog.root = Some(canonical_root);
+        Ok(catalog)
+    }
+
+    pub async fn read_package_entry(package_root: &Path) -> anyhow::Result<SkillCatalogEntry> {
+        let root_metadata = tokio::fs::symlink_metadata(package_root)
+            .await
+            .with_context(|| {
+                format!("failed to inspect package root {}", package_root.display())
+            })?;
+        if root_metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "skill package root must not be a symlink: {}",
+                package_root.display()
+            );
+        }
+        if !root_metadata.is_dir() {
+            anyhow::bail!(
+                "skill package root must be a directory: {}",
+                package_root.display()
+            );
+        }
+        let canonical_root = tokio::fs::canonicalize(package_root)
+            .await
+            .with_context(|| {
+                format!("failed to resolve package root {}", package_root.display())
+            })?;
+        read_instruction_entry(
+            &canonical_root,
+            &package_root.join("SKILL.md"),
+            Some(PathBuf::from("SKILL.md")),
+        )
+        .await
     }
 
     pub fn summaries(&self) -> &[SkillSummary] {
@@ -162,51 +220,22 @@ impl SkillCatalog {
         names: &[String],
         max_instruction_bytes: usize,
     ) -> anyhow::Result<Vec<SkillInstructionDocument>> {
-        let root = self
-            .root
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("skill catalog has no filesystem root"))?;
         let mut documents = Vec::new();
 
         for name in names {
-            let summary = self
-                .summaries
+            let entry = self
+                .entries
                 .iter()
-                .find(|summary| summary.name == *name)
+                .find(|entry| entry.summary.name == *name)
                 .ok_or_else(|| anyhow::anyhow!("unknown instruction skill: {name}"))?;
-            let path = root.join(&summary.source);
-            let canonical_path = tokio::fs::canonicalize(&path)
-                .await
-                .with_context(|| format!("failed to resolve {}", path.display()))?;
-            if !canonical_path.starts_with(root) {
-                anyhow::bail!(
-                    "unsafe skill instruction path: {}",
-                    summary.source.display()
-                );
+            let mut document = entry.document.clone();
+            if document.original_bytes > max_instruction_bytes {
+                let boundary = previous_char_boundary(&document.content, max_instruction_bytes);
+                document.content.truncate(boundary);
+                document.read_bytes = boundary;
+                document.truncated = true;
             }
-
-            let original_bytes = tokio::fs::metadata(&canonical_path)
-                .await
-                .with_context(|| format!("read metadata for {}", canonical_path.display()))?
-                .len() as usize;
-            let truncated = original_bytes > max_instruction_bytes;
-            let file = tokio::fs::File::open(&canonical_path)
-                .await
-                .with_context(|| format!("open {}", canonical_path.display()))?;
-            let mut bytes = Vec::with_capacity(max_instruction_bytes.min(original_bytes));
-            file.take(max_instruction_bytes as u64)
-                .read_to_end(&mut bytes)
-                .await
-                .with_context(|| format!("read {}", canonical_path.display()))?;
-
-            documents.push(SkillInstructionDocument {
-                name: summary.name.clone(),
-                source: summary.source.clone(),
-                content: String::from_utf8_lossy(&bytes).into_owned(),
-                truncated,
-                read_bytes: bytes.len(),
-                original_bytes,
-            });
+            documents.push(document);
         }
 
         Ok(documents)
@@ -298,7 +327,26 @@ fn unquote_scalar(value: &str) -> String {
         .to_string()
 }
 
-async fn read_skill_summary(root: &Path, skill_path: &Path) -> anyhow::Result<SkillSummary> {
+async fn read_instruction_entry(
+    root: &Path,
+    skill_path: &Path,
+    source: Option<PathBuf>,
+) -> anyhow::Result<SkillCatalogEntry> {
+    let metadata = tokio::fs::symlink_metadata(skill_path)
+        .await
+        .with_context(|| format!("failed to inspect {}", skill_path.display()))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "skill instruction path must not be a symlink: {}",
+            skill_path.display()
+        );
+    }
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "skill instruction path must be a file: {}",
+            skill_path.display()
+        );
+    }
     let canonical_path = tokio::fs::canonicalize(skill_path)
         .await
         .with_context(|| format!("failed to resolve {}", skill_path.display()))?;
@@ -310,17 +358,44 @@ async fn read_skill_summary(root: &Path, skill_path: &Path) -> anyhow::Result<Sk
         .await
         .with_context(|| format!("failed to read {}", canonical_path.display()))?;
     let front_matter = parse_skill_front_matter(&content)?;
-    let source = canonical_path
-        .strip_prefix(root)
-        .with_context(|| format!("make {} relative to root", canonical_path.display()))?
-        .to_path_buf();
-
-    Ok(SkillSummary {
-        name: front_matter.name,
-        description: front_matter.description,
-        aliases: front_matter.aliases,
-        source,
+    let source = match source {
+        Some(source) => source,
+        None => canonical_path
+            .strip_prefix(root)
+            .with_context(|| format!("make {} relative to root", canonical_path.display()))?
+            .to_path_buf(),
+    };
+    let original_bytes = content.len();
+    let name = front_matter.name;
+    Ok(SkillCatalogEntry {
+        summary: SkillSummary {
+            name: name.clone(),
+            description: front_matter.description,
+            aliases: front_matter.aliases,
+            source: source.clone(),
+        },
+        document: SkillInstructionDocument {
+            name,
+            source,
+            content,
+            truncated: false,
+            read_bytes: original_bytes,
+            original_bytes,
+        },
     })
+}
+
+fn set_entry_source(entry: &mut SkillCatalogEntry, source: PathBuf) {
+    entry.summary.source = source.clone();
+    entry.document.source = source;
+}
+
+fn previous_char_boundary(content: &str, limit: usize) -> usize {
+    let mut boundary = limit.min(content.len());
+    while !content.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
 }
 
 fn validate_unique_skill_names(summaries: &[SkillSummary]) -> anyhow::Result<()> {
@@ -587,6 +662,7 @@ Use checklists.
     fn trigger_policy_matches_explicit_dollar_skill() {
         let catalog = SkillCatalog {
             root: None,
+            entries: Vec::new(),
             summaries: vec![SkillSummary {
                 name: "planning".into(),
                 description: "Write plans.".into(),
@@ -605,6 +681,7 @@ Use checklists.
     fn trigger_policy_matches_unique_plain_text_name_or_alias() {
         let catalog = SkillCatalog {
             root: None,
+            entries: Vec::new(),
             summaries: vec![
                 SkillSummary {
                     name: "planning".into(),
@@ -631,6 +708,7 @@ Use checklists.
     fn trigger_policy_ignores_ambiguous_plain_text_mentions() {
         let catalog = SkillCatalog {
             root: None,
+            entries: Vec::new(),
             summaries: vec![
                 SkillSummary {
                     name: "plan".into(),
