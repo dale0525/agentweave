@@ -50,6 +50,54 @@ class RuntimeBridgeTest {
 
     assertNull(config?.secretId)
   }
+
+  @Test
+  fun listSkillsPreservesRuntimeAvailabilityReasons() {
+    val native = object : NativeRuntimeApi {
+      override fun initialize(requestJson: String): String = error("not used")
+
+      override fun invoke(handle: Long, requestJson: String): String =
+        """{"ok":true,"data":[{"id":"web-browser","label":"Web browser","description":"Browse","available":false,"reason":"Missing required capability: browser.headless"}]}"""
+
+      override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String =
+        error("not used")
+
+      override fun close(handle: Long): String = """{"ok":true,"data":null}"""
+    }
+
+    val skills = RuntimeClient(9L, native).listSkills()
+
+    assertEquals(1, skills.size)
+    assertEquals("web-browser", skills.single().id)
+    assertFalse(skills.single().available)
+    assertEquals("Missing required capability: browser.headless", skills.single().reason)
+  }
+
+  @Test
+  fun saveModelConfigAcceptsNullUnitPayload() {
+    val native = object : NativeRuntimeApi {
+      override fun initialize(requestJson: String): String = error("not used")
+
+      override fun invoke(handle: Long, requestJson: String): String =
+        """{"ok":true,"data":null}"""
+
+      override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String =
+        error("not used")
+
+      override fun close(handle: Long): String = """{"ok":true,"data":null}"""
+    }
+
+    RuntimeClient(9L, native).saveModelConfig(
+      RuntimeModelConfig(
+        providerId = "local",
+        providerName = "Local",
+        endpointType = "responses",
+        baseUrl = "http://localhost:11434/v1",
+        modelName = "qwen",
+        secretId = null,
+      ),
+    )
+  }
 }
 
 private class RecordingNativeRuntime : NativeRuntimeApi {

@@ -32,6 +32,14 @@ data class RuntimeMessage(
   val createdAt: String,
 )
 
+data class RuntimeSkill(
+  val id: String,
+  val label: String,
+  val description: String,
+  val available: Boolean,
+  val reason: String,
+)
+
 data class RuntimeModelConfig(
   val providerId: String,
   val providerName: String,

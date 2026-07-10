@@ -45,17 +45,20 @@ class RuntimeClient internal constructor(
   fun listSessions(): List<RuntimeSession> =
     invokeArray(JSONObject().put("operation", "list_sessions")).objects().map { it.toSession() }
 
+  fun listSkills(): List<RuntimeSkill> =
+    invokeArray(JSONObject().put("operation", "list_skills")).objects().map { it.toSkill() }
+
   fun getMessages(sessionId: String): List<RuntimeMessage> =
     invokeArray(
       JSONObject().put("operation", "get_messages").put("session_id", sessionId),
     ).objects().map { it.toMessage() }
 
   fun deleteSession(sessionId: String) {
-    invoke(JSONObject().put("operation", "delete_session").put("session_id", sessionId))
+    invokeUnit(JSONObject().put("operation", "delete_session").put("session_id", sessionId))
   }
 
   fun saveModelConfig(config: RuntimeModelConfig) {
-    invoke(JSONObject().put("operation", "save_model_config").put("config", config.toJson()))
+    invokeUnit(JSONObject().put("operation", "save_model_config").put("config", config.toJson()))
   }
 
   fun loadModelConfig(): RuntimeModelConfig? {
@@ -77,6 +80,10 @@ class RuntimeClient internal constructor(
   }
 
   private fun invoke(request: JSONObject): JSONObject = responseData(native.invoke(handle, request.toString()))
+
+  private fun invokeUnit(request: JSONObject) {
+    responseEnvelope(native.invoke(handle, request.toString()))
+  }
 
   private fun invokeArray(request: JSONObject): JSONArray =
     responseEnvelope(native.invoke(handle, request.toString())).getJSONArray("data")
@@ -132,6 +139,15 @@ private fun JSONObject.toMessage(): RuntimeMessage =
     role = getString("role"),
     content = getString("content"),
     createdAt = getString("created_at"),
+  )
+
+private fun JSONObject.toSkill(): RuntimeSkill =
+  RuntimeSkill(
+    id = getString("id"),
+    label = getString("label"),
+    description = getString("description"),
+    available = getBoolean("available"),
+    reason = getString("reason"),
   )
 
 private fun JSONObject.toModelConfig(): RuntimeModelConfig =

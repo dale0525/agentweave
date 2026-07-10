@@ -42,6 +42,8 @@ pub struct MobileSkillDto {
     pub id: String,
     pub label: String,
     pub description: String,
+    pub available: bool,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

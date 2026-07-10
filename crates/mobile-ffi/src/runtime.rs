@@ -1,16 +1,18 @@
 use crate::types::{
     MobileDiagnostics, MobileInitConfig, MobileMessageDto, MobileModelConfigDto, MobileSessionDto,
-    MobileTurnDto,
+    MobileSkillDto, MobileTurnDto,
 };
 use agent_runtime::mobile_host::{HttpMobileRuntimeHost, MobileRuntimeInit, SecretResolver};
 use agent_runtime::model_config::StoredModelConfig;
 use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::skill::SkillRegistry;
+use agent_runtime::skill_availability::SkillAvailabilityStatus;
 use agent_runtime::skill_catalog::SkillCatalog;
 use agent_runtime::storage::Storage;
 use agent_runtime::tools::RuntimeConfig;
 use anyhow::{Context, Result};
 use model_gateway::provider::EndpointType;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,6 +89,39 @@ impl MobileRuntime {
             skills_ready: self.skills_ready,
             model_configured: self.model_configured.load(Ordering::Acquire),
         }
+    }
+
+    pub fn list_skills(&self) -> Vec<MobileSkillDto> {
+        let mut inventory = BTreeMap::new();
+        for skill in self
+            .skills
+            .clone()
+            .with_platform_capabilities(self.init.platform, self.init.capabilities.clone())
+            .installed_skill_statuses()
+        {
+            inventory.insert(
+                skill.id.clone(),
+                MobileSkillDto {
+                    label: skill.id.clone(),
+                    id: skill.id,
+                    description: skill.description,
+                    available: skill.availability.status == SkillAvailabilityStatus::Available,
+                    reason: skill.availability.reason,
+                },
+            );
+        }
+        for skill in self.skill_catalog.summaries() {
+            inventory
+                .entry(skill.name.clone())
+                .or_insert_with(|| MobileSkillDto {
+                    label: skill.name.clone(),
+                    id: skill.name.clone(),
+                    description: skill.description.clone(),
+                    available: true,
+                    reason: "Instruction skill loaded.".into(),
+                });
+        }
+        inventory.into_values().collect()
     }
 
     pub fn create_session(&self, title: &str) -> Result<MobileSessionDto> {

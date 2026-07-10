@@ -12,6 +12,7 @@ static RUNTIMES: OnceLock<Mutex<HashMap<i64, Arc<MobileRuntime>>>> = OnceLock::n
 #[serde(tag = "operation", rename_all = "snake_case")]
 enum RuntimeRequest {
     Diagnostics,
+    ListSkills,
     CreateSession { title: String },
     ListSessions,
     GetMessages { session_id: String },
@@ -52,6 +53,7 @@ pub fn invoke_runtime_json(handle: i64, request_json: &str) -> String {
         let runtime = runtime(handle)?;
         match request {
             RuntimeRequest::Diagnostics => serde_json::to_value(runtime.diagnostics()),
+            RuntimeRequest::ListSkills => serde_json::to_value(runtime.list_skills()),
             RuntimeRequest::CreateSession { title } => {
                 serde_json::to_value(runtime.create_session(&title)?)
             }

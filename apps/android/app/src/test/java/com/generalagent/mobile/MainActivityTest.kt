@@ -3,6 +3,7 @@ package com.generalagent.mobile
 import com.generalagent.mobile.runtime.NativeRuntimeApi
 import com.generalagent.mobile.runtime.RuntimeClient
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,6 +29,24 @@ class MainActivityTest {
     val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
 
     assertFalse(controller.get().isFinishing)
+    controller.destroy()
+    assertTrue(native.closed)
+  }
+
+  @Test
+  fun activityRetainsRuntimeClientAcrossConfigurationChange() {
+    var loadCount = 0
+    RuntimeDependencies.runtimeLoader = {
+      loadCount += 1
+      RuntimeClient(7L, native)
+    }
+
+    val controller = Robolectric.buildActivity(MainActivity::class.java).setup()
+    controller.configurationChange()
+
+    assertEquals(1, loadCount)
+    assertFalse(native.closed)
+
     controller.destroy()
     assertTrue(native.closed)
   }

@@ -54,6 +54,13 @@ pub struct InstalledSkill {
     pub manifest: SkillManifest,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct InstalledSkillStatus {
+    pub id: String,
+    pub description: String,
+    pub availability: SkillAvailability,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct SkillBundleIndex {
     skills: Vec<SkillBundleEntry>,
@@ -160,6 +167,20 @@ impl SkillRegistry {
                     .map(|tool| (skill.manifest.name.clone(), tool))
             })
             .collect()
+    }
+
+    pub fn installed_skill_statuses(&self) -> Vec<InstalledSkillStatus> {
+        let mut statuses: Vec<_> = self
+            .skills
+            .iter()
+            .map(|skill| InstalledSkillStatus {
+                id: skill.manifest.name.clone(),
+                description: skill.manifest.description.clone(),
+                availability: self.skill_availability(skill),
+            })
+            .collect();
+        statuses.sort_by(|left, right| left.id.cmp(&right.id));
+        statuses
     }
 
     #[cfg(test)]

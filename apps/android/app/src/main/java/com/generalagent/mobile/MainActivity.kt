@@ -3,36 +3,69 @@ package com.generalagent.mobile
 import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.CreationExtras
 import com.generalagent.mobile.runtime.RuntimeBridge
 import com.generalagent.mobile.runtime.RuntimeClient
+import com.generalagent.mobile.secrets.AndroidKeystoreModelSecretStore
+import com.generalagent.mobile.ui.AppRoot
+import com.generalagent.mobile.ui.GeneralAgentTheme
+import com.generalagent.mobile.ui.RuntimeTurnGate
+import com.generalagent.mobile.ui.RuntimeSettingsGate
 
 class MainActivity : ComponentActivity() {
-  private var runtimeClient: RuntimeClient? = null
-
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    val client = RuntimeDependencies.runtimeLoader(this)
-    runtimeClient = client
+    enableEdgeToEdge()
+    val runtimeViewModel = ViewModelProvider(
+      this,
+      RuntimeClientViewModel.factory { RuntimeDependencies.runtimeLoader(this) },
+    )[RuntimeClientViewModel::class.java]
+    val client = runtimeViewModel.client
     val diagnostics = client.diagnostics()
+    val secretStore = AndroidKeystoreModelSecretStore(this)
     setContent {
-      MaterialTheme {
-        Surface(modifier = Modifier.fillMaxSize()) {
-          Text("GeneralAgent ${diagnostics.platform}")
-        }
+      GeneralAgentTheme {
+        AppRoot(
+          runtimeClient = client,
+          turnGate = runtimeViewModel.turnGate,
+          settingsGate = runtimeViewModel.settingsGate,
+          initialDiagnostics = diagnostics,
+          secretStore = secretStore,
+          modifier = Modifier.safeDrawingPadding(),
+        )
       }
     }
   }
+}
 
-  override fun onDestroy() {
-    runtimeClient?.close()
-    runtimeClient = null
-    super.onDestroy()
+private class RuntimeClientViewModel(
+  val client: RuntimeClient,
+  val turnGate: RuntimeTurnGate = RuntimeTurnGate(),
+  val settingsGate: RuntimeSettingsGate = RuntimeSettingsGate(),
+) : ViewModel() {
+  override fun onCleared() {
+    turnGate.close()
+    settingsGate.close()
+    client.close()
+  }
+
+  companion object {
+    fun factory(load: () -> RuntimeClient): ViewModelProvider.Factory =
+      object : ViewModelProvider.Factory {
+        override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
+          require(modelClass == RuntimeClientViewModel::class.java) {
+            "unsupported ViewModel: ${modelClass.name}"
+          }
+          @Suppress("UNCHECKED_CAST")
+          return RuntimeClientViewModel(load()) as T
+        }
+      }
   }
 }
 

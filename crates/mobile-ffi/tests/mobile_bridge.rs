@@ -80,8 +80,14 @@ fn json_bridge_uses_handles_for_session_operations() {
         &json!({"operation": "list_sessions"}).to_string(),
     ))
     .unwrap();
+    let skills: Value = serde_json::from_str(&invoke_runtime_json(
+        handle,
+        &json!({"operation": "list_skills"}).to_string(),
+    ))
+    .unwrap();
 
     assert_eq!(listed["data"][0]["id"], session_id);
+    assert_eq!(skills["data"], json!([]));
     let closed: Value = serde_json::from_str(&close_runtime(handle)).unwrap();
     assert_eq!(closed["ok"], true);
 }
