@@ -3,7 +3,13 @@ use anyhow::Context;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use tokio::io::AsyncReadExt;
+
+const TREE_HASH_DOMAIN: &[u8] = b"general-agent.skill-package-tree";
+const TREE_HASH_VERSION: u32 = 1;
+const TREE_HASH_FILE_ENTRY: u8 = 1;
+const TREE_HASH_READ_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SkillLayer {
@@ -104,44 +110,174 @@ pub async fn hash_package_tree(root: &Path) -> anyhow::Result<String> {
         anyhow::bail!("skill package root must be a directory: {}", root.display());
     }
 
-    let mut files = Vec::new();
-    collect_files(root, &mut files).await?;
-    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut files = collect_relative_files(root).await?;
+    files.sort_by(|left, right| left.canonical.cmp(&right.canonical));
 
     let mut hasher = Sha256::new();
-    for (path, bytes) in files {
-        hasher.update(path.to_string_lossy().as_bytes());
-        hasher.update([0]);
-        hasher.update(bytes);
-        hasher.update([0]);
+    hasher.update(TREE_HASH_DOMAIN);
+    hasher.update(TREE_HASH_VERSION.to_be_bytes());
+    for file in files {
+        hash_file_entry(root, &file, &mut hasher).await?;
     }
     Ok(hex::encode(hasher.finalize()))
 }
 
-async fn collect_files(root: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) -> anyhow::Result<()> {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(directory) = stack.pop() {
+#[derive(Debug)]
+struct CanonicalPackageFile {
+    relative: PathBuf,
+    canonical: Vec<u8>,
+}
+
+async fn collect_relative_files(root: &Path) -> anyhow::Result<Vec<CanonicalPackageFile>> {
+    let mut files = Vec::new();
+    let mut stack = vec![PathBuf::new()];
+    while let Some(relative_directory) = stack.pop() {
+        let directory = root.join(&relative_directory);
         let mut entries = tokio::fs::read_dir(&directory)
             .await
             .with_context(|| format!("failed to read package directory {}", directory.display()))?;
         while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let kind = entry.file_type().await?;
+            let relative = relative_directory.join(entry.file_name());
+            let path = root.join(&relative);
+            let metadata = tokio::fs::symlink_metadata(&path)
+                .await
+                .with_context(|| format!("failed to inspect package path {}", path.display()))?;
+            let kind = metadata.file_type();
             if kind.is_symlink() {
                 anyhow::bail!("skill package cannot contain symlinks: {}", path.display());
             }
             if kind.is_dir() {
-                stack.push(path);
+                canonical_relative_path(&relative)?;
+                stack.push(relative);
                 continue;
             }
             if kind.is_file() {
-                let relative = path.strip_prefix(root)?.to_path_buf();
-                let bytes = tokio::fs::read(&path)
-                    .await
-                    .with_context(|| format!("failed to read package file {}", path.display()))?;
-                files.push((relative, bytes));
+                files.push(CanonicalPackageFile {
+                    canonical: canonical_relative_path(&relative)?,
+                    relative,
+                });
+                continue;
             }
+            anyhow::bail!(
+                "skill package cannot contain special files: {}",
+                path.display()
+            );
         }
     }
+    Ok(files)
+}
+
+async fn hash_file_entry(
+    root: &Path,
+    file: &CanonicalPackageFile,
+    hasher: &mut Sha256,
+) -> anyhow::Result<()> {
+    let path = root.join(&file.relative);
+    let metadata = tokio::fs::symlink_metadata(&path)
+        .await
+        .with_context(|| format!("failed to inspect package file {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("skill package cannot contain symlinks: {}", path.display());
+    }
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "skill package path must remain a regular file: {}",
+            path.display()
+        );
+    }
+
+    let path_length = u64::try_from(file.canonical.len())
+        .context("canonical package path is too long to hash")?;
+    let content_length = metadata.len();
+    hasher.update([TREE_HASH_FILE_ENTRY]);
+    hasher.update(path_length.to_be_bytes());
+    hasher.update(&file.canonical);
+    hasher.update(content_length.to_be_bytes());
+
+    let mut source = tokio::fs::File::open(&path)
+        .await
+        .with_context(|| format!("failed to open package file {}", path.display()))?;
+    let mut buffer = vec![0; TREE_HASH_READ_BUFFER_SIZE];
+    let mut bytes_read = 0_u64;
+    loop {
+        let count = source
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("failed to read package file {}", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        bytes_read = bytes_read
+            .checked_add(u64::try_from(count)?)
+            .context("package file length overflowed while hashing")?;
+        hasher.update(&buffer[..count]);
+    }
+    if bytes_read != content_length {
+        anyhow::bail!(
+            "package file changed while hashing: {} (expected {content_length} bytes, read {bytes_read})",
+            path.display()
+        );
+    }
     Ok(())
+}
+
+pub(crate) fn canonical_relative_path(relative: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut canonical = String::new();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            anyhow::bail!(
+                "package paths must contain only relative normal components: {}",
+                relative.display()
+            );
+        };
+        let component = component.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "package path components must be valid UTF-8: {}",
+                relative.display()
+            )
+        })?;
+        validate_portable_component(component, relative)?;
+        if !canonical.is_empty() {
+            canonical.push('/');
+        }
+        canonical.push_str(component);
+    }
+    if canonical.is_empty() {
+        anyhow::bail!("package file path cannot be empty");
+    }
+    Ok(canonical.into_bytes())
+}
+
+fn validate_portable_component(component: &str, relative: &Path) -> anyhow::Result<()> {
+    if component.contains('\\') {
+        anyhow::bail!(
+            "package path components cannot contain a backslash: {}",
+            relative.display()
+        );
+    }
+    if component.chars().any(|character| {
+        character.is_control() || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+    }) {
+        anyhow::bail!(
+            "package path component is not portable across platforms: {}",
+            relative.display()
+        );
+    }
+    if component.ends_with([' ', '.']) || is_windows_reserved_name(component) {
+        anyhow::bail!(
+            "package path component is not portable across platforms: {}",
+            relative.display()
+        );
+    }
+    Ok(())
+}
+
+fn is_windows_reserved_name(component: &str) -> bool {
+    let stem = component.split('.').next().unwrap_or(component);
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || upper
+            .strip_prefix("COM")
+            .or_else(|| upper.strip_prefix("LPT"))
+            .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'))
 }

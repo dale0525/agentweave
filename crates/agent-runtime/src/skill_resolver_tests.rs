@@ -5,7 +5,8 @@ use crate::skill_package::{
 };
 use crate::skill_resolver::{SkillResolutionInput, SkillResolutionStatus, SkillResolver};
 use crate::skill_source::{
-    DirectorySkillSource, DiscoveredSkillPackage, SkillLayer, SkillSource, hash_package_tree,
+    DirectorySkillSource, DiscoveredSkillPackage, SkillLayer, SkillSource, canonical_relative_path,
+    hash_package_tree,
 };
 use semver::Version;
 use std::path::{Path, PathBuf};
@@ -54,6 +55,19 @@ fn status_for(
         .status
 }
 
+fn contains_resolution(
+    resolved: &[crate::skill_resolver::ResolvedSkillPackage],
+    id: &str,
+    layer: SkillLayer,
+    status: SkillResolutionStatus,
+) -> bool {
+    resolved.iter().any(|item| {
+        item.package.descriptor.id.as_str() == id
+            && item.package.layer == layer
+            && item.status == status
+    })
+}
+
 #[test]
 fn builtin_package_wins_without_explicit_override() {
     let resolved = SkillResolver::resolve(input(vec![
@@ -92,6 +106,159 @@ fn allowed_managed_override_retains_builtin_diagnostic() {
         item.package.layer == SkillLayer::Session
             && item.status == SkillResolutionStatus::OverrideDenied
     }));
+}
+
+#[test]
+fn runtime_ineligible_managed_override_falls_back_to_builtin() {
+    let id = SkillPackageId::parse("com.example.calendar").unwrap();
+    let mut managed = package(id.as_str(), SkillLayer::Managed);
+    managed.descriptor.compatibility.minimum_runtime_version = Some(Version::new(9, 0, 0));
+    let mut resolution_input = input(vec![package(id.as_str(), SkillLayer::Builtin), managed]);
+    resolution_input.allowed_overrides = vec![id.clone()];
+
+    let resolved = SkillResolver::resolve(resolution_input).unwrap();
+
+    assert_eq!(resolved.active[0].package.layer, SkillLayer::Builtin);
+    assert!(contains_resolution(
+        &resolved.inactive,
+        id.as_str(),
+        SkillLayer::Managed,
+        SkillResolutionStatus::RuntimeIncompatible
+    ));
+    assert!(
+        !resolved
+            .inactive
+            .iter()
+            .any(|item| item.status == SkillResolutionStatus::Overridden)
+    );
+}
+
+#[test]
+fn capability_ineligible_managed_override_falls_back_to_builtin() {
+    let id = SkillPackageId::parse("com.example.calendar").unwrap();
+    let mut managed = package(id.as_str(), SkillLayer::Managed);
+    managed.descriptor.requires.capabilities = vec!["network.http".into()];
+    let mut resolution_input = input(vec![package(id.as_str(), SkillLayer::Builtin), managed]);
+    resolution_input.allowed_overrides = vec![id.clone()];
+
+    let resolved = SkillResolver::resolve(resolution_input).unwrap();
+
+    assert_eq!(resolved.active[0].package.layer, SkillLayer::Builtin);
+    assert!(contains_resolution(
+        &resolved.inactive,
+        id.as_str(),
+        SkillLayer::Managed,
+        SkillResolutionStatus::CapabilityMissing
+    ));
+}
+
+#[test]
+fn platform_ineligible_managed_override_falls_back_to_builtin() {
+    let id = SkillPackageId::parse("com.example.calendar").unwrap();
+    let mut managed = package(id.as_str(), SkillLayer::Managed);
+    managed.descriptor.compatibility.platforms = vec!["server".into()];
+    let mut resolution_input = input(vec![package(id.as_str(), SkillLayer::Builtin), managed]);
+    resolution_input.allowed_overrides = vec![id.clone()];
+
+    let resolved = SkillResolver::resolve(resolution_input).unwrap();
+
+    assert_eq!(resolved.active[0].package.layer, SkillLayer::Builtin);
+    assert!(contains_resolution(
+        &resolved.inactive,
+        id.as_str(),
+        SkillLayer::Managed,
+        SkillResolutionStatus::PlatformUnsupported
+    ));
+}
+
+#[test]
+fn dependency_ineligible_managed_override_falls_back_to_builtin() {
+    let id = SkillPackageId::parse("com.example.calendar").unwrap();
+    let mut managed = package(id.as_str(), SkillLayer::Managed);
+    managed.descriptor.requires.packages =
+        vec![SkillPackageId::parse("com.example.missing").unwrap()];
+    let mut resolution_input = input(vec![package(id.as_str(), SkillLayer::Builtin), managed]);
+    resolution_input.allowed_overrides = vec![id.clone()];
+
+    let resolved = SkillResolver::resolve(resolution_input).unwrap();
+
+    assert_eq!(resolved.active[0].package.layer, SkillLayer::Builtin);
+    assert!(contains_resolution(
+        &resolved.inactive,
+        id.as_str(),
+        SkillLayer::Managed,
+        SkillResolutionStatus::DependencyMissing
+    ));
+    assert!(
+        !resolved
+            .inactive
+            .iter()
+            .any(|item| item.status == SkillResolutionStatus::Overridden)
+    );
+}
+
+#[test]
+fn dependency_fallback_rechecks_builtin_dependencies() {
+    let alpha_id = SkillPackageId::parse("com.example.alpha").unwrap();
+    let beta_id = SkillPackageId::parse("com.example.beta").unwrap();
+    let mut alpha_builtin = package(alpha_id.as_str(), SkillLayer::Builtin);
+    alpha_builtin.descriptor.requires.packages = vec![beta_id.clone()];
+    let mut alpha_managed = package(alpha_id.as_str(), SkillLayer::Managed);
+    alpha_managed.descriptor.requires.packages =
+        vec![SkillPackageId::parse("com.example.missing-alpha").unwrap()];
+    let mut beta = package(beta_id.as_str(), SkillLayer::Managed);
+    beta.descriptor.requires.packages =
+        vec![SkillPackageId::parse("com.example.missing-beta").unwrap()];
+    let mut resolution_input = input(vec![beta, alpha_managed, alpha_builtin]);
+    resolution_input.allowed_overrides = vec![alpha_id.clone()];
+
+    let resolved = SkillResolver::resolve(resolution_input).unwrap();
+
+    assert!(resolved.active.is_empty());
+    assert!(contains_resolution(
+        &resolved.inactive,
+        alpha_id.as_str(),
+        SkillLayer::Managed,
+        SkillResolutionStatus::DependencyMissing
+    ));
+    assert!(contains_resolution(
+        &resolved.inactive,
+        alpha_id.as_str(),
+        SkillLayer::Builtin,
+        SkillResolutionStatus::DependencyMissing
+    ));
+}
+
+#[test]
+fn three_layer_dependency_fallback_reports_each_candidate_once() {
+    let id = SkillPackageId::parse("com.example.calendar").unwrap();
+    let mut managed = package(id.as_str(), SkillLayer::Managed);
+    managed.descriptor.requires.packages =
+        vec![SkillPackageId::parse("com.example.missing").unwrap()];
+    let mut resolution_input = input(vec![
+        package(id.as_str(), SkillLayer::Session),
+        managed,
+        package(id.as_str(), SkillLayer::Builtin),
+    ]);
+    resolution_input.allowed_overrides = vec![id.clone()];
+
+    let resolved = SkillResolver::resolve(resolution_input).unwrap();
+
+    assert_eq!(resolved.active.len(), 1);
+    assert_eq!(resolved.active[0].package.layer, SkillLayer::Builtin);
+    assert_eq!(resolved.inactive.len(), 2);
+    assert!(contains_resolution(
+        &resolved.inactive,
+        id.as_str(),
+        SkillLayer::Managed,
+        SkillResolutionStatus::DependencyMissing
+    ));
+    assert!(contains_resolution(
+        &resolved.inactive,
+        id.as_str(),
+        SkillLayer::Session,
+        SkillResolutionStatus::OverrideDenied
+    ));
 }
 
 #[test]
@@ -136,6 +303,33 @@ fn session_package_activates_only_without_persistent_candidate() {
             .count(),
         2
     );
+}
+
+#[test]
+fn session_cannot_replace_a_locally_ineligible_persistent_candidate() {
+    let id = SkillPackageId::parse("com.example.calendar").unwrap();
+    let mut builtin = package(id.as_str(), SkillLayer::Builtin);
+    builtin.descriptor.compatibility.minimum_runtime_version = Some(Version::new(9, 0, 0));
+
+    let resolved = SkillResolver::resolve(input(vec![
+        package(id.as_str(), SkillLayer::Session),
+        builtin,
+    ]))
+    .unwrap();
+
+    assert!(resolved.active.is_empty());
+    assert!(contains_resolution(
+        &resolved.inactive,
+        id.as_str(),
+        SkillLayer::Builtin,
+        SkillResolutionStatus::RuntimeIncompatible
+    ));
+    assert!(contains_resolution(
+        &resolved.inactive,
+        id.as_str(),
+        SkillLayer::Session,
+        SkillResolutionStatus::OverrideDenied
+    ));
 }
 
 #[test]
@@ -351,6 +545,87 @@ async fn package_tree_hash_is_independent_of_file_creation_order() {
         hash_package_tree(first.path()).await.unwrap(),
         hash_package_tree(second.path()).await.unwrap()
     );
+}
+
+#[tokio::test]
+async fn package_tree_hash_distinguishes_nul_delimiter_collision_trees() {
+    let single_file = tempfile::tempdir().unwrap();
+    let two_files = tempfile::tempdir().unwrap();
+    tokio::fs::write(single_file.path().join("a"), b"\0b\0")
+        .await
+        .unwrap();
+    tokio::fs::write(two_files.path().join("a"), b"")
+        .await
+        .unwrap();
+    tokio::fs::write(two_files.path().join("b"), b"")
+        .await
+        .unwrap();
+
+    assert_ne!(
+        hash_package_tree(single_file.path()).await.unwrap(),
+        hash_package_tree(two_files.path()).await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn package_tree_hash_matches_canonical_cross_platform_vector() {
+    let temporary = tempfile::tempdir().unwrap();
+    tokio::fs::create_dir_all(temporary.path().join("nested"))
+        .await
+        .unwrap();
+    tokio::fs::write(temporary.path().join("SKILL.md"), b"hello\n")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        temporary.path().join("nested/config.json"),
+        b"{\"enabled\":true}\n",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        hash_package_tree(temporary.path()).await.unwrap(),
+        "1ebf9a1719bd82b56780b7cf26f4799c73df44f177dcf34e7d7ee087cfe380d7"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn package_tree_hash_rejects_non_utf8_path_components() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let name = OsString::from_vec(vec![b'n', b'o', b'n', b'-', 0xff]);
+
+    let error = canonical_relative_path(Path::new(&name)).unwrap_err();
+
+    assert!(error.to_string().contains("UTF-8"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn package_tree_hash_rejects_backslash_path_components() {
+    let temporary = tempfile::tempdir().unwrap();
+    tokio::fs::write(temporary.path().join("not\\portable"), b"content")
+        .await
+        .unwrap();
+
+    let error = hash_package_tree(temporary.path()).await.unwrap_err();
+
+    assert!(error.to_string().contains("backslash"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn package_tree_hash_rejects_special_files() {
+    use std::os::unix::net::UnixListener;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let _listener = UnixListener::bind(temporary.path().join("runtime.sock")).unwrap();
+
+    let error = hash_package_tree(temporary.path()).await.unwrap_err();
+
+    assert!(error.to_string().contains("special files"));
 }
 
 #[cfg(unix)]

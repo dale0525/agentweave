@@ -41,14 +41,22 @@ pub struct SkillResolutionInput {
 pub struct SkillResolver;
 
 impl SkillResolver {
-    pub fn resolve(mut input: SkillResolutionInput) -> anyhow::Result<ResolvedSkillSet> {
-        input.packages.sort_by(package_order);
-        let protected: BTreeSet<_> = input.protected_packages.into_iter().collect();
-        let overrides: BTreeSet<_> = input.allowed_overrides.into_iter().collect();
+    pub fn resolve(input: SkillResolutionInput) -> anyhow::Result<ResolvedSkillSet> {
+        let SkillResolutionInput {
+            mut packages,
+            platform,
+            capabilities,
+            protected_packages,
+            allowed_overrides,
+            runtime_version,
+        } = input;
+        packages.sort_by(package_order);
+        let protected: BTreeSet<_> = protected_packages.into_iter().collect();
+        let overrides: BTreeSet<_> = allowed_overrides.into_iter().collect();
         let mut grouped =
             BTreeMap::<SkillPackageId, BTreeMap<SkillLayer, DiscoveredSkillPackage>>::new();
 
-        for package in input.packages {
+        for package in packages {
             if let Err(error) = package.descriptor.validate() {
                 anyhow::bail!(
                     "invalid descriptor for package {} at {}: {error}",
@@ -74,143 +82,306 @@ impl SkillResolver {
             }
         }
 
-        let mut winners = Vec::new();
+        let platform_name = platform_name(platform);
+        let mut active = BTreeMap::new();
         let mut inactive = Vec::new();
         for (id, mut candidates) in grouped {
-            let builtin = candidates.remove(&SkillLayer::Builtin);
-            let managed = candidates.remove(&SkillLayer::Managed);
-            let mut session = candidates.remove(&SkillLayer::Session);
+            let has_builtin = candidates.contains_key(&SkillLayer::Builtin);
+            let has_managed = candidates.contains_key(&SkillLayer::Managed);
+            let has_persistent = has_builtin || has_managed;
+            let builtin = locally_eligible(
+                candidates.remove(&SkillLayer::Builtin),
+                platform_name,
+                &capabilities,
+                &runtime_version,
+                &mut inactive,
+            );
+            let managed = locally_eligible(
+                candidates.remove(&SkillLayer::Managed),
+                platform_name,
+                &capabilities,
+                &runtime_version,
+                &mut inactive,
+            );
+            let session = locally_eligible(
+                candidates.remove(&SkillLayer::Session),
+                platform_name,
+                &capabilities,
+                &runtime_version,
+                &mut inactive,
+            );
 
-            let winner = match (builtin, managed) {
-                (Some(builtin), Some(managed))
-                    if overrides.contains(&id) && !protected.contains(&id) =>
-                {
+            let persistent = match (builtin, managed) {
+                (Some(builtin), Some(managed)) => select_managed_override(
+                    Some(builtin),
+                    managed,
+                    &id,
+                    &protected,
+                    &overrides,
+                    &mut inactive,
+                ),
+                (None, Some(managed)) if has_builtin => select_managed_override(
+                    None,
+                    managed,
+                    &id,
+                    &protected,
+                    &overrides,
+                    &mut inactive,
+                ),
+                (None, Some(managed)) => Some(ActiveCandidate::without_fallback(managed)),
+                (Some(builtin), None) => Some(ActiveCandidate::without_fallback(builtin)),
+                (None, None) => None,
+            };
+
+            let selected = if has_persistent {
+                if let Some(session) = session {
                     inactive.push(resolved(
-                        builtin,
-                        SkillResolutionStatus::Overridden,
-                        "built-in package was overridden by an allowed managed package",
+                        session,
+                        SkillResolutionStatus::OverrideDenied,
+                        "session package cannot override a built-in or managed package",
                     ));
-                    managed
                 }
-                (Some(builtin), Some(managed)) => {
-                    let (status, reason) = if protected.contains(&id) {
-                        (
-                            SkillResolutionStatus::ProtectedPackage,
-                            "managed package cannot override a protected built-in package",
-                        )
-                    } else {
-                        (
-                            SkillResolutionStatus::OverrideDenied,
-                            "managed package cannot override a built-in package without permission",
-                        )
-                    };
-                    inactive.push(resolved(managed, status, reason));
-                    builtin
-                }
-                (Some(builtin), None) => builtin,
-                (None, Some(managed)) => managed,
-                (None, None) => session
-                    .take()
-                    .expect("a grouped package must contain at least one candidate"),
+                persistent
+            } else {
+                debug_assert!(!has_managed);
+                session.map(ActiveCandidate::without_fallback)
             };
+            if let Some(selected) = selected {
+                active.insert(id, selected);
+            }
+        }
 
-            if let Some(session) = session
-                && winner.layer != SkillLayer::Session
-            {
+        resolve_dependencies(&mut active, &mut inactive);
+
+        let mut resolved_active = Vec::with_capacity(active.len());
+        for (_, candidate) in active {
+            if let Some(overridden) = candidate.fallback {
                 inactive.push(resolved(
-                    session,
-                    SkillResolutionStatus::OverrideDenied,
-                    "session package cannot override a built-in or managed package",
+                    overridden,
+                    SkillResolutionStatus::Overridden,
+                    "built-in package was overridden by an allowed managed package",
                 ));
             }
-            winners.push(resolved(winner, SkillResolutionStatus::Active, "active"));
+            resolved_active.push(resolved(
+                candidate.package,
+                SkillResolutionStatus::Active,
+                "active",
+            ));
         }
-
-        let platform_name = platform_name(input.platform);
-        let mut eligible = BTreeMap::new();
-        for winner in winners {
-            let descriptor = &winner.package.descriptor;
-            let runtime_blocked = descriptor
-                .compatibility
-                .minimum_runtime_version
-                .as_ref()
-                .is_some_and(|minimum| minimum > &input.runtime_version);
-            let platform_blocked = !descriptor.compatibility.platforms.is_empty()
-                && !descriptor
-                    .compatibility
-                    .platforms
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(platform_name));
-            let missing_capability = descriptor
-                .requires
-                .capabilities
-                .iter()
-                .filter(|name| !input.capabilities.contains_name(name))
-                .min();
-
-            let failure = if runtime_blocked {
-                Some((
-                    SkillResolutionStatus::RuntimeIncompatible,
-                    format!(
-                        "runtime {} is below the package minimum",
-                        input.runtime_version
-                    ),
-                ))
-            } else if platform_blocked {
-                Some((
-                    SkillResolutionStatus::PlatformUnsupported,
-                    format!("unsupported platform: {platform_name}"),
-                ))
-            } else {
-                missing_capability.map(|name| {
-                    (
-                        SkillResolutionStatus::CapabilityMissing,
-                        format!("missing capability: {name}"),
-                    )
-                })
-            };
-
-            if let Some((status, reason)) = failure {
-                inactive.push(resolved(winner.package, status, reason));
-            } else {
-                eligible.insert(descriptor.id.clone(), winner);
-            }
-        }
-
-        loop {
-            let active_ids: BTreeSet<_> = eligible.keys().cloned().collect();
-            let removals = eligible
-                .iter()
-                .filter_map(|(id, item)| {
-                    item.package
-                        .descriptor
-                        .requires
-                        .packages
-                        .iter()
-                        .filter(|dependency| !active_ids.contains(*dependency))
-                        .min()
-                        .cloned()
-                        .map(|dependency| (id.clone(), dependency))
-                })
-                .collect::<Vec<_>>();
-            if removals.is_empty() {
-                break;
-            }
-            for (id, dependency) in removals {
-                let item = eligible
-                    .remove(&id)
-                    .expect("dependency removal must reference an eligible package");
-                inactive.push(resolved(
-                    item.package,
-                    SkillResolutionStatus::DependencyMissing,
-                    format!("missing dependency: {}", dependency.as_str()),
-                ));
-            }
-        }
-
-        let active = eligible.into_values().collect();
         inactive.sort_by(resolution_order);
-        Ok(ResolvedSkillSet { active, inactive })
+        Ok(ResolvedSkillSet {
+            active: resolved_active,
+            inactive,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ActiveCandidate {
+    package: DiscoveredSkillPackage,
+    fallback: Option<DiscoveredSkillPackage>,
+}
+
+impl ActiveCandidate {
+    fn without_fallback(package: DiscoveredSkillPackage) -> Self {
+        Self {
+            package,
+            fallback: None,
+        }
+    }
+}
+
+fn select_managed_override(
+    builtin: Option<DiscoveredSkillPackage>,
+    managed: DiscoveredSkillPackage,
+    id: &SkillPackageId,
+    protected: &BTreeSet<SkillPackageId>,
+    overrides: &BTreeSet<SkillPackageId>,
+    inactive: &mut Vec<ResolvedSkillPackage>,
+) -> Option<ActiveCandidate> {
+    if overrides.contains(id) && !protected.contains(id) {
+        return Some(ActiveCandidate {
+            package: managed,
+            fallback: builtin,
+        });
+    }
+
+    let (status, reason) = if protected.contains(id) {
+        (
+            SkillResolutionStatus::ProtectedPackage,
+            "managed package cannot override a protected built-in package",
+        )
+    } else {
+        (
+            SkillResolutionStatus::OverrideDenied,
+            "managed package cannot override a built-in package without permission",
+        )
+    };
+    inactive.push(resolved(managed, status, reason));
+    builtin.map(ActiveCandidate::without_fallback)
+}
+
+fn locally_eligible(
+    package: Option<DiscoveredSkillPackage>,
+    platform_name: &str,
+    capabilities: &CapabilitySet,
+    runtime_version: &Version,
+    inactive: &mut Vec<ResolvedSkillPackage>,
+) -> Option<DiscoveredSkillPackage> {
+    let package = package?;
+    if let Some((status, reason)) =
+        local_failure(&package, platform_name, capabilities, runtime_version)
+    {
+        inactive.push(resolved(package, status, reason));
+        None
+    } else {
+        Some(package)
+    }
+}
+
+fn local_failure(
+    package: &DiscoveredSkillPackage,
+    platform_name: &str,
+    capabilities: &CapabilitySet,
+    runtime_version: &Version,
+) -> Option<(SkillResolutionStatus, String)> {
+    let descriptor = &package.descriptor;
+    let runtime_blocked = descriptor
+        .compatibility
+        .minimum_runtime_version
+        .as_ref()
+        .is_some_and(|minimum| minimum > runtime_version);
+    if runtime_blocked {
+        return Some((
+            SkillResolutionStatus::RuntimeIncompatible,
+            format!("runtime {runtime_version} is below the package minimum"),
+        ));
+    }
+
+    let platform_blocked = !descriptor.compatibility.platforms.is_empty()
+        && !descriptor
+            .compatibility
+            .platforms
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(platform_name));
+    if platform_blocked {
+        return Some((
+            SkillResolutionStatus::PlatformUnsupported,
+            format!("unsupported platform: {platform_name}"),
+        ));
+    }
+
+    descriptor
+        .requires
+        .capabilities
+        .iter()
+        .filter(|name| !capabilities.contains_name(name))
+        .min()
+        .map(|name| {
+            (
+                SkillResolutionStatus::CapabilityMissing,
+                format!("missing capability: {name}"),
+            )
+        })
+}
+
+fn resolve_dependencies(
+    active: &mut BTreeMap<SkillPackageId, ActiveCandidate>,
+    inactive: &mut Vec<ResolvedSkillPackage>,
+) {
+    let mut reverse = BTreeMap::<SkillPackageId, BTreeSet<SkillPackageId>>::new();
+    for (id, candidate) in active.iter() {
+        add_dependency_edges(&mut reverse, id, &candidate.package);
+    }
+
+    let mut pending = active
+        .iter()
+        .filter_map(|(id, candidate)| {
+            missing_dependency(&candidate.package, active).map(|_| id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+
+    while let Some(id) = pending.pop_first() {
+        let Some(missing) = active
+            .get(&id)
+            .and_then(|candidate| missing_dependency(&candidate.package, active))
+        else {
+            continue;
+        };
+        let mut candidate = active
+            .remove(&id)
+            .expect("pending dependency resolution must reference an active package");
+        remove_dependency_edges(&mut reverse, &id, &candidate.package);
+        inactive.push(resolved(
+            candidate.package,
+            SkillResolutionStatus::DependencyMissing,
+            format!("missing dependency: {}", missing.as_str()),
+        ));
+
+        if let Some(fallback) = candidate.fallback.take() {
+            let replacement = ActiveCandidate::without_fallback(fallback);
+            add_dependency_edges(&mut reverse, &id, &replacement.package);
+            active.insert(id.clone(), replacement);
+            if active
+                .get(&id)
+                .and_then(|replacement| missing_dependency(&replacement.package, active))
+                .is_some()
+            {
+                pending.insert(id);
+            }
+            continue;
+        }
+
+        if let Some(dependents) = reverse.remove(&id) {
+            pending.extend(
+                dependents
+                    .into_iter()
+                    .filter(|dependent| active.contains_key(dependent)),
+            );
+        }
+    }
+}
+
+fn missing_dependency(
+    package: &DiscoveredSkillPackage,
+    active: &BTreeMap<SkillPackageId, ActiveCandidate>,
+) -> Option<SkillPackageId> {
+    package
+        .descriptor
+        .requires
+        .packages
+        .iter()
+        .filter(|dependency| !active.contains_key(*dependency))
+        .min()
+        .cloned()
+}
+
+fn add_dependency_edges(
+    reverse: &mut BTreeMap<SkillPackageId, BTreeSet<SkillPackageId>>,
+    package_id: &SkillPackageId,
+    package: &DiscoveredSkillPackage,
+) {
+    for dependency in &package.descriptor.requires.packages {
+        reverse
+            .entry(dependency.clone())
+            .or_default()
+            .insert(package_id.clone());
+    }
+}
+
+fn remove_dependency_edges(
+    reverse: &mut BTreeMap<SkillPackageId, BTreeSet<SkillPackageId>>,
+    package_id: &SkillPackageId,
+    package: &DiscoveredSkillPackage,
+) {
+    for dependency in &package.descriptor.requires.packages {
+        let remove_entry = reverse.get_mut(dependency).is_some_and(|dependents| {
+            dependents.remove(package_id);
+            dependents.is_empty()
+        });
+        if remove_entry {
+            reverse.remove(dependency);
+        }
     }
 }
 
