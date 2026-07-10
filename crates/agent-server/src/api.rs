@@ -3,6 +3,7 @@ use agent_runtime::{
     session::Message,
     skill::SkillRegistry,
     skill_catalog::SkillCatalog,
+    skill_manager::SkillManager,
     storage::Storage,
     tools::RuntimeConfig,
     turn::{AgentRunner, TurnRunner},
@@ -28,9 +29,8 @@ use tower_http::cors::CorsLayer;
 pub struct AppState {
     storage: Storage,
     agent: Arc<dyn AgentRunner>,
-    skills: Option<SkillRegistry>,
+    skill_manager: SkillManager,
     skills_root: Option<PathBuf>,
-    skill_catalog: SkillCatalog,
     runtime_config: RuntimeConfig,
 }
 
@@ -42,14 +42,11 @@ impl AppState {
 
     #[cfg(test)]
     pub fn new_with_agent(storage: Storage, agent: Arc<dyn AgentRunner>) -> Self {
-        Self {
+        Self::new_with_agent_and_skill_manager(
             storage,
             agent,
-            skills: None,
-            skills_root: None,
-            skill_catalog: SkillCatalog::empty(),
-            runtime_config: default_runtime_config(),
-        }
+            SkillManager::from_registry_and_catalog(SkillRegistry::empty(), SkillCatalog::empty()),
+        )
     }
 
     pub fn new_with_agent_and_skills(
@@ -57,12 +54,23 @@ impl AppState {
         agent: Arc<dyn AgentRunner>,
         skills: SkillRegistry,
     ) -> Self {
+        Self::new_with_agent_and_skill_manager(
+            storage,
+            agent,
+            SkillManager::from_registry_and_catalog(skills, SkillCatalog::empty()),
+        )
+    }
+
+    pub fn new_with_agent_and_skill_manager(
+        storage: Storage,
+        agent: Arc<dyn AgentRunner>,
+        skill_manager: SkillManager,
+    ) -> Self {
         Self {
             storage,
             agent,
-            skills: Some(skills),
+            skill_manager,
             skills_root: None,
-            skill_catalog: SkillCatalog::empty(),
             runtime_config: default_runtime_config(),
         }
     }
@@ -73,7 +81,13 @@ impl AppState {
     }
 
     pub fn with_skill_catalog(mut self, skill_catalog: SkillCatalog) -> Self {
-        self.skill_catalog = skill_catalog;
+        let registry = self.skill_manager.current_snapshot().registry().clone();
+        self.skill_manager = SkillManager::from_registry_and_catalog(registry, skill_catalog);
+        self
+    }
+
+    pub fn with_skill_manager(mut self, skill_manager: SkillManager) -> Self {
+        self.skill_manager = skill_manager;
         self
     }
 
@@ -206,8 +220,8 @@ pub fn router_with_dev_routes(state: Arc<AppState>) -> Router {
 }
 
 impl AppState {
-    pub(crate) fn skills(&self) -> Option<SkillRegistry> {
-        self.skills.clone()
+    pub(crate) fn skills(&self) -> SkillRegistry {
+        self.skill_manager.current_snapshot().registry().clone()
     }
 
     pub(crate) fn runtime_config(&self) -> RuntimeConfig {
@@ -215,7 +229,11 @@ impl AppState {
     }
 
     pub(crate) fn skill_catalog(&self) -> SkillCatalog {
-        self.skill_catalog.clone()
+        self.skill_manager.current_snapshot().catalog().clone()
+    }
+
+    pub(crate) fn skill_manager(&self) -> SkillManager {
+        self.skill_manager.clone()
     }
 
     pub(crate) fn skills_root(&self) -> Option<PathBuf> {
@@ -303,15 +321,10 @@ async fn run_agent_turn(
     request: &UserMessageRequest,
 ) -> Result<Vec<RuntimeEvent>, ApiError> {
     if let Some(model_settings) = request.model_settings.clone() {
-        let skills = state
-            .skills
-            .clone()
-            .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("runtime skills unavailable")))?;
         let profile = provider_profile_from_request(model_settings)?;
-        let runner = TurnRunner::new_with_catalog_and_config(
+        let runner = TurnRunner::new_with_manager_and_config(
             GatewayHttpClient::new(profile),
-            skills,
-            state.skill_catalog.clone(),
+            state.skill_manager(),
             state.runtime_config.clone(),
         );
 
@@ -393,606 +406,5 @@ fn deterministic_assistant_reply(content: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use agent_runtime::{
-        skill::SkillRegistry,
-        storage::Storage,
-        tools::RuntimeConfig,
-        turn::{ModelClient, ModelEventStream, TurnRunner},
-    };
-    use async_trait::async_trait;
-    use axum::body::Body;
-    use axum::body::to_bytes;
-    use axum::http::{HeaderMap, Request, StatusCode, header};
-    use futures::stream;
-    use model_gateway::responses::{GatewayEvent, GatewayRequest};
-    use serde_json::{Value, json};
-    use std::path::{Path, PathBuf};
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
-    use tower::ServiceExt;
-
-    struct SkillCallingModel {
-        calls: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl ModelClient for SkillCallingModel {
-        async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            assert!(request.tools.iter().any(|tool| tool.name == "echo"));
-            let events = if call == 0 {
-                vec![
-                    Ok(GatewayEvent::ToolCall {
-                        call_id: "call-1".into(),
-                        name: "echo".into(),
-                        arguments: json!({ "text": "hidden skill result" }),
-                    }),
-                    Ok(GatewayEvent::Completed),
-                ]
-            } else {
-                vec![
-                    Ok(GatewayEvent::TextDelta {
-                        text: "The hidden capability returned hidden skill result.".into(),
-                    }),
-                    Ok(GatewayEvent::Completed),
-                ]
-            };
-
-            Ok(Box::pin(stream::iter(events)))
-        }
-    }
-
-    #[tokio::test]
-    async fn health_returns_ok() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let app = router(Arc::new(AppState::new(storage)));
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn create_session_and_post_message_returns_runtime_events() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let app = router(Arc::new(AppState::new(storage.clone())));
-
-        let create_response = app
-            .clone()
-            .oneshot(json_request(
-                "/sessions",
-                json!({ "title": "MVP Verification" }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(create_response.status(), StatusCode::OK);
-        let created = read_json(create_response).await;
-        let session_id = created["id"].as_str().unwrap();
-        assert_eq!(created["title"], "MVP Verification");
-
-        let message_response = app
-            .oneshot(json_request(
-                &format!("/sessions/{session_id}/messages"),
-                json!({ "content": "Run the renderer smoke test" }),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(message_response.status(), StatusCode::OK);
-        let message = read_json(message_response).await;
-        assert_eq!(message["accepted"], true);
-        assert_eq!(
-            message["assistant_message"]["content"],
-            "MVP agent received: Run the renderer smoke test"
-        );
-        assert_eq!(message["events"][0]["type"], "turn_started");
-        assert_eq!(message["events"][1]["type"], "assistant_text_delta");
-        assert_eq!(
-            message["events"][2],
-            json!({
-                "type": "assistant_message_finished",
-                "text": "MVP agent received: Run the renderer smoke test"
-            })
-        );
-        assert_eq!(message["events"][3]["type"], "turn_finished");
-
-        let stored_messages = storage.list_messages(session_id).await.unwrap();
-        assert_eq!(stored_messages.len(), 2);
-        assert_eq!(stored_messages[0].role, "user");
-        assert_eq!(stored_messages[0].content, "Run the renderer smoke test");
-        assert_eq!(stored_messages[1].role, "assistant");
-        assert_eq!(
-            stored_messages[1].content,
-            "MVP agent received: Run the renderer smoke test"
-        );
-    }
-
-    #[tokio::test]
-    async fn post_message_runs_packaged_skills_through_the_agent_turn_loop() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let skills_root = packaged_echo_skill().await;
-        let skills = SkillRegistry::load_packaged(&skills_root).await.unwrap();
-        let runner = TurnRunner::new(
-            SkillCallingModel {
-                calls: AtomicUsize::new(0),
-            },
-            skills,
-        );
-        let app = router(Arc::new(AppState::new_with_agent(
-            storage.clone(),
-            Arc::new(runner),
-        )));
-
-        let create_response = app
-            .clone()
-            .oneshot(json_request(
-                "/sessions",
-                json!({ "title": "Hidden skill" }),
-            ))
-            .await
-            .unwrap();
-        let created = read_json(create_response).await;
-        let session_id = created["id"].as_str().unwrap();
-
-        let message_response = app
-            .oneshot(json_request(
-                &format!("/sessions/{session_id}/messages"),
-                json!({ "content": "Use the hidden echo capability" }),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(message_response.status(), StatusCode::OK);
-        let message = read_json(message_response).await;
-        assert_eq!(
-            message["assistant_message"]["content"],
-            "The hidden capability returned hidden skill result."
-        );
-        assert_eq!(message["events"][0]["type"], "turn_started");
-        assert!(
-            message["events"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|event| event["type"] == "tool_call_finished")
-        );
-
-        let stored_messages = storage.list_messages(session_id).await.unwrap();
-        assert_eq!(
-            stored_messages[1].content,
-            "The hidden capability returned hidden skill result."
-        );
-
-        remove_test_dir(skills_root).await;
-    }
-
-    #[tokio::test]
-    async fn post_message_rejects_missing_session() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let app = router(Arc::new(AppState::new(storage)));
-
-        let response = app
-            .oneshot(json_request(
-                "/sessions/missing-session/messages",
-                json!({ "content": "hello" }),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let body = read_json(response).await;
-        assert_eq!(body["error"], "session not found");
-    }
-
-    #[tokio::test]
-    async fn test_model_connection_uses_supplied_chat_completions_profile() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let provider_capture = Arc::new(ProviderCapture::default());
-        let provider_base_url = spawn_provider_server(provider_capture.clone()).await;
-        let app = router(Arc::new(AppState::new(storage)));
-
-        let response = app
-            .oneshot(json_request(
-                "/model/test",
-                json!({
-                    "apiKey": "local-secret",
-                    "baseUrl": provider_base_url,
-                    "endpointType": "chat_completions",
-                    "modelName": "qwen2.5"
-                }),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = read_json(response).await;
-        assert_eq!(body["ok"], true);
-        assert_eq!(body["message"], "Connection succeeded");
-
-        let captured = provider_capture
-            .request
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("provider should receive test request");
-        assert_eq!(captured.authorization, Some("Bearer local-secret".into()));
-        assert_eq!(captured.body["model"], "qwen2.5");
-        assert_eq!(captured.body["stream"], false);
-        assert_eq!(captured.body["messages"][0]["role"], "user");
-    }
-
-    #[tokio::test]
-    async fn post_message_uses_supplied_model_settings_for_agent_turn() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let provider_capture = Arc::new(ProviderCapture::default());
-        let provider_base_url = spawn_provider_server(provider_capture.clone()).await;
-        let workspace = unique_test_dir("server-configured-provider-workspace");
-        tokio::fs::create_dir_all(&workspace).await.unwrap();
-        tokio::fs::write(
-            workspace.join("AGENTS.md"),
-            "Project instruction from configured workspace",
-        )
-        .await
-        .unwrap();
-        let runtime_config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
-        let skills = development_skills().await;
-        let app = router(Arc::new(
-            AppState::new_with_agent_and_skills(
-                storage.clone(),
-                Arc::new(DeterministicAgent),
-                skills,
-            )
-            .with_runtime_config(runtime_config),
-        ));
-
-        let create_response = app
-            .clone()
-            .oneshot(json_request(
-                "/sessions",
-                json!({ "title": "Configured provider" }),
-            ))
-            .await
-            .unwrap();
-        let created = read_json(create_response).await;
-        let session_id = created["id"].as_str().unwrap();
-
-        let message_response = app
-            .oneshot(json_request(
-                &format!("/sessions/{session_id}/messages"),
-                json!({
-                    "content": "Use the configured provider",
-                    "modelSettings": {
-                        "apiKey": "local-secret",
-                        "baseUrl": provider_base_url,
-                        "endpointType": "chat_completions",
-                        "modelName": "qwen2.5"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(message_response.status(), StatusCode::OK);
-        let message = read_json(message_response).await;
-        assert_eq!(message["assistant_message"]["content"], "ok");
-
-        let captured = provider_capture
-            .request
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("provider should receive chat request");
-        assert_eq!(captured.authorization, Some("Bearer local-secret".into()));
-        assert_eq!(captured.body["model"], "qwen2.5");
-        let messages = captured.body["messages"].as_array().unwrap();
-        assert!(messages.iter().any(|message| message["role"] == "system"));
-        let project_instruction = messages
-            .iter()
-            .find(|message| {
-                message["role"] == "system"
-                    && message["content"]
-                        .as_str()
-                        .is_some_and(|content| content.contains("Project instruction"))
-            })
-            .and_then(|message| message["content"].as_str())
-            .expect("project instruction system message should be present");
-        assert!(project_instruction.contains("Project instruction from configured workspace"));
-        assert!(messages.iter().any(|message| {
-            message["role"] == "user" && message["content"] == "Use the configured provider"
-        }));
-
-        remove_test_dir(workspace).await;
-    }
-
-    #[tokio::test]
-    async fn post_message_rejects_completion_endpoint_for_tool_using_turns() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let skills = development_skills().await;
-        let app = router(Arc::new(AppState::new_with_agent_and_skills(
-            storage,
-            Arc::new(DeterministicAgent),
-            skills,
-        )));
-
-        let create_response = app
-            .clone()
-            .oneshot(json_request(
-                "/sessions",
-                json!({ "title": "Completion endpoint" }),
-            ))
-            .await
-            .unwrap();
-        let created = read_json(create_response).await;
-        let session_id = created["id"].as_str().unwrap();
-
-        let message_response = app
-            .oneshot(json_request(
-                &format!("/sessions/{session_id}/messages"),
-                json!({
-                    "content": "Use completion endpoint",
-                    "modelSettings": {
-                        "baseUrl": "http://127.0.0.1:9/v1",
-                        "endpointType": "completion",
-                        "modelName": "legacy"
-                    }
-                }),
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(message_response.status(), StatusCode::BAD_REQUEST);
-        let body = read_json(message_response).await;
-        assert_eq!(
-            body["error"],
-            "model endpoint does not support runtime tools"
-        );
-    }
-
-    #[tokio::test]
-    async fn app_state_accepts_runtime_config_for_model_settings_turns() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let workspace = unique_test_dir("server-runtime-config");
-        tokio::fs::create_dir_all(&workspace).await.unwrap();
-        let runtime_config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
-        let skills = development_skills().await;
-
-        let state =
-            AppState::new_with_agent_and_skills(storage, Arc::new(DeterministicAgent), skills)
-                .with_runtime_config(runtime_config);
-
-        assert_eq!(state.runtime_config.workspace_root, workspace);
-        assert_eq!(
-            state.runtime_config.cwd,
-            state.runtime_config.workspace_root
-        );
-
-        remove_test_dir(state.runtime_config.workspace_root).await;
-    }
-
-    #[test]
-    fn internal_api_errors_return_500() {
-        let response = ApiError::Internal(anyhow::anyhow!("storage unavailable")).into_response();
-
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[test]
-    fn upstream_model_errors_return_bad_gateway() {
-        let response = agent_turn_error(anyhow::anyhow!(
-            "upstream model request failed: 400 Bad Request"
-        ))
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    }
-
-    #[tokio::test]
-    async fn supports_vite_desktop_cors_preflight() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let app = router(Arc::new(AppState::new(storage)));
-
-        for origin in ["http://127.0.0.1:5173", "http://localhost:5173"] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("OPTIONS")
-                        .uri("/sessions/session-1/messages")
-                        .header(header::ORIGIN, origin)
-                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(
-                response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
-                origin
-            );
-            assert!(
-                response.headers()[header::ACCESS_CONTROL_ALLOW_METHODS]
-                    .to_str()
-                    .unwrap()
-                    .contains("POST")
-            );
-            assert!(
-                response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
-                    .to_str()
-                    .unwrap()
-                    .contains("content-type")
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn production_router_does_not_expose_skill_inventory() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let app = router(Arc::new(AppState::new(storage)));
-
-        for uri in ["/skills", "/dev/skills"] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri(uri)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        }
-    }
-
-    fn json_request(uri: &str, body: Value) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap()
-    }
-
-    async fn read_json(response: axum::response::Response) -> Value {
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        serde_json::from_slice(&bytes).unwrap()
-    }
-
-    #[derive(Clone, Debug)]
-    struct CapturedProviderRequest {
-        authorization: Option<String>,
-        body: Value,
-    }
-
-    #[derive(Default)]
-    struct ProviderCapture {
-        request: Mutex<Option<CapturedProviderRequest>>,
-    }
-
-    async fn spawn_provider_server(capture: Arc<ProviderCapture>) -> String {
-        let app = Router::new()
-            .route("/v1/chat/completions", post(capture_provider_request))
-            .with_state(capture);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        format!("http://{addr}/v1")
-    }
-
-    async fn capture_provider_request(
-        State(capture): State<Arc<ProviderCapture>>,
-        headers: HeaderMap,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        let authorization = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        *capture.request.lock().unwrap() = Some(CapturedProviderRequest {
-            authorization,
-            body,
-        });
-
-        Json(json!({
-            "choices": [
-                {
-                    "message": {
-                        "content": "ok"
-                    }
-                }
-            ]
-        }))
-    }
-
-    async fn development_skills() -> SkillRegistry {
-        let skills_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .unwrap()
-            .join("skills");
-        SkillRegistry::load_development(skills_root).await.unwrap()
-    }
-
-    async fn packaged_echo_skill() -> PathBuf {
-        let root = unique_test_dir("server-packaged-echo");
-        let skill_dir = root.join("echo");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(
-            root.join("skill-bundle.json"),
-            json!({
-                "skills": [
-                    { "path": "echo" }
-                ]
-            })
-            .to_string(),
-        )
-        .await
-        .unwrap();
-        tokio::fs::write(
-            skill_dir.join("skill.json"),
-            json!({
-                "name": "echo",
-                "description": "Echo a text payload.",
-                "version": "0.1.0",
-                "entry": {
-                    "type": "command",
-                    "command": "node",
-                    "args": ["index.js"]
-                },
-                "tools": [
-                    {
-                        "name": "echo",
-                        "description": "Return the provided text.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "text": { "type": "string" }
-                            },
-                            "required": ["text"]
-                        }
-                    }
-                ]
-            })
-            .to_string(),
-        )
-        .await
-        .unwrap();
-        tokio::fs::write(
-            skill_dir.join("index.js"),
-            "process.stdin.resume();\nprocess.stdin.on('data', (chunk) => process.stdout.write(chunk));\n",
-        )
-        .await
-        .unwrap();
-        root
-    }
-
-    fn unique_test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
-    }
-
-    async fn remove_test_dir(path: impl AsRef<Path>) {
-        if path.as_ref().exists() {
-            tokio::fs::remove_dir_all(path).await.unwrap();
-        }
-    }
-}
+#[path = "api_tests.rs"]
+mod tests;

@@ -58,7 +58,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 async fn list_tools(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DevToolsResponse>, StatusCode> {
-    let skills = state.skills().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let skills = state.skills();
     let registry = ToolRegistry::new(skills, &state.runtime_config());
 
     Ok(Json(DevToolsResponse {
@@ -69,7 +69,7 @@ async fn list_tools(
 async fn discover_tools(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DevToolDiscoveryResponse>, StatusCode> {
-    let skills = state.skills().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let skills = state.skills();
     let registry = ToolRegistry::new(skills, &state.runtime_config());
     let discovery = registry.discovery();
 
@@ -168,8 +168,15 @@ fn dev_skill_delete_status(error: anyhow::Error) -> StatusCode {
 #[cfg(test)]
 mod tests {
     use agent_runtime::{
-        events::RuntimeEvent, skill::SkillRegistry, skill_catalog::SkillCatalog, storage::Storage,
-        tools::RuntimeConfig, turn::AgentRunner,
+        events::RuntimeEvent,
+        platform::{CapabilitySet, PlatformId},
+        skill::SkillRegistry,
+        skill_catalog::SkillCatalog,
+        skill_manager::{SkillManager, SkillManagerConfig},
+        skill_source::{DirectorySkillSource, SkillLayer},
+        storage::Storage,
+        tools::RuntimeConfig,
+        turn::AgentRunner,
     };
     use async_trait::async_trait;
     use axum::{
@@ -504,6 +511,120 @@ mod tests {
         remove_test_dir(workspace).await;
     }
 
+    #[tokio::test]
+    async fn dev_runtime_views_follow_the_current_skill_snapshot() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let workspace = unique_test_dir("current-snapshot");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let skills_root = workspace.join("skills");
+        let package_root = skills_root.join("dynamic");
+        write_dynamic_package(&package_root, "first_tool", "first", "First body").await;
+        let manager = dynamic_skill_manager(&skills_root).await;
+        let state = Arc::new(
+            crate::api::AppState::new_with_agent(storage, Arc::new(TestAgent))
+                .with_skill_manager(manager.clone())
+                .with_runtime_config(
+                    RuntimeConfig::workspace_write(workspace.clone(), workspace.clone())
+                        .without_builtin_tools(),
+                ),
+        );
+        let app = crate::api::router_with_dev_routes(state);
+
+        let initial_tools = read_json(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/dev/tools")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            initial_tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| { tool["name"] == "first_tool" })
+        );
+
+        write_dynamic_package(&package_root, "second_tool", "second", "Second body").await;
+        manager.reload().await.unwrap();
+
+        let tools = read_json(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/dev/tools")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| { tool["name"] == "second_tool" })
+        );
+        assert!(
+            !tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| { tool["name"] == "first_tool" })
+        );
+
+        let discovery = read_json(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/dev/tool-discovery")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            discovery["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| { tool["name"] == "second_tool" })
+        );
+
+        let preview = read_json(
+            app.oneshot(json_request(
+                "/dev/instructions/preview",
+                json!({ "content": "use $second" }),
+            ))
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(preview["triggered_skills"], json!(["second"]));
+        assert!(
+            preview["developer"]
+                .as_str()
+                .unwrap()
+                .contains("Second body")
+        );
+        assert!(
+            !preview["developer"]
+                .as_str()
+                .unwrap()
+                .contains("First body")
+        );
+        remove_test_dir(workspace).await;
+    }
+
     async fn development_skills() -> PathBuf {
         let root = unique_test_dir("dev-tools");
         let skill_dir = root.join("echo");
@@ -538,6 +659,80 @@ mod tests {
         .await
         .unwrap();
         root
+    }
+
+    async fn dynamic_skill_manager(root: &std::path::Path) -> SkillManager {
+        SkillManager::new(SkillManagerConfig {
+            sources: vec![Arc::new(DirectorySkillSource::new(
+                SkillLayer::Builtin,
+                root,
+            ))],
+            platform: PlatformId::Desktop,
+            capabilities: CapabilitySet::desktop_runtime(),
+            protected_packages: Vec::new(),
+            allowed_overrides: Vec::new(),
+            runtime_version: "0.1.0".parse().unwrap(),
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn write_dynamic_package(
+        package_root: &std::path::Path,
+        tool_name: &str,
+        instruction_name: &str,
+        instruction_body: &str,
+    ) {
+        tokio::fs::create_dir_all(package_root).await.unwrap();
+        tokio::fs::write(
+            package_root.join("general-agent.json"),
+            json!({
+                "schemaVersion": 1,
+                "id": "com.example.dynamic",
+                "version": "1.0.0",
+                "displayName": "Dynamic",
+                "kind": "native_runtime",
+                "package": {
+                    "includeInstructions": true,
+                    "includeRuntime": true
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            package_root.join("skill.json"),
+            json!({
+                "name": "dynamic",
+                "description": "Dynamic test skill.",
+                "version": "1.0.0",
+                "entry": {
+                    "type": "command",
+                    "command": "node",
+                    "args": ["index.js"]
+                },
+                "tools": [{
+                    "name": tool_name,
+                    "description": "Dynamic tool.",
+                    "input_schema": { "type": "object" }
+                }]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(package_root.join("index.js"), "process.stdin.resume();\n")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            package_root.join("SKILL.md"),
+            format!(
+                "---\nname: {instruction_name}\ndescription: Dynamic instructions.\n---\n\n# Dynamic\n{instruction_body}"
+            ),
+        )
+        .await
+        .unwrap();
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

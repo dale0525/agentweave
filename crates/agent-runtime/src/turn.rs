@@ -3,6 +3,8 @@ use crate::events::RuntimeEvent;
 use crate::instructions::{InstructionConfig, InstructionContext};
 use crate::skill::SkillRegistry;
 use crate::skill_catalog::SkillCatalog;
+use crate::skill_manager::SkillManager;
+use crate::skill_snapshot::SkillSnapshot;
 use crate::tools::result::{ToolError, ToolResult, ToolResultMetadata};
 use crate::tools::{RuntimeConfig, ToolDefinition, ToolRegistry};
 use crate::turn_request::{BudgetPolicy, TurnRequest};
@@ -10,6 +12,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use model_gateway::responses::{GatewayEvent, GatewayRequest, GatewayTool};
 use std::pin::Pin;
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub type ModelEventStream = Pin<Box<dyn Stream<Item = anyhow::Result<GatewayEvent>> + Send>>;
@@ -26,8 +29,7 @@ pub trait AgentRunner: Send + Sync {
 
 pub struct TurnRunner<C> {
     model: C,
-    tools: ToolRegistry,
-    skill_catalog: SkillCatalog,
+    skill_manager: SkillManager,
     config: RuntimeConfig,
     max_steps: usize,
 }
@@ -52,12 +54,19 @@ where
         skill_catalog: SkillCatalog,
         config: RuntimeConfig,
     ) -> Self {
+        let skill_manager = SkillManager::from_registry_and_catalog(skills, skill_catalog);
+        Self::new_with_manager_and_config(model, skill_manager, config)
+    }
+
+    pub fn new_with_manager_and_config(
+        model: C,
+        skill_manager: SkillManager,
+        config: RuntimeConfig,
+    ) -> Self {
         let max_steps = config.max_tool_calls_per_turn.saturating_add(1);
-        let tools = ToolRegistry::new(skills, &config);
         Self {
             model,
-            tools,
-            skill_catalog,
+            skill_manager,
             config,
             max_steps,
         }
@@ -68,6 +77,17 @@ where
     }
 
     pub async fn run_request(&self, request: TurnRequest) -> anyhow::Result<Vec<RuntimeEvent>> {
+        let snapshot = self.skill_manager.current_snapshot();
+        self.run_with_snapshot(request, snapshot).await
+    }
+
+    async fn run_with_snapshot(
+        &self,
+        request: TurnRequest,
+        snapshot: Arc<SkillSnapshot>,
+    ) -> anyhow::Result<Vec<RuntimeEvent>> {
+        let tools = ToolRegistry::new(snapshot.registry().clone(), &self.config);
+        let skill_catalog = snapshot.catalog();
         let turn_id = Uuid::new_v4().to_string();
         let mut events = vec![RuntimeEvent::TurnStarted {
             turn_id: turn_id.clone(),
@@ -75,11 +95,10 @@ where
         let mut budget = BudgetPolicy::new(request.token_budget);
         let mut instruction_config =
             InstructionConfig::new(self.config.workspace_root.clone(), self.config.cwd.clone());
-        instruction_config.skill_summaries = self.skill_catalog.summaries().to_vec();
-        let triggered_skill_names = self.skill_catalog.triggered_skill_names(&request.user_text);
+        instruction_config.skill_summaries = skill_catalog.summaries().to_vec();
+        let triggered_skill_names = skill_catalog.triggered_skill_names(&request.user_text);
         if !triggered_skill_names.is_empty() {
-            match self
-                .skill_catalog
+            match skill_catalog
                 .load_instruction_documents(&triggered_skill_names, self.config.output_limit_bytes)
                 .await
             {
@@ -118,7 +137,7 @@ where
             });
             input = compacted.input;
         }
-        let tools = gateway_tools(self.tools.definitions());
+        let gateway_tools = gateway_tools(tools.definitions());
         let mut final_text = String::new();
         let mut tool_calls = 0usize;
 
@@ -127,7 +146,7 @@ where
                 .model
                 .stream(GatewayRequest {
                     input: input.clone(),
-                    tools: tools.clone(),
+                    tools: gateway_tools.clone(),
                 })
                 .await?;
             let mut saw_tool = false;
@@ -155,7 +174,7 @@ where
                             });
                             return Ok(events);
                         }
-                        if let Some(requirement) = self.tools.approval_requirement(&name) {
+                        if let Some(requirement) = tools.approval_requirement(&name) {
                             events.push(RuntimeEvent::ApprovalRequired {
                                 call_id: call_id.clone(),
                                 name: name.clone(),
@@ -215,11 +234,7 @@ where
                                 }
                             ]
                         }));
-                        let result = self
-                            .tools
-                            .execute(&name, &call_id, arguments)
-                            .await
-                            .into_value();
+                        let result = tools.execute(&name, &call_id, arguments).await.into_value();
                         events.push(RuntimeEvent::ToolCallFinished {
                             call_id: call_id.clone(),
                             result: result.clone(),

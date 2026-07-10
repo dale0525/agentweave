@@ -1,12 +1,17 @@
 use super::*;
+use crate::platform::{CapabilitySet, PlatformId};
+use crate::skill_manager::{SkillManager, SkillManagerConfig};
+use crate::skill_source::{DirectorySkillSource, SkillLayer};
 use crate::tools::RuntimeConfig;
 use futures::stream;
+use semver::Version;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
+use tempfile::tempdir;
 
 struct FakeModel {
     calls: AtomicUsize,
@@ -689,4 +694,232 @@ async fn runaway_tool_loop_stops_at_max_tool_calls_per_turn() {
         RuntimeEvent::TurnFailed { message, .. } if message.contains("max tool calls exceeded")
     )));
     remove_workspace(&workspace);
+}
+
+struct SnapshotSwapModel {
+    calls: AtomicUsize,
+    manager: SkillManager,
+    package_root: PathBuf,
+    fail_reload: bool,
+}
+
+#[async_trait]
+impl ModelClient for SnapshotSwapModel {
+    async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let events = match call {
+            0 => {
+                assert!(request_has_tool(&request, "first_tool"));
+                if self.fail_reload {
+                    tokio::fs::write(self.package_root.join("general-agent.json"), "{invalid")
+                        .await?;
+                    assert!(self.manager.reload().await.is_err());
+                } else {
+                    write_turn_runtime_package(&self.package_root, "second_tool").await;
+                    self.manager.reload().await?;
+                }
+                vec![
+                    GatewayEvent::ToolCall {
+                        call_id: "call-first".into(),
+                        name: "first_tool".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                    GatewayEvent::Completed,
+                ]
+            }
+            1 => vec![
+                GatewayEvent::TextDelta {
+                    text: "first turn done".into(),
+                },
+                GatewayEvent::Completed,
+            ],
+            2 => {
+                assert!(request_has_tool(&request, "second_tool"));
+                assert!(!request_has_tool(&request, "first_tool"));
+                vec![
+                    GatewayEvent::ToolCall {
+                        call_id: "call-second".into(),
+                        name: "second_tool".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                    GatewayEvent::Completed,
+                ]
+            }
+            _ => vec![
+                GatewayEvent::TextDelta {
+                    text: "second turn done".into(),
+                },
+                GatewayEvent::Completed,
+            ],
+        };
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
+#[tokio::test]
+async fn turn_keeps_the_snapshot_captured_at_start() {
+    let root = tempdir().unwrap();
+    let package_root = root.path().join("runtime");
+    write_turn_runtime_package(&package_root, "first_tool").await;
+    let manager = turn_skill_manager(root.path()).await;
+    let workspace = test_workspace("snapshot-swap");
+    let runner = TurnRunner::new_with_manager_and_config(
+        SnapshotSwapModel {
+            calls: AtomicUsize::new(0),
+            manager: manager.clone(),
+            package_root,
+            fail_reload: false,
+        },
+        manager.clone(),
+        RuntimeConfig::workspace_write(workspace.clone(), workspace.clone()),
+    );
+
+    let events = runner.run("use the tool").await.unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallStarted { name, .. } if name == "first_tool"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallStarted { name, .. } if name == "second_tool"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallFinished { result, .. }
+            if result["ok"] == true && result["tool"] == "first_tool"
+    )));
+    assert_eq!(manager.current_snapshot().generation(), 2);
+    remove_workspace(&workspace);
+}
+
+#[tokio::test]
+async fn next_turn_uses_the_newly_published_snapshot() {
+    let root = tempdir().unwrap();
+    let package_root = root.path().join("runtime");
+    write_turn_runtime_package(&package_root, "first_tool").await;
+    let manager = turn_skill_manager(root.path()).await;
+    let workspace = test_workspace("snapshot-next-turn");
+    let runner = TurnRunner::new_with_manager_and_config(
+        SnapshotSwapModel {
+            calls: AtomicUsize::new(0),
+            manager: manager.clone(),
+            package_root,
+            fail_reload: false,
+        },
+        manager,
+        RuntimeConfig::workspace_write(workspace.clone(), workspace.clone()),
+    );
+
+    runner.run("first turn").await.unwrap();
+    let events = runner.run("second turn").await.unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallStarted { name, .. } if name == "second_tool"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallFinished { result, .. }
+            if result["ok"] == true && result["tool"] == "second_tool"
+    )));
+    remove_workspace(&workspace);
+}
+
+#[tokio::test]
+async fn failed_reload_does_not_change_the_running_turn_snapshot() {
+    let root = tempdir().unwrap();
+    let package_root = root.path().join("runtime");
+    write_turn_runtime_package(&package_root, "first_tool").await;
+    let manager = turn_skill_manager(root.path()).await;
+    let initial = manager.current_snapshot();
+    let workspace = test_workspace("snapshot-failed-reload");
+    let runner = TurnRunner::new_with_manager_and_config(
+        SnapshotSwapModel {
+            calls: AtomicUsize::new(0),
+            manager: manager.clone(),
+            package_root,
+            fail_reload: true,
+        },
+        manager.clone(),
+        RuntimeConfig::workspace_write(workspace.clone(), workspace.clone()),
+    );
+
+    let events = runner.run("use the tool").await.unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallStarted { name, .. } if name == "first_tool"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallFinished { result, .. }
+            if result["ok"] == true && result["tool"] == "first_tool"
+    )));
+    assert!(Arc::ptr_eq(&initial, &manager.current_snapshot()));
+    remove_workspace(&workspace);
+}
+
+async fn turn_skill_manager(root: &Path) -> SkillManager {
+    SkillManager::new(SkillManagerConfig {
+        sources: vec![Arc::new(DirectorySkillSource::new(
+            SkillLayer::Builtin,
+            root,
+        ))],
+        platform: PlatformId::Desktop,
+        capabilities: CapabilitySet::desktop_runtime(),
+        protected_packages: Vec::new(),
+        allowed_overrides: Vec::new(),
+        runtime_version: Version::new(0, 1, 0),
+    })
+    .await
+    .unwrap()
+}
+
+async fn write_turn_runtime_package(package_root: &Path, tool_name: &str) {
+    tokio::fs::create_dir_all(package_root).await.unwrap();
+    tokio::fs::write(
+        package_root.join("general-agent.json"),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "id": "com.example.turn-runtime",
+            "version": "1.0.0",
+            "displayName": "Turn runtime",
+            "kind": "native_runtime",
+            "package": {
+                "includeInstructions": false,
+                "includeRuntime": true
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        package_root.join("skill.json"),
+        serde_json::json!({
+            "name": "turn-runtime",
+            "description": "Runtime used by turn snapshot tests.",
+            "version": "1.0.0",
+            "entry": {
+                "type": "command",
+                "command": "node",
+                "args": ["index.js"]
+            },
+            "tools": [{
+                "name": tool_name,
+                "description": "Test tool.",
+                "input_schema": { "type": "object" }
+            }]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        package_root.join("index.js"),
+        "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ tool: process.env.GENERAL_AGENT_TOOL_NAME })));\n",
+    )
+    .await
+    .unwrap();
 }

@@ -4,6 +4,7 @@ use crate::platform::{CapabilitySet, PlatformId};
 use crate::session::{Message, Session};
 use crate::skill::SkillRegistry;
 use crate::skill_catalog::SkillCatalog;
+use crate::skill_manager::SkillManager;
 use crate::storage::Storage;
 use crate::tools::RuntimeConfig;
 use crate::turn::{ModelClient, TurnRunner};
@@ -53,8 +54,7 @@ where
 pub struct MobileRuntimeHost<C> {
     storage: Storage,
     model: Arc<C>,
-    skills: SkillRegistry,
-    skill_catalog: SkillCatalog,
+    skill_manager: SkillManager,
     runtime_config: RuntimeConfig,
     init: MobileRuntimeInit,
 }
@@ -71,13 +71,23 @@ where
         runtime_config: RuntimeConfig,
         init: MobileRuntimeInit,
     ) -> Self {
-        let runtime_config = mobile_safe_runtime_config(&init, runtime_config);
         let skills = mobile_safe_skill_registry(&init, skills);
+        let skill_manager = SkillManager::from_registry_and_catalog(skills, skill_catalog);
+        Self::new_for_test_with_manager(storage, model, skill_manager, runtime_config, init)
+    }
+
+    pub fn new_for_test_with_manager(
+        storage: Storage,
+        model: C,
+        skill_manager: SkillManager,
+        runtime_config: RuntimeConfig,
+        init: MobileRuntimeInit,
+    ) -> Self {
+        let runtime_config = mobile_safe_runtime_config(&init, runtime_config);
         Self {
             storage,
             model: Arc::new(model),
-            skills,
-            skill_catalog,
+            skill_manager,
             runtime_config,
             init,
         }
@@ -104,7 +114,8 @@ where
     }
 
     pub fn diagnostics(&self) -> MobileRuntimeDiagnostics {
-        mobile_runtime_diagnostics(&self.init, &self.runtime_config, &self.skills)
+        let snapshot = self.skill_manager.current_snapshot();
+        mobile_runtime_diagnostics(&self.init, &self.runtime_config, snapshot.registry())
     }
 
     pub async fn send_message(
@@ -118,10 +129,9 @@ where
         self.storage
             .append_message(session_id, "user", content)
             .await?;
-        let runner = TurnRunner::new_with_catalog_and_config(
+        let runner = TurnRunner::new_with_manager_and_config(
             self.model.clone(),
-            self.skills.clone(),
-            self.skill_catalog.clone(),
+            self.skill_manager.clone(),
             self.runtime_config.clone(),
         );
         let events = runner.run(content).await?;
@@ -138,8 +148,7 @@ where
 
 pub struct HttpMobileRuntimeHost<R> {
     storage: Storage,
-    skills: SkillRegistry,
-    skill_catalog: SkillCatalog,
+    skill_manager: SkillManager,
     runtime_config: RuntimeConfig,
     init: MobileRuntimeInit,
     model_config: StoredModelConfig,
@@ -159,12 +168,30 @@ where
         model_config: StoredModelConfig,
         secret_resolver: R,
     ) -> Self {
-        let runtime_config = mobile_safe_runtime_config(&init, runtime_config);
         let skills = mobile_safe_skill_registry(&init, skills);
+        let skill_manager = SkillManager::from_registry_and_catalog(skills, skill_catalog);
+        Self::new_with_manager(
+            storage,
+            skill_manager,
+            runtime_config,
+            init,
+            model_config,
+            secret_resolver,
+        )
+    }
+
+    pub fn new_with_manager(
+        storage: Storage,
+        skill_manager: SkillManager,
+        runtime_config: RuntimeConfig,
+        init: MobileRuntimeInit,
+        model_config: StoredModelConfig,
+        secret_resolver: R,
+    ) -> Self {
+        let runtime_config = mobile_safe_runtime_config(&init, runtime_config);
         Self {
             storage,
-            skills,
-            skill_catalog,
+            skill_manager,
             runtime_config,
             init,
             model_config,
@@ -193,7 +220,8 @@ where
     }
 
     pub fn diagnostics(&self) -> MobileRuntimeDiagnostics {
-        mobile_runtime_diagnostics(&self.init, &self.runtime_config, &self.skills)
+        let snapshot = self.skill_manager.current_snapshot();
+        mobile_runtime_diagnostics(&self.init, &self.runtime_config, snapshot.registry())
     }
 
     pub async fn send_message(
@@ -221,10 +249,9 @@ where
             .map_err(|message| anyhow::anyhow!(message))?;
         let api_key = resolve_model_api_key(&self.model_config, &self.secret_resolver).await?;
         let profile = self.model_config.to_provider_profile(api_key);
-        let runner = TurnRunner::new_with_catalog_and_config(
+        let runner = TurnRunner::new_with_manager_and_config(
             model_gateway::responses::GatewayHttpClient::new(profile),
-            self.skills.clone(),
-            self.skill_catalog.clone(),
+            self.skill_manager.clone(),
             self.runtime_config.clone(),
         );
         let events = runner.run(content).await?;
@@ -320,6 +347,8 @@ mod tests {
     use crate::platform::{CapabilitySet, PlatformId};
     use crate::skill::SkillRegistry;
     use crate::skill_catalog::SkillCatalog;
+    use crate::skill_manager::{SkillManager, SkillManagerConfig};
+    use crate::skill_source::{DirectorySkillSource, SkillLayer};
     use crate::storage::Storage;
     use crate::tools::RuntimeConfig;
     use crate::tools::discovery::{
@@ -331,6 +360,7 @@ mod tests {
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     struct FakeModel;
@@ -343,6 +373,26 @@ mod tests {
         ) -> anyhow::Result<crate::turn::ModelEventStream> {
             Ok(Box::pin(stream::iter(vec![Ok(GatewayEvent::TextDelta {
                 text: "hello from android".into(),
+            })])))
+        }
+    }
+
+    struct ToolCapturingModel {
+        tool_names: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::turn::ModelClient for ToolCapturingModel {
+        async fn stream(
+            &self,
+            request: model_gateway::responses::GatewayRequest,
+        ) -> anyhow::Result<crate::turn::ModelEventStream> {
+            self.tool_names
+                .lock()
+                .unwrap()
+                .push(request.tools.into_iter().map(|tool| tool.name).collect());
+            Ok(Box::pin(stream::iter(vec![Ok(GatewayEvent::TextDelta {
+                text: "done".into(),
             })])))
         }
     }
@@ -504,6 +554,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mobile_turns_read_the_current_skill_manager_snapshot() {
+        let dir = tempdir().unwrap();
+        let skills_root = dir.path().join("skills");
+        let package_root = skills_root.join("dynamic");
+        write_dynamic_mobile_skill(&package_root, "first_tool").await;
+        let manager = SkillManager::new(SkillManagerConfig {
+            sources: vec![Arc::new(DirectorySkillSource::new(
+                SkillLayer::Builtin,
+                &skills_root,
+            ))],
+            platform: PlatformId::Android,
+            capabilities: CapabilitySet::android_mvp(),
+            protected_packages: Vec::new(),
+            allowed_overrides: Vec::new(),
+            runtime_version: "0.1.0".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+        let db_url = format!("sqlite://{}?mode=rwc", dir.path().join("ga.db").display());
+        let storage = Storage::connect(&db_url).await.unwrap();
+        let tool_names = Arc::new(Mutex::new(Vec::new()));
+        let host = MobileRuntimeHost::new_for_test_with_manager(
+            storage,
+            ToolCapturingModel {
+                tool_names: tool_names.clone(),
+            },
+            manager.clone(),
+            RuntimeConfig::workspace_write(dir.path(), dir.path()),
+            MobileRuntimeInit {
+                platform: PlatformId::Android,
+                capabilities: CapabilitySet::android_mvp(),
+            },
+        );
+        let session = host.create_session("Dynamic mobile").await.unwrap();
+
+        host.send_message(&session.id, "first").await.unwrap();
+        write_dynamic_mobile_skill(&package_root, "second_tool").await;
+        manager.reload().await.unwrap();
+        host.send_message(&session.id, "second").await.unwrap();
+
+        let requests = tool_names.lock().unwrap();
+        assert!(requests[0].iter().any(|name| name == "first_tool"));
+        assert!(!requests[0].iter().any(|name| name == "second_tool"));
+        assert!(requests[1].iter().any(|name| name == "second_tool"));
+        assert!(!requests[1].iter().any(|name| name == "first_tool"));
+        assert!(!host.diagnostics().built_in_tools_enabled);
+    }
+
+    #[tokio::test]
     async fn resolves_model_secret_for_provider_profile() {
         let model_config = StoredModelConfig {
             provider_id: "openai".into(),
@@ -611,6 +710,46 @@ mod tests {
         let skill_dir = root.join(folder);
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
         tokio::fs::write(skill_dir.join("skill.json"), manifest.to_string())
+            .await
+            .unwrap();
+    }
+
+    async fn write_dynamic_mobile_skill(package_root: &Path, tool_name: &str) {
+        tokio::fs::create_dir_all(package_root).await.unwrap();
+        tokio::fs::write(
+            package_root.join("general-agent.json"),
+            json!({
+                "schemaVersion": 1,
+                "id": "com.example.mobile-dynamic",
+                "version": "1.0.0",
+                "displayName": "Mobile dynamic",
+                "kind": "native_runtime",
+                "package": {
+                    "includeInstructions": false,
+                    "includeRuntime": true
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        write_skill_manifest(
+            package_root.parent().unwrap(),
+            package_root.file_name().unwrap().to_str().unwrap(),
+            json!({
+                "name": "mobile-dynamic",
+                "description": "Dynamic mobile skill.",
+                "version": "1.0.0",
+                "entry": { "type": "command", "command": "node", "args": ["index.js"] },
+                "tools": [{
+                    "name": tool_name,
+                    "description": "Dynamic mobile tool.",
+                    "input_schema": { "type": "object" }
+                }]
+            }),
+        )
+        .await;
+        tokio::fs::write(package_root.join("index.js"), "process.stdin.resume();\n")
             .await
             .unwrap();
     }

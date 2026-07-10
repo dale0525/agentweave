@@ -1,16 +1,24 @@
 use agent_runtime::{
+    platform::{CapabilitySet, PlatformId},
     skill::SkillRegistry,
     skill_catalog::SkillCatalog,
+    skill_manager::{SkillManager, SkillManagerConfig},
+    skill_source::{DirectorySkillSource, SkillLayer},
     storage::Storage,
     tools::{CommandMode, RuntimeConfig},
-    turn::TurnRunner,
+    turn::{ModelClient, TurnRunner},
 };
 use agent_server::api;
 use model_gateway::{
     provider::{EndpointType, ProviderProfile},
     responses::GatewayHttpClient,
 };
-use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 const DEFAULT_DATABASE_URL: &str = "sqlite://general-agent.db?mode=rwc";
 const DEFAULT_SKILLS_ROOT: &str = "skills";
@@ -27,21 +35,15 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("GENERAL_AGENT_DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.into());
     let storage = Storage::connect(&database_url).await?;
     let skills_root = skills_root_from_env();
-    let skills = load_runtime_skills(&skills_root).await?;
-    let skill_catalog = load_instruction_skills(&skills_root).await;
+    let skill_manager = load_skill_manager(&skills_root).await?;
     let model = GatewayHttpClient::new(model_profile_from_env());
     let runtime_config = runtime_config_from_env();
-    let runner = TurnRunner::new_with_catalog_and_config(
+    let state = build_server_state(
+        storage,
         model,
-        skills.clone(),
-        skill_catalog.clone(),
-        runtime_config.clone(),
-    );
-    let state = Arc::new(
-        api::AppState::new_with_agent_and_skills(storage, Arc::new(runner), skills)
-            .with_runtime_config(runtime_config)
-            .with_skill_catalog(skill_catalog)
-            .with_skills_root(skills_root.clone()),
+        skill_manager,
+        runtime_config,
+        skills_root.clone(),
     );
     let app = if std::env::var("GENERAL_AGENT_DEV_API").as_deref() == Ok("1") {
         api::router_with_dev_routes(state)
@@ -74,20 +76,51 @@ fn skills_root_from_env() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_SKILLS_ROOT))
 }
 
-async fn load_runtime_skills(root: &PathBuf) -> anyhow::Result<SkillRegistry> {
-    if root.join("skill-bundle.json").is_file() {
-        SkillRegistry::load_packaged(root).await
-    } else {
-        SkillRegistry::load_development(root).await
-    }
+fn build_server_state<C>(
+    storage: Storage,
+    model: C,
+    skill_manager: SkillManager,
+    runtime_config: RuntimeConfig,
+    skills_root: PathBuf,
+) -> Arc<api::AppState>
+where
+    C: ModelClient + 'static,
+{
+    let runner = TurnRunner::new_with_manager_and_config(
+        model,
+        skill_manager.clone(),
+        runtime_config.clone(),
+    );
+    Arc::new(
+        api::AppState::new_with_agent_and_skill_manager(storage, Arc::new(runner), skill_manager)
+            .with_runtime_config(runtime_config)
+            .with_skills_root(skills_root),
+    )
 }
 
-async fn load_instruction_skills(root: &PathBuf) -> SkillCatalog {
-    let result = if root.join("skill-bundle.json").is_file() {
-        SkillCatalog::load_packaged(root).await
-    } else {
-        SkillCatalog::load_development(root).await
-    };
+async fn load_skill_manager(root: &Path) -> anyhow::Result<SkillManager> {
+    if root.join("skill-bundle.json").is_file() {
+        let registry = SkillRegistry::load_packaged(root).await?;
+        let catalog = load_packaged_instruction_skills(root).await;
+        return Ok(SkillManager::from_registry_and_catalog(registry, catalog));
+    }
+
+    SkillManager::new(SkillManagerConfig {
+        sources: vec![Arc::new(DirectorySkillSource::new(
+            SkillLayer::Builtin,
+            root,
+        ))],
+        platform: PlatformId::Desktop,
+        capabilities: CapabilitySet::desktop_runtime(),
+        protected_packages: Vec::new(),
+        allowed_overrides: Vec::new(),
+        runtime_version: env!("CARGO_PKG_VERSION").parse()?,
+    })
+    .await
+}
+
+async fn load_packaged_instruction_skills(root: &Path) -> SkillCatalog {
+    let result = SkillCatalog::load_packaged(root).await;
 
     result.unwrap_or_else(|error| {
         tracing::warn!(?error, "failed to load instruction skill catalog");
@@ -123,9 +156,163 @@ fn model_endpoint_type_from_env() -> EndpointType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_runtime::turn::{ModelClient, ModelEventStream};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use futures::stream;
+    use model_gateway::responses::{GatewayEvent, GatewayRequest};
+    use std::path::Path;
+    use std::sync::Mutex;
+    use tower::ServiceExt;
+
+    struct CapturingModel {
+        tool_names: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelClient for CapturingModel {
+        async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
+            *self.tool_names.lock().unwrap() =
+                request.tools.into_iter().map(|tool| tool.name).collect();
+            Ok(Box::pin(stream::iter(vec![
+                Ok(GatewayEvent::TextDelta {
+                    text: "done".into(),
+                }),
+                Ok(GatewayEvent::Completed),
+            ])))
+        }
+    }
 
     #[test]
     fn server_runtime_config_disables_builtin_tools_by_default() {
         assert!(!runtime_config_from_env().built_in_tools_enabled);
+    }
+
+    #[tokio::test]
+    async fn production_state_and_runner_share_one_skill_manager() {
+        let root = unique_test_dir("shared-manager");
+        let package_root = root.join("runtime");
+        write_runtime_package(&package_root, "first_tool").await;
+        let manager = load_skill_manager(&root).await.unwrap();
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let session = storage.create_session("Shared manager").await.unwrap();
+        let tool_names = Arc::new(Mutex::new(Vec::new()));
+        let state = build_server_state(
+            storage,
+            CapturingModel {
+                tool_names: tool_names.clone(),
+            },
+            manager.clone(),
+            RuntimeConfig::workspace_write(root.clone(), root.clone()).without_builtin_tools(),
+            root.clone(),
+        );
+
+        write_runtime_package(&package_root, "second_tool").await;
+        manager.reload().await.unwrap();
+        let response = api::router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/messages", session.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"content":"check tools"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let names = tool_names.lock().unwrap();
+        assert!(names.iter().any(|name| name == "second_tool"));
+        assert!(!names.iter().any(|name| name == "first_tool"));
+        remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_bundle_selection_uses_a_static_skill_manager() {
+        let root = unique_test_dir("bundle-manager");
+        let package_root = root.join("runtime");
+        write_runtime_package(&package_root, "bundle_tool").await;
+        tokio::fs::write(
+            root.join("skill-bundle.json"),
+            serde_json::json!({
+                "skills": [{
+                    "path": "runtime",
+                    "includeInstructions": false
+                }]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let manager = load_skill_manager(&root).await.unwrap();
+
+        assert_eq!(
+            manager.current_snapshot().registry().tools()[0].name,
+            "bundle_tool"
+        );
+        assert!(manager.reload().await.is_err());
+        remove_test_dir(root).await;
+    }
+
+    async fn write_runtime_package(package_root: &Path, tool_name: &str) {
+        tokio::fs::create_dir_all(package_root).await.unwrap();
+        tokio::fs::write(
+            package_root.join("general-agent.json"),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "id": "com.example.server-runtime",
+                "version": "1.0.0",
+                "displayName": "Server runtime",
+                "kind": "native_runtime",
+                "package": {
+                    "includeInstructions": false,
+                    "includeRuntime": true
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            package_root.join("skill.json"),
+            serde_json::json!({
+                "name": "server-runtime",
+                "description": "Server runtime test skill.",
+                "version": "1.0.0",
+                "entry": {
+                    "type": "command",
+                    "command": "node",
+                    "args": ["index.js"]
+                },
+                "tools": [{
+                    "name": tool_name,
+                    "description": "Test tool.",
+                    "input_schema": { "type": "object" }
+                }]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(package_root.join("index.js"), "process.stdin.resume();\n")
+            .await
+            .unwrap();
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "general-agent-main-{name}-{}",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    async fn remove_test_dir(path: PathBuf) {
+        if path.exists() {
+            tokio::fs::remove_dir_all(path).await.unwrap();
+        }
     }
 }
