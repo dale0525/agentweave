@@ -686,7 +686,7 @@ fn managed_execution_compares_only_structured_absolute_command_components() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "vita"))))]
 #[tokio::test]
 async fn managed_execution_reaps_child_after_stdin_write_failure() {
     let fixture = VerifiedFixture::new().await;
@@ -720,27 +720,15 @@ async fn managed_execution_reaps_child_after_stdin_write_failure() {
     );
 
     let pid = tokio::fs::read_to_string(&pid_path).await.unwrap();
-    let process = std::process::Command::new("ps")
-        .args(["-p", pid.trim(), "-o", "stat="])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&process.stdout);
-    let stderr = String::from_utf8_lossy(&process.stderr);
-    assert!(
-        process.stderr.is_empty(),
-        "ps wrote to stderr for child {pid}: status={}, stdout={stdout:?}, stderr={stderr:?}",
-        process.status
-    );
-    assert!(
-        matches!(process.status.code(), Some(0 | 1)),
-        "ps returned an unexpected status for child {pid}: status={}, stdout={stdout:?}, stderr={stderr:?}",
-        process.status
-    );
-    assert!(
-        process.stdout.is_empty(),
-        "child {pid} was not reaped: status={}, stdout={stdout:?}, stderr={stderr:?}",
-        process.status
-    );
+    let pid = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
+    match rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG) {
+        Err(rustix::io::Errno::CHILD) => {}
+        Ok(None) => panic!("child {pid} is still running"),
+        Ok(Some((waited_pid, status))) => panic!(
+            "child {pid} was not reaped: waitpid returned child {waited_pid} with status {status:?}"
+        ),
+        Err(error) => panic!("waitpid failed for child {pid}: {error}"),
+    }
 }
 
 #[tokio::test]

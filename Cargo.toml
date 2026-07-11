@@ -22,7 +22,7 @@ fs2 = "0.4"
 hex = "0.4"
 icu_casemap = { version = "2.1.1", features = ["compiled_data"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 same-file = "1"
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
