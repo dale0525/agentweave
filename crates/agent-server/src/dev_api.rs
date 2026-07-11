@@ -14,6 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::api::AppState;
 use crate::dev_skills::DevSkillInventory;
@@ -54,7 +55,16 @@ struct DevSkillReloadResponse {
     reload_status: &'static str,
 }
 
+struct DevApiState {
+    app: Arc<AppState>,
+    mutations: Mutex<()>,
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
+    let state = Arc::new(DevApiState {
+        app: state,
+        mutations: Mutex::new(()),
+    });
     Router::new()
         .route("/dev/tools", get(list_tools))
         .route("/dev/tool-discovery", get(discover_tools))
@@ -67,10 +77,10 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 async fn list_tools(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<DevApiState>>,
 ) -> Result<Json<DevToolsResponse>, StatusCode> {
-    let skills = state.skills();
-    let registry = ToolRegistry::new(skills, &state.runtime_config());
+    let skills = state.app.skills();
+    let registry = ToolRegistry::new(skills, &state.app.runtime_config());
 
     Ok(Json(DevToolsResponse {
         tools: registry.diagnostics(),
@@ -78,10 +88,10 @@ async fn list_tools(
 }
 
 async fn discover_tools(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<DevApiState>>,
 ) -> Result<Json<DevToolDiscoveryResponse>, StatusCode> {
-    let skills = state.skills();
-    let registry = ToolRegistry::new(skills, &state.runtime_config());
+    let skills = state.app.skills();
+    let registry = ToolRegistry::new(skills, &state.app.runtime_config());
     let discovery = registry.discovery();
 
     Ok(Json(DevToolDiscoveryResponse {
@@ -91,11 +101,11 @@ async fn discover_tools(
 }
 
 async fn preview_instructions(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<DevApiState>>,
     Json(request): Json<InstructionsPreviewRequest>,
 ) -> Result<Json<InstructionsPreviewResponse>, StatusCode> {
-    let runtime_config = state.runtime_config();
-    let skill_catalog = state.skill_catalog();
+    let runtime_config = state.app.runtime_config();
+    let skill_catalog = state.app.skill_catalog();
     let triggered_skills = skill_catalog.triggered_skill_names(&request.content);
     let mut instruction_config =
         InstructionConfig::new(runtime_config.workspace_root, runtime_config.cwd);
@@ -129,9 +139,10 @@ fn input_content(input: &[serde_json::Value], index: usize) -> String {
 }
 
 async fn list_skills(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<DevApiState>>,
 ) -> Result<Json<DevSkillInventory>, StatusCode> {
-    let root = state.skills_root().ok_or(StatusCode::NOT_FOUND)?;
+    let _guard = state.mutations.lock().await;
+    let root = state.app.skills_root().ok_or(StatusCode::NOT_FOUND)?;
     crate::dev_skills::scan_skill_packages(root)
         .await
         .map(Json)
@@ -139,15 +150,17 @@ async fn list_skills(
 }
 
 async fn validate_skills(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<DevApiState>>,
 ) -> Result<Json<DevSkillInventory>, StatusCode> {
     list_skills(State(state)).await
 }
 
 async fn reload_skills(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<DevApiState>>,
 ) -> Result<Json<DevSkillReloadResponse>, StatusCode> {
+    let _guard = state.mutations.lock().await;
     let root = state
+        .app
         .skills_root()
         .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
     let metadata = tokio::fs::metadata(&root)
@@ -157,7 +170,7 @@ async fn reload_skills(
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
-    let manager = state.skill_manager();
+    let manager = state.app.skill_manager();
     let (report, inventory) = manager
         .reload_with_pre_publish(
             |_| async move { crate::dev_skills::scan_skill_packages(root).await },
@@ -177,9 +190,10 @@ async fn reload_skills(
 
 async fn delete_skill(
     Path(skill_id): Path<String>,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<DevApiState>>,
 ) -> Result<Json<DevSkillInventory>, StatusCode> {
-    let root = state.skills_root().ok_or(StatusCode::NOT_FOUND)?;
+    let _guard = state.mutations.lock().await;
+    let root = state.app.skills_root().ok_or(StatusCode::NOT_FOUND)?;
     crate::dev_skills::delete_skill_package(root, &skill_id)
         .await
         .map(Json)
@@ -204,3 +218,7 @@ fn dev_skill_delete_status(error: anyhow::Error) -> StatusCode {
 #[cfg(test)]
 #[path = "dev_api_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "dev_api_mutation_tests.rs"]
+mod mutation_tests;

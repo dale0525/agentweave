@@ -92,15 +92,27 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
   }, [loadInventory]);
 
   const handleDelete = useCallback(async (skillPackage: DevSkillPackage) => {
+    const operationId = ++operationSequenceRef.current;
+    setIsLoading(true);
     setActionError(null);
     try {
       const nextInventory = await deleteDevSkill(skillPackage.id);
+      if (operationId !== operationSequenceRef.current) {
+        return;
+      }
       setInventory(nextInventory);
       setSelectedId(nextInventory.packages[0]?.id ?? null);
       setDeletePackage(null);
     } catch {
+      if (operationId !== operationSequenceRef.current) {
+        return;
+      }
       setActionError("Action failed. Keep the current inventory and try again.");
       setDeletePackage(null);
+    } finally {
+      if (operationId === operationSequenceRef.current) {
+        setIsLoading(false);
+      }
     }
   }, []);
 

@@ -2,7 +2,11 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { DevSkillPackage } from "../src/renderer/api";
+import {
+  DevSkillInventory,
+  DevSkillPackage,
+  DevSkillReloadResponse
+} from "../src/renderer/api";
 import App from "../src/renderer/App";
 import {
   buildCreateSkillPrompt,
@@ -300,41 +304,8 @@ describe("DeveloperTools", () => {
 
   it("keeps the current inventory visible when reloading diagnostics fails", async () => {
     const user = userEvent.setup();
-    const initialInventory = {
-      root: "/repo/skills",
-      packages: [
-        {
-          id: "echo",
-          path: "echo",
-          name: "echo",
-          description: "Echo a text payload.",
-          hasSkillMd: false,
-          hasRuntimeManifest: true,
-          runtimeTools: ["echo"],
-          packageKind: "runtime",
-          bundleReady: true,
-          validation: { ok: true, errors: [], warnings: [] }
-        }
-      ]
-    };
-    const publishedInventory = {
-      root: "/repo/skills",
-      packages: [
-        ...initialInventory.packages,
-        {
-          id: "planning",
-          path: "planning",
-          name: "planning",
-          description: "Planning instructions.",
-          hasSkillMd: true,
-          hasRuntimeManifest: false,
-          runtimeTools: [],
-          packageKind: "instruction",
-          bundleReady: true,
-          validation: { ok: true, errors: [], warnings: [] }
-        }
-      ]
-    };
+    const initialInventory = inventoryWith("echo");
+    const publishedInventory = inventoryWith("echo", "planning");
     mockFetch([
       jsonResponse(initialInventory),
       jsonResponse({
@@ -433,29 +404,252 @@ describe("DeveloperTools", () => {
       ).not.toBeInTheDocument();
     });
   });
+
+  it("ignores stale delete success after a newer reload operation", async () => {
+    const user = userEvent.setup();
+    const staleDelete = deferred<Response>();
+    const latestReload = deferred<Response>();
+    mockFetch([
+      jsonResponse(inventoryWith("echo", "planning")),
+      jsonResponse(reloadResponse(5, inventoryWith("echo", "planning"))),
+      staleDelete.promise,
+      latestReload.promise
+    ]);
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await user.click(await screen.findByRole("button", { name: "Reload diagnostics" }));
+    await user.click(screen.getByRole("button", { name: "Delete package" }));
+    await user.click(screen.getByRole("button", { name: "Delete echo" }));
+    await user.click(screen.getByRole("button", { name: "Close delete dialog" }));
+    await user.click(screen.getByRole("button", { name: "Reload diagnostics" }));
+
+    await settleDeferred(staleDelete, jsonResponse(inventoryWith("stale")));
+
+    expectWorkbenchBusy(true);
+    expect(screen.getByText("skills/echo")).toBeInTheDocument();
+    expect(screen.getByText("Active snapshot 5")).toBeInTheDocument();
+    expect(screen.queryByText("skills/stale")).not.toBeInTheDocument();
+
+    await settleDeferred(
+      latestReload,
+      jsonResponse(reloadResponse(6, inventoryWith("planning")))
+    );
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
+    expect(screen.getByText("Active snapshot 6")).toBeInTheDocument();
+    expectWorkbenchBusy(false);
+  });
+
+  it("ignores stale delete failure after a newer refresh operation", async () => {
+    const user = userEvent.setup();
+    const staleDelete = deferred<Response>();
+    const latestRefresh = deferred<Response>();
+    mockFetch([
+      jsonResponse(inventoryWith("echo", "planning")),
+      jsonResponse(reloadResponse(5, inventoryWith("echo", "planning"))),
+      staleDelete.promise,
+      latestRefresh.promise
+    ]);
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await user.click(await screen.findByRole("button", { name: "Reload diagnostics" }));
+    await user.click(screen.getByRole("button", { name: "Delete package" }));
+    await user.click(screen.getByRole("button", { name: "Delete echo" }));
+    await user.click(screen.getByRole("button", { name: "Close delete dialog" }));
+    await user.click(screen.getByRole("button", { name: "Refresh skill packages" }));
+
+    await rejectDeferred(staleDelete, new Error("stale delete failed"));
+
+    expectWorkbenchBusy(true);
+    expect(screen.getByText("skills/echo")).toBeInTheDocument();
+    expect(screen.getByText("Active snapshot 5")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Action failed. Keep the current inventory and try again.")
+    ).not.toBeInTheDocument();
+
+    await settleDeferred(latestRefresh, jsonResponse(inventoryWith("planning")));
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
+    expect(screen.getByText("Active snapshot 5")).toBeInTheDocument();
+    expectWorkbenchBusy(false);
+  });
+
+  it("keeps an older refresh from overwriting a newer delete operation", async () => {
+    const user = userEvent.setup();
+    const staleRefresh = deferred<Response>();
+    const latestDelete = deferred<Response>();
+    mockFetch([
+      jsonResponse(inventoryWith("echo", "planning")),
+      jsonResponse(reloadResponse(5, inventoryWith("echo", "planning"))),
+      staleRefresh.promise,
+      latestDelete.promise
+    ]);
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await user.click(await screen.findByRole("button", { name: "Reload diagnostics" }));
+    await user.click(screen.getByRole("button", { name: "Refresh skill packages" }));
+    await user.click(screen.getByRole("button", { name: "Delete package" }));
+    await user.click(screen.getByRole("button", { name: "Delete echo" }));
+
+    await settleDeferred(staleRefresh, jsonResponse(inventoryWith("stale")));
+
+    expectWorkbenchBusy(true);
+    expect(screen.getByText("skills/echo")).toBeInTheDocument();
+    expect(screen.getByText("Active snapshot 5")).toBeInTheDocument();
+
+    await settleDeferred(latestDelete, jsonResponse(inventoryWith("planning")));
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
+    expect(screen.getByText("Active snapshot 5")).toBeInTheDocument();
+    expectWorkbenchBusy(false);
+  });
+
+  it("keeps an older reload failure from overwriting a newer delete operation", async () => {
+    const user = userEvent.setup();
+    const staleReload = deferred<Response>();
+    const latestDelete = deferred<Response>();
+    mockFetch([
+      jsonResponse(inventoryWith("echo", "planning")),
+      jsonResponse(reloadResponse(5, inventoryWith("echo", "planning"))),
+      staleReload.promise,
+      latestDelete.promise
+    ]);
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await user.click(await screen.findByRole("button", { name: "Reload diagnostics" }));
+    await user.click(screen.getByRole("button", { name: "Reload diagnostics" }));
+    await user.click(screen.getByRole("button", { name: "Delete package" }));
+    await user.click(screen.getByRole("button", { name: "Delete echo" }));
+
+    await settleDeferred(
+      staleReload,
+      new Response(JSON.stringify({ error: "stale reload failed" }), { status: 422 })
+    );
+
+    expectWorkbenchBusy(true);
+    expect(screen.getByText("skills/echo")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Action failed. Keep the current inventory and try again.")
+    ).not.toBeInTheDocument();
+
+    await settleDeferred(latestDelete, jsonResponse(inventoryWith("planning")));
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
+    expect(screen.getByText("Active snapshot 5")).toBeInTheDocument();
+    expectWorkbenchBusy(false);
+  });
+
+  it("keeps busy while a newer validate follows a completed refresh", async () => {
+    const user = userEvent.setup();
+    const staleRefresh = deferred<Response>();
+    const latestValidate = deferred<Response>();
+    mockFetch([
+      jsonResponse(inventoryWith("echo")),
+      staleRefresh.promise,
+      latestValidate.promise
+    ]);
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await screen.findByText("skills/echo");
+    await user.click(screen.getByRole("button", { name: "Refresh skill packages" }));
+    await user.click(screen.getByRole("button", { name: "Validate all skill packages" }));
+    await settleDeferred(staleRefresh, jsonResponse(inventoryWith("stale")));
+
+    expectWorkbenchBusy(true);
+    expect(screen.getByText("skills/echo")).toBeInTheDocument();
+
+    await settleDeferred(latestValidate, jsonResponse(inventoryWith("planning")));
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
+    expectWorkbenchBusy(false);
+  });
+
+  it("keeps busy when stale reload success finishes before a newer refresh", async () => {
+    const user = userEvent.setup();
+    const staleReload = deferred<Response>();
+    const latestRefresh = deferred<Response>();
+    mockFetch([
+      jsonResponse(inventoryWith("echo")),
+      staleReload.promise,
+      latestRefresh.promise
+    ]);
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await screen.findByText("skills/echo");
+    await user.click(screen.getByRole("button", { name: "Reload diagnostics" }));
+    await user.click(screen.getByRole("button", { name: "Refresh skill packages" }));
+    await settleDeferred(
+      staleReload,
+      jsonResponse(reloadResponse(9, inventoryWith("stale")))
+    );
+
+    expectWorkbenchBusy(true);
+    expect(screen.getByText("skills/echo")).toBeInTheDocument();
+    expect(screen.queryByText("Active snapshot 9")).not.toBeInTheDocument();
+
+    await settleDeferred(latestRefresh, jsonResponse(inventoryWith("planning")));
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
+    expectWorkbenchBusy(false);
+  });
+
+  it("keeps busy when stale reload failure finishes before a newer validate", async () => {
+    const user = userEvent.setup();
+    const staleReload = deferred<Response>();
+    const latestValidate = deferred<Response>();
+    mockFetch([
+      jsonResponse(inventoryWith("echo")),
+      staleReload.promise,
+      latestValidate.promise
+    ]);
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await screen.findByText("skills/echo");
+    await user.click(screen.getByRole("button", { name: "Reload diagnostics" }));
+    await user.click(screen.getByRole("button", { name: "Validate all skill packages" }));
+    await settleDeferred(
+      staleReload,
+      new Response(JSON.stringify({ error: "stale reload failed" }), { status: 422 })
+    );
+
+    expectWorkbenchBusy(true);
+    expect(
+      screen.queryByText("Action failed. Keep the current inventory and try again.")
+    ).not.toBeInTheDocument();
+
+    await settleDeferred(latestValidate, jsonResponse(inventoryWith("planning")));
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
+    expectWorkbenchBusy(false);
+  });
 });
 
-function inventoryWith(id: string) {
+function skillPackage(id: string): DevSkillPackage {
   return {
-    root: "/repo/skills",
-    packages: [
-      {
-        id,
-        path: id,
-        name: id,
-        description: `${id} package.`,
-        hasSkillMd: true,
-        hasRuntimeManifest: true,
-        runtimeTools: [`${id}_tool`],
-        packageKind: "combined",
-        bundleReady: true,
-        validation: { ok: true, errors: [], warnings: [] }
-      }
-    ]
+    id,
+    path: id,
+    name: id,
+    description: `${id} package.`,
+    hasSkillMd: true,
+    hasRuntimeManifest: true,
+    runtimeTools: [`${id}_tool`],
+    packageKind: "combined",
+    bundleReady: true,
+    runtimeReady: true,
+    instructionReady: true,
+    releaseReady: true,
+    readinessIssues: [],
+    requiredRuntimeTools: [],
+    requiredConnectors: [],
+    hasPackageMetadata: true,
+    validation: { ok: true, errors: [], warnings: [] }
   };
 }
 
-function reloadResponse(activeGeneration: number, inventory: ReturnType<typeof inventoryWith>) {
+function inventoryWith(...ids: string[]): DevSkillInventory {
+  return {
+    root: "/repo/skills",
+    packages: ids.map(skillPackage)
+  };
+}
+
+function reloadResponse(
+  activeGeneration: number,
+  inventory: DevSkillInventory
+): DevSkillReloadResponse {
   return {
     inventory,
     previousGeneration: activeGeneration - 1,
@@ -464,6 +658,29 @@ function reloadResponse(activeGeneration: number, inventory: ReturnType<typeof i
     inactivePackages: 0,
     reloadStatus: "published"
   };
+}
+
+async function settleDeferred<T>(pending: ReturnType<typeof deferred<T>>, value: T) {
+  await act(async () => {
+    pending.resolve(value);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+async function rejectDeferred<T>(pending: ReturnType<typeof deferred<T>>, error: Error) {
+  await act(async () => {
+    pending.reject(error);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+function expectWorkbenchBusy(isBusy: boolean) {
+  const workbench = screen
+    .getByRole("main", { name: "Developer Tools" })
+    .querySelector("[aria-busy]");
+  expect(workbench).toHaveAttribute("aria-busy", String(isBusy));
 }
 
 function deferred<T>() {

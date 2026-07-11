@@ -120,6 +120,7 @@ impl SkillManager {
     }
 
     /// Builds a candidate under the reload lock and publishes it only after preparation succeeds.
+    /// The callback must not call either reload method because the reload lock is non-reentrant.
     pub async fn reload_with_pre_publish<T, F, Fut>(
         &self,
         pre_publish: F,

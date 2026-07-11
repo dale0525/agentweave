@@ -534,6 +534,61 @@ async fn directory_source_rejects_duplicate_package_ids() {
     assert!(error.to_string().contains("duplicate package id"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn directory_source_accepts_only_safe_directory_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write_explicit_instruction_package(temporary.path(), "host", "com.example.host").await;
+    write_explicit_instruction_package(
+        &temporary.path().join("host"),
+        "linked-target",
+        "com.example.linked",
+    )
+    .await;
+    write_explicit_instruction_package(outside.path(), "outside", "com.example.outside").await;
+    tokio::fs::write(temporary.path().join("plain-file"), "not a package")
+        .await
+        .unwrap();
+    symlink(
+        temporary.path().join("host/linked-target"),
+        temporary.path().join("linked"),
+    )
+    .unwrap();
+    symlink(
+        outside.path().join("outside"),
+        temporary.path().join("escape"),
+    )
+    .unwrap();
+    symlink(
+        temporary.path().join("missing"),
+        temporary.path().join("dangling"),
+    )
+    .unwrap();
+    symlink(
+        temporary.path().join("plain-file"),
+        temporary.path().join("file-link"),
+    )
+    .unwrap();
+    let source = DirectorySkillSource::new(SkillLayer::Builtin, temporary.path());
+
+    let packages = source.discover().await.unwrap();
+    let ids = packages
+        .iter()
+        .map(|package| package.descriptor.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["com.example.host", "com.example.linked"]);
+    assert_eq!(
+        packages[1].root,
+        tokio::fs::canonicalize(temporary.path().join("host/linked-target"))
+            .await
+            .unwrap()
+    );
+}
+
 #[tokio::test]
 async fn package_tree_hash_is_independent_of_file_creation_order() {
     let first = tempfile::tempdir().unwrap();

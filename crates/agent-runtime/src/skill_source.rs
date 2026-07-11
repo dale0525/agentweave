@@ -56,13 +56,34 @@ impl SkillSource for DirectorySkillSource {
     }
 
     async fn discover(&self) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
+        let canonical_source_root = tokio::fs::canonicalize(&self.root)
+            .await
+            .with_context(|| format!("failed to resolve skill source {}", self.root.display()))?;
         let mut roots = Vec::new();
         let mut entries = tokio::fs::read_dir(&self.root)
             .await
             .with_context(|| format!("failed to read skill source {}", self.root.display()))?;
         while let Some(entry) = entries.next_entry().await? {
-            if entry.file_type().await?.is_dir() {
+            let file_type = entry.file_type().await?;
+            if file_type.is_dir() {
                 roots.push(entry.path());
+                continue;
+            }
+            if !file_type.is_symlink() {
+                continue;
+            }
+            let Ok(target) = tokio::fs::canonicalize(entry.path()).await else {
+                continue;
+            };
+            if !target.starts_with(&canonical_source_root) {
+                continue;
+            }
+            if tokio::fs::metadata(&target)
+                .await
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+            {
+                roots.push(target);
             }
         }
         roots.sort();
