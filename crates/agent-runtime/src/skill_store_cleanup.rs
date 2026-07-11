@@ -7,6 +7,38 @@ use chrono::Utc;
 use std::path::Path;
 
 impl SkillRevisionStore {
+    pub(crate) async fn cleanup_staging_candidate_error(
+        &self,
+        revision_id: &str,
+        primary: anyhow::Error,
+        candidate: &PreparedStoreDirectory,
+    ) -> anyhow::Result<()> {
+        let writable = make_tree_writable(candidate, self.limits.package_limits()).await;
+        let cleanup = match self.faults.check(StoreFaultPoint::WriteCandidateCleanup) {
+            Ok(()) => remove_opened_tree(candidate).await,
+            Err(error) => Err(error),
+        };
+        let mut diagnostics = Vec::new();
+        for (operation, result) in [
+            ("staging_candidate_writable", writable),
+            ("staging_candidate_cleanup", cleanup),
+        ] {
+            if let Err(error) = result {
+                self.record_maintenance_issue(revision_id, operation, candidate.path(), &error);
+                diagnostics.push(format!("{operation}: {error:#}"));
+            }
+        }
+        if diagnostics.is_empty() {
+            Err(primary)
+        } else {
+            let primary_message = format!("{primary:#}");
+            Err(primary.context(format!(
+                "{primary_message}; candidate cleanup diagnostics: {}",
+                diagnostics.join("; ")
+            )))
+        }
+    }
+
     pub(crate) async fn cleanup_failed_promotion_destination(
         &self,
         destination: &PreparedStoreDirectory,

@@ -361,17 +361,17 @@ fn ensure_opened_child_directory_platform(
     directory: &PreparedStoreDirectory,
     relative: &Path,
 ) -> anyhow::Result<()> {
-    let root = crate::skill_store_windows::final_path_for_file(directory.windows_descriptor())?;
-    let mut current = std::path::PathBuf::new();
+    let mut parent = directory.windows_descriptor().try_clone()?;
+    let mut parent_identity = crate::skill_store_windows::identity_for_file(&parent)?;
     for component in relative.components() {
-        current.push(component.as_os_str());
-        let path = root.join(&current);
-        match std::fs::create_dir(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-        crate::skill_store_windows::open_directory_nofollow(&path)?;
+        let (child, child_identity, _, _) =
+            crate::skill_store_windows::create_or_open_directory_child(
+                &parent,
+                parent_identity,
+                component.as_os_str(),
+            )?;
+        parent = child;
+        parent_identity = child_identity;
     }
     directory.verify()
 }
@@ -497,26 +497,17 @@ fn opened_tree_snapshot_platform(
 
 #[cfg(windows)]
 fn ensure_directory_platform(root: &StoreRootIdentity, relative: &Path) -> anyhow::Result<()> {
-    let root_final = crate::skill_store_windows::final_path_for_file(root.windows_descriptor())?;
-    let mut current = std::path::PathBuf::new();
+    let mut parent = root.windows_descriptor().try_clone()?;
+    let mut parent_identity = root.windows_identity();
     for component in relative.components() {
-        current.push(component.as_os_str());
-        match crate::skill_store_windows::open_directory_beneath(
-            root.windows_descriptor(),
-            root.windows_identity(),
-            &current,
-        ) {
-            Ok(_) => {}
-            Err(error) if error_is_not_found(&error) => {
-                std::fs::create_dir(root_final.join(&current))?;
-                crate::skill_store_windows::open_directory_beneath(
-                    root.windows_descriptor(),
-                    root.windows_identity(),
-                    &current,
-                )?;
-            }
-            Err(error) => return Err(error),
-        }
+        let (child, child_identity, _, _) =
+            crate::skill_store_windows::create_or_open_directory_child(
+                &parent,
+                parent_identity,
+                component.as_os_str(),
+            )?;
+        parent = child;
+        parent_identity = child_identity;
     }
     root.verify("store")
 }
@@ -524,27 +515,22 @@ fn ensure_directory_platform(root: &StoreRootIdentity, relative: &Path) -> anyho
 #[cfg(windows)]
 fn reserve_directory_platform(root: &StoreRootIdentity, relative: &Path) -> anyhow::Result<()> {
     let parent = relative.parent().unwrap_or_else(|| Path::new(""));
-    let (parent_handle, _, parent_final) = crate::skill_store_windows::open_directory_beneath(
+    let (parent_handle, parent_identity, _) = crate::skill_store_windows::open_directory_beneath(
         root.windows_descriptor(),
         root.windows_identity(),
         parent,
     )?;
     let name = relative.file_name().context("reservation path is empty")?;
-    std::fs::create_dir(parent_final.join(name))?;
-    let (_, _, opened_final) = crate::skill_store_windows::open_directory_beneath(
-        root.windows_descriptor(),
-        root.windows_identity(),
-        relative,
+    let (_, _, _, created) = crate::skill_store_windows::create_or_open_directory_child(
+        &parent_handle,
+        parent_identity,
+        name,
     )?;
-    let opened_parent = opened_final
-        .parent()
-        .context("reserved Windows directory has no parent")?;
-    let expected_parent = crate::skill_store_windows::final_path_for_file(&parent_handle)?;
-    if !opened_parent
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&expected_parent.to_string_lossy())
-    {
-        anyhow::bail!("reserved Windows directory escaped its opened parent");
+    if !created {
+        anyhow::bail!(
+            "skill store destination already exists: {}",
+            root.path().join(relative).display()
+        );
     }
     root.verify("store")
 }
@@ -561,15 +547,6 @@ fn snapshot_platform(
         relative,
     )?;
     crate::skill_store_secure_fs::snapshot_windows_opened(&final_path, directory, limits)
-}
-
-#[cfg(windows)]
-fn error_is_not_found(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-    })
 }
 
 #[cfg(all(not(unix), not(windows)))]

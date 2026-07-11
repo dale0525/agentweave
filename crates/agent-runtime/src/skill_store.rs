@@ -351,14 +351,24 @@ impl SkillRevisionStore {
         .await
         {
             return self
-                .cleanup_staging_candidate_error(error, &candidate_directory)
+                .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
                 .await;
         }
-        make_tree_writable(&candidate_directory, self.limits.package_limits()).await?;
+        if let Err(error) =
+            make_tree_writable(&candidate_directory, self.limits.package_limits()).await
+        {
+            return self
+                .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
+                .await;
+        }
         if let Some(parent) = relative_path.parent()
             && !parent.as_os_str().is_empty()
         {
-            ensure_opened_child_directory(&candidate_directory, parent).await?;
+            if let Err(error) = ensure_opened_child_directory(&candidate_directory, parent).await {
+                return self
+                    .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
+                    .await;
+            }
         }
         let mode = match open_prepared_regular_file(&candidate_directory, relative_path).await {
             Ok((file, _, mode)) => {
@@ -368,7 +378,7 @@ impl SkillRevisionStore {
             Err(error) if error_is_not_found(&error) => 0o644,
             Err(error) => {
                 return self
-                    .cleanup_staging_candidate_error(error, &candidate_directory)
+                    .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
                     .await;
             }
         };
@@ -391,32 +401,40 @@ impl SkillRevisionStore {
             }
             let error = failure.into_error();
             return self
-                .cleanup_staging_candidate_error(error, &candidate_directory)
+                .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
                 .await;
         }
         let metadata = match self.final_metadata(&record, &candidate_directory).await {
             Ok(metadata) => metadata,
             Err(error) => {
                 return self
-                    .cleanup_staging_candidate_error(error, &candidate_directory)
+                    .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
                     .await;
             }
         };
         self.faults
             .checkpoint(StoreFaultPoint::WriteBeforeMetadataCommit)
             .await;
+        let candidate_storage_path = match storage_path(&candidate) {
+            Ok(path) => path,
+            Err(error) => {
+                return self
+                    .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
+                    .await;
+            }
+        };
         let update = self
             .state
             .replace_staging_revision_cas(
                 revision_id,
                 SkillRevisionExpectation::from(&record),
-                &storage_path(&candidate)?,
+                &candidate_storage_path,
                 metadata,
             )
             .await;
         if let Err(error) = update {
             return self
-                .cleanup_staging_candidate_error(error, &candidate_directory)
+                .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
                 .await;
         }
         if let Err(error) = remove_opened_prepared_tree(&prepared_root).await {
@@ -971,21 +989,5 @@ impl SkillRevisionStore {
             "staging revision",
         )?;
         Ok((actual, relative))
-    }
-
-    async fn cleanup_staging_candidate_error(
-        &self,
-        error: anyhow::Error,
-        candidate: &crate::skill_store_secure_roots::PreparedStoreDirectory,
-    ) -> anyhow::Result<()> {
-        let writable = make_tree_writable(candidate, self.limits.package_limits()).await;
-        let cleanup = remove_opened_prepared_tree(candidate).await;
-        Err(combine_operation_errors(
-            error,
-            [
-                ("candidate writable preparation", writable),
-                ("candidate cleanup", cleanup),
-            ],
-        ))
     }
 }

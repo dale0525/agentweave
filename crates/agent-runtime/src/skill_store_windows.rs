@@ -61,6 +61,21 @@ pub(crate) fn normalized_path_is_within(path: &str, root: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('\\'))
 }
 
+#[cfg(any(test, windows))]
+pub(crate) fn finish_directory_child_creation<T, F>(
+    create: std::io::Result<()>,
+    open: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    match create {
+        Ok(()) => open(),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => open(),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(windows)]
 mod platform {
     use super::{
@@ -131,7 +146,7 @@ mod platform {
         }
         let mut ancestor = path;
         let mut missing = Vec::new();
-        let (mut directory, _, mut directory_final) = loop {
+        let (mut directory, _, _) = loop {
             match open_directory_nofollow(ancestor) {
                 Ok(opened) => break opened,
                 Err(error) if error_is_not_found(&error) => {
@@ -149,23 +164,47 @@ mod platform {
             }
         };
         for name in missing.into_iter().rev() {
-            let parent = WindowsStableParent {
-                identity: file_identity(&directory)?,
-                final_path: directory_final,
-                handle: directory,
-            };
-            let child_path = parent.final_path.join(&name);
-            std::fs::create_dir(&child_path)?;
-            directory = open_direct_child(
+            let parent_identity = file_identity(&directory)?;
+            let (child, _, _, _) =
+                create_or_open_directory_child(&directory, parent_identity, &name)?;
+            directory = child;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn create_or_open_directory_child(
+        parent_handle: &File,
+        parent_identity: WindowsFileIdentity,
+        child_name: &OsStr,
+    ) -> anyhow::Result<(File, WindowsFileIdentity, PathBuf, bool)> {
+        let components = Path::new(child_name).components().collect::<Vec<_>>();
+        if !matches!(components.as_slice(), [Component::Normal(_)]) {
+            anyhow::bail!("invalid Windows direct-child directory name");
+        }
+        let parent = WindowsStableParent {
+            handle: parent_handle.try_clone()?,
+            final_path: final_path(parent_handle)?,
+            identity: parent_identity,
+        };
+        let child_path = parent.final_path.join(child_name);
+        let create = std::fs::create_dir(&child_path);
+        let created = create.is_ok();
+        let child = super::finish_directory_child_creation(create, || {
+            open_direct_child(
                 &parent,
-                &name,
+                child_name,
                 FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
                 OPEN_EXISTING,
                 true,
-            )?;
-            directory_final = final_path(&directory)?;
-        }
-        Ok(())
+            )
+        })?;
+        let identity = file_identity(&child)?;
+        let child_final = final_path(&child)?;
+        Ok((child, identity, child_final, created))
+    }
+
+    pub(crate) fn identity_for_file(file: &File) -> anyhow::Result<WindowsFileIdentity> {
+        file_identity(file)
     }
 
     pub(crate) fn verify_directory_path(

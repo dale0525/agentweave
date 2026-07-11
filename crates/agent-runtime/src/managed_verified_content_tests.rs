@@ -21,6 +21,34 @@ struct VerifiedFixture {
     faults: SkillStoreTestFaults,
 }
 
+#[test]
+fn reap_result_reports_kill_and_wait_diagnostics() {
+    let error = crate::skill::finish_reap(
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "kill denied",
+        )),
+        Err(std::io::Error::other("wait failed")),
+    )
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("kill denied"), "{message}");
+    assert!(message.contains("wait failed"), "{message}");
+}
+
+#[test]
+fn reap_result_ignores_kill_error_after_process_exit() {
+    crate::skill::finish_reap(
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "already exited",
+        )),
+        Ok(()),
+    )
+    .unwrap();
+}
+
 impl VerifiedFixture {
     async fn new() -> Self {
         let app = tempdir().unwrap();
@@ -224,6 +252,191 @@ async fn managed_execution_uses_private_snapshot_after_hash_to_spawn_mutation() 
     assert!(!managed.path.join("original-marker").exists());
 }
 
+#[tokio::test]
+async fn managed_execution_rejects_absolute_store_command_before_spawn() {
+    let fixture = VerifiedFixture::new().await;
+    let marker = fixture._app.path().join("absolute-command.started");
+    let command = fixture
+        .store
+        .paths()
+        .managed
+        .join("forbidden-command")
+        .to_string_lossy()
+        .into_owned();
+    fixture
+        .active_package(
+            "com.example.execution-absolute-command",
+            write_runtime_package_with_entry(
+                "com.example.execution-absolute-command",
+                &command,
+                Vec::new(),
+                &format!(
+                    "printf started > '{}'; printf '{{\"ok\":true}}'\n",
+                    marker.display()
+                ),
+            )
+            .await,
+        )
+        .await;
+    let snapshot = SkillSnapshot::build(1, active_set(fixture.source.discover().await.unwrap()))
+        .await
+        .unwrap();
+
+    let error = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("managed execution command references skill store"));
+    assert!(!marker.exists());
+}
+
+#[tokio::test]
+async fn managed_execution_rejects_absolute_store_argument_before_spawn() {
+    let fixture = VerifiedFixture::new().await;
+    let marker = fixture._app.path().join("absolute-arg.started");
+    let argument = fixture
+        .store
+        .paths()
+        .staging
+        .join("forbidden")
+        .to_string_lossy()
+        .into_owned();
+    fixture
+        .active_package(
+            "com.example.execution-absolute-arg",
+            write_runtime_package_with_entry(
+                "com.example.execution-absolute-arg",
+                "sh",
+                vec!["run.sh".into(), argument],
+                &format!(
+                    "printf started > '{}'; printf '{{\"ok\":true}}'\n",
+                    marker.display()
+                ),
+            )
+            .await,
+        )
+        .await;
+    let snapshot = SkillSnapshot::build(1, active_set(fixture.source.discover().await.unwrap()))
+        .await
+        .unwrap();
+
+    let error = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("managed execution argument references skill store"));
+    assert!(!marker.exists());
+}
+
+#[tokio::test]
+async fn managed_execution_rejects_embedded_store_argument_before_spawn() {
+    let fixture = VerifiedFixture::new().await;
+    let marker = fixture._app.path().join("embedded-arg.started");
+    let argument = format!(
+        "--config={}",
+        fixture.store.paths().quarantine.join("config").display()
+    );
+    fixture
+        .active_package(
+            "com.example.execution-embedded-arg",
+            write_runtime_package_with_entry(
+                "com.example.execution-embedded-arg",
+                "sh",
+                vec!["run.sh".into(), argument],
+                &format!(
+                    "printf started > '{}'; printf '{{\"ok\":true}}'\n",
+                    marker.display()
+                ),
+            )
+            .await,
+        )
+        .await;
+    let snapshot = SkillSnapshot::build(1, active_set(fixture.source.discover().await.unwrap()))
+        .await
+        .unwrap();
+
+    let error = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("managed execution argument references skill store"));
+    assert!(!marker.exists());
+}
+
+#[tokio::test]
+async fn managed_execution_allows_system_node_with_private_relative_script() {
+    let fixture = VerifiedFixture::new().await;
+    fixture
+        .active_package(
+            "com.example.execution-node",
+            write_runtime_package_with_entry(
+                "com.example.execution-node",
+                "node",
+                vec!["index.js".into()],
+                "process.stdout.write(JSON.stringify({ok: true}));\n",
+            )
+            .await,
+        )
+        .await;
+    let snapshot = SkillSnapshot::build(1, active_set(fixture.source.discover().await.unwrap()))
+        .await
+        .unwrap();
+
+    let value = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap();
+
+    assert_eq!(value, json!({"ok": true}));
+}
+
+#[test]
+fn managed_execution_store_reference_comparison_normalizes_windows_text() {
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            r"--config=c:/STORE/managed/config.json",
+            Path::new(r"C:\store\MANAGED"),
+            true,
+        )
+    );
+    assert!(
+        !crate::skill_store_execution::execution_text_references_path(
+            r"--config=c:/store/managed-peer/config.json",
+            Path::new(r"C:\store\managed"),
+            true,
+        )
+    );
+}
+
+#[test]
+fn managed_execution_store_reference_comparison_resolves_absolute_parent_components() {
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            "/private/cache/../store/managed/tool",
+            Path::new("/private/store/managed"),
+            false,
+        )
+    );
+}
+
+#[test]
+fn managed_execution_store_reference_comparison_ignores_external_substring_matches() {
+    assert!(
+        !crate::skill_store_execution::execution_text_references_path(
+            "/external/private/store/managed/tool",
+            Path::new("/private/store/managed"),
+            false,
+        )
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn managed_execution_reaps_child_after_stdin_write_failure() {
@@ -367,6 +580,16 @@ fn active_set(packages: Vec<crate::skill_source::DiscoveredSkillPackage>) -> Res
 }
 
 async fn write_runtime_package(id: &str) -> TempDir {
+    write_runtime_package_with_entry(id, "sh", vec!["run.sh".into()], "printf '{\"ok\":true}'\n")
+        .await
+}
+
+async fn write_runtime_package_with_entry(
+    id: &str,
+    command: &str,
+    args: Vec<String>,
+    script: &str,
+) -> TempDir {
     let root = tempdir().unwrap();
     let name = id.rsplit('.').next().unwrap();
     tokio::fs::write(
@@ -389,7 +612,7 @@ async fn write_runtime_package(id: &str) -> TempDir {
             "name": name,
             "description": "verified runtime",
             "version": "1.0.0",
-            "entry": {"type": "command", "command": "sh", "args": ["run.sh"]},
+            "entry": {"type": "command", "command": command, "args": args},
             "tools": [{
                 "name": "verified_tool",
                 "description": "verified tool",
@@ -400,7 +623,12 @@ async fn write_runtime_package(id: &str) -> TempDir {
     )
     .await
     .unwrap();
-    tokio::fs::write(root.path().join("run.sh"), "printf '{\"ok\":true}'\n")
+    let script_name = if args.first().is_some_and(|arg| arg == "index.js") {
+        "index.js"
+    } else {
+        "run.sh"
+    };
+    tokio::fs::write(root.path().join(script_name), script)
         .await
         .unwrap();
     root

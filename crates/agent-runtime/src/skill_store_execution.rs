@@ -13,13 +13,112 @@ use anyhow::Context;
 use std::path::{Path, PathBuf};
 
 pub(crate) struct PreparedSkillExecution {
-    root: PathBuf,
+    command: String,
+    args: Vec<String>,
+    current_dir: PathBuf,
     _temporary: tempfile::TempDir,
 }
 
 impl PreparedSkillExecution {
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
+    pub(crate) fn command(&self) -> &str {
+        &self.command
+    }
+
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    pub(crate) fn current_dir(&self) -> &Path {
+        &self.current_dir
+    }
+}
+
+pub(crate) fn execution_text_references_path(value: &str, protected: &Path, windows: bool) -> bool {
+    let value = normalize_execution_text(value, windows);
+    let protected = normalize_execution_text(&protected.to_string_lossy(), windows)
+        .trim_end_matches(if windows { '\\' } else { '/' })
+        .to_string();
+    if protected.is_empty() {
+        return false;
+    }
+    let separator = if windows { '\\' } else { '/' };
+    let mut remaining = value.as_str();
+    while let Some(index) = remaining.find(&protected) {
+        let prefix = &remaining[..index];
+        let suffix = &remaining[index + protected.len()..];
+        let prefix_boundary = prefix
+            .chars()
+            .next_back()
+            .is_none_or(is_embedded_path_boundary);
+        if prefix_boundary && (suffix.is_empty() || suffix.starts_with(separator)) {
+            return true;
+        }
+        remaining = &remaining[index + protected.len()..];
+    }
+    let Some(value) = lexically_normalize_absolute(&value, windows) else {
+        return false;
+    };
+    let protected = lexically_normalize_absolute(&protected, windows).unwrap_or(protected);
+    value == protected
+        || value
+            .strip_prefix(&protected)
+            .is_some_and(|suffix| suffix.starts_with(separator))
+}
+
+fn is_embedded_path_boundary(character: char) -> bool {
+    !character.is_alphanumeric() && !matches!(character, '_' | '-' | '.' | '/' | '\\')
+}
+
+fn lexically_normalize_absolute(value: &str, windows: bool) -> Option<String> {
+    let separator = if windows { '\\' } else { '/' };
+    let (prefix, remainder) = if windows {
+        let bytes = value.as_bytes();
+        if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'\\' {
+            (&value[..2], &value[3..])
+        } else if let Some(remainder) = value.strip_prefix("\\\\") {
+            ("\\\\", remainder)
+        } else {
+            return None;
+        }
+    } else if let Some(remainder) = value.strip_prefix('/') {
+        ("/", remainder)
+    } else {
+        return None;
+    };
+    let mut components = Vec::new();
+    for component in remainder.split(separator) {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            component => components.push(component),
+        }
+    }
+    if prefix == "/" || prefix == "\\\\" {
+        Some(format!(
+            "{prefix}{}",
+            components.join(&separator.to_string())
+        ))
+    } else if components.is_empty() {
+        Some(format!("{prefix}{separator}"))
+    } else {
+        Some(format!(
+            "{prefix}{separator}{}",
+            components.join(&separator.to_string())
+        ))
+    }
+}
+
+fn normalize_execution_text(value: &str, windows: bool) -> String {
+    if windows {
+        value
+            .replace('/', "\\")
+            .to_lowercase()
+            .replace("\\\\?\\unc\\", "\\\\")
+            .replace("\\\\?\\", "")
+    } else {
+        value.to_string()
     }
 }
 
@@ -85,6 +184,7 @@ impl SkillRevisionStore {
         if actual != expected_hash {
             anyhow::bail!("managed execution snapshot hash mismatch: {revision_id}");
         }
+        review_execution_binding(manifest, &self.paths, expected_path)?;
         for resource in manifest_entry_resources(manifest) {
             match open_regular_file_nofollow(temporary.path(), resource).await {
                 Ok(_) => {}
@@ -106,10 +206,46 @@ impl SkillRevisionStore {
         self.faults
             .checkpoint(StoreFaultPoint::ExecutionAfterSnapshot)
             .await;
-        let root = temporary.path().to_path_buf();
+        let current_dir = temporary.path().to_path_buf();
         Ok(PreparedSkillExecution {
-            root,
+            command: manifest.entry.command.clone(),
+            args: manifest.entry.args.clone(),
+            current_dir,
             _temporary: temporary,
         })
     }
+}
+
+fn review_execution_binding(
+    manifest: &SkillManifest,
+    paths: &crate::skill_store::SkillStorePaths,
+    authoritative_revision: &Path,
+) -> anyhow::Result<()> {
+    let locks = paths.managed.join(".locks");
+    let protected = [
+        ("authoritative revision", authoritative_revision),
+        ("locks root", locks.as_path()),
+        ("managed root", paths.managed.as_path()),
+        ("staging root", paths.staging.as_path()),
+        ("quarantine root", paths.quarantine.as_path()),
+    ];
+    reject_execution_store_reference("command", &manifest.entry.command, &protected)?;
+    for arg in &manifest.entry.args {
+        reject_execution_store_reference("argument", arg, &protected)?;
+    }
+    Ok(())
+}
+
+fn reject_execution_store_reference(
+    value_kind: &str,
+    value: &str,
+    protected: &[(&str, &Path)],
+) -> anyhow::Result<()> {
+    if let Some((root_kind, _)) = protected
+        .iter()
+        .find(|(_, path)| execution_text_references_path(value, path, cfg!(windows)))
+    {
+        anyhow::bail!("managed execution {value_kind} references skill store {root_kind}: {value}");
+    }
+    Ok(())
 }

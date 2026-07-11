@@ -132,6 +132,78 @@ async fn invalid_candidate_descriptor_never_changes_authoritative_tree() {
 }
 
 #[tokio::test]
+async fn child_parent_failure_removes_candidate_and_preserves_authoritative_tree() {
+    let fixture = CowFixture::new().await;
+    let source = write_package().await;
+    tokio::fs::write(source.path().join("a"), b"authoritative")
+        .await
+        .unwrap();
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let prior = fixture.record(&staged.revision_id).await;
+
+    fixture
+        .store
+        .write_staging_file(&staged.revision_id, Path::new("a/b"), b"rejected")
+        .await
+        .unwrap_err();
+
+    assert_authoritative_binding(&fixture.record(&staged.revision_id).await, &prior).await;
+    assert_eq!(
+        tokio::fs::read(Path::new(&prior.storage_path).join("a"))
+            .await
+            .unwrap(),
+        b"authoritative"
+    );
+    let candidate_prefix = format!("{}.candidate.", staged.revision_id);
+    let mut entries = tokio::fs::read_dir(staged.path.parent().unwrap())
+        .await
+        .unwrap();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        assert!(
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&candidate_prefix),
+            "staging candidate residue remained: {}",
+            entry.path().display()
+        );
+    }
+}
+
+#[tokio::test]
+async fn candidate_cleanup_failure_records_issue_without_hiding_write_error() {
+    let fixture = CowFixture::new().await;
+    let staged = fixture.staged().await;
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::WriteCandidateCleanup);
+
+    let error = fixture
+        .store
+        .write_staging_file(
+            &staged.revision_id,
+            Path::new("general-agent.json"),
+            b"{invalid",
+        )
+        .await
+        .unwrap_err();
+
+    let primary_message = error.root_cause().to_string();
+    let message = format!("{error:#}");
+    let primary = message.find(&primary_message).unwrap();
+    let cleanup = message.find("WriteCandidateCleanup").unwrap();
+    assert!(primary < cleanup, "primary error was hidden: {message}");
+    let issues = fixture.store.maintenance_issues();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].operation, "staging_candidate_cleanup");
+    assert!(issues[0].message.contains("WriteCandidateCleanup"));
+}
+
+#[tokio::test]
 async fn successful_write_switches_database_to_existing_candidate_before_old_cleanup() {
     let fixture = CowFixture::new().await;
     let staged = fixture.staged().await;

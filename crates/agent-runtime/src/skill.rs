@@ -270,12 +270,19 @@ impl SkillRegistry {
             anyhow::bail!("{}", availability.reason);
         }
         let prepared_execution = crate::skill_verified::prepare_before_execution(skill).await?;
-        let execution_root = prepared_execution
-            .as_ref()
-            .map_or(skill.root.as_path(), |prepared| prepared.root());
+        let (command, args, execution_root) = prepared_execution.as_ref().map_or_else(
+            || {
+                (
+                    skill.manifest.entry.command.as_str(),
+                    skill.manifest.entry.args.as_slice(),
+                    skill.root.as_path(),
+                )
+            },
+            |prepared| (prepared.command(), prepared.args(), prepared.current_dir()),
+        );
 
-        let mut child = Command::new(&skill.manifest.entry.command)
-            .args(&skill.manifest.entry.args)
+        let mut child = Command::new(command)
+            .args(args)
             .current_dir(execution_root)
             .env("GENERAL_AGENT_TOOL_NAME", tool_name)
             .env("GENERAL_AGENT_WORKSPACE_ROOT", &context.workspace_root)
@@ -334,8 +341,11 @@ impl SkillRegistry {
                 Err(error) => return child_error(&mut child, error).await,
             };
         if output.stdout_truncated || output.stderr_truncated {
-            terminate_and_reap(&mut child).await;
-            anyhow::bail!("tool output exceeded runtime output limit");
+            return child_error(
+                &mut child,
+                anyhow::anyhow!("tool output exceeded runtime output limit"),
+            )
+            .await;
         }
 
         let status = match child.wait().await {
@@ -393,17 +403,38 @@ impl SkillRegistry {
 
 async fn child_error<T>(
     child: &mut tokio::process::Child,
-    error: anyhow::Error,
+    primary: anyhow::Error,
 ) -> anyhow::Result<T> {
-    terminate_and_reap(child).await;
-    Err(error)
+    match terminate_and_reap(child).await {
+        Ok(()) => Err(primary),
+        Err(reap) => {
+            let primary_message = format!("{primary:#}");
+            Err(primary.context(format!(
+                "{primary_message}; process reap diagnostics: {reap:#}"
+            )))
+        }
+    }
 }
 
-async fn terminate_and_reap(child: &mut tokio::process::Child) {
+async fn terminate_and_reap(child: &mut tokio::process::Child) -> anyhow::Result<()> {
     #[cfg(test)]
     EXPLICIT_CHILD_REAP_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    let kill = child.start_kill();
+    let wait = child.wait().await.map(|_| ());
+    finish_reap(kill, wait)
+}
+
+pub(crate) fn finish_reap(
+    kill: std::io::Result<()>,
+    wait: std::io::Result<()>,
+) -> anyhow::Result<()> {
+    match (kill, wait) {
+        (_, Ok(())) => Ok(()),
+        (Ok(()), Err(wait)) => Err(wait).context("failed to wait for terminated skill process"),
+        (Err(kill), Err(wait)) => anyhow::bail!(
+            "failed to kill skill process: {kill}; failed to wait for skill process: {wait}"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -460,7 +491,11 @@ pub(crate) fn validate_manifest_semantics(manifest: &SkillManifest) -> anyhow::R
     }
 
     for arg in &manifest.entry.args {
-        if looks_like_entry_resource(arg) && !is_safe_packaged_skill_path(Path::new(arg)) {
+        let path = Path::new(arg);
+        if looks_like_entry_resource(arg)
+            && !path.is_absolute()
+            && !is_safe_packaged_skill_path(path)
+        {
             anyhow::bail!("unsafe skill entry resource path: {arg}");
         }
     }

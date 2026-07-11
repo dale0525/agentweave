@@ -3,7 +3,7 @@ use crate::skill_store_windows::{
     FILE_FLAG_OPEN_REPARSE_POINT_FLAG, FILE_SHARE_DELETE_FLAG, FILE_SHARE_READ_FLAG,
     FILE_SHARE_WRITE_FLAG, MOVEFILE_REPLACE_EXISTING_FLAG, MOVEFILE_WRITE_THROUGH_FLAG,
     atomic_replace_flags, attributes_are_reparse, component_open_flags, directory_share_mode,
-    lock_file_share_mode, normalized_path_is_within,
+    finish_directory_child_creation, lock_file_share_mode, normalized_path_is_within,
 };
 
 #[test]
@@ -50,4 +50,34 @@ fn windows_containment_is_case_insensitive_and_component_bounded() {
         r"\\?\C:\Store\Managed-Escape\Revision",
         r"\\?\c:\store\managed"
     ));
+}
+
+#[test]
+fn windows_directory_child_creation_opens_after_a_concurrent_winner() {
+    let mut opened = false;
+    let child = finish_directory_child_creation(
+        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)),
+        || {
+            opened = true;
+            Ok("opened child")
+        },
+    )
+    .unwrap();
+
+    assert!(opened);
+    assert_eq!(child, "opened child");
+}
+
+#[test]
+fn windows_directory_child_creation_does_not_hide_other_create_errors() {
+    let error = finish_directory_child_creation::<(), _>(
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        || panic!("open must not run after a non-concurrent create failure"),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
 }
