@@ -8,8 +8,8 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::Barrier;
-use tokio::time::{Instant, sleep};
+use tokio::sync::{Barrier, mpsc};
+use tokio::time::{Instant, sleep, timeout};
 use uuid::Uuid;
 
 fn package_id(value: &str) -> SkillPackageId {
@@ -43,6 +43,22 @@ fn file_database() -> (TempDir, String) {
     let path = directory.path().join("skill-state.db");
     let url = format!("sqlite://{}?mode=rwc", path.display());
     (directory, url)
+}
+
+async fn await_operation_entries(receiver: &mut mpsc::UnboundedReceiver<()>) {
+    for _ in 0..2 {
+        timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("competitor did not reach the operation entry")
+            .expect("operation entry channel closed");
+    }
+}
+
+async fn await_task<T>(task: tokio::task::JoinHandle<T>) -> T {
+    timeout(Duration::from_secs(2), task)
+        .await
+        .expect("competitor did not finish")
+        .expect("competitor task panicked")
 }
 
 #[tokio::test]
@@ -105,6 +121,32 @@ async fn authoritative_revision_id_drives_staging_promotion_and_activation() {
         .await
         .unwrap();
     assert_eq!(direct.status, SkillRevisionStatus::Managed);
+}
+
+#[tokio::test]
+async fn create_revision_is_a_trusted_managed_import_compatibility_contract() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let state = SkillStateStore::new(storage);
+    let package_id = package_id("com.example.trusted");
+
+    let revision = state
+        .create_revision(revision_input(
+            package_id.clone(),
+            "managed/com.example.trusted/revisions/imported".into(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(revision.status, SkillRevisionStatus::Managed);
+    state
+        .activate_revision(
+            &package_id,
+            &revision.revision_id,
+            SkillLayerRecord::Managed,
+            "trusted-importer",
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -389,12 +431,13 @@ async fn quarantine_failure_rolls_back_revision_path_status_installation_and_jso
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_approval_resolution_has_one_winner_and_business_loser() {
     let (_directory, url) = file_database();
     let first_storage = Storage::connect(&url).await.unwrap();
     let second_storage = Storage::connect(&url).await.unwrap();
-    let first = SkillStateStore::new(first_storage);
+    let lock_storage = Storage::connect(&url).await.unwrap();
+    let first = SkillStateStore::new(first_storage.clone());
     let second = SkillStateStore::new(second_storage);
     let approval = first
         .create_approval(approval_input(package_id("com.example.calendar")))
@@ -402,11 +445,37 @@ async fn concurrent_approval_resolution_has_one_winner_and_business_loser() {
         .unwrap();
     let approval_id = approval.approval_id.clone();
     let second_id = approval.approval_id.clone();
+    let mut lock = lock_storage.pool().acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let (entered, mut entries) = mpsc::unbounded_channel();
+    let approve_barrier = barrier.clone();
+    let approve_entered = entered.clone();
+    let approve = tokio::spawn(async move {
+        approve_barrier.wait().await;
+        approve_entered.send(()).unwrap();
+        first.approve(&approval_id, "owner-2").await
+    });
+    let reject_barrier = barrier.clone();
+    let reject_entered = entered.clone();
+    let reject = tokio::spawn(async move {
+        reject_barrier.wait().await;
+        reject_entered.send(()).unwrap();
+        second.reject(&second_id, "owner-3").await
+    });
+    drop(entered);
+    barrier.wait().await;
+    await_operation_entries(&mut entries).await;
+    assert!(!approve.is_finished());
+    assert!(!reject.is_finished());
+    sqlx::query("COMMIT").execute(&mut *lock).await.unwrap();
+    drop(lock);
 
-    let (approve, reject) = tokio::join!(
-        first.approve(&approval_id, "owner-2"),
-        second.reject(&second_id, "owner-3")
-    );
+    let approve = await_task(approve).await;
+    let reject = await_task(reject).await;
 
     assert_eq!(approve.is_ok() as u8 + reject.is_ok() as u8, 1);
     let loser = approve.err().or_else(|| reject.err()).unwrap().to_string();
@@ -415,7 +484,7 @@ async fn concurrent_approval_resolution_has_one_winner_and_business_loser() {
         "unexpected loser error: {loser}"
     );
     assert!(!loser.contains("database is locked"));
-    let resolved = first
+    let resolved = SkillStateStore::new(first_storage)
         .get_approval(&approval.approval_id)
         .await
         .unwrap()
@@ -428,6 +497,7 @@ async fn concurrent_quarantine_has_one_business_winner_without_sqlite_busy() {
     let (_directory, url) = file_database();
     let first_storage = Storage::connect(&url).await.unwrap();
     let second_storage = Storage::connect(&url).await.unwrap();
+    let lock_storage = Storage::connect(&url).await.unwrap();
     let package_id = package_id("com.example.calendar");
     let first = SkillStateStore::new(first_storage.clone());
     let second = SkillStateStore::new(second_storage);
@@ -448,37 +518,43 @@ async fn concurrent_quarantine_has_one_business_winner_without_sqlite_busy() {
         .await
         .unwrap();
 
-    let mut lock = first_storage.pool().acquire().await.unwrap();
+    let mut lock = lock_storage.pool().acquire().await.unwrap();
     sqlx::query("BEGIN IMMEDIATE")
         .execute(&mut *lock)
         .await
         .unwrap();
     let barrier = Arc::new(Barrier::new(3));
+    let (entered, mut entries) = mpsc::unbounded_channel();
     let first_barrier = barrier.clone();
+    let first_entered = entered.clone();
     let first_revision = revision.revision_id.clone();
     let first_task = tokio::spawn(async move {
         first_barrier.wait().await;
+        first_entered.send(()).unwrap();
         first
             .quarantine_revision_record(&first_revision, "quarantine/first", "first")
             .await
     });
     let second_barrier = barrier.clone();
+    let second_entered = entered.clone();
     let second_revision = revision.revision_id.clone();
     let second_task = tokio::spawn(async move {
         second_barrier.wait().await;
+        second_entered.send(()).unwrap();
         second
             .quarantine_revision_record(&second_revision, "quarantine/second", "second")
             .await
     });
+    drop(entered);
     barrier.wait().await;
-    sleep(Duration::from_millis(100)).await;
+    await_operation_entries(&mut entries).await;
     assert!(!first_task.is_finished());
     assert!(!second_task.is_finished());
     sqlx::query("COMMIT").execute(&mut *lock).await.unwrap();
     drop(lock);
 
-    let first_result = first_task.await.unwrap();
-    let second_result = second_task.await.unwrap();
+    let first_result = await_task(first_task).await;
+    let second_result = await_task(second_task).await;
     assert_eq!(first_result.is_ok() as u8 + second_result.is_ok() as u8, 1);
     let winner_path = first_result
         .as_ref()

@@ -5,8 +5,8 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::Barrier;
-use tokio::time::sleep;
+use tokio::sync::{Barrier, mpsc};
+use tokio::time::timeout;
 use uuid::Uuid;
 
 fn package_id(value: &str) -> SkillPackageId {
@@ -18,6 +18,22 @@ fn file_database() -> (TempDir, String) {
     let path = directory.path().join("skill-state.db");
     let url = format!("sqlite://{}?mode=rwc", path.display());
     (directory, url)
+}
+
+async fn await_operation_entries(receiver: &mut mpsc::UnboundedReceiver<()>) {
+    for _ in 0..2 {
+        timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("competitor did not reach the operation entry")
+            .expect("operation entry channel closed");
+    }
+}
+
+async fn await_task<T>(task: tokio::task::JoinHandle<T>) -> T {
+    timeout(Duration::from_secs(2), task)
+        .await
+        .expect("competitor did not finish")
+        .expect("competitor task panicked")
 }
 
 #[tokio::test]
@@ -85,6 +101,7 @@ async fn concurrent_snapshot_activation_and_lkg_resolution_do_not_leak_sqlite_bu
     let (_directory, url) = file_database();
     let first_storage = Storage::connect(&url).await.unwrap();
     let second_storage = Storage::connect(&url).await.unwrap();
+    let lock_storage = Storage::connect(&url).await.unwrap();
     let first = SkillStateStore::new(first_storage.clone());
     let second = SkillStateStore::new(second_storage);
     first
@@ -97,31 +114,37 @@ async fn concurrent_snapshot_activation_and_lkg_resolution_do_not_leak_sqlite_bu
         .await
         .unwrap();
 
-    let mut lock = first_storage.pool().acquire().await.unwrap();
+    let mut lock = lock_storage.pool().acquire().await.unwrap();
     sqlx::query("BEGIN IMMEDIATE")
         .execute(&mut *lock)
         .await
         .unwrap();
     let barrier = Arc::new(Barrier::new(3));
+    let (entered, mut entries) = mpsc::unbounded_channel();
     let activation_barrier = barrier.clone();
+    let activation_entered = entered.clone();
     let activation = tokio::spawn(async move {
         activation_barrier.wait().await;
+        activation_entered.send(()).unwrap();
         first.record_snapshot_activation(2).await
     });
     let lkg_barrier = barrier.clone();
+    let lkg_entered = entered.clone();
     let lkg = tokio::spawn(async move {
         lkg_barrier.wait().await;
+        lkg_entered.send(()).unwrap();
         second.mark_snapshot_last_known_good(1).await
     });
+    drop(entered);
     barrier.wait().await;
-    sleep(Duration::from_millis(100)).await;
+    await_operation_entries(&mut entries).await;
     assert!(!activation.is_finished());
     assert!(!lkg.is_finished());
     sqlx::query("COMMIT").execute(&mut *lock).await.unwrap();
     drop(lock);
 
-    let activation_result = activation.await.unwrap();
-    let lkg_result = lkg.await.unwrap();
+    let activation_result = await_task(activation).await;
+    let lkg_result = await_task(lkg).await;
     assert!(activation_result.is_ok(), "{activation_result:?}");
     if let Err(error) = &lkg_result {
         let message = format!("{error:#}");
@@ -336,6 +359,70 @@ async fn public_reads_reject_corrupt_ids_packages_bools_json_and_timestamps() {
 }
 
 #[tokio::test]
+async fn approval_reads_reject_resolution_column_invariant_violations() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let state = SkillStateStore::new(storage.clone());
+    let now = "2026-01-01T00:00:00Z";
+    let mut connection = storage.pool().acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    for (id, status, approved_by, resolved_at) in [
+        (
+            "88888888-8888-4888-8888-888888888888",
+            "pending",
+            Some("owner-2"),
+            None,
+        ),
+        (
+            "99999999-9999-4999-8999-999999999999",
+            "approved",
+            None,
+            Some(now),
+        ),
+        (
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "rejected",
+            Some("owner-2"),
+            Some("not-a-time"),
+        ),
+    ] {
+        sqlx::query(
+            r#"INSERT INTO skill_approvals
+               (approval_id, package_id, revision_id, operation, requested_by, approved_by,
+                status, permission_diff, created_at, resolved_at)
+               VALUES (?, 'com.example.calendar', 'rev-1', 'activate', 'owner-1', ?, ?, '[]', ?, ?)"#,
+        )
+        .bind(id)
+        .bind(approved_by)
+        .bind(status)
+        .bind(now)
+        .bind(resolved_at)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    }
+    drop(connection);
+
+    let pending_error = state
+        .get_approval("88888888-8888-4888-8888-888888888888")
+        .await
+        .unwrap_err();
+    assert!(pending_error.to_string().contains("pending"));
+    let resolved_error = state
+        .get_approval("99999999-9999-4999-8999-999999999999")
+        .await
+        .unwrap_err();
+    assert!(resolved_error.to_string().contains("resolved"));
+    let timestamp_error = state
+        .get_approval("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        .await
+        .unwrap_err();
+    assert!(timestamp_error.to_string().contains("resolved_at"));
+}
+
+#[tokio::test]
 async fn snapshot_and_circuit_reads_are_typed_and_reject_corruption() {
     let storage = Storage::connect("sqlite::memory:").await.unwrap();
     let state = SkillStateStore::new(storage.clone());
@@ -438,9 +525,14 @@ async fn snapshot_and_circuit_reads_are_typed_and_reject_corruption() {
 }
 
 async fn insert_corrupt_approval_rows(storage: &Storage, now: &str) {
+    let mut connection = storage.pool().acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
     for (id, permission_diff, resolved_at) in [
-        ("bad-approval", "[]", None),
-        ("11111111-1111-4111-8111-111111111111", "{bad", None),
+        ("bad-approval", "[]", Some(now)),
+        ("11111111-1111-4111-8111-111111111111", "{bad", Some(now)),
         (
             "22222222-2222-4222-8222-222222222222",
             "[]",
@@ -458,7 +550,7 @@ async fn insert_corrupt_approval_rows(storage: &Storage, now: &str) {
         .bind(permission_diff)
         .bind(now)
         .bind(resolved_at)
-        .execute(storage.pool())
+        .execute(&mut *connection)
         .await
         .unwrap();
     }

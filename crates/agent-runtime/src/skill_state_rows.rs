@@ -284,18 +284,40 @@ pub(crate) fn approval_from_row(row: &SqliteRow) -> anyhow::Result<SkillApproval
     let approval_id: String = row.try_get("approval_id")?;
     validate_uuid_v4("approval_id", &approval_id)?;
     let status: String = row.try_get("status")?;
+    let status = SkillApprovalStatus::parse(&status)?;
+    let approved_by: Option<String> = row.try_get("approved_by")?;
+    let resolved_at = parse_optional_row_timestamp(row, "resolved_at")?;
+    validate_approval_resolution_columns(status, approved_by.as_deref(), resolved_at.as_ref())?;
     Ok(SkillApprovalRecord {
         approval_id,
         package_id: parse_package_id(row, "package_id")?,
         revision_id: row.try_get("revision_id")?,
         operation: row.try_get("operation")?,
         requested_by: row.try_get("requested_by")?,
-        approved_by: row.try_get("approved_by")?,
-        status: SkillApprovalStatus::parse(&status)?,
+        approved_by,
+        status,
         permission_diff: parse_row_json(row, "permission_diff")?,
         created_at: parse_row_timestamp(row, "created_at")?,
-        resolved_at: parse_optional_row_timestamp(row, "resolved_at")?,
+        resolved_at,
     })
+}
+
+fn validate_approval_resolution_columns(
+    status: SkillApprovalStatus,
+    approved_by: Option<&str>,
+    resolved_at: Option<&DateTime<Utc>>,
+) -> anyhow::Result<()> {
+    match status {
+        SkillApprovalStatus::Pending if approved_by.is_some() || resolved_at.is_some() => {
+            anyhow::bail!("pending skill approval cannot have resolver or resolved_at")
+        }
+        SkillApprovalStatus::Approved | SkillApprovalStatus::Rejected
+            if approved_by.is_none() || resolved_at.is_none() =>
+        {
+            anyhow::bail!("resolved skill approval requires resolver and resolved_at")
+        }
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn snapshot_from_row(row: &SqliteRow) -> anyhow::Result<SkillSnapshotRecord> {

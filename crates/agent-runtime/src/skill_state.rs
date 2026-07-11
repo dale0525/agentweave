@@ -35,7 +35,17 @@ impl SkillStateStore {
         Uuid::new_v4().to_string()
     }
 
+    /// Compatibility entry point for importing already-validated immutable content directly as a
+    /// managed revision. Runtime authoring and staging flows must use
+    /// [`Self::create_staging_revision_record`] followed by [`Self::promote_revision_record`].
     pub async fn create_revision(
+        &self,
+        input: NewSkillRevision,
+    ) -> anyhow::Result<SkillRevisionRecord> {
+        self.create_trusted_managed_revision_record(input).await
+    }
+
+    async fn create_trusted_managed_revision_record(
         &self,
         input: NewSkillRevision,
     ) -> anyhow::Result<SkillRevisionRecord> {
@@ -146,34 +156,37 @@ impl SkillStateStore {
         validate_uuid_v4("revision_id", revision_id)?;
         validate_storage_path(managed_storage_path)?;
         let mut tx = self.storage.pool().begin().await?;
-        let query = format!(
-            r#"UPDATE skill_revisions
-               SET storage_path = ?, lifecycle_status = 'managed'
-               WHERE revision_id = ? AND lifecycle_status = 'staging'
-               RETURNING {REVISION_COLUMNS}"#
-        );
-        let updated = sqlx::query(&query)
-            .bind(managed_storage_path)
+        let result = async {
+            let query = format!(
+                r#"UPDATE skill_revisions
+                   SET storage_path = ?, lifecycle_status = 'managed'
+                   WHERE revision_id = ? AND lifecycle_status = 'staging'
+                   RETURNING {REVISION_COLUMNS}"#
+            );
+            let updated = sqlx::query(&query)
+                .bind(managed_storage_path)
+                .bind(revision_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            if let Some(row) = updated {
+                return revision_from_row(&row);
+            }
+            let status: Option<String> = sqlx::query_scalar(
+                "SELECT lifecycle_status FROM skill_revisions WHERE revision_id = ?",
+            )
             .bind(revision_id)
             .fetch_optional(&mut *tx)
             .await?;
-        if let Some(row) = updated {
-            let revision = revision_from_row(&row)?;
-            tx.commit().await?;
-            return Ok(revision);
+            let status =
+                status.with_context(|| format!("skill revision not found: {revision_id}"))?;
+            let status = SkillRevisionStatus::parse(&status)?;
+            anyhow::bail!(
+                "skill revision cannot be promoted from {}: {revision_id}",
+                status.as_str()
+            )
         }
-        let status: Option<String> = sqlx::query_scalar(
-            "SELECT lifecycle_status FROM skill_revisions WHERE revision_id = ?",
-        )
-        .bind(revision_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let status = status.with_context(|| format!("skill revision not found: {revision_id}"))?;
-        let status = SkillRevisionStatus::parse(&status)?;
-        anyhow::bail!(
-            "skill revision cannot be promoted from {}: {revision_id}",
-            status.as_str()
-        )
+        .await;
+        crate::skill_state_transactions::finish(tx, result).await
     }
 
     pub async fn get_installation(
@@ -223,46 +236,47 @@ impl SkillStateStore {
         validate_uuid_v4("revision_id", revision_id)?;
         let now = Utc::now().to_rfc3339();
         let mut tx = self.storage.pool().begin().await?;
-        let activated = sqlx::query_scalar::<_, String>(
-            r#"INSERT INTO skill_installations
-               (package_id, source_layer, active_revision_id, enabled, trust_level,
-                install_status, installed_at, updated_at)
-               SELECT package_id, ?, revision_id, 1, 'approved', 'active', ?, ?
-               FROM skill_revisions
-               WHERE revision_id = ? AND package_id = ? AND lifecycle_status = 'managed'
-               ON CONFLICT(package_id) DO UPDATE SET
-                 source_layer = excluded.source_layer,
-                 active_revision_id = excluded.active_revision_id,
-                 enabled = 1,
-                 trust_level = excluded.trust_level,
-                 install_status = 'active',
-                 updated_at = excluded.updated_at
-               RETURNING package_id"#,
-        )
-        .bind(layer.as_str())
-        .bind(&now)
-        .bind(&now)
-        .bind(revision_id)
-        .bind(package_id.as_str())
-        .fetch_optional(&mut *tx)
-        .await?;
-        if activated.is_none() {
-            let error = activation_rejection(&mut *tx, package_id, revision_id).await;
-            tx.rollback().await?;
-            return Err(error?);
+        let result = async {
+            let activated = sqlx::query_scalar::<_, String>(
+                r#"INSERT INTO skill_installations
+                   (package_id, source_layer, active_revision_id, enabled, trust_level,
+                    install_status, installed_at, updated_at)
+                   SELECT package_id, ?, revision_id, 1, 'approved', 'active', ?, ?
+                   FROM skill_revisions
+                   WHERE revision_id = ? AND package_id = ? AND lifecycle_status = 'managed'
+                   ON CONFLICT(package_id) DO UPDATE SET
+                     source_layer = excluded.source_layer,
+                     active_revision_id = excluded.active_revision_id,
+                     enabled = 1,
+                     trust_level = excluded.trust_level,
+                     install_status = 'active',
+                     updated_at = excluded.updated_at
+                   RETURNING package_id"#,
+            )
+            .bind(layer.as_str())
+            .bind(&now)
+            .bind(&now)
+            .bind(revision_id)
+            .bind(package_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
+            if activated.is_none() {
+                return Err(activation_rejection(&mut *tx, package_id, revision_id).await?);
+            }
+            insert_audit(
+                &mut *tx,
+                actor_id,
+                "activate_revision",
+                package_id,
+                Some(revision_id),
+                "ok",
+                Value::Object(Map::new()),
+            )
+            .await?;
+            Ok(())
         }
-        insert_audit(
-            &mut *tx,
-            actor_id,
-            "activate_revision",
-            package_id,
-            Some(revision_id),
-            "ok",
-            Value::Object(Map::new()),
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(())
+        .await;
+        crate::skill_state_transactions::finish(tx, result).await
     }
 
     pub async fn create_approval(
@@ -342,60 +356,64 @@ impl SkillStateStore {
     ) -> anyhow::Result<SkillApprovalRecord> {
         validate_uuid_v4("approval_id", approval_id)?;
         let mut tx = self.storage.pool().begin().await?;
-        let resolved_at = Utc::now().to_rfc3339();
-        let updated = match target {
-            SkillApprovalStatus::Approved => {
-                let query = format!(
-                    r#"UPDATE skill_approvals
-                       SET approved_by = ?, status = 'approved', resolved_at = ?
-                       WHERE approval_id = ? AND status = 'pending' AND requested_by != ?
-                       RETURNING {APPROVAL_COLUMNS}"#
-                );
-                sqlx::query(&query)
-                    .bind(actor_id)
-                    .bind(&resolved_at)
-                    .bind(approval_id)
-                    .bind(actor_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
+        let result = async {
+            let resolved_at = Utc::now().to_rfc3339();
+            let updated = match target {
+                SkillApprovalStatus::Approved => {
+                    let query = format!(
+                        r#"UPDATE skill_approvals
+                           SET approved_by = ?, status = 'approved', resolved_at = ?
+                           WHERE approval_id = ? AND status = 'pending' AND requested_by != ?
+                           RETURNING {APPROVAL_COLUMNS}"#
+                    );
+                    sqlx::query(&query)
+                        .bind(actor_id)
+                        .bind(&resolved_at)
+                        .bind(approval_id)
+                        .bind(actor_id)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                }
+                SkillApprovalStatus::Rejected => {
+                    let query = format!(
+                        r#"UPDATE skill_approvals
+                           SET approved_by = ?, status = 'rejected', resolved_at = ?
+                           WHERE approval_id = ? AND status = 'pending'
+                           RETURNING {APPROVAL_COLUMNS}"#
+                    );
+                    sqlx::query(&query)
+                        .bind(actor_id)
+                        .bind(&resolved_at)
+                        .bind(approval_id)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                }
+                SkillApprovalStatus::Pending => {
+                    anyhow::bail!("cannot resolve approval to pending")
+                }
+            };
+            if let Some(row) = updated {
+                return approval_from_row(&row);
             }
-            SkillApprovalStatus::Rejected => {
-                let query = format!(
-                    r#"UPDATE skill_approvals
-                       SET approved_by = ?, status = 'rejected', resolved_at = ?
-                       WHERE approval_id = ? AND status = 'pending'
-                       RETURNING {APPROVAL_COLUMNS}"#
-                );
-                sqlx::query(&query)
-                    .bind(actor_id)
-                    .bind(&resolved_at)
-                    .bind(approval_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-            }
-            SkillApprovalStatus::Pending => anyhow::bail!("cannot resolve approval to pending"),
-        };
-        if let Some(row) = updated {
-            let approval = approval_from_row(&row)?;
-            tx.commit().await?;
-            return Ok(approval);
-        }
 
-        let select =
-            format!("SELECT {APPROVAL_COLUMNS} FROM skill_approvals WHERE approval_id = ?");
-        let row = sqlx::query(&select)
-            .bind(approval_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .with_context(|| format!("skill approval not found: {approval_id}"))?;
-        let approval = approval_from_row(&row)?;
-        if approval.status != SkillApprovalStatus::Pending {
-            anyhow::bail!("skill approval already resolved: {approval_id}");
+            let select =
+                format!("SELECT {APPROVAL_COLUMNS} FROM skill_approvals WHERE approval_id = ?");
+            let row = sqlx::query(&select)
+                .bind(approval_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .with_context(|| format!("skill approval not found: {approval_id}"))?;
+            let approval = approval_from_row(&row)?;
+            if approval.status != SkillApprovalStatus::Pending {
+                anyhow::bail!("skill approval already resolved: {approval_id}");
+            }
+            if target == SkillApprovalStatus::Approved && approval.requested_by == actor_id {
+                anyhow::bail!("requester cannot approve their own request");
+            }
+            anyhow::bail!("skill approval could not be resolved: {approval_id}")
         }
-        if target == SkillApprovalStatus::Approved && approval.requested_by == actor_id {
-            anyhow::bail!("requester cannot approve their own request");
-        }
-        anyhow::bail!("skill approval could not be resolved: {approval_id}")
+        .await;
+        crate::skill_state_transactions::finish(tx, result).await
     }
 
     pub async fn list_audit(

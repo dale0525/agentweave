@@ -1,4 +1,4 @@
-use crate::skill_state::{SkillRevisionStatus, SkillStateStore};
+use crate::skill_state::{SkillApprovalStatus, SkillRevisionStatus, SkillStateStore};
 use crate::storage::Storage;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -85,6 +85,80 @@ async fn upgrades_task6_schema_with_lifecycle_composite_fk_and_active_check() {
 
     crate::skill_state::migrate(storage.pool()).await.unwrap();
     crate::skill_state::migrate(storage.pool()).await.unwrap();
+}
+
+#[tokio::test]
+async fn upgrades_legacy_approval_schema_and_preserves_valid_rows() {
+    let (_directory, url) = file_database();
+    let pool = raw_pool(&url).await;
+    create_legacy_approval_table(&pool).await;
+    let pending_id = Uuid::new_v4().to_string();
+    let approved_id = Uuid::new_v4().to_string();
+    insert_legacy_approval(&pool, &pending_id, "pending", None, None).await;
+    insert_legacy_approval(
+        &pool,
+        &approved_id,
+        "approved",
+        Some("owner-2"),
+        Some("2026-01-01T00:00:00Z"),
+    )
+    .await;
+    pool.close().await;
+
+    let storage = Storage::connect(&url).await.unwrap();
+    let state = SkillStateStore::new(storage.clone());
+    assert_eq!(
+        state
+            .get_approval(&pending_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillApprovalStatus::Pending
+    );
+    assert_eq!(
+        state
+            .get_approval(&approved_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillApprovalStatus::Approved
+    );
+    let invalid_pending = sqlx::query(
+        r#"INSERT INTO skill_approvals
+           (approval_id, package_id, revision_id, operation, requested_by, approved_by,
+            status, permission_diff, created_at, resolved_at)
+           VALUES (?, 'com.example.calendar', 'rev-1', 'activate', 'owner-1', 'owner-2',
+                   'pending', '[]', '2026-01-01T00:00:00Z', NULL)"#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .execute(storage.pool())
+    .await;
+    assert!(invalid_pending.is_err());
+    crate::skill_state::migrate(storage.pool()).await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_approval_migration_rejects_pending_with_resolver_and_rolls_back() {
+    assert_legacy_approval_rejected("pending", Some("owner-2"), None, "pending").await;
+}
+
+#[tokio::test]
+async fn legacy_approval_migration_rejects_resolved_with_null_resolver_and_rolls_back() {
+    assert_legacy_approval_rejected("approved", None, Some("2026-01-01T00:00:00Z"), "resolved")
+        .await;
+}
+
+#[tokio::test]
+async fn legacy_approval_migration_rejects_bad_resolved_at_and_rolls_back() {
+    assert_legacy_approval_rejected(
+        "rejected",
+        Some("owner-2"),
+        Some("not-a-time"),
+        "resolved_at",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -268,6 +342,36 @@ async fn assert_legacy_storage_path_rejected(storage_path: &str) {
     assert_legacy_tables_intact(&url, 1, 0).await;
 }
 
+async fn assert_legacy_approval_rejected(
+    status: &str,
+    approved_by: Option<&str>,
+    resolved_at: Option<&str>,
+    expected_error: &str,
+) {
+    let (_directory, url) = file_database();
+    let pool = raw_pool(&url).await;
+    create_core_storage_tables(&pool).await;
+    create_legacy_approval_table(&pool).await;
+    let approval_id = Uuid::new_v4().to_string();
+    insert_legacy_approval(&pool, &approval_id, status, approved_by, resolved_at).await;
+    let schema_before = user_schema(&pool).await;
+    pool.close().await;
+
+    let error = storage_connect_error(&url).await;
+    assert!(
+        error.contains(&format!("skill_approvals row {approval_id}")),
+        "{error}"
+    );
+    assert!(error.contains(expected_error), "{error}");
+    let pool = raw_pool(&url).await;
+    assert_eq!(user_schema(&pool).await, schema_before);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill_approvals")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
 async fn user_schema(pool: &SqlitePool) -> Vec<(String, String, String, Option<String>)> {
     sqlx::query_as(
         r#"SELECT type, name, tbl_name, sql
@@ -377,6 +481,55 @@ async fn create_core_storage_tables(pool: &SqlitePool) {
     ] {
         sqlx::query(statement).execute(pool).await.unwrap();
     }
+}
+
+async fn create_legacy_approval_table(pool: &SqlitePool) {
+    sqlx::query(
+        r#"CREATE TABLE skill_approvals (
+          approval_id TEXT PRIMARY KEY,
+          package_id TEXT NOT NULL,
+          revision_id TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          requested_by TEXT NOT NULL,
+          approved_by TEXT,
+          status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
+          permission_diff TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          resolved_at TEXT
+        )"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE INDEX idx_skill_approvals_package_status ON skill_approvals(package_id, status, created_at)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_legacy_approval(
+    pool: &SqlitePool,
+    approval_id: &str,
+    status: &str,
+    approved_by: Option<&str>,
+    resolved_at: Option<&str>,
+) {
+    sqlx::query(
+        r#"INSERT INTO skill_approvals
+           (approval_id, package_id, revision_id, operation, requested_by, approved_by,
+            status, permission_diff, created_at, resolved_at)
+           VALUES (?, 'com.example.calendar', 'rev-1', 'activate', 'owner-1', ?, ?, '[]',
+                   '2026-01-01T00:00:00Z', ?)"#,
+    )
+    .bind(approval_id)
+    .bind(approved_by)
+    .bind(status)
+    .bind(resolved_at)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn insert_legacy_revision(

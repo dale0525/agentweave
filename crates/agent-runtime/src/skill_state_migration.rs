@@ -1,6 +1,6 @@
 use crate::skill_state_rows::{
-    INSTALLATION_COLUMNS, REVISION_COLUMNS, SkillInstallStatus, installation_from_row,
-    revision_from_row,
+    APPROVAL_COLUMNS, INSTALLATION_COLUMNS, REVISION_COLUMNS, SkillInstallStatus,
+    approval_from_row, installation_from_row, revision_from_row,
 };
 use anyhow::Context;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
@@ -33,8 +33,27 @@ const CREATE_INSTALLATIONS: &str = r#"CREATE TABLE skill_installations (
   FOREIGN KEY(package_id, active_revision_id) REFERENCES skill_revisions(package_id, revision_id)
 )"#;
 
+const CREATE_APPROVALS: &str = r#"CREATE TABLE skill_approvals (
+  approval_id TEXT PRIMARY KEY,
+  package_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  approved_by TEXT,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
+  permission_diff TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  CHECK(
+    (status = 'pending' AND approved_by IS NULL AND resolved_at IS NULL)
+    OR
+    (status IN ('approved', 'rejected') AND approved_by IS NOT NULL AND resolved_at IS NOT NULL)
+  )
+)"#;
+
 pub(crate) async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
+    migrate_approvals(&mut tx).await?;
     create_supporting_tables(&mut tx).await?;
 
     let revisions_exist = table_exists(&mut tx, "skill_revisions").await?;
@@ -61,18 +80,6 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
 
 async fn create_supporting_tables(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> {
     for statement in [
-        r#"CREATE TABLE IF NOT EXISTS skill_approvals (
-          approval_id TEXT PRIMARY KEY,
-          package_id TEXT NOT NULL,
-          revision_id TEXT NOT NULL,
-          operation TEXT NOT NULL,
-          requested_by TEXT NOT NULL,
-          approved_by TEXT,
-          status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
-          permission_diff TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          resolved_at TEXT
-        )"#,
         r#"CREATE TABLE IF NOT EXISTS skill_snapshots (
           generation INTEGER PRIMARY KEY CHECK(generation >= 0),
           status TEXT NOT NULL CHECK(status IN ('candidate', 'active', 'last_known_good')),
@@ -99,6 +106,58 @@ async fn create_supporting_tables(tx: &mut Transaction<'_, Sqlite>) -> anyhow::R
     ] {
         sqlx::query(statement).execute(&mut **tx).await?;
     }
+    Ok(())
+}
+
+async fn migrate_approvals(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> {
+    if !table_exists(tx, "skill_approvals").await? {
+        sqlx::query(CREATE_APPROVALS).execute(&mut **tx).await?;
+        return Ok(());
+    }
+    if approval_schema_is_final(tx).await? {
+        return Ok(());
+    }
+
+    sqlx::query("ALTER TABLE skill_approvals RENAME TO skill_approvals_legacy")
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(CREATE_APPROVALS).execute(&mut **tx).await?;
+    validate_approval_rows(tx, "skill_approvals_legacy").await?;
+    copy_approvals(tx, "skill_approvals_legacy").await?;
+    sqlx::query("DROP TABLE skill_approvals_legacy")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn validate_approval_rows(
+    tx: &mut Transaction<'_, Sqlite>,
+    table: &str,
+) -> anyhow::Result<()> {
+    let statement = format!("SELECT {APPROVAL_COLUMNS} FROM {table} ORDER BY approval_id");
+    let rows = sqlx::query(&statement).fetch_all(&mut **tx).await?;
+    for row in rows {
+        let identity: String = row
+            .try_get("approval_id")
+            .unwrap_or_else(|_| "<unreadable>".into());
+        approval_from_row(&row).with_context(|| format!("skill_approvals row {identity}"))?;
+    }
+    Ok(())
+}
+
+async fn copy_approvals(
+    tx: &mut Transaction<'_, Sqlite>,
+    source_table: &str,
+) -> anyhow::Result<()> {
+    let statement = format!(
+        r#"INSERT INTO skill_approvals
+           (approval_id, package_id, revision_id, operation, requested_by, approved_by,
+            status, permission_diff, created_at, resolved_at)
+           SELECT approval_id, package_id, revision_id, operation, requested_by, approved_by,
+                  status, permission_diff, created_at, resolved_at
+           FROM {source_table}"#
+    );
+    sqlx::query(&statement).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -278,4 +337,18 @@ async fn installation_schema_is_final(tx: &mut Transaction<'_, Sqlite>) -> anyho
     .fetch_one(&mut **tx)
     .await?;
     Ok(sql.contains("active_revision_id IS NOT NULL") && foreign_keys == 2)
+}
+
+async fn approval_schema_is_final(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<bool> {
+    let sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'skill_approvals'",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    let sql = sql.to_ascii_lowercase();
+    Ok(sql.contains("status = 'pending'")
+        && sql.contains("approved_by is null")
+        && sql.contains("resolved_at is null")
+        && sql.contains("approved_by is not null")
+        && sql.contains("resolved_at is not null"))
 }
