@@ -7,6 +7,8 @@ pub(crate) enum StoreFaultPoint {
     StagingCopyFile,
     StagingAuthorFile,
     StagingAuthorAfterReservation,
+    StagingAuthorAfterSnapshot,
+    StagingAuthorAfterRecord,
     IncomingCopyFile,
     QuarantineCopyFile,
     PromoteStagingRename,

@@ -27,6 +27,10 @@ impl std::fmt::Debug for SkillManagementToolContext {
 pub struct SkillManagementTools;
 
 impl SkillManagementTools {
+    pub(crate) fn is_reserved_name(name: &str) -> bool {
+        name == CREATE_SKILL_DRAFT_TOOL
+    }
+
     pub fn definitions(
         service: &OwnerSkillManagementService,
         actor: &ActorContext,

@@ -6,7 +6,9 @@ use crate::skill_store::{
 };
 use crate::skill_store_faults::StoreFaultPoint;
 use crate::skill_store_fs::ensure_directory_contained;
-use crate::skill_store_operations::{storage_path, stored_revision, with_compensation};
+use crate::skill_store_operations::{
+    combine_operation_errors, storage_path, stored_revision, with_compensation,
+};
 use crate::skill_store_prepared_fs::create_regular_file;
 use crate::skill_store_secure_roots::{
     ensure_opened_child_directory, opened_package_snapshot, remove_opened_tree,
@@ -63,6 +65,7 @@ impl SkillRevisionStore {
             .unwrap_or_else(SkillStateStore::allocate_revision_id);
         let destination = self.paths.staging.join(&revision_id);
         let mut reserved = None;
+        let mut recorded = None;
         let result = async {
             let reserved_directory =
                 reserve_opened_directory(self.paths.staging_identity(), Path::new(&revision_id))
@@ -86,6 +89,11 @@ impl SkillRevisionStore {
             }
             let snapshot =
                 opened_package_snapshot(&reserved_directory, self.limits.package_limits()).await?;
+            self.faults
+                .checkpoint(StoreFaultPoint::StagingAuthorAfterSnapshot)
+                .await;
+            self.paths.verify_identity()?;
+            reserved_directory.verify()?;
             snapshot.descriptor.descriptor.validate()?;
             if snapshot.descriptor.descriptor.id != expected_package_id {
                 anyhow::bail!("draft package id changed during creation");
@@ -110,19 +118,43 @@ impl SkillRevisionStore {
                     },
                 )
                 .await?;
+            recorded = Some(record.clone());
+            self.faults
+                .checkpoint(StoreFaultPoint::StagingAuthorAfterRecord)
+                .await;
+            self.paths.verify_identity()?;
+            reserved_directory.verify()?;
             Ok(stored_revision(record, destination.clone(), Vec::new()))
         }
         .await;
         match result {
             Ok(revision) => Ok(revision),
             Err(error) if reserved.is_none() => Err(error),
-            Err(error) => {
+            Err(error) if recorded.is_none() => {
                 match remove_opened_tree(reserved.as_ref().expect("authoring reservation recorded"))
                     .await
                 {
                     Ok(()) => Err(error),
                     Err(compensation) => Err(with_compensation(error, compensation)),
                 }
+            }
+            Err(error) => {
+                let row_cleanup = self
+                    .state
+                    .delete_staging_revision_record_if_matches(
+                        recorded.as_ref().expect("authoring record committed"),
+                    )
+                    .await;
+                let tree_cleanup =
+                    remove_opened_tree(reserved.as_ref().expect("authoring reservation recorded"))
+                        .await;
+                Err(combine_operation_errors(
+                    error,
+                    [
+                        ("staging row cleanup", row_cleanup),
+                        ("opened authored tree cleanup", tree_cleanup),
+                    ],
+                ))
             }
         }
     }

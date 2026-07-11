@@ -150,9 +150,17 @@ impl OwnerSkillManagementService {
             .await?
         {
             let installation = row.installation;
+            let version = match (&installation.active_revision_id, row.active_version) {
+                (Some(_), Some(version)) => version,
+                (None, None) => String::new(),
+                _ => anyhow::bail!(
+                    "managed installation consistency error for {}: active revision version mismatch",
+                    installation.package_id.as_str()
+                ),
+            };
             statuses.push(SkillPackageStatus {
                 package_id: installation.package_id,
-                version: row.active_version.unwrap_or_default(),
+                version,
                 source_layer: "managed".into(),
                 status: installation.status.as_str().into(),
                 reason: installation_reason(installation.status, installation.enabled).into(),

@@ -10,7 +10,9 @@ pub mod search;
 
 use crate::policy::{ApprovalPolicy, SandboxProfile};
 use crate::skill::{SkillExecutionContext, SkillRegistry};
-use crate::skill_management_tools::{SkillManagementToolContext, SkillManagementTools};
+use crate::skill_management_tools::{
+    CREATE_SKILL_DRAFT_TOOL, SkillManagementToolContext, SkillManagementTools,
+};
 use builtin::BuiltInTools;
 use discovery::{ConnectorMetadata, ExternalToolConfig, ExternalToolExecution, ToolDiscoveryItem};
 use result::{ToolError, ToolResult, ToolResultMetadata};
@@ -215,6 +217,17 @@ impl ToolRegistry {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = self.non_management_definitions();
+        if let Some(context) = &self.management {
+            definitions.extend(SkillManagementTools::definitions(
+                &context.service,
+                &context.actor,
+            ));
+        }
+        definitions
+    }
+
+    fn non_management_definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = if self.built_in_tools_enabled {
             self.builtins.definitions()
         } else {
@@ -238,12 +251,6 @@ impl ToolRegistry {
             },
         ));
         definitions.extend(self.external_definitions.clone());
-        if let Some(context) = &self.management {
-            definitions.extend(SkillManagementTools::definitions(
-                &context.service,
-                &context.actor,
-            ));
-        }
         definitions
     }
 
@@ -326,13 +333,23 @@ impl ToolRegistry {
     pub async fn execute(&self, name: &str, call_id: &str, arguments: Value) -> ToolResult {
         let started = Instant::now();
         if let Some(context) = &self.management
-            && SkillManagementTools::handles(context, name)
+            && SkillManagementTools::is_reserved_name(name)
         {
-            let result = SkillManagementTools::execute(context, name, call_id, arguments).await;
-            if name == "create_skill_draft" {
-                return result;
+            if SkillManagementTools::handles(context, name) {
+                let result = SkillManagementTools::execute(context, name, call_id, arguments).await;
+                if name == CREATE_SKILL_DRAFT_TOOL {
+                    return result;
+                }
+                return self.apply_output_limit(result);
             }
-            return self.apply_output_limit(result);
+            return registry_failure(
+                name,
+                call_id,
+                "unknown_tool",
+                format!("unknown tool: {name}"),
+                false,
+                registry_metadata(started),
+            );
         }
         let execution = tokio::time::timeout(
             self.tool_timeout,
@@ -486,6 +503,14 @@ impl ToolRegistry {
     }
 
     fn validate(self) -> anyhow::Result<Self> {
+        for definition in self.non_management_definitions() {
+            if SkillManagementTools::is_reserved_name(&definition.name) {
+                anyhow::bail!(
+                    "duplicate tool name: {} (reserved skill management tool name)",
+                    definition.name
+                );
+            }
+        }
         let mut names = HashSet::new();
         for definition in self.definitions() {
             if !names.insert(definition.name.clone()) {
@@ -558,6 +583,9 @@ fn skill_error_code(message: &str) -> &'static str {
 
 #[cfg(test)]
 mod registry_tests;
+
+#[cfg(test)]
+mod management_registry_tests;
 
 #[cfg(test)]
 mod management_permission_tests {

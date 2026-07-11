@@ -20,6 +20,7 @@ pub mod skill_resolver;
 pub mod skill_snapshot;
 pub mod skill_source;
 pub mod skill_state;
+mod skill_state_compensation;
 mod skill_state_management;
 mod skill_state_migration;
 mod skill_state_revision_cas;
@@ -61,6 +62,9 @@ mod skill_policy_tests;
 mod skill_management_tests;
 
 #[cfg(test)]
+mod skill_store_authoring_race_tests;
+
+#[cfg(test)]
 mod skill_manager_tests;
 
 #[cfg(test)]
@@ -74,6 +78,9 @@ mod skill_entry_resource_tests;
 
 #[cfg(test)]
 mod skill_state_tests;
+
+#[cfg(test)]
+mod skill_state_management_tests;
 
 #[cfg(test)]
 mod skill_state_lifecycle_tests;
