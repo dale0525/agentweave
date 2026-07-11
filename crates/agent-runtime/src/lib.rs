@@ -20,15 +20,21 @@ mod skill_state_revision_cas;
 mod skill_state_rows;
 mod skill_state_transactions;
 pub mod skill_store;
+mod skill_store_atomic_write;
+mod skill_store_cleanup;
+mod skill_store_execution;
 mod skill_store_faults;
 mod skill_store_fs;
 mod skill_store_fs_types;
 mod skill_store_locks;
 mod skill_store_operations;
 mod skill_store_path_prepare;
+mod skill_store_prepared_fs;
 mod skill_store_recovery;
 mod skill_store_secure_fs;
 mod skill_store_secure_fs_faults;
+mod skill_store_secure_roots;
+mod skill_store_windows;
 mod skill_verified;
 pub mod storage;
 pub mod subagent;
@@ -93,3 +99,6 @@ mod managed_skill_source_limits_tests;
 
 #[cfg(test)]
 mod managed_verified_content_tests;
+
+#[cfg(test)]
+mod skill_store_windows_contract_tests;

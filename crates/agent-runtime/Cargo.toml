@@ -20,6 +20,7 @@ same-file.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+tempfile = "3"
 tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
@@ -28,5 +29,5 @@ uuid.workspace = true
 
 rustix.workspace = true
 
-[dev-dependencies]
-tempfile = "3"
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

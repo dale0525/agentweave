@@ -3,7 +3,10 @@ use crate::skill_resolver::{ResolvedSkillPackage, ResolvedSkillSet, SkillResolut
 use crate::skill_snapshot::SkillSnapshot;
 use crate::skill_source::{ManagedSkillSource, SkillSource};
 use crate::skill_state::{SkillLayerRecord, SkillStateStore};
-use crate::skill_store::{SkillRevisionStore, SkillStorePaths};
+use crate::skill_store::{
+    SkillRevisionStore, SkillStoreFaultPoint, SkillStoreLimits, SkillStorePaths,
+    SkillStoreTestFaults,
+};
 use crate::storage::Storage;
 use serde_json::json;
 use std::path::Path;
@@ -15,6 +18,7 @@ struct VerifiedFixture {
     state: SkillStateStore,
     store: SkillRevisionStore,
     source: ManagedSkillSource,
+    faults: SkillStoreTestFaults,
 }
 
 impl VerifiedFixture {
@@ -25,7 +29,13 @@ impl VerifiedFixture {
             .await
             .unwrap();
         let state = SkillStateStore::new(Storage::connect("sqlite::memory:").await.unwrap());
-        let store = SkillRevisionStore::new(paths, state.clone());
+        let faults = SkillStoreTestFaults::default();
+        let store = SkillRevisionStore::with_test_faults(
+            paths,
+            state.clone(),
+            SkillStoreLimits::default(),
+            faults.clone(),
+        );
         let source = ManagedSkillSource::from_store(store.clone());
         Self {
             _app: app,
@@ -33,6 +43,7 @@ impl VerifiedFixture {
             state,
             store,
             source,
+            faults,
         }
     }
 
@@ -129,8 +140,75 @@ async fn managed_execution_rehashes_tree_and_does_not_start_changed_command() {
         .await
         .unwrap_err();
 
-    assert!(format!("{error:#}").contains("changed since managed snapshot"));
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("managed execution snapshot hash mismatch"),
+        "{message}"
+    );
     assert!(!managed.path.join("marker").exists());
+}
+
+#[tokio::test]
+async fn managed_execution_uses_private_snapshot_after_hash_to_spawn_mutation() {
+    let fixture = VerifiedFixture::new().await;
+    let managed = fixture
+        .active_package(
+            "com.example.execution-private",
+            write_runtime_package("com.example.execution-private").await,
+        )
+        .await;
+    let packages = fixture.source.discover().await.unwrap();
+    let snapshot = SkillSnapshot::build(1, active_set(packages)).await.unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::ExecutionAfterSnapshot);
+    let registry = snapshot.registry().clone();
+    let execution = tokio::spawn(async move { registry.execute("verified_tool", json!({})).await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), gate.wait_entered())
+        .await
+        .expect("execution did not reach private snapshot checkpoint");
+    make_writable(&managed.path).await;
+    tokio::fs::write(
+        managed.path.join("run.sh"),
+        "printf mutated > original-marker\nprintf '{\"ok\":false}'\n",
+    )
+    .await
+    .unwrap();
+    gate.release().await;
+
+    let value = execution.await.unwrap().unwrap();
+    assert_eq!(value, json!({"ok": true}));
+    assert!(!managed.path.join("original-marker").exists());
+}
+
+#[tokio::test]
+async fn quarantined_managed_residue_is_rejected_by_old_snapshot() {
+    let fixture = VerifiedFixture::new().await;
+    let managed = fixture
+        .active_package(
+            "com.example.execution-quarantined",
+            write_runtime_package("com.example.execution-quarantined").await,
+        )
+        .await;
+    let packages = fixture.source.discover().await.unwrap();
+    let snapshot = SkillSnapshot::build(1, active_set(packages)).await.unwrap();
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::QuarantineSourceCleanup);
+    fixture
+        .store
+        .quarantine_revision(&managed.revision_id, "security invalid")
+        .await
+        .unwrap();
+    assert!(managed.path.is_dir());
+
+    let error = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("no longer active managed revision"));
 }
 
 fn active_set(packages: Vec<crate::skill_source::DiscoveredSkillPackage>) -> ResolvedSkillSet {

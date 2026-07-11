@@ -1,11 +1,12 @@
 use anyhow::Context;
 use std::collections::HashMap;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
-use crate::skill_store_secure_fs::ensure_store_directory;
+use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SkillStoreIdentity {
@@ -37,34 +38,76 @@ impl SkillStoreIdentity {
         self.locks.verify("locks")
     }
 
-    fn managed_path(&self) -> &Path {
-        &self.managed.path
+    fn locks(&self) -> &StoreRootIdentity {
+        &self.locks
     }
 
-    #[cfg(not(unix))]
+    pub(crate) fn managed(&self) -> &StoreRootIdentity {
+        &self.managed
+    }
+
+    pub(crate) fn staging(&self) -> &StoreRootIdentity {
+        &self.staging
+    }
+
+    pub(crate) fn quarantine(&self) -> &StoreRootIdentity {
+        &self.quarantine
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
     fn locks_path(&self) -> &Path {
         &self.locks.path
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct StoreRootIdentity {
+#[derive(Clone, Debug)]
+pub(crate) struct StoreRootIdentity {
     path: PathBuf,
     handle: Arc<same_file::Handle>,
+    #[cfg(unix)]
+    descriptor: Arc<File>,
+    #[cfg(windows)]
+    descriptor: Arc<File>,
+    #[cfg(windows)]
+    windows_identity: crate::skill_store_windows::WindowsFileIdentity,
 }
 
 impl StoreRootIdentity {
     fn capture(path: PathBuf) -> anyhow::Result<Self> {
+        #[cfg(unix)]
+        let descriptor = File::open(&path)?;
+        #[cfg(unix)]
+        let handle = same_file::Handle::from_file(descriptor.try_clone()?)?;
+        #[cfg(windows)]
+        let (descriptor, windows_identity, _) =
+            crate::skill_store_windows::open_directory_nofollow(&path)?;
+        #[cfg(windows)]
+        let handle = same_file::Handle::from_file(descriptor.try_clone()?)?;
+        #[cfg(all(not(unix), not(windows)))]
         let handle = same_file::Handle::from_path(&path)?;
         Ok(Self {
             path,
             handle: Arc::new(handle),
+            #[cfg(unix)]
+            descriptor: Arc::new(descriptor),
+            #[cfg(windows)]
+            descriptor: Arc::new(descriptor),
+            #[cfg(windows)]
+            windows_identity,
         })
     }
 
-    fn verify(&self, label: &str) -> anyhow::Result<()> {
+    pub(crate) fn verify(&self, label: &str) -> anyhow::Result<()> {
+        #[cfg(windows)]
+        {
+            crate::skill_store_windows::verify_directory_path(&self.path, self.windows_identity)
+                .with_context(|| format!("failed to verify {label} store root identity"))?;
+            return Ok(());
+        }
+        #[cfg(not(windows))]
         let current = same_file::Handle::from_path(&self.path)
             .with_context(|| format!("failed to verify {label} store root identity"))?;
+        #[cfg(not(windows))]
         if current != *self.handle {
             anyhow::bail!(
                 "{label} store root identity changed: {}",
@@ -72,6 +115,40 @@ impl StoreRootIdentity {
             );
         }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn descriptor(&self) -> &File {
+        &self.descriptor
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn windows_descriptor(&self) -> &File {
+        &self.descriptor
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn windows_identity(&self) -> crate::skill_store_windows::WindowsFileIdentity {
+        self.windows_identity
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl PartialEq for StoreRootIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && self.handle == other.handle
+    }
+}
+
+impl Eq for StoreRootIdentity {}
+
+impl Hash for StoreRootIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.path.hash(state);
+        self.handle.hash(state);
     }
 }
 
@@ -91,6 +168,7 @@ fn revision_locks() -> &'static Mutex<RevisionLockMap> {
 pub(crate) async fn acquire_revision_lock(
     store: &SkillStoreIdentity,
     revision_id: &str,
+    faults: &StoreFaults,
 ) -> anyhow::Result<RevisionOperationGuard> {
     let key = RevisionLockKey {
         store: store.clone(),
@@ -110,6 +188,9 @@ pub(crate) async fn acquire_revision_lock(
             }
         }
     };
+    faults
+        .checkpoint(StoreFaultPoint::RevisionLockAttempt)
+        .await;
     let process = lock.lock_owned().await;
     let os = acquire_os_revision_lock(store, revision_id).await?;
     #[cfg(test)]
@@ -147,14 +228,33 @@ pub(crate) async fn acquire_os_revision_lock(
     store: &SkillStoreIdentity,
     revision_id: &str,
 ) -> anyhow::Result<OsRevisionLock> {
+    acquire_os_revision_lock_inner(store, revision_id, None).await
+}
+
+#[cfg(test)]
+pub(crate) async fn acquire_os_revision_lock_with_attempt(
+    store: &SkillStoreIdentity,
+    revision_id: &str,
+    attempt: tokio::sync::oneshot::Sender<()>,
+) -> anyhow::Result<OsRevisionLock> {
+    acquire_os_revision_lock_inner(store, revision_id, Some(attempt)).await
+}
+
+async fn acquire_os_revision_lock_inner(
+    store: &SkillStoreIdentity,
+    revision_id: &str,
+    attempt: Option<tokio::sync::oneshot::Sender<()>>,
+) -> anyhow::Result<OsRevisionLock> {
     store.verify()?;
-    ensure_store_directory(store.managed_path(), Path::new(".locks")).await?;
     let store = store.clone();
     let revision_id = revision_id.to_string();
     tokio::task::spawn_blocking(move || {
         use fs2::FileExt;
         store.verify()?;
         let descriptor = open_revision_lock_file(&store, &revision_id)?;
+        if let Some(attempt) = attempt {
+            let _ = attempt.send(());
+        }
         descriptor
             .lock_exclusive()
             .with_context(|| format!("failed to lock revision operation: {revision_id}"))?;
@@ -169,20 +269,9 @@ pub(crate) async fn acquire_os_revision_lock(
 
 #[cfg(unix)]
 fn open_revision_lock_file(store: &SkillStoreIdentity, revision_id: &str) -> anyhow::Result<File> {
-    use rustix::fs::{FileType, Mode, OFlags, RawMode, fstat, open, openat};
-    let root = open(
-        store.managed_path(),
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )?;
-    let locks = openat(
-        &root,
-        ".locks",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )?;
+    use rustix::fs::{FileType, Mode, OFlags, RawMode, fstat, openat};
     let descriptor = openat(
-        &locks,
+        store.locks().descriptor(),
         format!("{revision_id}.lock"),
         OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::from_raw_mode(RawMode::try_from(0o600_u32)?),
@@ -194,7 +283,16 @@ fn open_revision_lock_file(store: &SkillStoreIdentity, revision_id: &str) -> any
     Ok(descriptor.into())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_revision_lock_file(store: &SkillStoreIdentity, revision_id: &str) -> anyhow::Result<File> {
+    crate::skill_store_windows::open_lock_file_beneath(
+        store.locks().windows_descriptor(),
+        store.locks().windows_identity(),
+        std::ffi::OsStr::new(&format!("{revision_id}.lock")),
+    )
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn open_revision_lock_file(store: &SkillStoreIdentity, revision_id: &str) -> anyhow::Result<File> {
     store.verify()?;
     let path = store.locks_path().join(format!("{revision_id}.lock"));

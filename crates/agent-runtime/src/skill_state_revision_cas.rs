@@ -22,6 +22,8 @@ impl SkillStateStore {
             );
         }
         validate_storage_path(&expected.storage_path)?;
+        let expected_descriptor_json = serde_json::to_string(&expected.descriptor_json)?;
+        let expected_validation_json = serde_json::to_string(&expected.validation_json)?;
         let descriptor_json = serde_json::to_string(&metadata.descriptor_json)?;
         let validation_json = serde_json::to_string(&metadata.validation_json)?;
         let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
@@ -31,6 +33,7 @@ impl SkillStateStore {
                    SET version = ?, content_hash = ?, descriptor_json = ?, validation_json = ?
                    WHERE revision_id = ? AND lifecycle_status = ?
                      AND version = ? AND content_hash = ? AND storage_path = ?
+                     AND descriptor_json = ? AND validation_json = ?
                    RETURNING {REVISION_COLUMNS}"#
             );
             let updated = sqlx::query(&query)
@@ -43,6 +46,8 @@ impl SkillStateStore {
                 .bind(&expected.version)
                 .bind(&expected.content_hash)
                 .bind(&expected.storage_path)
+                .bind(&expected_descriptor_json)
+                .bind(&expected_validation_json)
                 .fetch_optional(&mut *tx)
                 .await?;
             if let Some(row) = updated {
@@ -63,6 +68,8 @@ impl SkillStateStore {
         validate_uuid_v4("revision_id", revision_id)?;
         validate_storage_path(&expected.storage_path)?;
         validate_storage_path(&promotion.storage_path)?;
+        let expected_descriptor_json = serde_json::to_string(&expected.descriptor_json)?;
+        let expected_validation_json = serde_json::to_string(&expected.validation_json)?;
         let descriptor_json = serde_json::to_string(&promotion.descriptor_json)?;
         let validation_json = serde_json::to_string(&promotion.validation_json)?;
         let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
@@ -73,6 +80,7 @@ impl SkillStateStore {
                        validation_json = ?, lifecycle_status = 'managed'
                    WHERE revision_id = ? AND lifecycle_status = ? AND version = ?
                      AND content_hash = ? AND storage_path = ?
+                     AND descriptor_json = ? AND validation_json = ?
                    RETURNING {REVISION_COLUMNS}"#
             );
             let updated = sqlx::query(&query)
@@ -86,6 +94,8 @@ impl SkillStateStore {
                 .bind(&expected.version)
                 .bind(&expected.content_hash)
                 .bind(&expected.storage_path)
+                .bind(&expected_descriptor_json)
+                .bind(&expected_validation_json)
                 .fetch_optional(&mut *tx)
                 .await?;
             if let Some(row) = updated {

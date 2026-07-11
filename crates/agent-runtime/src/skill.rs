@@ -61,6 +61,7 @@ pub struct InstalledSkill {
 pub(crate) struct InstalledSkillVerification {
     pub(crate) expected_content_hash: String,
     pub(crate) limits: PackageLimits,
+    pub(crate) execution_binding: Option<crate::skill_source::ManagedExecutionBinding>,
 }
 
 impl InstalledSkill {
@@ -263,11 +264,14 @@ impl SkillRegistry {
         if availability.status != SkillAvailabilityStatus::Available {
             anyhow::bail!("{}", availability.reason);
         }
-        crate::skill_verified::verify_before_execution(skill).await?;
+        let prepared_execution = crate::skill_verified::prepare_before_execution(skill).await?;
+        let execution_root = prepared_execution
+            .as_ref()
+            .map_or(skill.root.as_path(), |prepared| prepared.root());
 
         let mut child = Command::new(&skill.manifest.entry.command)
             .args(&skill.manifest.entry.args)
-            .current_dir(&skill.root)
+            .current_dir(execution_root)
             .env("GENERAL_AGENT_TOOL_NAME", tool_name)
             .env("GENERAL_AGENT_WORKSPACE_ROOT", &context.workspace_root)
             .env("GENERAL_AGENT_CWD", &context.cwd)

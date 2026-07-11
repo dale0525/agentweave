@@ -145,6 +145,39 @@ async fn staging_rejects_real_root_replacement_without_writing_replacement() {
     assert!(directory_is_empty(&fixture.paths.staging).await);
 }
 
+#[tokio::test]
+async fn staging_copy_rejects_reserved_revision_replacement_without_writing_it() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.reserved-revision-swap").await;
+    let revision_id = SkillStateStore::allocate_revision_id();
+    fixture.faults.set_revision_id_once(&revision_id);
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::CopyBeforeFileOpen);
+    let store = fixture.store.clone();
+    let source_path = source.path().to_path_buf();
+    let staging =
+        tokio::spawn(async move { store.create_staging_revision(&source_path, "owner-1").await });
+    gate.wait_entered().await;
+    let destination = fixture.paths.staging.join(&revision_id);
+    let original = fixture
+        .paths
+        .staging
+        .join(format!("{revision_id}.original"));
+    tokio::fs::rename(&destination, &original).await.unwrap();
+    tokio::fs::create_dir(&destination).await.unwrap();
+
+    gate.release().await;
+    let result = staging.await.unwrap();
+
+    assert!(
+        result.is_err(),
+        "replacement revision must invalidate staging"
+    );
+    assert!(destination.is_dir());
+    assert!(directory_is_empty(&destination).await);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn copy_open_rejects_file_swapped_to_symlink_after_scan() {
@@ -169,7 +202,8 @@ async fn copy_open_rejects_file_swapped_to_symlink_after_scan() {
     gate.release().await;
     let error = stage.await.unwrap().unwrap_err();
 
-    assert!(format!("{error:#}").contains("symlink"));
+    let message = format!("{error:#}");
+    assert!(message.contains("symlink"), "{message}");
     assert_eq!(
         tokio::fs::read_to_string(outside_file).await.unwrap(),
         "outside"
@@ -197,7 +231,8 @@ async fn secure_hash_never_reads_outside_file_after_path_is_swapped_to_symlink()
     gate.release().await;
 
     let error = hashing.await.unwrap().unwrap_err();
-    assert!(format!("{error:#}").contains("symlink"));
+    let message = format!("{error:#}");
+    assert!(message.contains("symlink"), "{message}");
     assert_eq!(
         tokio::fs::read_to_string(outside_file).await.unwrap(),
         "outside-secret"
@@ -237,8 +272,56 @@ async fn staging_write_rejects_parent_swapped_to_symlink_before_temp_open() {
     gate.release().await;
     let error = write.await.unwrap().unwrap_err();
 
-    assert!(format!("{error:#}").contains("symlink"));
+    let message = format!("{error:#}");
+    assert!(message.contains("NotCommitted"), "{message}");
     assert!(!outside.path().join("file").exists());
+}
+
+#[tokio::test]
+async fn staging_write_rejects_revision_replacement_before_temp_open() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.write-revision-swap").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::WriteBeforeTempOpen);
+    let store = fixture.store.clone();
+    let revision_id = staged.revision_id.clone();
+    let write = tokio::spawn(async move {
+        store
+            .write_staging_file(
+                &revision_id,
+                Path::new("SKILL.md"),
+                b"---\nname: swapped\ndescription: changed\n---\nchanged\n",
+            )
+            .await
+    });
+    gate.wait_entered().await;
+    let original = staged.path.with_extension("original");
+    tokio::fs::rename(&staged.path, &original).await.unwrap();
+    tokio::fs::create_dir(&staged.path).await.unwrap();
+    for name in ["general-agent.json", "SKILL.md"] {
+        tokio::fs::copy(original.join(name), staged.path.join(name))
+            .await
+            .unwrap();
+    }
+    let replacement_before = tokio::fs::read(staged.path.join("SKILL.md")).await.unwrap();
+
+    gate.release().await;
+    let result = write.await.unwrap();
+
+    assert!(
+        result.is_err(),
+        "replacement revision must invalidate the write"
+    );
+    assert_eq!(
+        tokio::fs::read(staged.path.join("SKILL.md")).await.unwrap(),
+        replacement_before
+    );
 }
 
 #[cfg(unix)]
@@ -304,6 +387,129 @@ async fn destination_empty_directory_created_after_check_is_not_replaced() {
     assert!(destination.is_dir());
     assert!(directory_is_empty(&destination).await);
     assert!(staged.path.is_dir());
+}
+
+#[tokio::test]
+async fn promotion_copy_rejects_incoming_revision_replacement_without_writing_it() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.incoming-revision-swap").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::CopyBeforeFileOpen);
+    let store = fixture.store.clone();
+    let revision_id = staged.revision_id.clone();
+    let promotion = tokio::spawn(async move { store.promote_revision(&revision_id).await });
+    gate.wait_entered().await;
+    let incoming_root = fixture.paths.managed.join(".incoming");
+    let mut entries = tokio::fs::read_dir(&incoming_root).await.unwrap();
+    let incoming = entries.next_entry().await.unwrap().unwrap().path();
+    assert!(entries.next_entry().await.unwrap().is_none());
+    let original = incoming.with_extension("original");
+    tokio::fs::rename(&incoming, &original).await.unwrap();
+    tokio::fs::create_dir(&incoming).await.unwrap();
+
+    gate.release().await;
+    let result = promotion.await.unwrap();
+
+    assert!(
+        result.is_err(),
+        "replacement incoming revision must abort promotion"
+    );
+    assert!(incoming.is_dir());
+    assert!(directory_is_empty(&incoming).await);
+    assert!(staged.path.is_dir());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn promotion_readonly_rejects_destination_revision_replacement() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.readonly-revision-swap").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::ManagedReadonlyBeforeApply);
+    let store = fixture.store.clone();
+    let revision_id = staged.revision_id.clone();
+    let promotion = tokio::spawn(async move { store.promote_revision(&revision_id).await });
+    gate.wait_entered().await;
+    let destination = fixture
+        .paths
+        .managed
+        .join("com.example.readonly-revision-swap/revisions")
+        .join(&staged.revision_id);
+    let original = destination.with_extension("original");
+    tokio::fs::rename(&destination, &original).await.unwrap();
+    tokio::fs::create_dir(&destination).await.unwrap();
+    let marker = destination.join("replacement-marker");
+    tokio::fs::write(&marker, b"replacement").await.unwrap();
+    tokio::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600))
+        .await
+        .unwrap();
+
+    gate.release().await;
+    let result = promotion.await.unwrap();
+
+    assert!(
+        result.is_err(),
+        "replacement destination must abort promotion"
+    );
+    assert_eq!(tokio::fs::read(&marker).await.unwrap(), b"replacement");
+    assert_ne!(
+        tokio::fs::metadata(&marker)
+            .await
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o200,
+        0
+    );
+}
+
+#[tokio::test]
+async fn promotion_cleanup_rejects_staging_revision_replacement() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.cleanup-revision-swap").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::PromoteSourceCleanupBeforeApply);
+    let store = fixture.store.clone();
+    let revision_id = staged.revision_id.clone();
+    let promotion = tokio::spawn(async move { store.promote_revision(&revision_id).await });
+    gate.wait_entered().await;
+    let original = staged.path.with_extension("cleanup-original");
+    tokio::fs::rename(&staged.path, &original).await.unwrap();
+    tokio::fs::create_dir(&staged.path).await.unwrap();
+    let marker = staged.path.join("replacement-marker");
+    tokio::fs::write(&marker, b"replacement").await.unwrap();
+
+    gate.release().await;
+    let promoted = promotion.await.unwrap().unwrap();
+
+    assert!(promoted.path.is_dir());
+    assert_eq!(tokio::fs::read(&marker).await.unwrap(), b"replacement");
+    assert!(
+        promoted
+            .maintenance_issues
+            .iter()
+            .any(|issue| issue.operation == "promotion_source_cleanup")
+    );
 }
 
 #[cfg(unix)]

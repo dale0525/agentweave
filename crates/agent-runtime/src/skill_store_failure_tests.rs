@@ -357,7 +357,11 @@ async fn persistent_promotion_and_cleanup_failures_leave_staging_authoritative()
     assert!(message.contains("PromoteRestoreRename"), "{message}");
     assert!(staged.path.is_dir());
     assert!(!fixture.paths.quarantine.join(&staged.revision_id).exists());
-    assert!(managed_path(&fixture, "com.example.fallback", &staged.revision_id).exists());
+    assert!(!managed_path(&fixture, "com.example.fallback", &staged.revision_id).exists());
+    let maintenance = fixture.paths.quarantine.join(".maintenance");
+    let mut entries = tokio::fs::read_dir(&maintenance).await.unwrap();
+    assert!(entries.next_entry().await.unwrap().unwrap().path().is_dir());
+    assert!(entries.next_entry().await.unwrap().is_none());
     assert_eq!(fixture.store.maintenance_issues().len(), 1);
     assert_eq!(
         fixture

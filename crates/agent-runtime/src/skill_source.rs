@@ -4,9 +4,9 @@ use crate::skill_state::{
 };
 use crate::skill_store::{SkillRevisionStore, SkillStoreLimits, SkillStorePaths};
 use crate::skill_store_secure_fs::{
-    secure_package_hash, secure_package_snapshot, secure_package_snapshot_beneath,
-    unbounded_package_limits,
+    secure_package_hash, secure_package_snapshot, unbounded_package_limits,
 };
+use crate::skill_store_secure_roots::package_snapshot as prepared_package_snapshot;
 use anyhow::Context;
 use async_trait::async_trait;
 use icu_casemap::CaseMapper;
@@ -45,6 +45,26 @@ pub struct VerifiedPackageContent {
     pub expected_content_hash: String,
     /// Bounds that must also be applied when rechecking before execution.
     pub limits: SkillStoreLimits,
+    pub(crate) execution_binding: Option<ManagedExecutionBinding>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ManagedExecutionBinding {
+    pub(crate) store: SkillRevisionStore,
+    pub(crate) package_id: crate::skill_package::SkillPackageId,
+    pub(crate) revision_id: String,
+    pub(crate) storage_path: PathBuf,
+}
+
+impl std::fmt::Debug for ManagedExecutionBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManagedExecutionBinding")
+            .field("package_id", &self.package_id)
+            .field("revision_id", &self.revision_id)
+            .field("storage_path", &self.storage_path)
+            .finish_non_exhaustive()
+    }
 }
 
 #[async_trait]
@@ -212,8 +232,8 @@ impl ManagedSkillSource {
         let relative = PathBuf::from(revision.package_id.as_str())
             .join("revisions")
             .join(&revision.revision_id);
-        let snapshot = secure_package_snapshot_beneath(
-            &self.paths.managed,
+        let snapshot = prepared_package_snapshot(
+            self.paths.managed_identity(),
             &relative,
             self.store.package_limits(),
         )
@@ -255,7 +275,7 @@ impl ManagedSkillSource {
         }
         Ok(DiscoveredSkillPackage {
             layer: SkillLayer::Managed,
-            root: stored_path,
+            root: stored_path.clone(),
             descriptor: loaded.descriptor,
             content_hash: content_hash.clone(),
             warnings: loaded.warnings,
@@ -264,6 +284,12 @@ impl ManagedSkillSource {
                 instructions_file: snapshot.instructions_file.map(Arc::from),
                 expected_content_hash: content_hash,
                 limits: self.store.limits,
+                execution_binding: Some(ManagedExecutionBinding {
+                    store: self.store.clone(),
+                    package_id: revision.package_id,
+                    revision_id: revision.revision_id,
+                    storage_path: stored_path.clone(),
+                }),
             }),
         })
     }
@@ -384,7 +410,7 @@ fn is_transient_discovery_error(error: &anyhow::Error) -> bool {
                     | std::io::ErrorKind::PermissionDenied
                     | std::io::ErrorKind::TimedOut
                     | std::io::ErrorKind::OutOfMemory
-            ) || matches!(error.raw_os_error(), Some(23 | 24))
+            ) || error.raw_os_error().is_some_and(is_transient_raw_os_error)
         });
         #[cfg(unix)]
         let errno_transient = cause
@@ -404,6 +430,52 @@ fn is_transient_discovery_error(error: &anyhow::Error) -> bool {
         let errno_transient = false;
         io_transient || errno_transient
     })
+}
+
+#[cfg(any(test, windows))]
+fn is_windows_transient_raw_os_error(code: i32) -> bool {
+    matches!(code, 4 | 32 | 33)
+}
+
+fn is_transient_raw_os_error(code: i32) -> bool {
+    #[cfg(windows)]
+    {
+        is_windows_transient_raw_os_error(code)
+    }
+    #[cfg(unix)]
+    {
+        matches!(code, 23 | 24)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = code;
+        false
+    }
+}
+
+#[cfg(test)]
+mod transient_error_tests {
+    use super::is_windows_transient_raw_os_error;
+
+    #[test]
+    fn windows_resource_and_sharing_errors_are_transient() {
+        for code in [4, 32, 33] {
+            assert!(
+                is_windows_transient_raw_os_error(code),
+                "Win32 error {code} must skip discovery without quarantine"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_integrity_errors_are_not_transient() {
+        for code in [2, 3, 4390] {
+            assert!(
+                !is_windows_transient_raw_os_error(code),
+                "Win32 error {code} must remain an integrity failure"
+            );
+        }
+    }
 }
 
 fn validate_managed_record(

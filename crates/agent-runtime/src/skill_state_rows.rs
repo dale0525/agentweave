@@ -246,6 +246,8 @@ pub struct SkillRevisionExpectation {
     pub content_hash: String,
     pub storage_path: String,
     pub status: SkillRevisionStatus,
+    pub descriptor_json: Value,
+    pub validation_json: Value,
 }
 
 impl From<&SkillRevisionRecord> for SkillRevisionExpectation {
@@ -255,10 +257,13 @@ impl From<&SkillRevisionRecord> for SkillRevisionExpectation {
             content_hash: record.content_hash.clone(),
             storage_path: record.storage_path.clone(),
             status: record.status,
+            descriptor_json: record.descriptor_json.clone(),
+            validation_json: record.validation_json.clone(),
         }
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct SkillRevisionMetadata {
     pub version: String,
     pub content_hash: String,

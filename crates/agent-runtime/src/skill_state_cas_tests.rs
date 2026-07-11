@@ -164,3 +164,76 @@ async fn staging_metadata_cas_rejects_non_staging_expectation_before_sql() {
 
     assert!(format!("{error:#}").contains("expected staging lifecycle"));
 }
+
+#[tokio::test]
+async fn staging_refresh_cas_rejects_validation_only_change() {
+    let (state, observed) = staging_revision().await;
+    state
+        .update_revision_validation(&observed.revision_id, json!({"status": "reviewed"}))
+        .await
+        .unwrap();
+
+    let error = state
+        .refresh_staging_revision_metadata_cas(
+            &observed.revision_id,
+            SkillRevisionExpectation::from(&observed),
+            SkillRevisionMetadata {
+                version: observed.version.clone(),
+                content_hash: "writer-hash".into(),
+                descriptor_json: observed.descriptor_json.clone(),
+                validation_json: json!({"status": "valid"}),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("changed since operation observation"));
+}
+
+#[tokio::test]
+async fn promotion_cas_rejects_validation_only_change() {
+    let (state, observed) = staging_revision().await;
+    state
+        .update_revision_validation(&observed.revision_id, json!({"status": "reviewed"}))
+        .await
+        .unwrap();
+
+    let error = state
+        .promote_revision_record_with_metadata_cas(
+            &observed.revision_id,
+            SkillRevisionExpectation::from(&observed),
+            SkillRevisionPromotion {
+                version: observed.version.clone(),
+                content_hash: observed.content_hash.clone(),
+                storage_path: format!("managed/{}", observed.revision_id),
+                descriptor_json: observed.descriptor_json.clone(),
+                validation_json: json!({"status": "valid"}),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("changed since operation observation"));
+}
+
+#[tokio::test]
+async fn quarantine_cas_rejects_validation_only_change() {
+    let (state, observed) = staging_revision().await;
+    state
+        .update_revision_validation(&observed.revision_id, json!({"status": "reviewed"}))
+        .await
+        .unwrap();
+
+    let error = state
+        .quarantine_revision_record_cas(
+            &observed.revision_id,
+            &format!("quarantine/{}", observed.revision_id),
+            "stale",
+            SkillRevisionExpectation::from(&observed),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("changed since operation observation"));
+}

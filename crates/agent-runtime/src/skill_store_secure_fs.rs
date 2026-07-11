@@ -127,29 +127,6 @@ pub(crate) async fn secure_package_hash(
         .context("secure package hash worker failed")?
 }
 
-pub(crate) async fn secure_tree_snapshot(
-    root: &Path,
-    limits: PackageLimits,
-) -> anyhow::Result<SecureTreeSnapshot> {
-    let root = root.to_path_buf();
-    tokio::task::spawn_blocking(move || tree_direct(&root, limits))
-        .await
-        .context("secure tree snapshot worker failed")?
-}
-
-pub(crate) async fn secure_package_snapshot_beneath(
-    trusted_root: &Path,
-    relative: &Path,
-    limits: PackageLimits,
-) -> anyhow::Result<SecurePackageSnapshot> {
-    canonical_relative_path(relative)?;
-    let trusted_root = trusted_root.to_path_buf();
-    let relative = relative.to_path_buf();
-    tokio::task::spawn_blocking(move || snapshot_beneath(&trusted_root, &relative, limits))
-        .await
-        .context("secure package snapshot worker failed")?
-}
-
 pub(crate) async fn ensure_store_directory(
     trusted_root: &Path,
     relative: &Path,
@@ -167,27 +144,6 @@ pub(crate) async fn prepare_directory_path(path: &Path) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || prepare_directory_path_platform(&path))
         .await
         .context("secure directory path preparation worker failed")?
-}
-
-pub(crate) async fn remove_store_tree(trusted_root: &Path, relative: &Path) -> anyhow::Result<()> {
-    canonical_relative_path(relative)?;
-    let trusted_root = trusted_root.to_path_buf();
-    let relative = relative.to_path_buf();
-    tokio::task::spawn_blocking(move || remove_tree_beneath(&trusted_root, &relative))
-        .await
-        .context("secure tree cleanup worker failed")?
-}
-
-pub(crate) async fn reserve_store_directory(
-    trusted_root: &Path,
-    relative: &Path,
-) -> anyhow::Result<()> {
-    canonical_relative_path(relative)?;
-    let trusted_root = trusted_root.to_path_buf();
-    let relative = relative.to_path_buf();
-    tokio::task::spawn_blocking(move || reserve_directory_beneath(&trusted_root, &relative))
-        .await
-        .context("secure directory reservation worker failed")?
 }
 
 #[cfg(unix)]
@@ -241,71 +197,6 @@ fn prepare_directory_path_platform(path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
-fn remove_tree_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
-    use rustix::fs::{AtFlags, Mode, OFlags, openat, unlinkat};
-    let mut parent = open_trusted_directory(root)?;
-    let components = relative.components().collect::<Vec<_>>();
-    let (name, parents) = components
-        .split_last()
-        .context("store cleanup path is empty")?;
-    for component in parents {
-        parent = openat(
-            &parent,
-            component.as_os_str(),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )?;
-    }
-    let target = match openat(
-        &parent,
-        name.as_os_str(),
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    ) {
-        Ok(target) => target,
-        Err(rustix::io::Errno::NOENT) => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    remove_open_directory_contents(&target)?;
-    match unlinkat(&parent, name.as_os_str(), AtFlags::REMOVEDIR) {
-        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-#[cfg(unix)]
-fn remove_open_directory_contents(directory: &std::os::fd::OwnedFd) -> anyhow::Result<()> {
-    use rustix::fs::{AtFlags, Dir, Mode, OFlags, openat, unlinkat};
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    let entries = Dir::read_from(directory)?;
-    for entry in entries {
-        let entry = entry?;
-        let bytes = entry.file_name().to_bytes();
-        if matches!(bytes, b"." | b"..") {
-            continue;
-        }
-        let name = OsStr::from_bytes(bytes);
-        match openat(
-            directory,
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        ) {
-            Ok(child) => {
-                remove_open_directory_contents(&child)?;
-                unlinkat(directory, name, AtFlags::REMOVEDIR)?;
-            }
-            Err(rustix::io::Errno::NOTDIR) | Err(rustix::io::Errno::LOOP) => {
-                unlinkat(directory, name, AtFlags::empty())?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
 fn ensure_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
     use rustix::fs::{Mode, OFlags, RawMode, mkdirat, openat};
     let mut directory = open_trusted_directory(root)?;
@@ -335,36 +226,6 @@ fn ensure_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> 
     Ok(())
 }
 
-#[cfg(unix)]
-fn reserve_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
-    use rustix::fs::{Mode, OFlags, RawMode, mkdirat, openat};
-    let mut parent = open_trusted_directory(root)?;
-    let components = relative.components().collect::<Vec<_>>();
-    let (name, parents) = components
-        .split_last()
-        .context("store reservation path is empty")?;
-    for component in parents {
-        parent = openat(
-            &parent,
-            component.as_os_str(),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )?;
-    }
-    match mkdirat(
-        &parent,
-        name.as_os_str(),
-        Mode::from_raw_mode(RawMode::try_from(0o755_u32)?),
-    ) {
-        Ok(()) => Ok(()),
-        Err(rustix::io::Errno::EXIST) => anyhow::bail!(
-            "skill store destination already exists: {}",
-            root.join(relative).display()
-        ),
-        Err(error) => Err(error.into()),
-    }
-}
-
 #[cfg(not(unix))]
 fn ensure_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(root.join(relative))?;
@@ -379,25 +240,6 @@ fn ensure_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> 
 #[cfg(not(unix))]
 fn prepare_directory_path_platform(path: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(path)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn remove_tree_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
-    let canonical_root = std::fs::canonicalize(root)?;
-    let target = root.join(relative);
-    match std::fs::canonicalize(&target) {
-        Ok(canonical) if canonical.starts_with(canonical_root) => std::fs::remove_dir_all(target)?,
-        Ok(_) => anyhow::bail!("cleanup target escapes trusted store root"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn reserve_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir(root.join(relative))?;
     Ok(())
 }
 
@@ -430,52 +272,6 @@ fn hash_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<String> {
 }
 
 #[cfg(unix)]
-fn tree_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureTreeSnapshot> {
-    use rustix::fs::{Mode, OFlags, open};
-    let root_fd = open(
-        root,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )?;
-    scan_opened(root, root_fd, limits)
-}
-
-#[cfg(unix)]
-fn snapshot_beneath(
-    trusted_root: &Path,
-    relative: &Path,
-    limits: PackageLimits,
-) -> anyhow::Result<SecurePackageSnapshot> {
-    use rustix::fs::{Mode, OFlags, open, openat};
-    let mut directory = open(
-        trusted_root,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )
-    .with_context(|| {
-        format!(
-            "failed to open trusted store root: {}",
-            trusted_root.display()
-        )
-    })?;
-    for component in relative.components() {
-        directory = openat(
-            &directory,
-            component.as_os_str(),
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )
-        .with_context(|| {
-            format!(
-                "failed to open managed package path without following symlinks: {}",
-                trusted_root.join(relative).display()
-            )
-        })?;
-    }
-    snapshot_opened(&trusted_root.join(relative), directory, limits)
-}
-
-#[cfg(unix)]
 struct PackageFileIdentity {
     relative: PathBuf,
     canonical: Vec<u8>,
@@ -494,7 +290,7 @@ struct WalkState {
 }
 
 #[cfg(unix)]
-fn snapshot_opened(
+pub(crate) fn snapshot_opened(
     display_root: &Path,
     root_fd: std::os::fd::OwnedFd,
     limits: PackageLimits,
@@ -528,7 +324,7 @@ fn snapshot_opened(
 }
 
 #[cfg(unix)]
-fn scan_opened(
+pub(crate) fn scan_opened(
     display_root: &Path,
     root_fd: std::os::fd::OwnedFd,
     limits: PackageLimits,
@@ -800,12 +596,15 @@ fn hash_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<String> {
 }
 
 #[cfg(not(unix))]
-fn tree_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureTreeSnapshot> {
+pub(crate) fn tree_direct(
+    root: &Path,
+    limits: PackageLimits,
+) -> anyhow::Result<SecureTreeSnapshot> {
     scan_fallback(root, limits)
 }
 
 #[cfg(not(unix))]
-fn snapshot_beneath(
+pub(crate) fn snapshot_beneath(
     trusted_root: &Path,
     relative: &Path,
     limits: PackageLimits,

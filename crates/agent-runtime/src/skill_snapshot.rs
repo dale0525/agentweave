@@ -86,6 +86,7 @@ async fn build_registry(packages: &[ResolvedSkillPackage]) -> anyhow::Result<Ski
                             bytes,
                             verified.expected_content_hash.clone(),
                             verified.limits.package_limits(),
+                            verified.execution_binding.clone(),
                         )
                         .await?,
                     );

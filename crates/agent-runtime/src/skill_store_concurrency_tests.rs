@@ -76,10 +76,14 @@ async fn acknowledged_write_completes_before_waiting_promotion_on_store_clone() 
             .await
     });
     gate.wait_entered().await;
+    let attempt = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::RevisionLockAttempt);
     let promoter = fixture.store.clone();
     let promote_revision = staged.revision_id.clone();
     let promote = tokio::spawn(async move { promoter.promote_revision(&promote_revision).await });
-    tokio::task::yield_now().await;
+    attempt.wait_entered().await;
+    attempt.release().await;
     assert!(!promote.is_finished());
 
     gate.release().await;
@@ -189,12 +193,14 @@ async fn independent_store_instances_use_destination_reservation_and_db_cas() {
     );
     let first_gate = first_faults.gate_once(SkillStoreFaultPoint::PromoteBeforeDestinationCommit);
     let second_gate = second_faults.gate_once(SkillStoreFaultPoint::PromoteBeforeDestinationCommit);
+    let second_attempt = second_faults.gate_once(SkillStoreFaultPoint::RevisionLockAttempt);
     let first_revision = staged.revision_id.clone();
     let first = tokio::spawn(async move { first_store.promote_revision(&first_revision).await });
     first_gate.wait_entered().await;
     let second_revision = staged.revision_id.clone();
     let second = tokio::spawn(async move { second_store.promote_revision(&second_revision).await });
-    tokio::task::yield_now().await;
+    second_attempt.wait_entered().await;
+    second_attempt.release().await;
     assert!(!second_gate.has_entered());
 
     first_gate.release().await;
@@ -227,6 +233,7 @@ async fn independent_store_write_blocks_promotion_and_acknowledged_edit_is_promo
     let promoter = independent_store(&fixture, promoter_faults.clone());
     let writer_gate = writer_faults.gate_once(SkillStoreFaultPoint::WriteAfterLock);
     let promoter_gate = promoter_faults.gate_once(SkillStoreFaultPoint::PromoteAfterLock);
+    let promoter_attempt = promoter_faults.gate_once(SkillStoreFaultPoint::RevisionLockAttempt);
     let write_revision = staged.revision_id.clone();
     let write = tokio::spawn(async move {
         writer
@@ -240,23 +247,15 @@ async fn independent_store_write_blocks_promotion_and_acknowledged_edit_is_promo
     writer_gate.wait_entered().await;
     let promote_revision = staged.revision_id.clone();
     let promote = tokio::spawn(async move { promoter.promote_revision(&promote_revision).await });
-    tokio::task::yield_now().await;
-    let entered_early = promoter_gate.has_entered();
-    if entered_early {
-        promoter_gate.release().await;
-    }
+    promoter_attempt.wait_entered().await;
+    promoter_attempt.release().await;
+    assert!(!promoter_gate.has_entered());
     writer_gate.release().await;
     let write_result = write.await.unwrap();
-    if !entered_early {
-        promoter_gate.wait_entered().await;
-        promoter_gate.release().await;
-    }
+    promoter_gate.wait_entered().await;
+    promoter_gate.release().await;
     let managed = promote.await.unwrap();
 
-    assert!(
-        !entered_early,
-        "independent promotion entered the revision operation concurrently"
-    );
     write_result.unwrap();
     let managed = managed.unwrap();
     let content = tokio::fs::read_to_string(managed.path.join("SKILL.md"))
@@ -275,6 +274,7 @@ async fn independent_store_write_blocks_quarantine_and_acknowledged_edit_is_quar
     let quarantiner = independent_store(&fixture, quarantine_faults.clone());
     let writer_gate = writer_faults.gate_once(SkillStoreFaultPoint::WriteAfterLock);
     let quarantine_gate = quarantine_faults.gate_once(SkillStoreFaultPoint::QuarantineAfterLock);
+    let quarantine_attempt = quarantine_faults.gate_once(SkillStoreFaultPoint::RevisionLockAttempt);
     let write_revision = staged.revision_id.clone();
     let write = tokio::spawn(async move {
         writer
@@ -288,23 +288,15 @@ async fn independent_store_write_blocks_quarantine_and_acknowledged_edit_is_quar
             .quarantine_revision(&quarantine_revision, "concurrent")
             .await
     });
-    tokio::task::yield_now().await;
-    let entered_early = quarantine_gate.has_entered();
-    if entered_early {
-        quarantine_gate.release().await;
-    }
+    quarantine_attempt.wait_entered().await;
+    quarantine_attempt.release().await;
+    assert!(!quarantine_gate.has_entered());
     writer_gate.release().await;
     let write_result = write.await.unwrap();
-    if !entered_early {
-        quarantine_gate.wait_entered().await;
-        quarantine_gate.release().await;
-    }
+    quarantine_gate.wait_entered().await;
+    quarantine_gate.release().await;
     let quarantined = quarantine.await.unwrap();
 
-    assert!(
-        !entered_early,
-        "independent quarantine entered the revision operation concurrently"
-    );
     write_result.unwrap();
     let quarantined = quarantined.unwrap();
     assert_eq!(
@@ -325,6 +317,7 @@ async fn independent_store_double_write_is_serialized_and_final_hash_matches_tre
     let second_store = independent_store(&fixture, second_faults.clone());
     let first_gate = first_faults.gate_once(SkillStoreFaultPoint::WriteAfterLock);
     let second_gate = second_faults.gate_once(SkillStoreFaultPoint::WriteAfterLock);
+    let second_attempt = second_faults.gate_once(SkillStoreFaultPoint::RevisionLockAttempt);
     let first_revision = staged.revision_id.clone();
     let first = tokio::spawn(async move {
         first_store
@@ -338,23 +331,15 @@ async fn independent_store_double_write_is_serialized_and_final_hash_matches_tre
             .write_staging_file(&second_revision, Path::new("second.txt"), b"second")
             .await
     });
-    tokio::task::yield_now().await;
-    let entered_early = second_gate.has_entered();
-    if entered_early {
-        second_gate.release().await;
-    }
+    second_attempt.wait_entered().await;
+    second_attempt.release().await;
+    assert!(!second_gate.has_entered());
     first_gate.release().await;
     let first_result = first.await.unwrap();
-    if !entered_early {
-        second_gate.wait_entered().await;
-        second_gate.release().await;
-    }
+    second_gate.wait_entered().await;
+    second_gate.release().await;
     let second_result = second.await.unwrap();
 
-    assert!(
-        !entered_early,
-        "independent writes entered the revision operation concurrently"
-    );
     first_result.unwrap();
     second_result.unwrap();
     let record = fixture

@@ -606,7 +606,9 @@ impl SkillStateStore {
                 && (revision.status != expected.status
                     || revision.version != expected.version
                     || revision.content_hash != expected.content_hash
-                    || revision.storage_path != expected.storage_path)
+                    || revision.storage_path != expected.storage_path
+                    || revision.descriptor_json != expected.descriptor_json
+                    || revision.validation_json != expected.validation_json)
             {
                 anyhow::bail!(
                     "skill revision changed since operation observation: {revision_id}"
@@ -638,12 +640,17 @@ impl SkillStateStore {
             let validation = serde_json::to_string(&Value::Object(validation))?;
             let storage_path = storage_path.unwrap_or(&revision.storage_path);
             let result = if let Some(expected) = &expected {
+                let expected_descriptor_json =
+                    serde_json::to_string(&expected.descriptor_json)?;
+                let expected_validation_json =
+                    serde_json::to_string(&expected.validation_json)?;
                 sqlx::query(
                     r#"UPDATE skill_revisions
                        SET version = ?, content_hash = ?, descriptor_json = ?, storage_path = ?,
                            lifecycle_status = 'quarantined', validation_json = ?
                        WHERE revision_id = ? AND lifecycle_status = ? AND version = ?
-                         AND content_hash = ? AND storage_path = ?"#,
+                         AND content_hash = ? AND storage_path = ?
+                         AND descriptor_json = ? AND validation_json = ?"#,
                 )
                 .bind(&version)
                 .bind(&content_hash)
@@ -655,6 +662,8 @@ impl SkillStateStore {
                 .bind(&expected.version)
                 .bind(&expected.content_hash)
                 .bind(&expected.storage_path)
+                .bind(expected_descriptor_json)
+                .bind(expected_validation_json)
                 .execute(&mut *tx)
                 .await?
             } else {

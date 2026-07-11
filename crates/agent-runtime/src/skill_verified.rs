@@ -2,8 +2,8 @@ use crate::skill::{
     InstalledSkill, InstalledSkillVerification, SkillManifest, SkillRegistry, canonical_skill_root,
     validate_manifest,
 };
+use crate::skill_store_execution::PreparedSkillExecution;
 use crate::skill_store_fs::PackageLimits;
-use crate::skill_store_secure_fs::secure_package_hash;
 use anyhow::Context;
 use std::path::PathBuf;
 
@@ -13,6 +13,7 @@ impl SkillRegistry {
         manifest_bytes: &[u8],
         expected_content_hash: String,
         limits: PackageLimits,
+        execution_binding: Option<crate::skill_source::ManagedExecutionBinding>,
     ) -> anyhow::Result<InstalledSkill> {
         let root = canonical_skill_root(&root).await?;
         let manifest: SkillManifest =
@@ -26,21 +27,31 @@ impl SkillRegistry {
             verification: Some(InstalledSkillVerification {
                 expected_content_hash,
                 limits,
+                execution_binding,
             }),
         })
     }
 }
 
-pub(crate) async fn verify_before_execution(skill: &InstalledSkill) -> anyhow::Result<()> {
+pub(crate) async fn prepare_before_execution(
+    skill: &InstalledSkill,
+) -> anyhow::Result<Option<PreparedSkillExecution>> {
     let Some(verification) = &skill.verification else {
-        return Ok(());
+        return Ok(None);
     };
-    let actual = secure_package_hash(&skill.root, verification.limits).await?;
-    if actual != verification.expected_content_hash {
-        anyhow::bail!(
-            "managed skill content changed since managed snapshot: {}",
-            skill.root.display()
-        );
-    }
-    Ok(())
+    let binding = verification
+        .execution_binding
+        .as_ref()
+        .context("managed skill verification has no execution binding")?;
+    binding
+        .store
+        .prepare_managed_execution(
+            &binding.package_id,
+            &binding.revision_id,
+            &binding.storage_path,
+            &verification.expected_content_hash,
+            verification.limits,
+        )
+        .await
+        .map(Some)
 }

@@ -84,6 +84,17 @@ async fn promotion_db_and_destination_cleanup_failures_keep_staging_authoritativ
     assert_eq!(record.status, SkillRevisionStatus::Staging);
     assert_eq!(record.storage_path, staged.path.to_string_lossy());
     assert!(staged.path.is_dir());
+    let canonical = fixture
+        .paths
+        .managed
+        .join("com.example.promote-cleanup/revisions")
+        .join(&staged.revision_id);
+    assert!(!canonical.exists());
+    let maintenance = fixture.paths.quarantine.join(".maintenance");
+    let mut entries = tokio::fs::read_dir(&maintenance).await.unwrap();
+    let isolated = entries.next_entry().await.unwrap().unwrap().path();
+    assert!(isolated.is_dir());
+    assert!(entries.next_entry().await.unwrap().is_none());
     assert!(
         fixture
             .store
@@ -91,6 +102,13 @@ async fn promotion_db_and_destination_cleanup_failures_keep_staging_authoritativ
             .iter()
             .any(|issue| issue.revision_id == staged.revision_id)
     );
+
+    let promoted = fixture
+        .store
+        .promote_revision(&staged.revision_id)
+        .await
+        .unwrap();
+    assert!(promoted.path.is_dir());
 }
 
 #[tokio::test]

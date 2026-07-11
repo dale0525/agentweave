@@ -450,8 +450,12 @@ async fn promotion_cleanup_failure_keeps_staging_authoritative_and_reports_both_
     assert!(message.contains("PromoteDatabase"), "{message}");
     assert!(message.contains("PromoteRestoreRename"), "{message}");
     assert!(staged.path.exists());
-    assert!(managed_path(&fixture, &staged.revision_id).exists());
+    assert!(!managed_path(&fixture, &staged.revision_id).exists());
     assert!(!fixture.paths.quarantine.join(&staged.revision_id).exists());
+    let maintenance = fixture.paths.quarantine.join(".maintenance");
+    let mut entries = tokio::fs::read_dir(&maintenance).await.unwrap();
+    assert!(entries.next_entry().await.unwrap().unwrap().path().is_dir());
+    assert!(entries.next_entry().await.unwrap().is_none());
     let record = fixture
         .state
         .get_revision(&staged.revision_id)

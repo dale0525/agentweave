@@ -107,6 +107,120 @@ async fn metadata_and_restore_failure_quarantines_actual_tree_with_final_hash() 
 }
 
 #[tokio::test]
+async fn committed_write_and_restore_failure_quarantines_actual_tree() {
+    let fixture = RecoveryFixture::new().await;
+    let staged = fixture.staged().await;
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::WriteAfterRenameMode);
+    fixture
+        .faults
+        .fail_after(SkillStoreFaultPoint::WriteBeforeRename, 1);
+
+    let error = fixture
+        .store
+        .write_staging_file(&staged.revision_id, Path::new("SKILL.md"), edited_skill())
+        .await
+        .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("WriteAfterRenameMode"), "{message}");
+    assert!(message.contains("WriteBeforeRename"), "{message}");
+    let record = fixture
+        .state
+        .get_revision(&staged.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, SkillRevisionStatus::Quarantined);
+    assert_eq!(
+        record.content_hash,
+        hash_package_tree(Path::new(&record.storage_path))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn committed_invalid_descriptor_and_restore_failure_isolated_with_actual_hash() {
+    let fixture = RecoveryFixture::new().await;
+    let staged = fixture.staged().await;
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::WriteAfterRenameRevalidate);
+    fixture
+        .faults
+        .fail_after(SkillStoreFaultPoint::WriteBeforeRename, 1);
+
+    fixture
+        .store
+        .write_staging_file(
+            &staged.revision_id,
+            Path::new("general-agent.json"),
+            b"{invalid",
+        )
+        .await
+        .unwrap_err();
+
+    let record = fixture
+        .state
+        .get_revision(&staged.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, SkillRevisionStatus::Quarantined);
+    assert_eq!(
+        record.content_hash,
+        hash_package_tree(Path::new(&record.storage_path))
+            .await
+            .unwrap()
+    );
+    assert!(record.validation_json["descriptorError"].is_string());
+}
+
+#[tokio::test]
+async fn committed_write_isolation_db_and_second_restore_failure_retries_quarantine_cas() {
+    let fixture = RecoveryFixture::new().await;
+    let staged = fixture.staged().await;
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::WriteAfterRenameMode);
+    fixture
+        .faults
+        .fail_after(SkillStoreFaultPoint::WriteBeforeRename, 1);
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::WriteIsolationDatabase);
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::WriteIsolationRestore);
+
+    let error = fixture
+        .store
+        .write_staging_file(&staged.revision_id, Path::new("SKILL.md"), edited_skill())
+        .await
+        .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("WriteIsolationDatabase"), "{message}");
+    assert!(message.contains("WriteIsolationRestore"), "{message}");
+    let record = fixture
+        .state
+        .get_revision(&staged.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, SkillRevisionStatus::Quarantined);
+    assert_eq!(
+        record.content_hash,
+        hash_package_tree(Path::new(&record.storage_path))
+            .await
+            .unwrap()
+    );
+    assert!(Path::new(&record.storage_path).is_dir());
+}
+
+#[tokio::test]
 async fn isolation_collision_keeps_staging_path_authoritative_and_quarantined() {
     let fixture = RecoveryFixture::new().await;
     let staged = fixture.staged().await;

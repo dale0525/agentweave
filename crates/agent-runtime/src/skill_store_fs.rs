@@ -2,19 +2,30 @@ use crate::skill_source::{
     canonical_relative_path, portable_collision_key, register_portable_path,
 };
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
-pub(crate) use crate::skill_store_fs_types::{
-    AtomicReplaceCommitState, AtomicReplaceFailure, PackageLimits,
-};
+pub(crate) use crate::skill_store_fs_types::PackageLimits;
 use crate::skill_store_fs_types::{
     PackageDirectory, PackageEntries, PackageFile, StoredFileContents,
 };
+use crate::skill_store_prepared_fs::{
+    create_regular_file as create_regular_file_prepared,
+    open_regular_file as open_regular_file_prepared, set_mode as set_mode_prepared,
+    set_readonly as set_readonly_prepared, set_writable as set_writable_prepared,
+};
 use crate::skill_store_secure_fs::ensure_store_directory;
+use crate::skill_store_secure_roots::{PreparedStoreDirectory, ensure_opened_child_directory};
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
+
+struct CopyRoots<'a> {
+    source: &'a Path,
+    destination: &'a Path,
+    prepared_source: Option<&'a PreparedStoreDirectory>,
+    prepared_destination: Option<&'a PreparedStoreDirectory>,
+}
 
 pub(crate) async fn measure_package_tree(
     root: &Path,
@@ -33,13 +44,64 @@ pub(crate) async fn measure_package_tree(
     Ok(package_bytes)
 }
 
-pub(crate) async fn copy_package_tree_into_reserved(
+pub(crate) async fn copy_package_tree_into_prepared(
     source: &Path,
+    destination: &PreparedStoreDirectory,
+    limits: PackageLimits,
+    faults: &StoreFaults,
+    copy_fault: StoreFaultPoint,
+) -> anyhow::Result<()> {
+    destination.verify()?;
+    let entries = collect_entries(source, limits).await?;
+    copy_collected_entries(
+        CopyRoots {
+            source,
+            destination: destination.path(),
+            prepared_source: None,
+            prepared_destination: Some(destination),
+        },
+        entries,
+        limits,
+        faults,
+        copy_fault,
+    )
+    .await
+}
+
+pub(crate) async fn copy_prepared_package_tree_into_prepared(
+    source: &PreparedStoreDirectory,
+    destination: &PreparedStoreDirectory,
+    limits: PackageLimits,
+    faults: &StoreFaults,
+    copy_fault: StoreFaultPoint,
+) -> anyhow::Result<()> {
+    source.verify()?;
+    destination.verify()?;
+    let entries = collect_entries(source.path(), limits).await?;
+    source.verify()?;
+    copy_collected_entries(
+        CopyRoots {
+            source: source.path(),
+            destination: destination.path(),
+            prepared_source: Some(source),
+            prepared_destination: Some(destination),
+        },
+        entries,
+        limits,
+        faults,
+        copy_fault,
+    )
+    .await
+}
+
+pub(crate) async fn copy_prepared_package_tree_into_reserved(
+    source: &PreparedStoreDirectory,
     destination: &Path,
     limits: PackageLimits,
     faults: &StoreFaults,
     copy_fault: StoreFaultPoint,
 ) -> anyhow::Result<()> {
+    source.verify()?;
     let metadata = tokio::fs::symlink_metadata(destination).await?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         anyhow::bail!(
@@ -47,35 +109,79 @@ pub(crate) async fn copy_package_tree_into_reserved(
             destination.display()
         );
     }
-    let entries = collect_entries(source, limits).await?;
-    copy_collected_entries(source, destination, entries, limits, faults, copy_fault).await
+    let entries = collect_entries(source.path(), limits).await?;
+    source.verify()?;
+    copy_collected_entries(
+        CopyRoots {
+            source: source.path(),
+            destination,
+            prepared_source: Some(source),
+            prepared_destination: None,
+        },
+        entries,
+        limits,
+        faults,
+        copy_fault,
+    )
+    .await
 }
 
 async fn copy_collected_entries(
-    source: &Path,
-    destination: &Path,
+    roots: CopyRoots<'_>,
     entries: PackageEntries,
     limits: PackageLimits,
     faults: &StoreFaults,
     copy_fault: StoreFaultPoint,
 ) -> anyhow::Result<()> {
     for directory in &entries.directories {
-        ensure_store_directory(destination, &directory.relative).await?;
+        if let Some(destination) = roots.prepared_destination {
+            ensure_opened_child_directory(destination, &directory.relative).await?;
+        } else {
+            ensure_store_directory(roots.destination, &directory.relative).await?;
+        }
     }
 
     let mut package_bytes = 0_u64;
     for file in entries.files {
         faults.check(copy_fault)?;
         faults.checkpoint(StoreFaultPoint::CopyBeforeFileOpen).await;
-        let bytes = copy_regular_file(source, destination, &file, limits.max_file_bytes).await?;
+        if let Some(source) = roots.prepared_source {
+            source.verify()?;
+        }
+        if let Some(destination) = roots.prepared_destination {
+            destination.verify()?;
+        }
+        let bytes = copy_regular_file(
+            roots.source,
+            roots.destination,
+            roots.prepared_source,
+            roots.prepared_destination,
+            &file,
+            limits.max_file_bytes,
+        )
+        .await?;
         package_bytes = checked_package_add(package_bytes, bytes, limits.max_package_bytes)?;
     }
     let mut directories = entries.directories;
     directories.sort_by_key(|directory| std::cmp::Reverse(directory.relative.components().count()));
     for directory in directories {
-        set_mode_nofollow(destination, Some(&directory.relative), directory.mode, true).await?;
+        if let Some(destination) = roots.prepared_destination {
+            set_mode_prepared(destination, Some(&directory.relative), directory.mode, true).await?;
+        } else {
+            set_mode_nofollow(
+                roots.destination,
+                Some(&directory.relative),
+                directory.mode,
+                true,
+            )
+            .await?;
+        }
     }
-    set_mode_nofollow(destination, None, entries.root_mode, true).await?;
+    if let Some(destination) = roots.prepared_destination {
+        set_mode_prepared(destination, None, entries.root_mode, true).await?;
+    } else {
+        set_mode_nofollow(roots.destination, None, entries.root_mode, true).await?;
+    }
     Ok(())
 }
 
@@ -224,19 +330,6 @@ pub(crate) async fn read_optional_regular_file(
     Ok(Some(StoredFileContents { bytes, mode }))
 }
 
-pub(crate) async fn atomic_replace_file(
-    root: &Path,
-    relative: &Path,
-    bytes: &[u8],
-    mode: u32,
-    faults: &StoreFaults,
-) -> Result<(), AtomicReplaceFailure> {
-    faults
-        .checkpoint(StoreFaultPoint::WriteBeforeTempOpen)
-        .await;
-    atomic_replace_file_platform(root, relative, bytes, mode, faults).await
-}
-
 pub(crate) async fn remove_created_directories(created: &[PathBuf]) -> anyhow::Result<()> {
     let mut errors = Vec::new();
     for path in created.iter().rev() {
@@ -294,27 +387,37 @@ pub(crate) async fn remove_regular_file_nofollow(
     }
 }
 
-pub(crate) async fn make_tree_readonly(root: &Path, limits: PackageLimits) -> anyhow::Result<()> {
-    let entries = collect_entries(root, limits).await?;
+pub(crate) async fn make_tree_readonly(
+    root: &PreparedStoreDirectory,
+    limits: PackageLimits,
+) -> anyhow::Result<()> {
+    root.verify()?;
+    let entries = collect_entries(root.path(), limits).await?;
+    root.verify()?;
     for file in entries.files {
-        set_readonly_nofollow(root, Some(&file.relative), false).await?;
+        set_readonly_prepared(root, Some(&file.relative), false).await?;
     }
     let mut directories = entries.directories;
     directories.sort_by_key(|directory| std::cmp::Reverse(directory.relative.components().count()));
     for directory in directories {
-        set_readonly_nofollow(root, Some(&directory.relative), true).await?;
+        set_readonly_prepared(root, Some(&directory.relative), true).await?;
     }
-    set_readonly_nofollow(root, None, true).await
+    set_readonly_prepared(root, None, true).await
 }
 
-pub(crate) async fn make_tree_writable(root: &Path, limits: PackageLimits) -> anyhow::Result<()> {
-    let entries = collect_entries(root, limits).await?;
-    set_writable_nofollow(root, None, true).await?;
+pub(crate) async fn make_tree_writable(
+    root: &PreparedStoreDirectory,
+    limits: PackageLimits,
+) -> anyhow::Result<()> {
+    root.verify()?;
+    let entries = collect_entries(root.path(), limits).await?;
+    root.verify()?;
+    set_writable_prepared(root, None, true).await?;
     for directory in &entries.directories {
-        set_writable_nofollow(root, Some(&directory.relative), true).await?;
+        set_writable_prepared(root, Some(&directory.relative), true).await?;
     }
     for file in entries.files {
-        set_writable_nofollow(root, Some(&file.relative), false).await?;
+        set_writable_prepared(root, Some(&file.relative), false).await?;
     }
     Ok(())
 }
@@ -451,20 +554,28 @@ async fn read_file_size(
 async fn copy_regular_file(
     source_root: &Path,
     destination_root: &Path,
+    prepared_source: Option<&PreparedStoreDirectory>,
+    prepared_destination: Option<&PreparedStoreDirectory>,
     file: &PackageFile,
     max_file_bytes: u64,
 ) -> anyhow::Result<u64> {
     let source_path = source_root.join(&file.relative);
-    let (mut source, opened_bytes, _) =
-        open_regular_file_nofollow(source_root, &file.relative).await?;
+    let (mut source, opened_bytes, _) = match prepared_source {
+        Some(source) => open_regular_file_prepared(source, &file.relative).await?,
+        None => open_regular_file_nofollow(source_root, &file.relative).await?,
+    };
     if opened_bytes != file.expected_bytes {
         anyhow::bail!(
             "package file changed while copying: {}",
             source_path.display()
         );
     }
-    let mut destination =
-        create_regular_file_nofollow(destination_root, &file.relative, file.mode).await?;
+    let mut destination = match prepared_destination {
+        Some(destination) => {
+            create_regular_file_prepared(destination, &file.relative, file.mode).await?
+        }
+        None => create_regular_file_nofollow(destination_root, &file.relative, file.mode).await?,
+    };
     let mut buffer = vec![0; COPY_BUFFER_BYTES];
     let mut bytes = 0_u64;
     loop {
@@ -490,7 +601,11 @@ async fn copy_regular_file(
             source_path.display()
         );
     }
-    set_mode_nofollow(destination_root, Some(&file.relative), file.mode, false).await?;
+    if let Some(destination) = prepared_destination {
+        set_mode_prepared(destination, Some(&file.relative), file.mode, false).await?;
+    } else {
+        set_mode_nofollow(destination_root, Some(&file.relative), file.mode, false).await?;
+    }
     Ok(bytes)
 }
 
@@ -561,192 +676,6 @@ async fn open_regular_file_nofollow(
         bytes,
         mode,
     ))
-}
-
-#[cfg(unix)]
-async fn atomic_replace_file_platform(
-    root: &Path,
-    relative: &Path,
-    bytes: &[u8],
-    mode: u32,
-    faults: &StoreFaults,
-) -> Result<(), AtomicReplaceFailure> {
-    use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawMode, fstat, openat, renameat, unlinkat};
-    use std::fs::File;
-
-    let failure = |error, state, temp_path| AtomicReplaceFailure {
-        state,
-        temp_path,
-        error,
-    };
-    let (parent, destination_name) = open_parent_nofollow(root, relative)
-        .map_err(|error| failure(error, AtomicReplaceCommitState::NotCommitted, None))?;
-    let temporary_name = format!(".skill-write-{}.tmp", uuid::Uuid::new_v4());
-    let temporary_path = root
-        .join(relative.parent().unwrap_or_else(|| Path::new("")))
-        .join(&temporary_name);
-    let descriptor = openat(
-        &parent,
-        temporary_name.as_str(),
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::from_raw_mode(RawMode::try_from(mode & 0o777).map_err(|error| {
-            failure(error.into(), AtomicReplaceCommitState::NotCommitted, None)
-        })?),
-    )
-    .with_context(|| {
-        format!(
-            "failed to create staging temporary file without following symlinks: {}",
-            root.join(relative).display()
-        )
-    })
-    .map_err(|error| failure(error, AtomicReplaceCommitState::NotCommitted, None))?;
-    let stat = fstat(&descriptor)
-        .map_err(|error| failure(error.into(), AtomicReplaceCommitState::NotCommitted, None))?;
-    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
-        return Err(failure(
-            anyhow::anyhow!("staging temporary path is not a regular file"),
-            AtomicReplaceCommitState::NotCommitted,
-            Some(temporary_path),
-        ));
-    }
-    let mut file = tokio::fs::File::from_std(File::from(descriptor));
-    let mut committed = false;
-    let result = async {
-        file.write_all(bytes).await?;
-        file.flush().await?;
-        drop(file);
-        faults.check(StoreFaultPoint::WriteBeforeRename)?;
-        renameat(&parent, temporary_name.as_str(), &parent, destination_name).with_context(
-            || {
-                format!(
-                    "failed to atomically replace staging file {}",
-                    root.join(relative).display()
-                )
-            },
-        )?;
-        committed = true;
-        faults.check(StoreFaultPoint::WriteAfterRenameMode)?;
-        set_mode_nofollow(root, Some(relative), mode, false).await?;
-        faults.check(StoreFaultPoint::WriteAfterRenameRevalidate)?;
-        let _ = open_regular_file_nofollow(root, relative).await?;
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-    match result {
-        Ok(()) => Ok(()),
-        Err(error) if committed => Err(failure(error, AtomicReplaceCommitState::Committed, None)),
-        Err(error) => {
-            let cleanup = match faults.check(StoreFaultPoint::WriteTempCleanup) {
-                Ok(()) => unlinkat(&parent, temporary_name.as_str(), AtFlags::empty())
-                    .map_err(anyhow::Error::from),
-                Err(cleanup) => Err(cleanup),
-            };
-            match cleanup {
-                Ok(()) => Err(failure(error, AtomicReplaceCommitState::NotCommitted, None)),
-                Err(cleanup)
-                    if cleanup.downcast_ref::<rustix::io::Errno>()
-                        == Some(&rustix::io::Errno::NOENT) =>
-                {
-                    Err(failure(error, AtomicReplaceCommitState::NotCommitted, None))
-                }
-                Err(cleanup) => Err(failure(
-                    error.context(format!("temporary cleanup failed: {cleanup:#}")),
-                    AtomicReplaceCommitState::NotCommitted,
-                    Some(temporary_path),
-                )),
-            }
-        }
-    }
-}
-
-#[cfg(not(unix))]
-async fn atomic_replace_file_platform(
-    root: &Path,
-    relative: &Path,
-    bytes: &[u8],
-    _mode: u32,
-    faults: &StoreFaults,
-) -> Result<(), AtomicReplaceFailure> {
-    let failure = |error, state, temp_path| AtomicReplaceFailure {
-        state,
-        temp_path,
-        error,
-    };
-    let destination = root.join(relative);
-    let parent = destination
-        .parent()
-        .context("staging file has no parent")
-        .map_err(|error| failure(error, AtomicReplaceCommitState::NotCommitted, None))?;
-    let canonical_root = tokio::fs::canonicalize(root)
-        .await
-        .map_err(|error| failure(error.into(), AtomicReplaceCommitState::NotCommitted, None))?;
-    let canonical_parent = tokio::fs::canonicalize(parent)
-        .await
-        .map_err(|error| failure(error.into(), AtomicReplaceCommitState::NotCommitted, None))?;
-    if !canonical_parent.starts_with(&canonical_root) {
-        return Err(failure(
-            anyhow::anyhow!(
-                "staging file parent escapes revision root: {}",
-                parent.display()
-            ),
-            AtomicReplaceCommitState::NotCommitted,
-            None,
-        ));
-    }
-    let temporary = parent.join(format!(".skill-write-{}.tmp", uuid::Uuid::new_v4()));
-    let mut committed = false;
-    let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .await?;
-        if !file.metadata().await?.is_file() {
-            anyhow::bail!("staging temporary path is not a regular file");
-        }
-        file.write_all(bytes).await?;
-        file.flush().await?;
-        drop(file);
-        let canonical_parent = tokio::fs::canonicalize(parent).await?;
-        if !canonical_parent.starts_with(&canonical_root) {
-            anyhow::bail!("staging file parent escaped revision root before replace");
-        }
-        faults.check(StoreFaultPoint::WriteBeforeRename)?;
-        tokio::fs::rename(&temporary, &destination).await?;
-        committed = true;
-        faults.check(StoreFaultPoint::WriteAfterRenameMode)?;
-        faults.check(StoreFaultPoint::WriteAfterRenameRevalidate)?;
-        let _ = open_regular_file_nofollow(root, relative).await?;
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-    match result {
-        Ok(()) => Ok(()),
-        Err(error) if committed => Err(failure(error, AtomicReplaceCommitState::Committed, None)),
-        Err(error) => {
-            let cleanup = match faults.check(StoreFaultPoint::WriteTempCleanup) {
-                Ok(()) => tokio::fs::remove_file(&temporary)
-                    .await
-                    .map_err(anyhow::Error::from),
-                Err(cleanup) => Err(cleanup),
-            };
-            match cleanup {
-                Ok(()) => Err(failure(error, AtomicReplaceCommitState::NotCommitted, None)),
-                Err(cleanup)
-                    if cleanup
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
-                {
-                    Err(failure(error, AtomicReplaceCommitState::NotCommitted, None))
-                }
-                Err(cleanup) => Err(failure(
-                    error.context(format!("temporary cleanup failed: {cleanup:#}")),
-                    AtomicReplaceCommitState::NotCommitted,
-                    Some(temporary),
-                )),
-            }
-        }
-    }
 }
 
 #[cfg(not(unix))]
@@ -936,53 +865,6 @@ async fn set_mode_nofollow(
     _directory: bool,
 ) -> anyhow::Result<()> {
     revalidate_mode_path(root, relative).await.map(|_| ())
-}
-
-async fn set_readonly_nofollow(
-    root: &Path,
-    relative: Option<&Path>,
-    directory: bool,
-) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use rustix::fs::{Mode, RawMode, fchmod, fstat};
-        let descriptor = open_mode_target(root, relative, directory)?;
-        let mode = (u32::from(fstat(&descriptor)?.st_mode) & !0o222) & 0o777;
-        fchmod(descriptor, Mode::from_raw_mode(RawMode::try_from(mode)?))?;
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let path = revalidate_mode_path(root, relative).await?;
-        let mut permissions = tokio::fs::metadata(&path).await?.permissions();
-        permissions.set_readonly(true);
-        tokio::fs::set_permissions(path, permissions).await?;
-        Ok(())
-    }
-}
-
-async fn set_writable_nofollow(
-    root: &Path,
-    relative: Option<&Path>,
-    directory: bool,
-) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use rustix::fs::{Mode, RawMode, fchmod, fstat};
-        let descriptor = open_mode_target(root, relative, directory)?;
-        let access = if directory { 0o700 } else { 0o600 };
-        let mode = (u32::from(fstat(&descriptor)?.st_mode) | access) & 0o777;
-        fchmod(descriptor, Mode::from_raw_mode(RawMode::try_from(mode)?))?;
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let path = revalidate_mode_path(root, relative).await?;
-        let mut permissions = tokio::fs::metadata(&path).await?.permissions();
-        permissions.set_readonly(false);
-        tokio::fs::set_permissions(path, permissions).await?;
-        Ok(())
-    }
 }
 
 #[cfg(not(unix))]
