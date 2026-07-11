@@ -3,7 +3,7 @@ use crate::skill_availability::{
     SkillAvailability, SkillAvailabilityStatus, SkillCapabilityMetadata,
     evaluate_skill_availability,
 };
-use crate::skill_store_execution::is_portable_absolute_path;
+use crate::skill_entry_resource::{ManifestEntryArgKind, classify_manifest_entry_arg};
 use crate::skill_store_fs::PackageLimits;
 use crate::tools::ToolPermission;
 use crate::tools::process::read_limited_child_output;
@@ -492,11 +492,7 @@ pub(crate) fn validate_manifest_semantics(manifest: &SkillManifest) -> anyhow::R
     }
 
     for arg in &manifest.entry.args {
-        let path = Path::new(arg);
-        if looks_like_entry_resource(arg)
-            && !is_portable_absolute_path(arg)
-            && !is_safe_packaged_skill_path(path)
-        {
+        if classify_manifest_entry_arg(arg) == ManifestEntryArgKind::UnsafeRelative {
             anyhow::bail!("unsafe skill entry resource path: {arg}");
         }
     }
@@ -533,21 +529,21 @@ fn is_tool_name(name: &str) -> bool {
 
 async fn validate_entry_resources(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
     for path in manifest_entry_resources(manifest) {
-        resolve_skill_package_file(root, path, "skill manifest entry resource").await?;
+        resolve_skill_package_file(root, &path, "skill manifest entry resource").await?;
     }
 
     Ok(())
 }
 
-pub(crate) fn manifest_entry_resources(manifest: &SkillManifest) -> impl Iterator<Item = &Path> {
-    manifest
-        .entry
-        .args
-        .iter()
-        .filter(|arg| looks_like_entry_resource(arg))
-        .filter(|arg| !is_portable_absolute_path(arg))
-        .filter(|arg| is_safe_packaged_skill_path(Path::new(arg)))
-        .map(Path::new)
+pub(crate) fn manifest_entry_resources(
+    manifest: &SkillManifest,
+) -> impl Iterator<Item = PathBuf> + '_ {
+    manifest.entry.args.iter().filter_map(|arg| {
+        let ManifestEntryArgKind::PackagedRelative(path) = classify_manifest_entry_arg(arg) else {
+            return None;
+        };
+        Some(path)
+    })
 }
 
 pub(crate) async fn canonical_skill_root(root: &Path) -> anyhow::Result<PathBuf> {
@@ -600,15 +596,6 @@ async fn resolve_skill_package_file(
         );
     }
     Ok(canonical)
-}
-
-fn looks_like_entry_resource(arg: &str) -> bool {
-    if arg.trim().is_empty() || arg.starts_with('-') {
-        return false;
-    }
-
-    let path = Path::new(arg);
-    path.extension().is_some() || path.components().count() > 1 || arg.contains('\\')
 }
 
 fn is_safe_packaged_skill_path(path: &Path) -> bool {

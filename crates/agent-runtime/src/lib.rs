@@ -9,6 +9,7 @@ pub mod session;
 pub mod skill;
 pub mod skill_availability;
 pub mod skill_catalog;
+mod skill_entry_resource;
 pub mod skill_manager;
 pub mod skill_package;
 pub mod skill_resolver;
@@ -54,6 +55,9 @@ mod skill_resolver_tests;
 
 #[cfg(test)]
 mod skill_runtime_tests;
+
+#[cfg(test)]
+mod skill_entry_resource_tests;
 
 #[cfg(test)]
 mod skill_state_tests;

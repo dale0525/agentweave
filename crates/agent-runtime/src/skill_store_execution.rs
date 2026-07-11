@@ -239,7 +239,7 @@ impl SkillRevisionStore {
         )
         .await?;
         for resource in manifest_entry_resources(manifest) {
-            match open_regular_file_nofollow(temporary.path(), resource).await {
+            match open_regular_file_nofollow(temporary.path(), &resource).await {
                 Ok(_) => {}
                 Err(error) if error_is_not_found(&error) => anyhow::bail!(
                     "private execution entry resource does not exist: {}",
