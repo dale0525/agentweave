@@ -10,6 +10,7 @@ pub mod search;
 
 use crate::policy::{ApprovalPolicy, SandboxProfile};
 use crate::skill::{SkillExecutionContext, SkillRegistry};
+use crate::skill_management_tools::{SkillManagementToolContext, SkillManagementTools};
 use builtin::BuiltInTools;
 use discovery::{ConnectorMetadata, ExternalToolConfig, ExternalToolExecution, ToolDiscoveryItem};
 use result::{ToolError, ToolResult, ToolResultMetadata};
@@ -165,6 +166,7 @@ pub struct ToolRegistry {
     tool_timeout: Duration,
     output_limit_bytes: usize,
     approval_policy: ApprovalPolicy,
+    management: Option<SkillManagementToolContext>,
 }
 
 impl ToolRegistry {
@@ -173,6 +175,23 @@ impl ToolRegistry {
     }
 
     pub fn try_new(skills: SkillRegistry, config: &RuntimeConfig) -> anyhow::Result<Self> {
+        Self::try_new_with_management(skills, config, None)
+    }
+
+    pub fn new_with_management(
+        skills: SkillRegistry,
+        config: &RuntimeConfig,
+        management: Option<SkillManagementToolContext>,
+    ) -> Self {
+        Self::try_new_with_management(skills, config, management)
+            .expect("runtime tool registry should be valid")
+    }
+
+    pub fn try_new_with_management(
+        skills: SkillRegistry,
+        config: &RuntimeConfig,
+        management: Option<SkillManagementToolContext>,
+    ) -> anyhow::Result<Self> {
         let external_definitions = external_definitions(&config.external_tools)?;
         let external_discovery = external_discovery(&config.external_tools)?;
         Self {
@@ -190,6 +209,7 @@ impl ToolRegistry {
             tool_timeout: Duration::from_millis(config.tool_timeout_ms),
             output_limit_bytes: config.output_limit_bytes,
             approval_policy: config.approval_policy,
+            management,
         }
         .validate()
     }
@@ -218,6 +238,12 @@ impl ToolRegistry {
             },
         ));
         definitions.extend(self.external_definitions.clone());
+        if let Some(context) = &self.management {
+            definitions.extend(SkillManagementTools::definitions(
+                &context.service,
+                &context.actor,
+            ));
+        }
         definitions
     }
 
@@ -330,6 +356,12 @@ impl ToolRegistry {
 
         if let Some(tool) = self.external_tool(name) {
             return self.execute_external_tool(tool, name, call_id, started);
+        }
+
+        if let Some(context) = &self.management
+            && SkillManagementTools::handles(context, name)
+        {
+            return SkillManagementTools::execute(context, name, call_id, arguments).await;
         }
 
         let skill_tools = self.skills.tools();

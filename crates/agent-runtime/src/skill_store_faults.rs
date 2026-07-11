@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum StoreFaultPoint {
     StagingCopyFile,
+    StagingAuthorFile,
     IncomingCopyFile,
     QuarantineCopyFile,
     PromoteStagingRename,

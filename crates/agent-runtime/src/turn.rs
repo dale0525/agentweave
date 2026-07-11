@@ -3,6 +3,7 @@ use crate::events::RuntimeEvent;
 use crate::instructions::{InstructionConfig, InstructionContext};
 use crate::skill::SkillRegistry;
 use crate::skill_catalog::SkillCatalog;
+use crate::skill_management_tools::SkillManagementToolContext;
 use crate::skill_manager::SkillManager;
 use crate::skill_snapshot::SkillSnapshot;
 use crate::tools::result::{ToolError, ToolResult, ToolResultMetadata};
@@ -32,6 +33,7 @@ pub struct TurnRunner<C> {
     skill_manager: SkillManager,
     config: RuntimeConfig,
     max_steps: usize,
+    management: Option<SkillManagementToolContext>,
 }
 
 impl<C> TurnRunner<C>
@@ -69,7 +71,13 @@ where
             skill_manager,
             config,
             max_steps,
+            management: None,
         }
+    }
+
+    pub fn with_skill_management(mut self, management: SkillManagementToolContext) -> Self {
+        self.management = Some(management);
+        self
     }
 
     pub async fn run(&self, user_text: &str) -> anyhow::Result<Vec<RuntimeEvent>> {
@@ -86,7 +94,11 @@ where
         request: TurnRequest,
         snapshot: Arc<SkillSnapshot>,
     ) -> anyhow::Result<Vec<RuntimeEvent>> {
-        let tools = ToolRegistry::new(snapshot.registry().clone(), &self.config);
+        let tools = ToolRegistry::new_with_management(
+            snapshot.registry().clone(),
+            &self.config,
+            self.management.clone(),
+        );
         let skill_catalog = snapshot.catalog();
         let turn_id = Uuid::new_v4().to_string();
         let mut events = vec![RuntimeEvent::TurnStarted {

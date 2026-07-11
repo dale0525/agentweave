@@ -161,6 +161,19 @@ fn generic_allows_never_authorizes_builtin_override() {
 }
 
 #[test]
+fn inspect_authorization_is_package_independent() {
+    let diagnostics = SkillManagementPolicy {
+        mode: SkillManagementMode::DiagnosticsOnly,
+        ..SkillManagementPolicy::default()
+    };
+    let inspector = ActorContext::anonymous().with_grants([SkillGrant::Inspect]);
+
+    assert!(diagnostics.can_inspect(&inspector));
+    assert!(!diagnostics.can_inspect(&ActorContext::anonymous()));
+    assert!(!SkillManagementPolicy::default().can_inspect(&inspector));
+}
+
+#[test]
 fn protected_override_denies_packages_missing_from_allowlist() {
     let package = SkillPackageId::parse("generalagent.core.runtime").unwrap();
     let policy = SkillManagementPolicy::owner_only().protect(package.clone());

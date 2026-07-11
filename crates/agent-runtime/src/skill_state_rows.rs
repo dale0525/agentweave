@@ -202,7 +202,7 @@ pub struct SkillSnapshotRecord {
     pub activated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq)]
 pub struct SkillAuditRecord {
     pub id: String,
     pub actor_id: String,

@@ -159,6 +159,12 @@ pub struct StoredSkillRevision {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagingSkillFile {
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillStoreMaintenanceIssue {
     pub revision_id: String,
     pub operation: String,

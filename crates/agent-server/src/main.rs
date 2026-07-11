@@ -2,7 +2,9 @@ use agent_runtime::{
     platform::{CapabilitySet, PlatformId},
     skill::SkillRegistry,
     skill_catalog::SkillCatalog,
+    skill_management::OwnerSkillManagementService,
     skill_manager::{SkillManager, SkillManagerConfig},
+    skill_policy::{ActorContext, SkillGrant, SkillManagementMode, SkillManagementPolicy},
     skill_source::{DirectorySkillSource, ManagedSkillSource, SkillLayer, SkillSource},
     skill_state::SkillStateStore,
     skill_store::{SkillRevisionStore, SkillStorePaths},
@@ -10,6 +12,7 @@ use agent_runtime::{
     tools::{CommandMode, RuntimeConfig},
 };
 use agent_server::api;
+use agent_server::owner_api::{OwnerApiConfig, OwnerAuth};
 use model_gateway::{
     provider::{EndpointType, ProviderProfile},
     responses::GatewayHttpClient,
@@ -34,7 +37,6 @@ struct ManagedSkillsConfig {
 
 struct LoadedSkillManager {
     manager: SkillManager,
-    #[cfg(test)]
     managed_store: Option<SkillRevisionStore>,
     #[cfg(test)]
     managed_source: Option<ManagedSkillSource>,
@@ -51,20 +53,28 @@ async fn main() -> anyhow::Result<()> {
     let storage = Storage::connect(&database_url).await?;
     let skills_root = skills_root_from_env();
     let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
-    let skill_manager = load_skill_manager(&skills_root, storage.clone(), managed_skills)
-        .await?
-        .manager;
+    let loaded = load_skill_manager(&skills_root, storage.clone(), managed_skills).await?;
+    let owner_host = owner_host_config_from_lookup(|name| std::env::var_os(name))?;
+    let owner_management = build_owner_api_config(owner_host, &loaded, storage.clone())?;
     let model = GatewayHttpClient::new(model_profile_from_env());
     let runtime_config = runtime_config_from_env();
-    let state = Arc::new(
+    let state = if let Some(owner_management) = owner_management {
+        api::AppState::new_with_model_skill_manager_and_owner(
+            storage,
+            model,
+            loaded.manager,
+            runtime_config,
+            owner_management,
+        )
+    } else {
         api::AppState::new_with_model_and_skill_manager(
             storage,
             model,
-            skill_manager,
+            loaded.manager,
             runtime_config,
         )
-        .with_skills_root(skills_root.clone()),
-    );
+    };
+    let state = Arc::new(state.with_skills_root(skills_root.clone()));
     let app = if std::env::var("GENERAL_AGENT_DEV_API").as_deref() == Ok("1") {
         api::router_with_dev_routes(state)
     } else {
@@ -118,6 +128,89 @@ where
     }))
 }
 
+#[derive(Clone)]
+struct OwnerHostConfig {
+    policy: SkillManagementPolicy,
+    token: Arc<[u8]>,
+    actor: ActorContext,
+}
+
+fn owner_host_config_from_lookup<F>(lookup: F) -> anyhow::Result<Option<OwnerHostConfig>>
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    let mode = lookup("GENERAL_AGENT_SKILL_MANAGEMENT_MODE")
+        .map(|value| {
+            value.into_string().map_err(|_| {
+                anyhow::anyhow!("GENERAL_AGENT_SKILL_MANAGEMENT_MODE must be valid UTF-8")
+            })
+        })
+        .transpose()?;
+    let Some(mode) = mode else {
+        return Ok(None);
+    };
+    if mode == "disabled" {
+        return Ok(None);
+    }
+    let policy = match mode.as_str() {
+        "diagnostics_only" => SkillManagementPolicy {
+            mode: SkillManagementMode::DiagnosticsOnly,
+            ..SkillManagementPolicy::default()
+        },
+        "owner_only" => SkillManagementPolicy::owner_only(),
+        "organization_managed" => SkillManagementPolicy {
+            mode: SkillManagementMode::OrganizationManaged,
+            ..SkillManagementPolicy::default()
+        },
+        _ => anyhow::bail!("unsupported GENERAL_AGENT_SKILL_MANAGEMENT_MODE"),
+    };
+    let token = lookup("GENERAL_AGENT_OWNER_TOKEN")
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "GENERAL_AGENT_OWNER_TOKEN is required when skill management is enabled"
+            )
+        })?
+        .into_encoded_bytes();
+    if token.is_empty() {
+        anyhow::bail!("GENERAL_AGENT_OWNER_TOKEN cannot be empty");
+    }
+    let actor = match policy.mode {
+        SkillManagementMode::OwnerOnly => ActorContext::owner(
+            "local-owner",
+            [SkillGrant::Inspect, SkillGrant::CreateDraft],
+        ),
+        SkillManagementMode::DiagnosticsOnly | SkillManagementMode::OrganizationManaged => {
+            ActorContext::anonymous().with_grants([SkillGrant::Inspect])
+        }
+        SkillManagementMode::Disabled => unreachable!("disabled mode returned above"),
+    };
+    Ok(Some(OwnerHostConfig {
+        policy,
+        token: Arc::from(token),
+        actor,
+    }))
+}
+
+fn build_owner_api_config(
+    host: Option<OwnerHostConfig>,
+    loaded: &LoadedSkillManager,
+    storage: Storage,
+) -> anyhow::Result<Option<OwnerApiConfig>> {
+    let Some(host) = host else {
+        return Ok(None);
+    };
+    let revisions = loaded.managed_store.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "GENERAL_AGENT_MANAGED_SKILLS=1 is required when skill management is enabled"
+        )
+    })?;
+    let state = SkillStateStore::new(storage);
+    let service =
+        OwnerSkillManagementService::new(loaded.manager.clone(), revisions, state, host.policy);
+    let auth = OwnerAuth::new(host.token.as_ref(), host.actor)?;
+    Ok(Some(OwnerApiConfig::new(service, auth)))
+}
+
 async fn load_skill_manager(
     root: &Path,
     storage: Storage,
@@ -131,7 +224,6 @@ async fn load_skill_manager(
         let catalog = load_packaged_instruction_skills(root).await;
         return Ok(LoadedSkillManager {
             manager: SkillManager::from_registry_and_catalog(registry, catalog),
-            #[cfg(test)]
             managed_store: None,
             #[cfg(test)]
             managed_source: None,
@@ -142,7 +234,6 @@ async fn load_skill_manager(
         SkillLayer::Builtin,
         root,
     ))];
-    #[cfg(test)]
     let mut managed_store = None;
     #[cfg(test)]
     let mut managed_source = None;
@@ -151,9 +242,9 @@ async fn load_skill_manager(
         let store = SkillRevisionStore::new(paths, SkillStateStore::new(storage));
         let source = ManagedSkillSource::from_store(store.clone());
         sources.push(Arc::new(source.clone()));
+        managed_store = Some(store);
         #[cfg(test)]
         {
-            managed_store = Some(store);
             managed_source = Some(source);
         }
     }
@@ -168,7 +259,6 @@ async fn load_skill_manager(
     .await?;
     Ok(LoadedSkillManager {
         manager,
-        #[cfg(test)]
         managed_store,
         #[cfg(test)]
         managed_source,
@@ -273,6 +363,59 @@ mod tests {
         .unwrap();
         assert_eq!(config.app_data_root, PathBuf::from("/tmp/app"));
         assert_eq!(config.cache_root, PathBuf::from("/tmp/cache"));
+    }
+
+    #[test]
+    fn owner_management_policy_is_not_enabled_by_a_token_alone() {
+        let config = owner_host_config_from_lookup(|name| match name {
+            "GENERAL_AGENT_OWNER_TOKEN" => Some("secret-token".into()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn enabled_owner_management_requires_a_nonempty_token() {
+        let missing = owner_host_config_from_lookup(|name| match name {
+            "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
+            _ => None,
+        })
+        .err()
+        .unwrap();
+        assert!(missing.to_string().contains("GENERAL_AGENT_OWNER_TOKEN"));
+
+        let empty = owner_host_config_from_lookup(|name| match name {
+            "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("diagnostics_only".into()),
+            "GENERAL_AGENT_OWNER_TOKEN" => Some("".into()),
+            _ => None,
+        })
+        .err()
+        .unwrap();
+        assert!(empty.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn owner_host_context_is_fixed_and_minimally_granted() {
+        let config = owner_host_config_from_lookup(|name| match name {
+            "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
+            "GENERAL_AGENT_OWNER_TOKEN" => Some("secret-token".into()),
+            _ => None,
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(config.policy.mode, SkillManagementMode::OwnerOnly);
+        assert_eq!(config.actor.actor_id, "local-owner");
+        assert_eq!(config.actor.role, "owner");
+        assert_eq!(
+            config.actor.grants,
+            [SkillGrant::Inspect, SkillGrant::CreateDraft]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(config.token.as_ref(), b"secret-token");
     }
 
     #[tokio::test]

@@ -132,6 +132,18 @@ impl SkillManagementPolicy {
         self
     }
 
+    pub fn can_inspect(&self, actor: &ActorContext) -> bool {
+        match self.mode {
+            SkillManagementMode::Disabled => false,
+            SkillManagementMode::DiagnosticsOnly | SkillManagementMode::OrganizationManaged => {
+                actor.grants.contains(&SkillGrant::Inspect)
+            }
+            SkillManagementMode::OwnerOnly => {
+                actor.role == "owner" && actor.grants.contains(&SkillGrant::Inspect)
+            }
+        }
+    }
+
     pub fn allows(
         &self,
         actor: &ActorContext,

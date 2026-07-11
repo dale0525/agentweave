@@ -1,3 +1,4 @@
+use crate::owner_api::OwnerApiConfig;
 use agent_runtime::{
     events::RuntimeEvent,
     session::Message,
@@ -34,6 +35,7 @@ pub struct AppState {
     skills_root: Option<PathBuf>,
     runtime_config: RuntimeConfig,
     dev_skill_mutations: Arc<Mutex<()>>,
+    owner_management: Option<OwnerApiConfig>,
 }
 
 impl AppState {
@@ -58,6 +60,34 @@ impl AppState {
             skills_root: None,
             runtime_config,
             dev_skill_mutations: Arc::new(Mutex::new(())),
+            owner_management: None,
+        }
+    }
+
+    pub fn new_with_model_skill_manager_and_owner<C>(
+        storage: Storage,
+        model: C,
+        skill_manager: SkillManager,
+        runtime_config: RuntimeConfig,
+        owner_management: OwnerApiConfig,
+    ) -> Self
+    where
+        C: ModelClient + 'static,
+    {
+        let runner = TurnRunner::new_with_manager_and_config(
+            model,
+            skill_manager.clone(),
+            runtime_config.clone(),
+        )
+        .with_skill_management(owner_management.tool_context());
+        Self {
+            storage,
+            agent: Arc::new(runner),
+            skill_manager,
+            skills_root: None,
+            runtime_config,
+            dev_skill_mutations: Arc::new(Mutex::new(())),
+            owner_management: Some(owner_management),
         }
     }
 
@@ -101,6 +131,7 @@ impl AppState {
             skills_root: None,
             runtime_config: default_runtime_config(),
             dev_skill_mutations: Arc::new(Mutex::new(())),
+            owner_management: None,
         }
     }
 
@@ -239,13 +270,15 @@ impl IntoResponse for ApiError {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/model/test", post(test_model_connection))
         .route("/sessions", post(create_session))
-        .route("/sessions/{session_id}/messages", post(post_message))
-        .layer(desktop_cors_layer())
-        .with_state(state)
+        .route("/sessions/{session_id}/messages", post(post_message));
+    if let Some(owner_routes) = crate::owner_api::router(&state) {
+        router = router.merge(owner_routes);
+    }
+    router.layer(desktop_cors_layer()).with_state(state)
 }
 
 pub fn router_with_dev_routes(state: Arc<AppState>) -> Router {
@@ -276,6 +309,10 @@ impl AppState {
     pub(crate) fn dev_skill_mutations(&self) -> &Mutex<()> {
         &self.dev_skill_mutations
     }
+
+    pub(crate) fn owner_management(&self) -> Option<&OwnerApiConfig> {
+        self.owner_management.as_ref()
+    }
 }
 
 pub(crate) fn desktop_cors_layer() -> CorsLayer {
@@ -285,7 +322,7 @@ pub(crate) fn desktop_cors_layer() -> CorsLayer {
             HeaderValue::from_static("http://localhost:5173"),
         ])
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers([header::CONTENT_TYPE])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
 }
 
 async fn test_model_connection(

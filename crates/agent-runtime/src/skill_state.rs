@@ -282,6 +282,17 @@ impl SkillStateStore {
             .collect()
     }
 
+    pub async fn list_installations(&self) -> anyhow::Result<Vec<SkillInstallationRecord>> {
+        let query =
+            format!("SELECT {INSTALLATION_COLUMNS} FROM skill_installations ORDER BY package_id");
+        sqlx::query(&query)
+            .fetch_all(self.storage.pool())
+            .await?
+            .iter()
+            .map(installation_from_row)
+            .collect()
+    }
+
     pub async fn activate_revision(
         &self,
         package_id: &SkillPackageId,

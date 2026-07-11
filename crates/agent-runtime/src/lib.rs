@@ -7,9 +7,12 @@ pub mod platform;
 pub mod policy;
 pub mod session;
 pub mod skill;
+pub mod skill_authoring;
 pub mod skill_availability;
 pub mod skill_catalog;
 mod skill_entry_resource;
+pub mod skill_management;
+pub mod skill_management_tools;
 pub mod skill_manager;
 pub mod skill_package;
 pub mod skill_policy;
@@ -23,6 +26,7 @@ mod skill_state_rows;
 mod skill_state_transactions;
 pub mod skill_store;
 mod skill_store_atomic_write;
+mod skill_store_authoring;
 mod skill_store_cleanup;
 mod skill_store_execution;
 mod skill_store_faults;
@@ -50,6 +54,9 @@ mod skill_package_tests;
 
 #[cfg(test)]
 mod skill_policy_tests;
+
+#[cfg(test)]
+mod skill_management_tests;
 
 #[cfg(test)]
 mod skill_manager_tests;
