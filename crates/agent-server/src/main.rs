@@ -6,7 +6,6 @@ use agent_runtime::{
     skill_source::{DirectorySkillSource, SkillLayer},
     storage::Storage,
     tools::{CommandMode, RuntimeConfig},
-    turn::{ModelClient, TurnRunner},
 };
 use agent_server::api;
 use model_gateway::{
@@ -38,12 +37,14 @@ async fn main() -> anyhow::Result<()> {
     let skill_manager = load_skill_manager(&skills_root).await?;
     let model = GatewayHttpClient::new(model_profile_from_env());
     let runtime_config = runtime_config_from_env();
-    let state = build_server_state(
-        storage,
-        model,
-        skill_manager,
-        runtime_config,
-        skills_root.clone(),
+    let state = Arc::new(
+        api::AppState::new_with_model_and_skill_manager(
+            storage,
+            model,
+            skill_manager,
+            runtime_config,
+        )
+        .with_skills_root(skills_root.clone()),
     );
     let app = if std::env::var("GENERAL_AGENT_DEV_API").as_deref() == Ok("1") {
         api::router_with_dev_routes(state)
@@ -74,28 +75,6 @@ fn skills_root_from_env() -> PathBuf {
     std::env::var("GENERAL_AGENT_SKILLS_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_SKILLS_ROOT))
-}
-
-fn build_server_state<C>(
-    storage: Storage,
-    model: C,
-    skill_manager: SkillManager,
-    runtime_config: RuntimeConfig,
-    skills_root: PathBuf,
-) -> Arc<api::AppState>
-where
-    C: ModelClient + 'static,
-{
-    let runner = TurnRunner::new_with_manager_and_config(
-        model,
-        skill_manager.clone(),
-        runtime_config.clone(),
-    );
-    Arc::new(
-        api::AppState::new_with_agent_and_skill_manager(storage, Arc::new(runner), skill_manager)
-            .with_runtime_config(runtime_config)
-            .with_skills_root(skills_root),
-    )
 }
 
 async fn load_skill_manager(root: &Path) -> anyhow::Result<SkillManager> {
@@ -199,14 +178,16 @@ mod tests {
         let storage = Storage::connect("sqlite::memory:").await.unwrap();
         let session = storage.create_session("Shared manager").await.unwrap();
         let tool_names = Arc::new(Mutex::new(Vec::new()));
-        let state = build_server_state(
-            storage,
-            CapturingModel {
-                tool_names: tool_names.clone(),
-            },
-            manager.clone(),
-            RuntimeConfig::workspace_write(root.clone(), root.clone()).without_builtin_tools(),
-            root.clone(),
+        let state = Arc::new(
+            api::AppState::new_with_model_and_skill_manager(
+                storage,
+                CapturingModel {
+                    tool_names: tool_names.clone(),
+                },
+                manager.clone(),
+                RuntimeConfig::workspace_write(root.clone(), root.clone()).without_builtin_tools(),
+            )
+            .with_skills_root(root.clone()),
         );
 
         write_runtime_package(&package_root, "second_tool").await;

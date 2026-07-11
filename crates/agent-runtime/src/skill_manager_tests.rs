@@ -444,6 +444,78 @@ async fn dynamic_android_snapshots_filter_runtime_manifest_capabilities_after_re
 }
 
 #[tokio::test]
+async fn android_descriptor_platform_resolution_is_stable_across_reload() {
+    let root = tempdir().unwrap();
+    write_instruction_package_with_platforms(
+        root.path(),
+        "android",
+        "com.example.android",
+        "android-only",
+        "Android v1",
+        &["android"],
+    )
+    .await;
+    write_instruction_package_with_platforms(
+        root.path(),
+        "desktop",
+        "com.example.desktop",
+        "desktop-only",
+        "Desktop v1",
+        &["desktop"],
+    )
+    .await;
+    let manager = SkillManager::new(SkillManagerConfig {
+        sources: vec![Arc::new(DirectorySkillSource::new(
+            SkillLayer::Builtin,
+            root.path(),
+        ))],
+        platform: PlatformId::Android,
+        capabilities: CapabilitySet::android_mvp(),
+        protected_packages: Vec::new(),
+        allowed_overrides: Vec::new(),
+        runtime_version: Version::new(0, 3, 0),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        manager.current_snapshot().catalog().summaries()[0].name,
+        "android-only"
+    );
+    assert_eq!(manager.current_snapshot().catalog().summaries().len(), 1);
+
+    write_instruction_package_with_platforms(
+        root.path(),
+        "android",
+        "com.example.android",
+        "android-only",
+        "Android v2",
+        &["android"],
+    )
+    .await;
+    write_instruction_package_with_platforms(
+        root.path(),
+        "desktop",
+        "com.example.desktop",
+        "desktop-only",
+        "Desktop v2",
+        &["desktop"],
+    )
+    .await;
+    manager.reload().await.unwrap();
+
+    let documents = manager
+        .current_snapshot()
+        .catalog()
+        .load_instruction_documents(&["android-only".into()], usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(manager.current_snapshot().generation(), 2);
+    assert_eq!(manager.current_snapshot().catalog().summaries().len(), 1);
+    assert!(documents[0].content.contains("Android v2"));
+}
+
+#[tokio::test]
 async fn duplicate_instruction_names_reject_candidate_snapshot() {
     let root = tempdir().unwrap();
     write_instruction_package(
@@ -575,6 +647,56 @@ fn static_manager_factory_does_not_require_a_tokio_runtime() {
     assert_eq!(manager.current_snapshot().generation(), 1);
 }
 
+#[tokio::test]
+async fn managers_expose_immutable_runtime_context() {
+    let dynamic_root = tempdir().unwrap();
+    let dynamic = SkillManager::new(SkillManagerConfig {
+        sources: vec![Arc::new(DirectorySkillSource::new(
+            SkillLayer::Builtin,
+            dynamic_root.path(),
+        ))],
+        platform: PlatformId::Android,
+        capabilities: CapabilitySet::android_mvp(),
+        protected_packages: Vec::new(),
+        allowed_overrides: Vec::new(),
+        runtime_version: Version::new(0, 3, 0),
+    })
+    .await
+    .unwrap();
+    let dynamic_context = dynamic.runtime_context().unwrap();
+    assert_eq!(dynamic_context.platform(), PlatformId::Android);
+    assert_eq!(
+        dynamic_context.capabilities(),
+        &CapabilitySet::android_mvp()
+    );
+
+    let contextless =
+        SkillManager::from_registry_and_catalog(SkillRegistry::empty(), SkillCatalog::empty());
+    assert!(contextless.runtime_context().is_none());
+
+    let static_root = tempdir().unwrap();
+    write_runtime_package(
+        static_root.path(),
+        "runtime",
+        "com.example.runtime",
+        "unsafe_tool",
+    )
+    .await;
+    let registry = SkillRegistry::load_development(static_root.path())
+        .await
+        .unwrap();
+    let contextual = SkillManager::from_registry_and_catalog_with_context(
+        registry,
+        SkillCatalog::empty(),
+        PlatformId::Android,
+        CapabilitySet::android_mvp(),
+    );
+    let static_context = contextual.runtime_context().unwrap();
+    assert_eq!(static_context.platform(), PlatformId::Android);
+    assert_eq!(static_context.capabilities(), &CapabilitySet::android_mvp());
+    assert!(contextual.current_snapshot().registry().tools().is_empty());
+}
+
 struct MutableSource {
     layer: SkillLayer,
     packages: RwLock<Vec<DiscoveredSkillPackage>>,
@@ -653,6 +775,38 @@ async fn write_instruction_package(
     tokio::fs::write(package_root.join("SKILL.md"), skill_document(name, body))
         .await
         .unwrap();
+    package_root
+}
+
+async fn write_instruction_package_with_platforms(
+    root: &Path,
+    folder: &str,
+    id: &str,
+    name: &str,
+    body: &str,
+    platforms: &[&str],
+) -> std::path::PathBuf {
+    let package_root = write_instruction_package(root, folder, id, name, body).await;
+    tokio::fs::write(
+        package_root.join("general-agent.json"),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "id": id,
+            "version": "1.0.0",
+            "displayName": name,
+            "kind": "instruction_only",
+            "package": {
+                "includeInstructions": true,
+                "includeRuntime": false
+            },
+            "compatibility": {
+                "platforms": platforms
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
     package_root
 }
 

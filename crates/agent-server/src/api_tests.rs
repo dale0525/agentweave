@@ -53,6 +53,24 @@ impl ModelClient for SkillCallingModel {
     }
 }
 
+struct ToolSchemaCaptureModel {
+    tool_names: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl ModelClient for ToolSchemaCaptureModel {
+    async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
+        *self.tool_names.lock().unwrap() =
+            request.tools.into_iter().map(|tool| tool.name).collect();
+        Ok(Box::pin(stream::iter(vec![
+            Ok(GatewayEvent::TextDelta {
+                text: "default done".into(),
+            }),
+            Ok(GatewayEvent::Completed),
+        ])))
+    }
+}
+
 #[tokio::test]
 async fn health_returns_ok() {
     let storage = Storage::connect("sqlite::memory:").await.unwrap();
@@ -398,6 +416,100 @@ async fn app_state_reads_skills_from_the_current_snapshot() {
     assert_eq!(state.skills().tools()[0].name, "second_tool");
     assert_eq!(state.skill_manager().current_snapshot().generation(), 2);
     remove_test_dir(skills_root).await;
+}
+
+#[tokio::test]
+async fn production_state_binds_default_settings_and_dev_views_to_one_manager() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let skills_root = packaged_echo_skill().await;
+    let manager = dynamic_skill_manager(&skills_root).await;
+    let default_tools = Arc::new(Mutex::new(Vec::new()));
+    let workspace = unique_test_dir("atomic-production-state");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let state = Arc::new(
+        AppState::new_with_model_and_skill_manager(
+            storage.clone(),
+            ToolSchemaCaptureModel {
+                tool_names: default_tools.clone(),
+            },
+            manager.clone(),
+            RuntimeConfig::workspace_write(workspace.clone(), workspace.clone())
+                .without_builtin_tools(),
+        )
+        .with_skills_root(skills_root.clone()),
+    );
+
+    write_packaged_tool(&skills_root, "second_tool").await;
+    manager.reload().await.unwrap();
+    let default_session = storage.create_session("Default turn").await.unwrap();
+    let settings_session = storage.create_session("Settings turn").await.unwrap();
+    let provider_capture = Arc::new(ProviderCapture::default());
+    let provider_base_url = spawn_provider_server(provider_capture.clone()).await;
+    let app = router_with_dev_routes(state.clone());
+
+    let default_response = app
+        .clone()
+        .oneshot(json_request(
+            &format!("/sessions/{}/messages", default_session.id),
+            json!({ "content": "default" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(default_response.status(), StatusCode::OK);
+
+    let settings_response = app
+        .clone()
+        .oneshot(json_request(
+            &format!("/sessions/{}/messages", settings_session.id),
+            json!({
+                "content": "settings",
+                "modelSettings": {
+                    "baseUrl": provider_base_url,
+                    "endpointType": "chat_completions",
+                    "modelName": "qwen2.5"
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(settings_response.status(), StatusCode::OK);
+
+    let dev_tools = read_json(
+        app.oneshot(
+            Request::builder()
+                .uri("/dev/tools")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+
+    let default_names = default_tools.lock().unwrap();
+    assert!(default_names.iter().any(|name| name == "second_tool"));
+    assert!(!default_names.iter().any(|name| name == "echo"));
+    let provider_body = provider_capture
+        .request
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .body
+        .to_string();
+    assert!(provider_body.contains("second_tool"));
+    assert!(!provider_body.contains("\"name\":\"echo\""));
+    assert!(
+        dev_tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| { tool["name"] == "second_tool" })
+    );
+    assert_eq!(state.skill_manager().current_snapshot().generation(), 2);
+
+    remove_test_dir(skills_root).await;
+    remove_test_dir(workspace).await;
 }
 
 #[test]

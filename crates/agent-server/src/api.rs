@@ -6,7 +6,7 @@ use agent_runtime::{
     skill_manager::SkillManager,
     storage::Storage,
     tools::RuntimeConfig,
-    turn::{AgentRunner, TurnRunner},
+    turn::{AgentRunner, ModelClient, TurnRunner},
 };
 #[cfg(test)]
 use async_trait::async_trait;
@@ -35,6 +35,29 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn new_with_model_and_skill_manager<C>(
+        storage: Storage,
+        model: C,
+        skill_manager: SkillManager,
+        runtime_config: RuntimeConfig,
+    ) -> Self
+    where
+        C: ModelClient + 'static,
+    {
+        let runner = TurnRunner::new_with_manager_and_config(
+            model,
+            skill_manager.clone(),
+            runtime_config.clone(),
+        );
+        Self {
+            storage,
+            agent: Arc::new(runner),
+            skill_manager,
+            skills_root: None,
+            runtime_config,
+        }
+    }
+
     #[cfg(test)]
     pub fn new(storage: Storage) -> Self {
         Self::new_with_agent(storage, Arc::new(DeterministicAgent))
@@ -49,6 +72,7 @@ impl AppState {
         )
     }
 
+    #[cfg(test)]
     pub fn new_with_agent_and_skills(
         storage: Storage,
         agent: Arc<dyn AgentRunner>,
@@ -61,6 +85,7 @@ impl AppState {
         )
     }
 
+    #[cfg(test)]
     pub fn new_with_agent_and_skill_manager(
         storage: Storage,
         agent: Arc<dyn AgentRunner>,
@@ -75,17 +100,20 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub fn with_runtime_config(mut self, runtime_config: RuntimeConfig) -> Self {
         self.runtime_config = runtime_config;
         self
     }
 
+    #[cfg(test)]
     pub fn with_skill_catalog(mut self, skill_catalog: SkillCatalog) -> Self {
         let registry = self.skill_manager.current_snapshot().registry().clone();
         self.skill_manager = SkillManager::from_registry_and_catalog(registry, skill_catalog);
         self
     }
 
+    #[cfg(test)]
     pub fn with_skill_manager(mut self, skill_manager: SkillManager) -> Self {
         self.skill_manager = skill_manager;
         self
@@ -97,6 +125,7 @@ impl AppState {
     }
 }
 
+#[cfg(test)]
 fn default_runtime_config() -> RuntimeConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     RuntimeConfig::workspace_write(cwd.clone(), cwd).without_builtin_tools()

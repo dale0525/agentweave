@@ -18,6 +18,7 @@ pub struct SkillManager {
 
 struct SkillManagerInner {
     mode: SkillManagerMode,
+    runtime_context: Option<SkillRuntimeContext>,
     current: RwLock<Arc<SkillSnapshot>>,
     reload_lock: Mutex<()>,
 }
@@ -37,6 +38,29 @@ pub struct SkillManagerConfig {
     pub runtime_version: Version,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillRuntimeContext {
+    platform: PlatformId,
+    capabilities: CapabilitySet,
+}
+
+impl SkillRuntimeContext {
+    fn new(platform: PlatformId, capabilities: CapabilitySet) -> Self {
+        Self {
+            platform,
+            capabilities,
+        }
+    }
+
+    pub fn platform(&self) -> PlatformId {
+        self.platform
+    }
+
+    pub fn capabilities(&self) -> &CapabilitySet {
+        &self.capabilities
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct SkillReloadReport {
     pub previous_generation: u64,
@@ -48,12 +72,33 @@ pub struct SkillReloadReport {
 impl SkillManager {
     pub async fn new(config: SkillManagerConfig) -> anyhow::Result<Self> {
         let initial = Arc::new(build_snapshot(&config, 1).await?);
-        Ok(Self::with_mode(initial, SkillManagerMode::Dynamic(config)))
+        let runtime_context =
+            SkillRuntimeContext::new(config.platform, config.capabilities.clone());
+        Ok(Self::with_mode(
+            initial,
+            SkillManagerMode::Dynamic(config),
+            Some(runtime_context),
+        ))
     }
 
     pub fn from_registry_and_catalog(registry: SkillRegistry, catalog: SkillCatalog) -> Self {
         let snapshot = SkillSnapshot::from_registry_and_catalog(1, registry, catalog);
-        Self::with_mode(Arc::new(snapshot), SkillManagerMode::Static)
+        Self::with_mode(Arc::new(snapshot), SkillManagerMode::Static, None)
+    }
+
+    pub fn from_registry_and_catalog_with_context(
+        registry: SkillRegistry,
+        catalog: SkillCatalog,
+        platform: PlatformId,
+        capabilities: CapabilitySet,
+    ) -> Self {
+        let snapshot = SkillSnapshot::from_registry_and_catalog(1, registry, catalog)
+            .with_platform_capabilities(platform, capabilities.clone());
+        Self::with_mode(
+            Arc::new(snapshot),
+            SkillManagerMode::Static,
+            Some(SkillRuntimeContext::new(platform, capabilities)),
+        )
     }
 
     pub fn current_snapshot(&self) -> Arc<SkillSnapshot> {
@@ -62,6 +107,10 @@ impl SkillManager {
             .read()
             .expect("skill snapshot lock poisoned")
             .clone()
+    }
+
+    pub fn runtime_context(&self) -> Option<&SkillRuntimeContext> {
+        self.inner.runtime_context.as_ref()
     }
 
     pub async fn reload(&self) -> anyhow::Result<SkillReloadReport> {
@@ -89,10 +138,15 @@ impl SkillManager {
         Ok(report)
     }
 
-    fn with_mode(current: Arc<SkillSnapshot>, mode: SkillManagerMode) -> Self {
+    fn with_mode(
+        current: Arc<SkillSnapshot>,
+        mode: SkillManagerMode,
+        runtime_context: Option<SkillRuntimeContext>,
+    ) -> Self {
         Self {
             inner: Arc::new(SkillManagerInner {
                 mode,
+                runtime_context,
                 current: RwLock::new(current),
                 reload_lock: Mutex::new(()),
             }),
