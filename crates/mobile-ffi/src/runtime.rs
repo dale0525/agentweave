@@ -5,15 +5,16 @@ use crate::types::{
 use agent_runtime::mobile_host::{HttpMobileRuntimeHost, MobileRuntimeInit, SecretResolver};
 use agent_runtime::model_config::StoredModelConfig;
 use agent_runtime::platform::{CapabilitySet, PlatformId};
-use agent_runtime::skill::SkillRegistry;
 use agent_runtime::skill_availability::SkillAvailabilityStatus;
-use agent_runtime::skill_catalog::SkillCatalog;
+use agent_runtime::skill_manager::{SkillManager, SkillManagerConfig};
+use agent_runtime::skill_source::{DirectorySkillSource, SkillLayer};
 use agent_runtime::storage::Storage;
 use agent_runtime::tools::RuntimeConfig;
 use anyhow::{Context, Result};
 use model_gateway::provider::EndpointType;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -24,8 +25,7 @@ pub struct MobileRuntime {
     tokio: Runtime,
     storage: Storage,
     init: MobileRuntimeInit,
-    skills: SkillRegistry,
-    skill_catalog: SkillCatalog,
+    skill_manager: SkillManager,
     runtime_config: RuntimeConfig,
     database_ready: bool,
     skills_ready: bool,
@@ -59,20 +59,29 @@ impl MobileRuntime {
         }
         let database_url = format!("sqlite://{}?mode=rwc", database_path.display());
         let storage = tokio.block_on(Storage::connect(&database_url))?;
-        let skills = tokio.block_on(SkillRegistry::load_development(&skills_path))?;
-        let skill_catalog = tokio.block_on(SkillCatalog::load_development(&skills_path))?;
+        let init = MobileRuntimeInit {
+            platform,
+            capabilities,
+        };
+        let skill_manager = tokio.block_on(SkillManager::new(SkillManagerConfig {
+            sources: vec![Arc::new(DirectorySkillSource::new(
+                SkillLayer::Builtin,
+                &skills_path,
+            ))],
+            platform: init.platform,
+            capabilities: init.capabilities.clone(),
+            protected_packages: Vec::new(),
+            allowed_overrides: Vec::new(),
+            runtime_version: env!("CARGO_PKG_VERSION").parse()?,
+        }))?;
         let model_configured = tokio.block_on(storage.load_model_config())?.is_some();
         let runtime_config = RuntimeConfig::workspace_write(&app_data_dir, &app_data_dir);
 
         Ok(Self {
             tokio,
             storage,
-            init: MobileRuntimeInit {
-                platform,
-                capabilities,
-            },
-            skills,
-            skill_catalog,
+            init,
+            skill_manager,
             runtime_config,
             database_ready: true,
             skills_ready: skills_path.is_dir(),
@@ -92,13 +101,9 @@ impl MobileRuntime {
     }
 
     pub fn list_skills(&self) -> Vec<MobileSkillDto> {
+        let snapshot = self.skill_manager.current_snapshot();
         let mut inventory = BTreeMap::new();
-        for skill in self
-            .skills
-            .clone()
-            .with_platform_capabilities(self.init.platform, self.init.capabilities.clone())
-            .installed_skill_statuses()
-        {
+        for skill in snapshot.registry().installed_skill_statuses() {
             inventory.insert(
                 skill.id.clone(),
                 MobileSkillDto {
@@ -110,7 +115,7 @@ impl MobileRuntime {
                 },
             );
         }
-        for skill in self.skill_catalog.summaries() {
+        for skill in snapshot.catalog().summaries() {
             inventory
                 .entry(skill.name.clone())
                 .or_insert_with(|| MobileSkillDto {
@@ -200,15 +205,14 @@ impl MobileRuntime {
                 {
                     anyhow::bail!("model API key is unavailable");
                 }
-                let host = HttpMobileRuntimeHost::new(
+                let host = HttpMobileRuntimeHost::new_with_manager(
                     self.storage.clone(),
-                    self.skills.clone(),
-                    self.skill_catalog.clone(),
+                    self.skill_manager.clone(),
                     self.runtime_config.clone(),
                     self.init.clone(),
                     config,
                     TransientSecretResolver::new(api_key),
-                );
+                )?;
                 host.send_message_after_user_persisted(session_id, content)
                     .await
             };

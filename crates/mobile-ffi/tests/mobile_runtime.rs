@@ -18,6 +18,41 @@ fn android_config(root: &std::path::Path) -> MobileInitConfig {
     }
 }
 
+fn write_instruction_package(
+    skills_root: &std::path::Path,
+    folder: &str,
+    id: &str,
+    name: &str,
+    platform: &str,
+) {
+    let package_root = skills_root.join(folder);
+    std::fs::create_dir_all(&package_root).unwrap();
+    std::fs::write(
+        package_root.join("general-agent.json"),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "id": id,
+            "version": "1.0.0",
+            "displayName": name,
+            "kind": "instruction_only",
+            "package": {
+                "includeInstructions": true,
+                "includeRuntime": false
+            },
+            "compatibility": {
+                "platforms": [platform]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        package_root.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {name} instructions.\n---\n\n# {name}\n"),
+    )
+    .unwrap();
+}
+
 #[test]
 fn initializes_runtime_and_returns_android_capabilities() {
     let dir = tempdir().unwrap();
@@ -47,6 +82,32 @@ fn lists_instruction_only_skills_from_the_runtime_catalog() {
     assert_eq!(skills[0].id, "notes");
     assert!(skills[0].available);
     assert_eq!(skills[0].reason, "Instruction skill loaded.");
+}
+
+#[test]
+fn android_runtime_lists_only_platform_compatible_instruction_packages() {
+    let dir = tempdir().unwrap();
+    let skills_root = dir.path().join("files/skills");
+    write_instruction_package(
+        &skills_root,
+        "android",
+        "com.example.android",
+        "android-only",
+        "android",
+    );
+    write_instruction_package(
+        &skills_root,
+        "desktop",
+        "com.example.desktop",
+        "desktop-only",
+        "desktop",
+    );
+
+    let runtime = MobileRuntime::initialize(android_config(dir.path())).unwrap();
+    let skills = runtime.list_skills();
+
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].id, "android-only");
 }
 
 #[test]
