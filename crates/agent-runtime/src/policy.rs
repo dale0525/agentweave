@@ -10,19 +10,19 @@ pub enum ApprovalPolicy {
 
 impl ApprovalPolicy {
     pub fn requires_approval(self, permission: ToolPermission) -> bool {
-        if permission == ToolPermission::ManageSkills {
-            return false;
-        }
-
-        match self {
-            Self::Never => false,
-            Self::OnWorkspaceWrite => {
-                matches!(
-                    permission,
-                    ToolPermission::WriteWorkspace | ToolPermission::ExecuteCommand
-                )
-            }
-            Self::OnCommand => permission == ToolPermission::ExecuteCommand,
+        match (self, permission) {
+            (Self::Never, ToolPermission::ReadWorkspace) => false,
+            (Self::Never, ToolPermission::WriteWorkspace) => false,
+            (Self::Never, ToolPermission::ExecuteCommand) => false,
+            (Self::Never, ToolPermission::ManageSkills) => false,
+            (Self::OnWorkspaceWrite, ToolPermission::ReadWorkspace) => false,
+            (Self::OnWorkspaceWrite, ToolPermission::WriteWorkspace) => true,
+            (Self::OnWorkspaceWrite, ToolPermission::ExecuteCommand) => true,
+            (Self::OnWorkspaceWrite, ToolPermission::ManageSkills) => false,
+            (Self::OnCommand, ToolPermission::ReadWorkspace) => false,
+            (Self::OnCommand, ToolPermission::WriteWorkspace) => false,
+            (Self::OnCommand, ToolPermission::ExecuteCommand) => true,
+            (Self::OnCommand, ToolPermission::ManageSkills) => false,
         }
     }
 }
@@ -66,11 +66,56 @@ mod tests {
 
     #[test]
     fn approval_policy_identifies_permissions_that_require_approval() {
-        assert!(!ApprovalPolicy::Never.requires_approval(ToolPermission::WriteWorkspace));
-        assert!(ApprovalPolicy::OnWorkspaceWrite.requires_approval(ToolPermission::WriteWorkspace));
-        assert!(ApprovalPolicy::OnWorkspaceWrite.requires_approval(ToolPermission::ExecuteCommand));
-        assert!(!ApprovalPolicy::OnCommand.requires_approval(ToolPermission::WriteWorkspace));
-        assert!(ApprovalPolicy::OnCommand.requires_approval(ToolPermission::ExecuteCommand));
+        let cases = [
+            (ApprovalPolicy::Never, ToolPermission::ReadWorkspace, false),
+            (ApprovalPolicy::Never, ToolPermission::WriteWorkspace, false),
+            (ApprovalPolicy::Never, ToolPermission::ExecuteCommand, false),
+            (ApprovalPolicy::Never, ToolPermission::ManageSkills, false),
+            (
+                ApprovalPolicy::OnWorkspaceWrite,
+                ToolPermission::ReadWorkspace,
+                false,
+            ),
+            (
+                ApprovalPolicy::OnWorkspaceWrite,
+                ToolPermission::WriteWorkspace,
+                true,
+            ),
+            (
+                ApprovalPolicy::OnWorkspaceWrite,
+                ToolPermission::ExecuteCommand,
+                true,
+            ),
+            (
+                ApprovalPolicy::OnWorkspaceWrite,
+                ToolPermission::ManageSkills,
+                false,
+            ),
+            (
+                ApprovalPolicy::OnCommand,
+                ToolPermission::ReadWorkspace,
+                false,
+            ),
+            (
+                ApprovalPolicy::OnCommand,
+                ToolPermission::WriteWorkspace,
+                false,
+            ),
+            (
+                ApprovalPolicy::OnCommand,
+                ToolPermission::ExecuteCommand,
+                true,
+            ),
+            (
+                ApprovalPolicy::OnCommand,
+                ToolPermission::ManageSkills,
+                false,
+            ),
+        ];
+
+        for (policy, permission, expected) in cases {
+            assert_eq!(policy.requires_approval(permission), expected);
+        }
     }
 
     #[test]

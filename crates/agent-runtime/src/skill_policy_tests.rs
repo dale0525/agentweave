@@ -145,6 +145,22 @@ fn protected_override_requires_allowlist_and_override_grant() {
 }
 
 #[test]
+fn generic_allows_never_authorizes_builtin_override() {
+    let package = SkillPackageId::parse("generalagent.core.runtime").unwrap();
+    let policy = SkillManagementPolicy::owner_only()
+        .protect(package.clone())
+        .allow_override(package.clone());
+    let actor = ActorContext::owner("owner-1", [SkillGrant::OverrideBuiltin]);
+
+    assert!(!policy.allows(
+        &actor,
+        SkillOperation::OverrideBuiltin,
+        SkillPackageKind::InstructionOnly
+    ));
+    assert!(policy.can_override(&actor, &package));
+}
+
+#[test]
 fn protected_override_denies_packages_missing_from_allowlist() {
     let package = SkillPackageId::parse("generalagent.core.runtime").unwrap();
     let policy = SkillManagementPolicy::owner_only().protect(package.clone());
@@ -202,5 +218,102 @@ fn operation_names_and_grants_have_a_stable_mapping() {
     for (operation, name, grant) in cases {
         assert_eq!(operation.as_str(), name);
         assert_eq!(operation.required_grant(), grant);
+    }
+}
+
+#[test]
+fn actor_context_grants_serialize_deterministically_and_round_trip() {
+    let actor = ActorContext {
+        actor_id: "owner-1".into(),
+        role: "owner".into(),
+        tenant_id: Some("tenant-1".into()),
+        device_id: Some("device-1".into()),
+        grants: [
+            SkillGrant::Rollback,
+            SkillGrant::Inspect,
+            SkillGrant::Activate,
+            SkillGrant::Inspect,
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let expected = serde_json::json!({
+        "actor_id": "owner-1",
+        "role": "owner",
+        "tenant_id": "tenant-1",
+        "device_id": "device-1",
+        "grants": ["inspect", "activate", "rollback"]
+    });
+
+    let serialized = serde_json::to_value(&actor).unwrap();
+    assert_eq!(serialized, expected);
+
+    let decoded: ActorContext = serde_json::from_value(serialized).unwrap();
+    assert_eq!(decoded, actor);
+    assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+}
+
+#[test]
+fn skill_management_policy_serializes_deterministically_and_round_trips() {
+    let protected_alpha = SkillPackageId::parse("generalagent.core.alpha").unwrap();
+    let protected_runtime = SkillPackageId::parse("generalagent.core.runtime").unwrap();
+    let policy = SkillManagementPolicy {
+        mode: SkillManagementMode::OwnerOnly,
+        agent_authoring: false,
+        allowed_kinds: [
+            SkillPackageKind::NativeRuntime,
+            SkillPackageKind::InstructionOnly,
+        ]
+        .into_iter()
+        .collect(),
+        protected_packages: [protected_runtime.clone(), protected_alpha]
+            .into_iter()
+            .collect(),
+        allowed_overrides: [protected_runtime].into_iter().collect(),
+        activation_approval_required: false,
+        permission_escalation_approval_required: true,
+    };
+    let expected = serde_json::json!({
+        "mode": "owner_only",
+        "agent_authoring": false,
+        "allowed_kinds": ["instruction_only", "native_runtime"],
+        "protected_packages": ["generalagent.core.alpha", "generalagent.core.runtime"],
+        "allowed_overrides": ["generalagent.core.runtime"],
+        "activation_approval_required": false,
+        "permission_escalation_approval_required": true
+    });
+
+    let serialized = serde_json::to_value(&policy).unwrap();
+    assert_eq!(serialized, expected);
+
+    let decoded: SkillManagementPolicy = serde_json::from_value(serialized).unwrap();
+    assert_eq!(decoded, policy);
+    assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+}
+
+#[test]
+fn all_skill_operations_have_stable_snake_case_serde() {
+    let cases = [
+        (SkillOperation::Inspect, "inspect"),
+        (SkillOperation::CreateDraft, "create_draft"),
+        (SkillOperation::EditDraft, "edit_draft"),
+        (SkillOperation::Validate, "validate"),
+        (SkillOperation::Test, "test"),
+        (SkillOperation::Activate, "activate"),
+        (SkillOperation::Disable, "disable"),
+        (SkillOperation::DeleteManaged, "delete_managed"),
+        (SkillOperation::Import, "import"),
+        (SkillOperation::Export, "export"),
+        (SkillOperation::Rollback, "rollback"),
+        (SkillOperation::OverrideBuiltin, "override_builtin"),
+    ];
+
+    for (operation, value) in cases {
+        let serialized = serde_json::to_value(operation).unwrap();
+        assert_eq!(serialized, serde_json::json!(value));
+        assert_eq!(
+            serde_json::from_value::<SkillOperation>(serialized).unwrap(),
+            operation
+        );
     }
 }

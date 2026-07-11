@@ -138,6 +138,10 @@ impl SkillManagementPolicy {
         operation: SkillOperation,
         kind: SkillPackageKind,
     ) -> bool {
+        if operation == SkillOperation::OverrideBuiltin {
+            return false;
+        }
+
         match self.mode {
             SkillManagementMode::Disabled => false,
             SkillManagementMode::DiagnosticsOnly | SkillManagementMode::OrganizationManaged => {
@@ -197,6 +201,19 @@ impl SkillOperation {
     }
 
     fn is_authoring(self) -> bool {
-        matches!(self, Self::CreateDraft | Self::EditDraft)
+        match self {
+            Self::Inspect => false,
+            Self::CreateDraft => true,
+            Self::EditDraft => true,
+            Self::Validate => false,
+            Self::Test => false,
+            Self::Activate => false,
+            Self::Disable => false,
+            Self::DeleteManaged => false,
+            Self::Import => false,
+            Self::Export => false,
+            Self::Rollback => false,
+            Self::OverrideBuiltin => false,
+        }
     }
 }
