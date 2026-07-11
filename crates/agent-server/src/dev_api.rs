@@ -43,6 +43,17 @@ struct InstructionsPreviewResponse {
     triggered_skills: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DevSkillReloadResponse {
+    inventory: DevSkillInventory,
+    previous_generation: u64,
+    active_generation: u64,
+    active_packages: usize,
+    inactive_packages: usize,
+    reload_status: &'static str,
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/dev/tools", get(list_tools))
@@ -135,8 +146,34 @@ async fn validate_skills(
 
 async fn reload_skills(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<DevSkillInventory>, StatusCode> {
-    list_skills(State(state)).await
+) -> Result<Json<DevSkillReloadResponse>, StatusCode> {
+    let root = state
+        .skills_root()
+        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let metadata = tokio::fs::metadata(&root)
+        .await
+        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+    if !metadata.is_dir() {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    let report = state
+        .skill_manager()
+        .reload()
+        .await
+        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+    let inventory = crate::dev_skills::scan_skill_packages(root)
+        .await
+        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+
+    Ok(Json(DevSkillReloadResponse {
+        inventory,
+        previous_generation: report.previous_generation,
+        active_generation: report.active_generation,
+        active_packages: report.active_packages,
+        inactive_packages: report.inactive_packages,
+        reload_status: "published",
+    }))
 }
 
 async fn delete_skill(
@@ -512,17 +549,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dev_runtime_views_follow_the_current_skill_snapshot() {
+    async fn dev_reload_publishes_new_runtime_and_instruction_package() {
         let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let workspace = unique_test_dir("current-snapshot");
+        let workspace = unique_test_dir("reload-publishes");
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         let skills_root = workspace.join("skills");
-        let package_root = skills_root.join("dynamic");
-        write_dynamic_package(&package_root, "first_tool", "first", "First body").await;
+        tokio::fs::create_dir_all(&skills_root).await.unwrap();
         let manager = dynamic_skill_manager(&skills_root).await;
         let state = Arc::new(
             crate::api::AppState::new_with_agent(storage, Arc::new(TestAgent))
                 .with_skill_manager(manager.clone())
+                .with_skills_root(skills_root.clone())
                 .with_runtime_config(
                     RuntimeConfig::workspace_write(workspace.clone(), workspace.clone())
                         .without_builtin_tools(),
@@ -530,28 +567,48 @@ mod tests {
         );
         let app = crate::api::router_with_dev_routes(state);
 
-        let initial_tools = read_json(
-            app.clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/dev/tools")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap(),
+        write_dynamic_package(
+            &skills_root.join("late"),
+            "late_echo",
+            "late",
+            "Late instructions",
         )
         .await;
-        assert!(
-            initial_tools["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|tool| { tool["name"] == "first_tool" })
-        );
+        let reload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/dev/skills/reload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-        write_dynamic_package(&package_root, "second_tool", "second", "Second body").await;
-        manager.reload().await.unwrap();
+        assert_eq!(reload.status(), StatusCode::OK);
+        let body = read_json(reload).await;
+        assert_eq!(
+            body.as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                "activeGeneration",
+                "activePackages",
+                "inactivePackages",
+                "inventory",
+                "previousGeneration",
+                "reloadStatus",
+            ]
+        );
+        assert_eq!(body["previousGeneration"], 1);
+        assert_eq!(body["activeGeneration"], 2);
+        assert_eq!(body["activePackages"], 1);
+        assert_eq!(body["inactivePackages"], 0);
+        assert_eq!(body["reloadStatus"], "published");
+        assert_eq!(body["inventory"]["packages"][0]["id"], "late");
 
         let tools = read_json(
             app.clone()
@@ -570,21 +627,69 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|tool| { tool["name"] == "second_tool" })
-        );
-        assert!(
-            !tools["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|tool| { tool["name"] == "first_tool" })
+                .any(|tool| tool["name"] == "late_echo")
         );
 
-        let discovery = read_json(
+        let preview = read_json(
+            app.oneshot(json_request(
+                "/dev/instructions/preview",
+                json!({ "content": "use $late" }),
+            ))
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(preview["triggered_skills"], json!(["late"]));
+        assert!(
+            preview["developer"]
+                .as_str()
+                .unwrap()
+                .contains("Late instructions")
+        );
+        remove_test_dir(workspace).await;
+    }
+
+    #[tokio::test]
+    async fn dev_reload_rejects_invalid_candidate_and_keeps_previous_snapshot() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let workspace = unique_test_dir("reload-invalid");
+        let skills_root = workspace.join("skills");
+        let package_root = skills_root.join("stable");
+        write_dynamic_package(&package_root, "stable_tool", "stable", "Stable body").await;
+        let manager = dynamic_skill_manager(&skills_root).await;
+        let state = Arc::new(
+            crate::api::AppState::new_with_agent(storage, Arc::new(TestAgent))
+                .with_skill_manager(manager.clone())
+                .with_skills_root(skills_root.clone())
+                .with_runtime_config(
+                    RuntimeConfig::workspace_write(workspace.clone(), workspace.clone())
+                        .without_builtin_tools(),
+                ),
+        );
+        let app = crate::api::router_with_dev_routes(state);
+        tokio::fs::write(package_root.join("general-agent.json"), "{invalid")
+            .await
+            .unwrap();
+
+        let reload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/dev/skills/reload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(reload.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(manager.current_snapshot().generation(), 1);
+        let tools = read_json(
             app.clone()
                 .oneshot(
                     Request::builder()
-                        .uri("/dev/tool-discovery")
+                        .uri("/dev/tools")
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -593,36 +698,86 @@ mod tests {
         )
         .await;
         assert!(
-            discovery["tools"]
+            tools["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|tool| { tool["name"] == "second_tool" })
+                .any(|tool| tool["name"] == "stable_tool")
         );
-
         let preview = read_json(
             app.oneshot(json_request(
                 "/dev/instructions/preview",
-                json!({ "content": "use $second" }),
+                json!({ "content": "use $stable" }),
             ))
             .await
             .unwrap(),
         )
         .await;
-        assert_eq!(preview["triggered_skills"], json!(["second"]));
+        assert_eq!(preview["triggered_skills"], json!(["stable"]));
         assert!(
             preview["developer"]
                 .as_str()
                 .unwrap()
-                .contains("Second body")
-        );
-        assert!(
-            !preview["developer"]
-                .as_str()
-                .unwrap()
-                .contains("First body")
+                .contains("Stable body")
         );
         remove_test_dir(workspace).await;
+    }
+
+    #[tokio::test]
+    async fn dev_reload_rejects_static_skill_manager() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let skills_root = development_skills().await;
+        let skills = SkillRegistry::load_development(&skills_root).await.unwrap();
+        let manager = SkillManager::from_registry_and_catalog(skills, SkillCatalog::empty());
+        let state = Arc::new(
+            crate::api::AppState::new_with_agent(storage, Arc::new(TestAgent))
+                .with_skill_manager(manager)
+                .with_skills_root(skills_root.clone()),
+        );
+        let app = crate::api::router_with_dev_routes(state);
+
+        let reload = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/dev/skills/reload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(reload.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        remove_test_dir(skills_root).await;
+    }
+
+    #[tokio::test]
+    async fn dev_reload_missing_skills_root_does_not_advance_generation() {
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let skills_root = unique_test_dir("reload-missing-root");
+        tokio::fs::create_dir_all(&skills_root).await.unwrap();
+        let manager = dynamic_skill_manager(&skills_root).await;
+        let state = Arc::new(
+            crate::api::AppState::new_with_agent(storage, Arc::new(TestAgent))
+                .with_skill_manager(manager.clone())
+                .with_skills_root(skills_root.clone()),
+        );
+        tokio::fs::remove_dir_all(&skills_root).await.unwrap();
+        let app = crate::api::router_with_dev_routes(state);
+
+        let reload = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/dev/skills/reload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(reload.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(manager.current_snapshot().generation(), 1);
     }
 
     async fn development_skills() -> PathBuf {

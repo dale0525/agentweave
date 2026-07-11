@@ -300,33 +300,69 @@ describe("DeveloperTools", () => {
 
   it("keeps the current inventory visible when reloading diagnostics fails", async () => {
     const user = userEvent.setup();
+    const initialInventory = {
+      root: "/repo/skills",
+      packages: [
+        {
+          id: "echo",
+          path: "echo",
+          name: "echo",
+          description: "Echo a text payload.",
+          hasSkillMd: false,
+          hasRuntimeManifest: true,
+          runtimeTools: ["echo"],
+          packageKind: "runtime",
+          bundleReady: true,
+          validation: { ok: true, errors: [], warnings: [] }
+        }
+      ]
+    };
+    const publishedInventory = {
+      root: "/repo/skills",
+      packages: [
+        ...initialInventory.packages,
+        {
+          id: "planning",
+          path: "planning",
+          name: "planning",
+          description: "Planning instructions.",
+          hasSkillMd: true,
+          hasRuntimeManifest: false,
+          runtimeTools: [],
+          packageKind: "instruction",
+          bundleReady: true,
+          validation: { ok: true, errors: [], warnings: [] }
+        }
+      ]
+    };
     mockFetch([
+      jsonResponse(initialInventory),
       jsonResponse({
-        root: "/repo/skills",
-        packages: [
-          {
-            id: "echo",
-            path: "echo",
-            name: "echo",
-            description: "Echo a text payload.",
-            hasSkillMd: false,
-            hasRuntimeManifest: true,
-            runtimeTools: ["echo"],
-            packageKind: "runtime",
-            bundleReady: true,
-            validation: { ok: true, errors: [], warnings: [] }
-          }
-        ]
+        inventory: publishedInventory,
+        previousGeneration: 1,
+        activeGeneration: 2,
+        activePackages: 2,
+        inactivePackages: 0,
+        reloadStatus: "published"
       }),
-      new Response(JSON.stringify({ error: "reload failed" }), { status: 500 })
+      jsonResponse(publishedInventory),
+      new Response(JSON.stringify({ error: "reload failed" }), { status: 422 })
     ]);
 
     render(<DeveloperTools onBack={() => undefined} />);
 
     await screen.findByRole("button", { name: "Modify with skill-creator" });
     await user.click(screen.getByRole("button", { name: "Reload diagnostics" }));
+    expect(await screen.findByText("Active snapshot 2")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Refresh skill packages" }));
+    expect(await screen.findByText("Active snapshot 2")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /planning/i }));
+    expect(screen.getByText("skills/planning")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reload diagnostics" }));
 
     expect(await screen.findByText("Action failed. Keep the current inventory and try again.")).toBeInTheDocument();
+    expect(screen.getByText("Active snapshot 2")).toBeInTheDocument();
+    expect(screen.getByText("skills/planning")).toBeInTheDocument();
     expect(screen.getAllByText("echo").length).toBeGreaterThan(0);
     expect(screen.queryByText("Development API is not available")).not.toBeInTheDocument();
   });

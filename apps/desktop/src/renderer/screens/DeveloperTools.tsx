@@ -25,6 +25,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [activeSnapshotGeneration, setActiveSnapshotGeneration] = useState<number | null>(null);
   const [promptPackage, setPromptPackage] = useState<DevSkillPackage | "new" | null>(null);
   const [deletePackage, setDeletePackage] = useState<DevSkillPackage | null>(null);
   const inventoryRef = useRef<DevSkillInventory | null>(null);
@@ -93,6 +94,28 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
     }
   }, []);
 
+  const handleReload = useCallback(async () => {
+    setIsLoading(true);
+    setActionError(null);
+    try {
+      const response = await reloadDevSkills();
+      const nextInventory = response.inventory;
+      setInventory(nextInventory);
+      setLoadError(null);
+      setSelectedId((current) => {
+        if (current && nextInventory.packages.some((item) => item.id === current)) {
+          return current;
+        }
+        return nextInventory.packages[0]?.id ?? null;
+      });
+      setActiveSnapshotGeneration(response.activeGeneration);
+    } catch {
+      setActionError("Action failed. Keep the current inventory and try again.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
   return (
     <main className="developer-screen" aria-label="Developer Tools">
       <header className="top-bar developer-top-bar">
@@ -129,9 +152,17 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
         </div>
       </header>
 
-      {actionError ? (
+      {actionError || activeSnapshotGeneration !== null ? (
         <div aria-live="polite" className="developer-status-banner" role="status">
-          {actionError}
+          {activeSnapshotGeneration !== null ? (
+            <span>Active snapshot {activeSnapshotGeneration}</span>
+          ) : null}
+          {actionError ? (
+            <>
+              {" "}
+              <span>{actionError}</span>
+            </>
+          ) : null}
         </div>
       ) : null}
 
@@ -154,10 +185,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
               onDelete={setDeletePackage}
               onModify={setPromptPackage}
               onReload={() => {
-                void loadInventory(reloadDevSkills, {
-                  failureMessage: "Action failed. Keep the current inventory and try again.",
-                  preserveInventoryOnError: true
-                });
+                void handleReload();
               }}
               skillPackage={selectedPackage}
             />

@@ -76,6 +76,15 @@ export type DevSkillInventory = {
   packages: DevSkillPackage[];
 };
 
+export type DevSkillReloadResponse = {
+  inventory: DevSkillInventory;
+  previousGeneration: number;
+  activeGeneration: number;
+  activePackages: number;
+  inactivePackages: number;
+  reloadStatus: "published";
+};
+
 type ErrorPayload = {
   error?: string;
 };
@@ -120,8 +129,8 @@ export async function validateDevSkills(): Promise<DevSkillInventory> {
   });
 }
 
-export async function reloadDevSkills(): Promise<DevSkillInventory> {
-  return requestJson<DevSkillInventory>("/dev/skills/reload", {
+export async function reloadDevSkills(): Promise<DevSkillReloadResponse> {
+  return requestJson<DevSkillReloadResponse>("/dev/skills/reload", {
     method: "POST"
   });
 }
