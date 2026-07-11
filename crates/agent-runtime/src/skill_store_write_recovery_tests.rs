@@ -201,6 +201,116 @@ async fn isolation_database_failure_leaves_db_path_existing_and_combines_errors(
     assert!(Path::new(&record.storage_path).is_dir());
 }
 
+#[tokio::test]
+async fn invalid_descriptor_and_restore_failure_quarantines_raw_tree_with_prior_descriptor() {
+    let fixture = RecoveryFixture::new().await;
+    let staged = fixture.staged().await;
+    let prior = fixture
+        .state
+        .get_revision(&staged.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.faults.fail_once(SkillStoreFaultPoint::WriteRestore);
+
+    let error = fixture
+        .store
+        .write_staging_file(
+            &staged.revision_id,
+            Path::new("general-agent.json"),
+            b"{invalid",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("WriteRestore"));
+    let record = fixture
+        .state
+        .get_revision(&staged.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, SkillRevisionStatus::Quarantined);
+    assert_eq!(record.version, prior.version);
+    assert_eq!(record.descriptor_json, prior.descriptor_json);
+    assert!(record.validation_json.get("descriptorError").is_some());
+    assert!(Path::new(&record.storage_path).is_dir());
+    assert_eq!(
+        record.content_hash,
+        hash_package_tree(Path::new(&record.storage_path))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn invalid_descriptor_isolation_collision_keeps_actual_staging_tree_quarantined() {
+    let fixture = RecoveryFixture::new().await;
+    let staged = fixture.staged().await;
+    fixture.faults.fail_once(SkillStoreFaultPoint::WriteRestore);
+    let collision = fixture.paths.quarantine.join(&staged.revision_id);
+    tokio::fs::create_dir(&collision).await.unwrap();
+    tokio::fs::write(collision.join("external"), "keep")
+        .await
+        .unwrap();
+
+    fixture
+        .store
+        .write_staging_file(
+            &staged.revision_id,
+            Path::new("general-agent.json"),
+            b"{invalid",
+        )
+        .await
+        .unwrap_err();
+
+    let record = fixture
+        .state
+        .get_revision(&staged.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, SkillRevisionStatus::Quarantined);
+    assert_eq!(record.storage_path, staged.path.to_string_lossy());
+    assert!(record.validation_json.get("descriptorError").is_some());
+    assert_eq!(
+        tokio::fs::read_to_string(collision.join("external"))
+            .await
+            .unwrap(),
+        "keep"
+    );
+}
+
+#[tokio::test]
+async fn invalid_descriptor_isolation_db_failure_keeps_db_path_existing() {
+    let fixture = RecoveryFixture::new().await;
+    let staged = fixture.staged().await;
+    fixture.faults.fail_once(SkillStoreFaultPoint::WriteRestore);
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::WriteIsolationDatabase);
+
+    let error = fixture
+        .store
+        .write_staging_file(
+            &staged.revision_id,
+            Path::new("general-agent.json"),
+            b"{invalid",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("WriteIsolationDatabase"));
+    let record = fixture
+        .state
+        .get_revision(&staged.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, SkillRevisionStatus::Staging);
+    assert!(Path::new(&record.storage_path).is_dir());
+}
+
 fn edited_skill() -> &'static [u8] {
     b"---\nname: recovery\ndescription: edited\n---\nedited\n"
 }

@@ -453,6 +453,56 @@ async fn quarantine_rejects_db_metadata_changed_after_locked_observation() {
     assert!(staged.path.is_dir());
 }
 
+#[tokio::test]
+async fn staging_write_cas_rejects_metadata_changed_after_file_commit() {
+    let fixture = ConcurrentFixture::new().await;
+    let staged = fixture.stage().await;
+    let original = tokio::fs::read(staged.path.join("SKILL.md")).await.unwrap();
+    let faults = SkillStoreTestFaults::default();
+    let store = independent_store(&fixture, faults.clone());
+    let gate = faults.gate_once(SkillStoreFaultPoint::WriteBeforeMetadataCommit);
+    let revision_id = staged.revision_id.clone();
+    let write = tokio::spawn(async move {
+        store
+            .write_staging_file(
+                &revision_id,
+                Path::new("SKILL.md"),
+                b"---\nname: lock\ndescription: changed\n---\nchanged\n",
+            )
+            .await
+    });
+    gate.wait_entered().await;
+    fixture
+        .state
+        .refresh_staging_revision_metadata(
+            &staged.revision_id,
+            SkillRevisionMetadata {
+                version: "9.0.0".into(),
+                content_hash: "external-hash".into(),
+                descriptor_json: json!({"external": true}),
+                validation_json: json!({"status": "external"}),
+            },
+        )
+        .await
+        .unwrap();
+    gate.release().await;
+
+    let error = write.await.unwrap().unwrap_err();
+
+    assert!(format!("{error:#}").contains("changed since operation observation"));
+    assert_eq!(
+        tokio::fs::read(staged.path.join("SKILL.md")).await.unwrap(),
+        original
+    );
+    let record = fixture
+        .state
+        .get_revision(&staged.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.content_hash, "external-hash");
+}
+
 fn independent_store(
     fixture: &ConcurrentFixture,
     faults: SkillStoreTestFaults,

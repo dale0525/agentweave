@@ -98,3 +98,46 @@ async fn quarantine_cas_rejects_metadata_changed_after_observation() {
             .contains("revision changed since operation observation")
     );
 }
+
+#[tokio::test]
+async fn staging_metadata_cas_rejects_metadata_changed_after_observation() {
+    let (state, observed) = staging_revision().await;
+    state
+        .refresh_staging_revision_metadata(
+            &observed.revision_id,
+            SkillRevisionMetadata {
+                version: "2.0.0".into(),
+                content_hash: "external-hash".into(),
+                descriptor_json: json!({"version": "2.0.0"}),
+                validation_json: json!({"status": "external"}),
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = state
+        .refresh_staging_revision_metadata_cas(
+            &observed.revision_id,
+            SkillRevisionExpectation::from(&observed),
+            SkillRevisionMetadata {
+                version: "3.0.0".into(),
+                content_hash: "writer-hash".into(),
+                descriptor_json: json!({"version": "3.0.0"}),
+                validation_json: json!({"status": "valid"}),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("revision changed since operation observation")
+    );
+    let record = state
+        .get_revision(&observed.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.content_hash, "external-hash");
+}

@@ -16,13 +16,16 @@ pub mod skill_snapshot;
 pub mod skill_source;
 pub mod skill_state;
 mod skill_state_migration;
+mod skill_state_revision_cas;
 mod skill_state_rows;
 mod skill_state_transactions;
 pub mod skill_store;
 mod skill_store_faults;
 mod skill_store_fs;
+mod skill_store_fs_types;
 mod skill_store_locks;
 mod skill_store_operations;
+mod skill_store_recovery;
 mod skill_store_secure_fs;
 pub mod storage;
 pub mod subagent;
@@ -72,6 +75,9 @@ mod skill_store_security_tests;
 
 #[cfg(test)]
 mod skill_store_write_recovery_tests;
+
+#[cfg(test)]
+mod skill_store_lock_tests;
 
 #[cfg(test)]
 mod skill_store_compensation_tests;

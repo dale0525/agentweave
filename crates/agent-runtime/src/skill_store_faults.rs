@@ -20,9 +20,15 @@ pub(crate) enum StoreFaultPoint {
     QuarantineAfterLock,
     CopyBeforeFileOpen,
     WriteBeforeTempOpen,
+    WriteBeforeMetadataCommit,
+    WriteBeforeRename,
+    WriteAfterRenameMode,
+    WriteAfterRenameRevalidate,
+    WriteTempCleanup,
     WriteRestore,
     WriteIsolationCopy,
     WriteIsolationDatabase,
+    ManagedDiscoveryTransientIo,
     PromoteBeforeDestinationCommit,
     ManagedReadonly,
     PromoteDestinationCleanup,
@@ -39,6 +45,7 @@ pub(crate) enum StoreFaultPoint {
 pub(crate) struct StoreFaults {
     failures: Arc<Mutex<BTreeMap<StoreFaultPoint, usize>>>,
     gates: Arc<Mutex<BTreeMap<StoreFaultPoint, Arc<StoreTestGateInner>>>>,
+    revision_id: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug)]
@@ -70,6 +77,15 @@ impl StoreTestGate {
 }
 
 impl StoreFaults {
+    #[cfg(test)]
+    pub(crate) fn set_revision_id_once(&self, revision_id: &str) {
+        *self.revision_id.lock().unwrap() = Some(revision_id.to_string());
+    }
+
+    pub(crate) fn take_revision_id(&self) -> Option<String> {
+        self.revision_id.lock().unwrap().take()
+    }
+
     #[cfg(test)]
     pub(crate) fn fail_once(&self, point: StoreFaultPoint) {
         self.failures.lock().unwrap().insert(point, 0);

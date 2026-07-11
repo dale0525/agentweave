@@ -2,43 +2,19 @@ use crate::skill_source::{
     canonical_relative_path, portable_collision_key, register_portable_path,
 };
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
+pub(crate) use crate::skill_store_fs_types::{
+    AtomicReplaceCommitState, AtomicReplaceFailure, PackageLimits,
+};
+use crate::skill_store_fs_types::{
+    PackageDirectory, PackageEntries, PackageFile, StoredFileContents,
+};
+use crate::skill_store_secure_fs::ensure_store_directory;
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct PackageLimits {
-    pub max_file_bytes: u64,
-    pub max_package_bytes: u64,
-    pub max_entries: u64,
-    pub max_files: u64,
-    pub max_directories: u64,
-    pub max_depth: u64,
-    pub max_relative_path_bytes: u64,
-}
-
-#[derive(Debug)]
-struct PackageEntries {
-    root_mode: u32,
-    directories: Vec<PackageDirectory>,
-    files: Vec<PackageFile>,
-}
-
-#[derive(Debug)]
-struct PackageDirectory {
-    relative: PathBuf,
-    mode: u32,
-}
-
-#[derive(Debug)]
-struct PackageFile {
-    relative: PathBuf,
-    expected_bytes: u64,
-    mode: u32,
-}
 
 pub(crate) async fn measure_package_tree(
     root: &Path,
@@ -84,14 +60,7 @@ async fn copy_collected_entries(
     copy_fault: StoreFaultPoint,
 ) -> anyhow::Result<()> {
     for directory in &entries.directories {
-        tokio::fs::create_dir(destination.join(&directory.relative))
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to create package directory {}",
-                    destination.join(&directory.relative).display()
-                )
-            })?;
+        ensure_store_directory(destination, &directory.relative).await?;
     }
 
     let mut package_bytes = 0_u64;
@@ -225,12 +194,6 @@ pub(crate) async fn ensure_directory_contained(
     Ok(())
 }
 
-#[derive(Debug)]
-pub(crate) struct StoredFileContents {
-    pub bytes: Vec<u8>,
-    pub mode: u32,
-}
-
 pub(crate) async fn read_optional_regular_file(
     root: &Path,
     relative: &Path,
@@ -267,11 +230,11 @@ pub(crate) async fn atomic_replace_file(
     bytes: &[u8],
     mode: u32,
     faults: &StoreFaults,
-) -> anyhow::Result<()> {
+) -> Result<(), AtomicReplaceFailure> {
     faults
         .checkpoint(StoreFaultPoint::WriteBeforeTempOpen)
         .await;
-    atomic_replace_file_platform(root, relative, bytes, mode).await
+    atomic_replace_file_platform(root, relative, bytes, mode, faults).await
 }
 
 pub(crate) async fn remove_created_directories(created: &[PathBuf]) -> anyhow::Result<()> {
@@ -606,33 +569,53 @@ async fn atomic_replace_file_platform(
     relative: &Path,
     bytes: &[u8],
     mode: u32,
-) -> anyhow::Result<()> {
+    faults: &StoreFaults,
+) -> Result<(), AtomicReplaceFailure> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawMode, fstat, openat, renameat, unlinkat};
     use std::fs::File;
 
-    let (parent, destination_name) = open_parent_nofollow(root, relative)?;
+    let failure = |error, state, temp_path| AtomicReplaceFailure {
+        state,
+        temp_path,
+        error,
+    };
+    let (parent, destination_name) = open_parent_nofollow(root, relative)
+        .map_err(|error| failure(error, AtomicReplaceCommitState::NotCommitted, None))?;
     let temporary_name = format!(".skill-write-{}.tmp", uuid::Uuid::new_v4());
+    let temporary_path = root
+        .join(relative.parent().unwrap_or_else(|| Path::new("")))
+        .join(&temporary_name);
     let descriptor = openat(
         &parent,
         temporary_name.as_str(),
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::from_raw_mode(RawMode::try_from(mode & 0o777)?),
+        Mode::from_raw_mode(RawMode::try_from(mode & 0o777).map_err(|error| {
+            failure(error.into(), AtomicReplaceCommitState::NotCommitted, None)
+        })?),
     )
     .with_context(|| {
         format!(
             "failed to create staging temporary file without following symlinks: {}",
             root.join(relative).display()
         )
-    })?;
-    let stat = fstat(&descriptor)?;
+    })
+    .map_err(|error| failure(error, AtomicReplaceCommitState::NotCommitted, None))?;
+    let stat = fstat(&descriptor)
+        .map_err(|error| failure(error.into(), AtomicReplaceCommitState::NotCommitted, None))?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
-        anyhow::bail!("staging temporary path is not a regular file");
+        return Err(failure(
+            anyhow::anyhow!("staging temporary path is not a regular file"),
+            AtomicReplaceCommitState::NotCommitted,
+            Some(temporary_path),
+        ));
     }
     let mut file = tokio::fs::File::from_std(File::from(descriptor));
+    let mut committed = false;
     let result = async {
         file.write_all(bytes).await?;
         file.flush().await?;
         drop(file);
+        faults.check(StoreFaultPoint::WriteBeforeRename)?;
         renameat(&parent, temporary_name.as_str(), &parent, destination_name).with_context(
             || {
                 format!(
@@ -641,15 +624,39 @@ async fn atomic_replace_file_platform(
                 )
             },
         )?;
+        committed = true;
+        faults.check(StoreFaultPoint::WriteAfterRenameMode)?;
         set_mode_nofollow(root, Some(relative), mode, false).await?;
+        faults.check(StoreFaultPoint::WriteAfterRenameRevalidate)?;
         let _ = open_regular_file_nofollow(root, relative).await?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
-    if result.is_err() {
-        let _ = unlinkat(&parent, temporary_name.as_str(), AtFlags::empty());
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if committed => Err(failure(error, AtomicReplaceCommitState::Committed, None)),
+        Err(error) => {
+            let cleanup = match faults.check(StoreFaultPoint::WriteTempCleanup) {
+                Ok(()) => unlinkat(&parent, temporary_name.as_str(), AtFlags::empty())
+                    .map_err(anyhow::Error::from),
+                Err(cleanup) => Err(cleanup),
+            };
+            match cleanup {
+                Ok(()) => Err(failure(error, AtomicReplaceCommitState::NotCommitted, None)),
+                Err(cleanup)
+                    if cleanup.downcast_ref::<rustix::io::Errno>()
+                        == Some(&rustix::io::Errno::NOENT) =>
+                {
+                    Err(failure(error, AtomicReplaceCommitState::NotCommitted, None))
+                }
+                Err(cleanup) => Err(failure(
+                    error.context(format!("temporary cleanup failed: {cleanup:#}")),
+                    AtomicReplaceCommitState::NotCommitted,
+                    Some(temporary_path),
+                )),
+            }
+        }
     }
-    result
 }
 
 #[cfg(not(unix))]
@@ -658,18 +665,36 @@ async fn atomic_replace_file_platform(
     relative: &Path,
     bytes: &[u8],
     _mode: u32,
-) -> anyhow::Result<()> {
+    faults: &StoreFaults,
+) -> Result<(), AtomicReplaceFailure> {
+    let failure = |error, state, temp_path| AtomicReplaceFailure {
+        state,
+        temp_path,
+        error,
+    };
     let destination = root.join(relative);
-    let parent = destination.parent().context("staging file has no parent")?;
-    let canonical_root = tokio::fs::canonicalize(root).await?;
-    let canonical_parent = tokio::fs::canonicalize(parent).await?;
+    let parent = destination
+        .parent()
+        .context("staging file has no parent")
+        .map_err(|error| failure(error, AtomicReplaceCommitState::NotCommitted, None))?;
+    let canonical_root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|error| failure(error.into(), AtomicReplaceCommitState::NotCommitted, None))?;
+    let canonical_parent = tokio::fs::canonicalize(parent)
+        .await
+        .map_err(|error| failure(error.into(), AtomicReplaceCommitState::NotCommitted, None))?;
     if !canonical_parent.starts_with(&canonical_root) {
-        anyhow::bail!(
-            "staging file parent escapes revision root: {}",
-            parent.display()
-        );
+        return Err(failure(
+            anyhow::anyhow!(
+                "staging file parent escapes revision root: {}",
+                parent.display()
+            ),
+            AtomicReplaceCommitState::NotCommitted,
+            None,
+        ));
     }
     let temporary = parent.join(format!(".skill-write-{}.tmp", uuid::Uuid::new_v4()));
+    let mut committed = false;
     let result = async {
         let mut file = tokio::fs::OpenOptions::new()
             .create_new(true)
@@ -686,15 +711,42 @@ async fn atomic_replace_file_platform(
         if !canonical_parent.starts_with(&canonical_root) {
             anyhow::bail!("staging file parent escaped revision root before replace");
         }
+        faults.check(StoreFaultPoint::WriteBeforeRename)?;
         tokio::fs::rename(&temporary, &destination).await?;
+        committed = true;
+        faults.check(StoreFaultPoint::WriteAfterRenameMode)?;
+        faults.check(StoreFaultPoint::WriteAfterRenameRevalidate)?;
         let _ = open_regular_file_nofollow(root, relative).await?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&temporary).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if committed => Err(failure(error, AtomicReplaceCommitState::Committed, None)),
+        Err(error) => {
+            let cleanup = match faults.check(StoreFaultPoint::WriteTempCleanup) {
+                Ok(()) => tokio::fs::remove_file(&temporary)
+                    .await
+                    .map_err(anyhow::Error::from),
+                Err(cleanup) => Err(cleanup),
+            };
+            match cleanup {
+                Ok(()) => Err(failure(error, AtomicReplaceCommitState::NotCommitted, None)),
+                Err(cleanup)
+                    if cleanup
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    Err(failure(error, AtomicReplaceCommitState::NotCommitted, None))
+                }
+                Err(cleanup) => Err(failure(
+                    error.context(format!("temporary cleanup failed: {cleanup:#}")),
+                    AtomicReplaceCommitState::NotCommitted,
+                    Some(temporary),
+                )),
+            }
+        }
     }
-    result
 }
 
 #[cfg(not(unix))]

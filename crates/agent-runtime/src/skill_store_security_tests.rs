@@ -161,9 +161,6 @@ async fn copy_open_rejects_file_swapped_to_symlink_after_scan() {
 #[tokio::test]
 async fn secure_hash_never_reads_outside_file_after_path_is_swapped_to_symlink() {
     let source = write_package("com.example.hash-swap").await;
-    let expected = crate::skill_source::hash_package_tree(source.path())
-        .await
-        .unwrap();
     let outside = tempdir().unwrap();
     let outside_file = outside.path().join("outside");
     tokio::fs::write(&outside_file, "outside-secret")
@@ -179,7 +176,8 @@ async fn secure_hash_never_reads_outside_file_after_path_is_swapped_to_symlink()
     std::os::unix::fs::symlink(&outside_file, source.path().join("SKILL.md")).unwrap();
     gate.release().await;
 
-    assert_eq!(hashing.await.unwrap().unwrap(), expected);
+    let error = hashing.await.unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("symlink"));
     assert_eq!(
         tokio::fs::read_to_string(outside_file).await.unwrap(),
         "outside-secret"
@@ -434,6 +432,92 @@ async fn readonly_failure_rolls_back_before_database_promotion() {
             .status,
         SkillRevisionStatus::Staging
     );
+}
+
+#[tokio::test]
+async fn after_rename_failures_restore_original_tree_and_database_metadata() {
+    for point in [
+        SkillStoreFaultPoint::WriteAfterRenameMode,
+        SkillStoreFaultPoint::WriteAfterRenameRevalidate,
+    ] {
+        let fixture = SecurityFixture::new(small_limits()).await;
+        let source = write_package("com.example.after-rename").await;
+        let staged = fixture
+            .store
+            .create_staging_revision(source.path(), "owner-1")
+            .await
+            .unwrap();
+        let original = tokio::fs::read(staged.path.join("SKILL.md")).await.unwrap();
+        fixture.faults.fail_once(point);
+
+        let error = fixture
+            .store
+            .write_staging_file(
+                &staged.revision_id,
+                Path::new("SKILL.md"),
+                b"---\nname: after-rename\ndescription: changed\n---\nchanged\n",
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains(&format!("{point:?}")));
+        assert_eq!(
+            tokio::fs::read(staged.path.join("SKILL.md")).await.unwrap(),
+            original
+        );
+        let record = fixture
+            .state
+            .get_revision(&staged.revision_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.content_hash,
+            crate::skill_source::hash_package_tree(&staged.path)
+                .await
+                .unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn temp_cleanup_failure_is_reported_as_maintenance_issue_without_db_change() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.temp-cleanup").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let original = tokio::fs::read(staged.path.join("SKILL.md")).await.unwrap();
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::WriteBeforeRename);
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::WriteTempCleanup);
+
+    let error = fixture
+        .store
+        .write_staging_file(
+            &staged.revision_id,
+            Path::new("SKILL.md"),
+            b"---\nname: temp-cleanup\ndescription: changed\n---\nchanged\n",
+        )
+        .await
+        .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("WriteBeforeRename"), "{message}");
+    assert!(message.contains("WriteTempCleanup"), "{message}");
+    assert_eq!(
+        tokio::fs::read(staged.path.join("SKILL.md")).await.unwrap(),
+        original
+    );
+    let issues = fixture.store.maintenance_issues();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].operation, "staging_write_temp_cleanup");
+    assert!(issues[0].path.exists());
 }
 
 #[tokio::test]

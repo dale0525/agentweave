@@ -191,6 +191,7 @@ impl ManagedSkillSource {
             .with_context(|| format!("active skill revision not found: {revision_id}"))?;
         validate_managed_record(&revision, installation_package, &self.paths.managed)?;
         let stored_path = PathBuf::from(&revision.storage_path);
+        self.store.check_managed_discovery_io()?;
         let relative = PathBuf::from(revision.package_id.as_str())
             .join("revisions")
             .join(&revision.revision_id);
@@ -291,13 +292,17 @@ impl SkillSource for ManagedSkillSource {
             {
                 Ok(package) => discovered.push(package),
                 Err(error) => {
+                    let transient = is_transient_discovery_error(&error);
                     let reason = format!("{error:#}");
-                    let quarantine_error = self
-                        .store
-                        .quarantine_revision(revision_id, &reason)
-                        .await
-                        .err()
-                        .map(|error| format!("{error:#}"));
+                    let quarantine_error = if transient {
+                        None
+                    } else {
+                        self.store
+                            .quarantine_revision(revision_id, &reason)
+                            .await
+                            .err()
+                            .map(|error| format!("{error:#}"))
+                    };
                     let diagnostic_error = if let Some(quarantine_error) = &quarantine_error {
                         self.state
                             .record_revision_diagnostic(
@@ -343,6 +348,38 @@ impl SkillSource for ManagedSkillSource {
             .expect("managed skill issue lock poisoned") = issues;
         Ok(discovered)
     }
+}
+
+fn is_transient_discovery_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let io_transient = cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::OutOfMemory
+            ) || matches!(error.raw_os_error(), Some(23 | 24))
+        });
+        #[cfg(unix)]
+        let errno_transient = cause
+            .downcast_ref::<rustix::io::Errno>()
+            .is_some_and(|error| {
+                matches!(
+                    *error,
+                    rustix::io::Errno::MFILE
+                        | rustix::io::Errno::NFILE
+                        | rustix::io::Errno::INTR
+                        | rustix::io::Errno::AGAIN
+                        | rustix::io::Errno::ACCESS
+                        | rustix::io::Errno::TIMEDOUT
+                )
+            });
+        #[cfg(not(unix))]
+        let errno_transient = false;
+        io_transient || errno_transient
+    })
 }
 
 fn validate_managed_record(

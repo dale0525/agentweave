@@ -72,6 +72,24 @@ pub(crate) struct SecurePackageSnapshot {
     pub content_hash: String,
 }
 
+pub(crate) struct SecureTreeSnapshot {
+    pub content_hash: String,
+    descriptor_bytes: Option<Vec<u8>>,
+    runtime_manifest: Option<Vec<u8>>,
+    instructions_file: Option<Vec<u8>>,
+}
+
+impl SecureTreeSnapshot {
+    pub(crate) fn load_descriptor(&self, root: &Path) -> anyhow::Result<LoadedPackageDescriptor> {
+        SkillPackageDescriptor::load_from_file_bytes(
+            root,
+            self.descriptor_bytes.clone(),
+            self.runtime_manifest.clone(),
+            self.instructions_file.clone(),
+        )
+    }
+}
+
 pub(crate) fn unbounded_package_limits() -> PackageLimits {
     PackageLimits {
         max_file_bytes: u64::MAX,
@@ -104,6 +122,16 @@ pub(crate) async fn secure_package_hash(
         .context("secure package hash worker failed")?
 }
 
+pub(crate) async fn secure_tree_snapshot(
+    root: &Path,
+    limits: PackageLimits,
+) -> anyhow::Result<SecureTreeSnapshot> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || tree_direct(&root, limits))
+        .await
+        .context("secure tree snapshot worker failed")?
+}
+
 pub(crate) async fn secure_package_snapshot_beneath(
     trusted_root: &Path,
     relative: &Path,
@@ -129,6 +157,50 @@ pub(crate) async fn ensure_store_directory(
         .context("secure directory preparation worker failed")?
 }
 
+pub(crate) async fn prepare_directory_path(path: &Path) -> anyhow::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || prepare_directory_path_platform(&path))
+        .await
+        .context("secure directory path preparation worker failed")?
+}
+
+pub(crate) async fn prepare_canonical_directory(path: &Path) -> anyhow::Result<PathBuf> {
+    if let Ok(canonical) = tokio::fs::canonicalize(path).await {
+        return Ok(canonical);
+    }
+    let mut current = path;
+    let mut missing = Vec::new();
+    let canonical_ancestor = loop {
+        if let Ok(canonical) = tokio::fs::canonicalize(current).await {
+            break canonical;
+        }
+        missing.push(
+            current
+                .file_name()
+                .context("skill store path has no existing ancestor")?
+                .to_os_string(),
+        );
+        current = current
+            .parent()
+            .context("skill store path has no existing ancestor")?;
+    };
+    let mut prepared = canonical_ancestor;
+    for component in missing.into_iter().rev() {
+        prepared.push(component);
+    }
+    prepare_directory_path(&prepared).await?;
+    Ok(tokio::fs::canonicalize(prepared).await?)
+}
+
+pub(crate) async fn remove_store_tree(trusted_root: &Path, relative: &Path) -> anyhow::Result<()> {
+    canonical_relative_path(relative)?;
+    let trusted_root = trusted_root.to_path_buf();
+    let relative = relative.to_path_buf();
+    tokio::task::spawn_blocking(move || remove_tree_beneath(&trusted_root, &relative))
+        .await
+        .context("secure tree cleanup worker failed")?
+}
+
 pub(crate) async fn reserve_store_directory(
     trusted_root: &Path,
     relative: &Path,
@@ -150,6 +222,110 @@ fn open_trusted_directory(root: &Path) -> anyhow::Result<std::os::fd::OwnedFd> {
         Mode::empty(),
     )
     .with_context(|| format!("failed to open trusted store root: {}", root.display()))
+}
+
+#[cfg(unix)]
+fn prepare_directory_path_platform(path: &Path) -> anyhow::Result<()> {
+    use rustix::fs::{Mode, OFlags, RawMode, mkdirat, open, openat};
+    if !path.is_absolute() {
+        anyhow::bail!("skill store root must be absolute: {}", path.display());
+    }
+    let mut directory = open(
+        "/",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    for component in path.components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        match mkdirat(
+            &directory,
+            name,
+            Mode::from_raw_mode(RawMode::try_from(0o755_u32)?),
+        ) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => return Err(error.into()),
+        }
+        directory = openat(
+            &directory,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .with_context(|| {
+            format!(
+                "failed to prepare directory path without following symlinks: {}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_tree_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags, openat, unlinkat};
+    let mut parent = open_trusted_directory(root)?;
+    let components = relative.components().collect::<Vec<_>>();
+    let (name, parents) = components
+        .split_last()
+        .context("store cleanup path is empty")?;
+    for component in parents {
+        parent = openat(
+            &parent,
+            component.as_os_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+    }
+    let target = match openat(
+        &parent,
+        name.as_os_str(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(target) => target,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    remove_open_directory_contents(&target)?;
+    match unlinkat(&parent, name.as_os_str(), AtFlags::REMOVEDIR) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn remove_open_directory_contents(directory: &std::os::fd::OwnedFd) -> anyhow::Result<()> {
+    use rustix::fs::{AtFlags, Dir, Mode, OFlags, openat, unlinkat};
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let entries = Dir::read_from(directory)?;
+    for entry in entries {
+        let entry = entry?;
+        let bytes = entry.file_name().to_bytes();
+        if matches!(bytes, b"." | b"..") {
+            continue;
+        }
+        let name = OsStr::from_bytes(bytes);
+        match openat(
+            directory,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(child) => {
+                remove_open_directory_contents(&child)?;
+                unlinkat(directory, name, AtFlags::REMOVEDIR)?;
+            }
+            Err(rustix::io::Errno::NOTDIR) | Err(rustix::io::Errno::LOOP) => {
+                unlinkat(directory, name, AtFlags::empty())?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -224,6 +400,25 @@ fn ensure_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> 
 }
 
 #[cfg(not(unix))]
+fn prepare_directory_path_platform(path: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn remove_tree_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
+    let canonical_root = std::fs::canonicalize(root)?;
+    let target = root.join(relative);
+    match std::fs::canonicalize(&target) {
+        Ok(canonical) if canonical.starts_with(canonical_root) => std::fs::remove_dir_all(target)?,
+        Ok(_) => anyhow::bail!("cleanup target escapes trusted store root"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
 fn reserve_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
     std::fs::create_dir(root.join(relative))?;
     Ok(())
@@ -255,6 +450,17 @@ fn hash_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<String> {
         Mode::empty(),
     )?;
     Ok(scan_opened(root, root_fd, limits)?.content_hash)
+}
+
+#[cfg(unix)]
+fn tree_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureTreeSnapshot> {
+    use rustix::fs::{Mode, OFlags, open};
+    let root_fd = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    scan_opened(root, root_fd, limits)
 }
 
 #[cfg(unix)]
@@ -293,11 +499,10 @@ fn snapshot_beneath(
 }
 
 #[cfg(unix)]
-struct OpenedPackageFile {
+struct PackageFileIdentity {
     relative: PathBuf,
     canonical: Vec<u8>,
     expected_bytes: u64,
-    descriptor: std::os::fd::OwnedFd,
 }
 
 #[cfg(unix)]
@@ -308,7 +513,7 @@ struct WalkState {
     directories: u64,
     package_bytes: u64,
     portable_paths: BTreeMap<Vec<u8>, PathBuf>,
-    opened_files: Vec<OpenedPackageFile>,
+    files_to_hash: Vec<PackageFileIdentity>,
 }
 
 #[cfg(unix)]
@@ -324,13 +529,13 @@ fn snapshot_opened(
         directories: 0,
         package_bytes: 0,
         portable_paths: BTreeMap::new(),
-        opened_files: Vec::new(),
+        files_to_hash: Vec::new(),
     };
     walk_open_directory(&root_fd, Path::new(""), display_root, &mut state)?;
     state
-        .opened_files
+        .files_to_hash
         .sort_by(|left, right| left.canonical.cmp(&right.canonical));
-    let scanned = scan_opened_files(display_root, state.opened_files)?;
+    let scanned = scan_relative_files(display_root, &root_fd, state.files_to_hash)?;
     let descriptor = SkillPackageDescriptor::load_from_file_bytes(
         display_root,
         scanned.descriptor_bytes,
@@ -348,7 +553,7 @@ fn scan_opened(
     display_root: &Path,
     root_fd: std::os::fd::OwnedFd,
     limits: PackageLimits,
-) -> anyhow::Result<ScannedPackage> {
+) -> anyhow::Result<SecureTreeSnapshot> {
     let mut state = WalkState {
         limits,
         entries: 0,
@@ -356,14 +561,14 @@ fn scan_opened(
         directories: 0,
         package_bytes: 0,
         portable_paths: BTreeMap::new(),
-        opened_files: Vec::new(),
+        files_to_hash: Vec::new(),
     };
     walk_open_directory(&root_fd, Path::new(""), display_root, &mut state)?;
     state
-        .opened_files
+        .files_to_hash
         .sort_by(|left, right| left.canonical.cmp(&right.canonical));
     checkpoint_secure_hash_after_open();
-    scan_opened_files(display_root, state.opened_files)
+    scan_relative_files(display_root, &root_fd, state.files_to_hash)
 }
 
 #[cfg(unix)]
@@ -373,7 +578,7 @@ fn walk_open_directory(
     display_root: &Path,
     state: &mut WalkState,
 ) -> anyhow::Result<()> {
-    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, fstat, openat, statat};
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, statat};
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
@@ -413,27 +618,8 @@ fn walk_open_directory(
                 display_root.join(&relative).display()
             );
         }
-        let descriptor = openat(
-            directory,
-            name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-            Mode::empty(),
-        )
-        .with_context(|| {
-            format!(
-                "failed to open package entry without following symlinks: {}",
-                display_root.join(&relative).display()
-            )
-        })?;
-        let stat = fstat(&descriptor)?;
-        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
-            anyhow::bail!(
-                "skill package cannot contain special files: {}",
-                display_root.join(&relative).display()
-            );
-        }
         let expected_bytes =
-            u64::try_from(stat.st_size).context("package file has negative size")?;
+            u64::try_from(entry_stat.st_size).context("package file has negative size")?;
         if expected_bytes > state.limits.max_file_bytes {
             anyhow::bail!(
                 "skill package file exceeds {} byte limit: {}",
@@ -447,11 +633,10 @@ fn walk_open_directory(
             state.limits.max_package_bytes,
         )?;
         state.files = checked_count(state.files, state.limits.max_files, "file")?;
-        state.opened_files.push(OpenedPackageFile {
+        state.files_to_hash.push(PackageFileIdentity {
             canonical: canonical_relative_path(&relative)?,
             relative,
             expected_bytes,
-            descriptor,
         });
     }
     Ok(())
@@ -480,18 +665,11 @@ fn validate_relative_entry(relative: &Path, state: &mut WalkState) -> anyhow::Re
 }
 
 #[cfg(unix)]
-struct ScannedPackage {
-    content_hash: String,
-    descriptor_bytes: Option<Vec<u8>>,
-    runtime_manifest: Option<Vec<u8>>,
-    instructions_file: Option<Vec<u8>>,
-}
-
-#[cfg(unix)]
-fn scan_opened_files(
+fn scan_relative_files(
     display_root: &Path,
-    files: Vec<OpenedPackageFile>,
-) -> anyhow::Result<ScannedPackage> {
+    root_fd: &std::os::fd::OwnedFd,
+    files: Vec<PackageFileIdentity>,
+) -> anyhow::Result<SecureTreeSnapshot> {
     use std::fs::File;
     use std::io::Read;
 
@@ -502,6 +680,21 @@ fn scan_opened_files(
     let mut runtime_manifest = None;
     let mut instructions_file = None;
     for opened in files {
+        let descriptor = open_relative_file(root_fd, &opened.relative, display_root)?;
+        let stat = rustix::fs::fstat(&descriptor)?;
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+            anyhow::bail!(
+                "skill package cannot contain special files: {}",
+                display_root.join(&opened.relative).display()
+            );
+        }
+        let opened_bytes = u64::try_from(stat.st_size).context("package file has negative size")?;
+        if opened_bytes != opened.expected_bytes {
+            anyhow::bail!(
+                "package file changed before hashing: {}",
+                display_root.join(&opened.relative).display()
+            );
+        }
         hasher.update([TREE_HASH_FILE_ENTRY]);
         hasher.update(u64::try_from(opened.canonical.len())?.to_be_bytes());
         hasher.update(&opened.canonical);
@@ -511,7 +704,7 @@ fn scan_opened_files(
             b"general-agent.json" | b"skill.json" | b"SKILL.md"
         );
         let mut captured = capture.then(Vec::new);
-        let mut file = File::from(opened.descriptor);
+        let mut file = File::from(descriptor);
         let mut buffer = vec![0_u8; READ_BUFFER_BYTES];
         let mut bytes_read = 0_u64;
         loop {
@@ -540,11 +733,55 @@ fn scan_opened_files(
             _ => {}
         }
     }
-    Ok(ScannedPackage {
+    Ok(SecureTreeSnapshot {
         content_hash: hex::encode(hasher.finalize()),
         descriptor_bytes,
         runtime_manifest,
         instructions_file,
+    })
+}
+
+#[cfg(unix)]
+fn open_relative_file(
+    root_fd: &std::os::fd::OwnedFd,
+    relative: &Path,
+    display_root: &Path,
+) -> anyhow::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, openat, statat};
+    let mut directory = openat(
+        root_fd,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    for component in parent.components() {
+        directory = openat(
+            &directory,
+            component.as_os_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+    }
+    let name = relative.file_name().context("package file has no name")?;
+    let entry_stat = statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(entry_stat.st_mode) == FileType::Symlink {
+        anyhow::bail!(
+            "skill package cannot contain symlinks: {}",
+            display_root.join(relative).display()
+        );
+    }
+    openat(
+        &directory,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .with_context(|| {
+        format!(
+            "failed to open package file without following symlinks: {}",
+            display_root.join(relative).display()
+        )
     })
 }
 
@@ -576,6 +813,11 @@ fn snapshot_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureP
 #[cfg(not(unix))]
 fn hash_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<String> {
     Ok(scan_fallback(root, limits)?.content_hash)
+}
+
+#[cfg(not(unix))]
+fn tree_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureTreeSnapshot> {
+    scan_fallback(root, limits)
 }
 
 #[cfg(not(unix))]
@@ -612,7 +854,7 @@ fn snapshot_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<Secur
 }
 
 #[cfg(not(unix))]
-fn scan_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<ScannedPackage> {
+fn scan_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureTreeSnapshot> {
     use std::fs::File;
     use std::io::Read;
 
@@ -744,7 +986,7 @@ fn scan_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<ScannedPa
             _ => {}
         }
     }
-    Ok(ScannedPackage {
+    Ok(SecureTreeSnapshot {
         content_hash: hex::encode(hasher.finalize()),
         descriptor_bytes,
         runtime_manifest,

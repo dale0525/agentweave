@@ -83,6 +83,108 @@ async fn partial_staging_copy_failure_removes_partial_directory() {
 }
 
 #[tokio::test]
+async fn staging_uuid_collision_never_deletes_external_directory() {
+    let faults = SkillStoreTestFaults::default();
+    let revision_id = "c52bbb51-5c18-4fe4-a14b-09659be22764";
+    faults.set_revision_id_once(revision_id);
+    let fixture = FailureFixture::new(faults).await;
+    let collision = fixture.paths.staging.join(revision_id);
+    tokio::fs::create_dir(&collision).await.unwrap();
+    tokio::fs::write(collision.join("external"), "keep")
+        .await
+        .unwrap();
+    let source = write_package("com.example.staging-collision").await;
+
+    let error = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("already exists"));
+    assert_eq!(
+        tokio::fs::read_to_string(collision.join("external"))
+            .await
+            .unwrap(),
+        "keep"
+    );
+    assert_eq!(revision_count(&fixture).await, 0);
+}
+
+#[tokio::test]
+async fn promotion_destination_copy_failure_removes_owned_reservation_only() {
+    let faults = SkillStoreTestFaults::default();
+    let fixture = FailureFixture::new(faults.clone()).await;
+    let source = write_package("com.example.destination-copy").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    faults.fail_after(SkillStoreFaultPoint::IncomingCopyFile, 2);
+
+    let error = fixture
+        .store
+        .promote_revision(&staged.revision_id)
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("IncomingCopyFile"));
+    assert!(
+        !managed_path(
+            &fixture,
+            "com.example.destination-copy",
+            &staged.revision_id
+        )
+        .exists()
+    );
+    assert!(staged.path.is_dir());
+    assert_eq!(
+        fixture
+            .state
+            .get_revision(&staged.revision_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillRevisionStatus::Staging
+    );
+}
+
+#[tokio::test]
+async fn quarantine_destination_copy_failure_removes_owned_reservation_only() {
+    let faults = SkillStoreTestFaults::default();
+    let fixture = FailureFixture::new(faults.clone()).await;
+    let source = write_package("com.example.quarantine-copy").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    faults.fail_after(SkillStoreFaultPoint::QuarantineCopyFile, 2);
+
+    let error = fixture
+        .store
+        .quarantine_revision(&staged.revision_id, "copy failure")
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("QuarantineCopyFile"));
+    assert!(!fixture.paths.quarantine.join(&staged.revision_id).exists());
+    assert!(staged.path.is_dir());
+    assert_eq!(
+        fixture
+            .state
+            .get_revision(&staged.revision_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillRevisionStatus::Staging
+    );
+}
+
+#[tokio::test]
 async fn staging_metadata_database_failure_restores_file_and_hash() {
     let fixture = FailureFixture::new(SkillStoreTestFaults::default()).await;
     let source = write_package("com.example.edit").await;

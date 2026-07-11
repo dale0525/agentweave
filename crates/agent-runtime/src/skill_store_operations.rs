@@ -71,14 +71,6 @@ pub(crate) fn storage_path(path: &Path) -> anyhow::Result<String> {
         .with_context(|| format!("skill storage path must be UTF-8: {}", path.display()))
 }
 
-pub(crate) async fn remove_tree_if_exists(path: &Path) -> anyhow::Result<()> {
-    match tokio::fs::remove_dir_all(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
 pub(crate) fn combine_operation_errors<const N: usize>(
     primary: anyhow::Error,
     compensations: [(&str, anyhow::Result<()>); N],

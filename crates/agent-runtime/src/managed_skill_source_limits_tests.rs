@@ -1,7 +1,10 @@
 use crate::skill_package::SkillPackageId;
 use crate::skill_source::{ManagedSkillSource, SkillSource};
 use crate::skill_state::{SkillLayerRecord, SkillStateStore};
-use crate::skill_store::{SkillRevisionStore, SkillStoreLimits, SkillStorePaths};
+use crate::skill_store::{
+    SkillRevisionStore, SkillStoreFaultPoint, SkillStoreLimits, SkillStorePaths,
+    SkillStoreTestFaults,
+};
 use crate::storage::Storage;
 use serde_json::json;
 use std::path::Path;
@@ -165,6 +168,41 @@ async fn managed_source_does_not_validate_or_quarantine_other_layers() {
         crate::skill_state::SkillRevisionStatus::Managed
     );
     assert!(managed.path.is_dir());
+}
+
+#[tokio::test]
+async fn transient_managed_validation_error_skips_without_quarantine_and_keeps_valid_peer() {
+    let fixture = LimitsFixture::new().await;
+    let transient = fixture.active("com.example.alpha-transient").await;
+    let valid = fixture.active("com.example.zeta-valid").await;
+    let faults = SkillStoreTestFaults::default();
+    faults.fail_once(SkillStoreFaultPoint::ManagedDiscoveryTransientIo);
+    let source = ManagedSkillSource::from_store(SkillRevisionStore::with_test_faults(
+        fixture.paths.clone(),
+        fixture.state.clone(),
+        SkillStoreLimits::default(),
+        faults,
+    ));
+
+    let discovered = source.discover().await.unwrap();
+
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].root, valid.path);
+    let issues = source.issues();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].revision_id, transient.revision_id);
+    assert!(issues[0].reason.contains("transient managed discovery I/O"));
+    let record = fixture
+        .state
+        .get_revision(&transient.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.status,
+        crate::skill_state::SkillRevisionStatus::Managed
+    );
+    assert!(transient.path.is_dir());
 }
 
 async fn write_package(id: &str) -> TempDir {

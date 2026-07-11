@@ -6,7 +6,7 @@ use crate::skill_state::{
 };
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 use crate::skill_store_fs::{
-    PackageLimits, atomic_replace_file, copy_package_tree_into_reserved,
+    AtomicReplaceCommitState, PackageLimits, atomic_replace_file, copy_package_tree_into_reserved,
     ensure_directory_contained, ensure_safe_write_parent, make_tree_readonly, make_tree_writable,
     measure_package_tree, read_optional_regular_file, remove_created_directories,
     remove_regular_file_nofollow,
@@ -14,10 +14,11 @@ use crate::skill_store_fs::{
 use crate::skill_store_locks::{SkillStoreIdentity, acquire_revision_lock};
 use crate::skill_store_operations::{
     TransitionPhase, TransitionState, cleanup_created_directories_error, combine_operation_errors,
-    ensure_exact_path, remove_tree_if_exists, storage_path, stored_revision, with_compensation,
+    ensure_exact_path, storage_path, stored_revision, with_compensation,
 };
 use crate::skill_store_secure_fs::{
-    ensure_store_directory, reserve_store_directory, secure_package_hash, secure_package_snapshot,
+    ensure_store_directory, prepare_canonical_directory, remove_store_tree,
+    reserve_store_directory, secure_package_hash, secure_package_snapshot,
 };
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -87,13 +88,23 @@ pub struct SkillStorePaths {
 
 impl SkillStorePaths {
     pub async fn prepare(app_data_root: &Path, cache_root: &Path) -> anyhow::Result<Self> {
+        let app_data_root = prepare_canonical_directory(app_data_root).await?;
+        let cache_root = prepare_canonical_directory(cache_root).await?;
+        ensure_store_directory(&app_data_root, Path::new("managed-skills"))
+            .await
+            .with_context(|| {
+                format!(
+                    "skill store root must be a real directory: {}",
+                    app_data_root.join("managed-skills").display()
+                )
+            })?;
+        ensure_store_directory(&app_data_root, Path::new("skill-quarantine")).await?;
+        ensure_store_directory(&cache_root, Path::new("skill-staging")).await?;
         let managed = app_data_root.join("managed-skills");
         let staging = cache_root.join("skill-staging");
         let quarantine = app_data_root.join("skill-quarantine");
+        ensure_store_directory(&managed, Path::new(".locks")).await?;
         for path in [&managed, &staging, &quarantine] {
-            tokio::fs::create_dir_all(path)
-                .await
-                .with_context(|| format!("failed to prepare skill store {}", path.display()))?;
             let metadata = tokio::fs::symlink_metadata(path)
                 .await
                 .with_context(|| format!("failed to inspect skill store {}", path.display()))?;
@@ -138,11 +149,11 @@ pub struct SkillStoreMaintenanceIssue {
 
 #[derive(Clone)]
 pub struct SkillRevisionStore {
-    paths: SkillStorePaths,
-    state: SkillStateStore,
-    limits: SkillStoreLimits,
-    faults: StoreFaults,
-    maintenance_issues: Arc<RwLock<Vec<SkillStoreMaintenanceIssue>>>,
+    pub(crate) paths: SkillStorePaths,
+    pub(crate) state: SkillStateStore,
+    pub(crate) limits: SkillStoreLimits,
+    pub(crate) faults: StoreFaults,
+    pub(crate) maintenance_issues: Arc<RwLock<Vec<SkillStoreMaintenanceIssue>>>,
 }
 
 impl SkillRevisionStore {
@@ -199,16 +210,33 @@ impl SkillRevisionStore {
         self.limits.package_limits()
     }
 
+    pub(crate) fn check_managed_discovery_io(&self) -> anyhow::Result<()> {
+        self.faults
+            .check(StoreFaultPoint::ManagedDiscoveryTransientIo)
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    format!("transient managed discovery I/O: {error:#}"),
+                )
+                .into()
+            })
+    }
+
     pub async fn create_staging_revision(
         &self,
         source: &Path,
         actor_id: &str,
     ) -> anyhow::Result<StoredSkillRevision> {
         ensure_directory_contained(&self.paths.staging, &self.paths.staging, "staging").await?;
-        let revision_id = SkillStateStore::allocate_revision_id();
+        let revision_id = self
+            .faults
+            .take_revision_id()
+            .unwrap_or_else(SkillStateStore::allocate_revision_id);
         let destination = self.paths.staging.join(&revision_id);
+        let mut reserved = false;
         let result = async {
             reserve_store_directory(&self.paths.staging, Path::new(&revision_id)).await?;
+            reserved = true;
             copy_package_tree_into_reserved(
                 source,
                 &destination,
@@ -243,7 +271,8 @@ impl SkillRevisionStore {
         .await;
         match result {
             Ok(revision) => Ok(revision),
-            Err(error) => match remove_tree_if_exists(&destination).await {
+            Err(error) if !reserved => Err(error),
+            Err(error) => match self.remove_store_tree_path(&destination).await {
                 Ok(()) => Err(error),
                 Err(compensation) => Err(with_compensation(error, compensation)),
             },
@@ -258,7 +287,7 @@ impl SkillRevisionStore {
     ) -> anyhow::Result<()> {
         canonical_relative_path(relative_path)?;
         let observed = self.staging_record(revision_id).await?;
-        let _revision_guard = acquire_revision_lock(&self.paths.identity, revision_id).await;
+        let _revision_guard = acquire_revision_lock(&self.paths.identity, revision_id).await?;
         let record = self.revision_after_wait(&observed).await?;
         self.faults
             .checkpoint(StoreFaultPoint::WriteAfterLock)
@@ -299,20 +328,36 @@ impl SkillRevisionStore {
             }
         };
         let mode = previous.as_ref().map_or(0o644, |file| file.mode);
-        if let Err(error) =
+        if let Err(failure) =
             atomic_replace_file(&root, relative_path, bytes, mode, &self.faults).await
         {
-            let restore = match &previous {
-                Some(previous) => {
-                    atomic_replace_file(
-                        &root,
-                        relative_path,
-                        &previous.bytes,
-                        previous.mode,
-                        &self.faults,
-                    )
-                    .await
-                }
+            let state = failure.state;
+            if let Some(temp_path) = &failure.temp_path {
+                self.record_maintenance_issue(
+                    revision_id,
+                    "staging_write_temp_cleanup",
+                    temp_path,
+                    &anyhow::anyhow!("temporary file cleanup failed"),
+                );
+            }
+            let error = failure.into_error();
+            if state == AtomicReplaceCommitState::NotCommitted {
+                let directory_cleanup = remove_created_directories(&created_directories).await;
+                return Err(combine_operation_errors(
+                    error,
+                    [("parent cleanup", directory_cleanup)],
+                ));
+            }
+            let restore: anyhow::Result<()> = match &previous {
+                Some(previous) => atomic_replace_file(
+                    &root,
+                    relative_path,
+                    &previous.bytes,
+                    previous.mode,
+                    &self.faults,
+                )
+                .await
+                .map_err(|failure| failure.into_error()),
                 None => remove_regular_file_nofollow(&root, relative_path).await,
             };
             let directory_cleanup = remove_created_directories(&created_directories).await;
@@ -324,21 +369,23 @@ impl SkillRevisionStore {
                 ],
             ));
         }
+        self.faults
+            .checkpoint(StoreFaultPoint::WriteBeforeMetadataCommit)
+            .await;
         let update = self.refresh_staging_metadata(&record, &root).await;
         if let Err(error) = update {
             let restore = async {
                 self.faults.check(StoreFaultPoint::WriteRestore)?;
                 match previous {
-                    Some(previous) => {
-                        atomic_replace_file(
-                            &root,
-                            relative_path,
-                            &previous.bytes,
-                            previous.mode,
-                            &self.faults,
-                        )
-                        .await
-                    }
+                    Some(previous) => atomic_replace_file(
+                        &root,
+                        relative_path,
+                        &previous.bytes,
+                        previous.mode,
+                        &self.faults,
+                    )
+                    .await
+                    .map_err(|failure| failure.into_error()),
                     None => remove_regular_file_nofollow(&root, relative_path).await,
                 }
             }
@@ -367,7 +414,7 @@ impl SkillRevisionStore {
 
     pub async fn promote_revision(&self, revision_id: &str) -> anyhow::Result<StoredSkillRevision> {
         let observed = self.staging_record(revision_id).await?;
-        let _revision_guard = acquire_revision_lock(&self.paths.identity, revision_id).await;
+        let _revision_guard = acquire_revision_lock(&self.paths.identity, revision_id).await?;
         let record = self.revision_after_wait(&observed).await?;
         self.faults
             .checkpoint(StoreFaultPoint::PromoteAfterLock)
@@ -435,14 +482,26 @@ impl SkillRevisionStore {
         let reserve = async {
             self.faults.check(StoreFaultPoint::PromoteIncomingRename)?;
             reserve_store_directory(&self.paths.managed, &destination_relative).await?;
-            copy_package_tree_into_reserved(
+            let copy = copy_package_tree_into_reserved(
                 &incoming,
                 &destination,
                 self.limits.package_limits(),
                 &self.faults,
                 StoreFaultPoint::IncomingCopyFile,
             )
-            .await
+            .await;
+            match copy {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let cleanup = self
+                        .cleanup_failed_promotion_destination(&destination)
+                        .await;
+                    Err(combine_operation_errors(
+                        error,
+                        [("destination reservation cleanup", cleanup)],
+                    ))
+                }
+            }
         }
         .await;
         if let Err(error) = reserve {
@@ -451,7 +510,7 @@ impl SkillRevisionStore {
                 .await;
         }
         transition.advance(TransitionPhase::DestinationReserved);
-        if let Err(error) = remove_tree_if_exists(&incoming).await {
+        if let Err(error) = self.remove_store_tree_path(&incoming).await {
             let cleanup = self
                 .cleanup_failed_promotion_destination(&destination)
                 .await;
@@ -559,7 +618,7 @@ impl SkillRevisionStore {
         if observed.status == SkillRevisionStatus::Quarantined {
             anyhow::bail!("revision is already quarantined: {revision_id}");
         }
-        let _revision_guard = acquire_revision_lock(&self.paths.identity, revision_id).await;
+        let _revision_guard = acquire_revision_lock(&self.paths.identity, revision_id).await?;
         let record = self.revision_after_wait(&observed).await?;
         self.faults
             .checkpoint(StoreFaultPoint::QuarantineAfterLock)
@@ -606,14 +665,26 @@ impl SkillRevisionStore {
             self.faults
                 .check(StoreFaultPoint::QuarantineIncomingRename)?;
             reserve_store_directory(&self.paths.quarantine, Path::new(revision_id)).await?;
-            copy_package_tree_into_reserved(
+            let copy = copy_package_tree_into_reserved(
                 &incoming,
                 &destination,
                 self.limits.package_limits(),
                 &self.faults,
                 StoreFaultPoint::QuarantineCopyFile,
             )
-            .await
+            .await;
+            match copy {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let cleanup = self
+                        .cleanup_failed_quarantine_destination(&destination)
+                        .await;
+                    Err(combine_operation_errors(
+                        error,
+                        [("destination reservation cleanup", cleanup)],
+                    ))
+                }
+            }
         }
         .await;
         if let Err(error) = reserve {
@@ -624,7 +695,7 @@ impl SkillRevisionStore {
         transition.advance(TransitionPhase::DestinationReserved);
         let incoming_cleanup = async {
             make_tree_writable(&incoming, self.limits.package_limits()).await?;
-            remove_tree_if_exists(&incoming).await
+            self.remove_store_tree_path(&incoming).await
         }
         .await;
         if let Err(error) = incoming_cleanup {
@@ -741,7 +812,11 @@ impl SkillRevisionStore {
     ) -> anyhow::Result<SkillRevisionRecord> {
         let metadata = self.final_metadata(record, root).await?;
         self.state
-            .refresh_staging_revision_metadata(&record.revision_id, metadata)
+            .refresh_staging_revision_metadata_cas(
+                &record.revision_id,
+                SkillRevisionExpectation::from(record),
+                metadata,
+            )
             .await
     }
 
@@ -768,98 +843,6 @@ impl SkillRevisionStore {
         })
     }
 
-    async fn isolate_failed_staging_write(
-        &self,
-        record: &SkillRevisionRecord,
-        source: &Path,
-        primary: anyhow::Error,
-    ) -> anyhow::Error {
-        let metadata = match self.final_metadata(record, source).await {
-            Ok(metadata) => metadata,
-            Err(error) => return with_compensation(primary, error),
-        };
-        let destination = self.paths.quarantine.join(&record.revision_id);
-        let reserved =
-            reserve_store_directory(&self.paths.quarantine, Path::new(&record.revision_id)).await;
-        let copied = match reserved {
-            Ok(()) => {
-                let copy = async {
-                    self.faults.check(StoreFaultPoint::WriteIsolationCopy)?;
-                    copy_package_tree_into_reserved(
-                        source,
-                        &destination,
-                        self.limits.package_limits(),
-                        &self.faults,
-                        StoreFaultPoint::QuarantineCopyFile,
-                    )
-                    .await
-                }
-                .await;
-                match copy {
-                    Ok(()) => true,
-                    Err(error) => {
-                        let cleanup = remove_tree_if_exists(&destination).await;
-                        let recovery = combine_operation_errors(
-                            error,
-                            [("failed isolation cleanup", cleanup)],
-                        );
-                        self.record_maintenance_issue(
-                            &record.revision_id,
-                            "staging_write_isolation_copy",
-                            source,
-                            &recovery,
-                        );
-                        false
-                    }
-                }
-            }
-            Err(error) => {
-                self.record_maintenance_issue(
-                    &record.revision_id,
-                    "staging_write_isolation_reservation",
-                    source,
-                    &error,
-                );
-                false
-            }
-        };
-        let authoritative = if copied { &destination } else { source };
-        let database = async {
-            self.faults.check(StoreFaultPoint::WriteIsolationDatabase)?;
-            self.state
-                .quarantine_revision_record_cas(
-                    &record.revision_id,
-                    &storage_path(authoritative)?,
-                    "staging metadata update and file restore both failed",
-                    SkillRevisionExpectation::from(record),
-                    Some(metadata),
-                )
-                .await
-        }
-        .await;
-        match database {
-            Ok(_) if copied => {
-                let cleanup = remove_tree_if_exists(source).await;
-                combine_operation_errors(primary, [("staging source cleanup", cleanup)])
-            }
-            Ok(_) => primary,
-            Err(error) => {
-                let cleanup = if copied {
-                    remove_tree_if_exists(&destination).await
-                } else {
-                    Ok(())
-                };
-                combine_operation_errors(
-                    primary,
-                    [
-                        ("write isolation database transition", Err(error)),
-                        ("write isolation copy cleanup", cleanup),
-                    ],
-                )
-            }
-        }
-    }
-
     fn expected_revision_path(&self, record: &SkillRevisionRecord) -> anyhow::Result<PathBuf> {
         let expected = match record.status {
             SkillRevisionStatus::Staging => self.paths.staging.join(&record.revision_id),
@@ -877,12 +860,30 @@ impl SkillRevisionStore {
         Ok(expected)
     }
 
+    pub(crate) async fn remove_store_tree_path(&self, path: &Path) -> anyhow::Result<()> {
+        for root in [
+            &self.paths.managed,
+            &self.paths.staging,
+            &self.paths.quarantine,
+        ] {
+            if let Ok(relative) = path.strip_prefix(root)
+                && !relative.as_os_str().is_empty()
+            {
+                return remove_store_tree(root, relative).await;
+            }
+        }
+        anyhow::bail!(
+            "store cleanup path is outside prepared roots: {}",
+            path.display()
+        )
+    }
+
     async fn cleanup_failed_promotion_destination(&self, destination: &Path) -> anyhow::Result<()> {
         self.faults.check(StoreFaultPoint::PromoteRestoreRename)?;
         self.faults
             .check(StoreFaultPoint::PromoteDestinationCleanup)?;
         make_tree_writable(destination, self.limits.package_limits()).await?;
-        remove_tree_if_exists(destination).await?;
+        self.remove_store_tree_path(destination).await?;
         self.faults
             .check(StoreFaultPoint::PromoteDestinationCleanupAfter)
     }
@@ -898,7 +899,7 @@ impl SkillRevisionStore {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                 Err(error) => return Err(error.into()),
             }
-            remove_tree_if_exists(incoming).await
+            self.remove_store_tree_path(incoming).await
         }
         .await;
         match cleanup {
@@ -916,7 +917,7 @@ impl SkillRevisionStore {
         self.faults
             .check(StoreFaultPoint::QuarantineDestinationCleanup)?;
         make_tree_writable(destination, self.limits.package_limits()).await?;
-        remove_tree_if_exists(destination).await?;
+        self.remove_store_tree_path(destination).await?;
         self.faults
             .check(StoreFaultPoint::QuarantineDestinationCleanupAfter)
     }
@@ -924,7 +925,7 @@ impl SkillRevisionStore {
     async fn cleanup_promoted_source(&self, source: &Path) -> anyhow::Result<()> {
         self.faults.check(StoreFaultPoint::PromoteSourceCleanup)?;
         make_tree_writable(source, self.limits.package_limits()).await?;
-        remove_tree_if_exists(source).await?;
+        self.remove_store_tree_path(source).await?;
         self.faults
             .check(StoreFaultPoint::PromoteSourceCleanupAfter)
     }
@@ -937,12 +938,12 @@ impl SkillRevisionStore {
         self.faults
             .check(StoreFaultPoint::QuarantineSourceCleanup)?;
         make_tree_writable(source, self.limits.package_limits()).await?;
-        remove_tree_if_exists(source).await?;
+        self.remove_store_tree_path(source).await?;
         self.faults
             .check(StoreFaultPoint::QuarantineSourceCleanupAfter)
     }
 
-    fn record_maintenance_issue(
+    pub(crate) fn record_maintenance_issue(
         &self,
         revision_id: &str,
         operation: &str,
