@@ -8,7 +8,7 @@ use crate::storage::Storage;
 use anyhow::Context;
 use chrono::Utc;
 use serde_json::{Map, Value};
-use sqlx::{Row, Sqlite, SqlitePool, Transaction};
+use sqlx::{Executor, Row, Sqlite, SqlitePool};
 use uuid::Uuid;
 
 pub use crate::skill_state_rows::{
@@ -223,53 +223,36 @@ impl SkillStateStore {
         validate_uuid_v4("revision_id", revision_id)?;
         let now = Utc::now().to_rfc3339();
         let mut tx = self.storage.pool().begin().await?;
-        let row = sqlx::query(
-            "SELECT package_id, lifecycle_status FROM skill_revisions WHERE revision_id = ?",
-        )
-        .bind(revision_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .with_context(|| format!("skill revision not found: {revision_id}"))?;
-        let stored_package: String = row.try_get("package_id")?;
-        let stored_package = SkillPackageId::parse(&stored_package)?;
-        if &stored_package != package_id {
-            anyhow::bail!(
-                "skill revision {revision_id} belongs to {}, not {}",
-                stored_package.as_str(),
-                package_id.as_str()
-            );
-        }
-        let status: String = row.try_get("lifecycle_status")?;
-        let status = SkillRevisionStatus::parse(&status)?;
-        if status != SkillRevisionStatus::Managed {
-            anyhow::bail!(
-                "skill revision is not activatable in {} state",
-                status.as_str()
-            );
-        }
-
-        sqlx::query(
+        let activated = sqlx::query_scalar::<_, String>(
             r#"INSERT INTO skill_installations
                (package_id, source_layer, active_revision_id, enabled, trust_level,
                 install_status, installed_at, updated_at)
-               VALUES (?, ?, ?, 1, 'approved', 'active', ?, ?)
+               SELECT package_id, ?, revision_id, 1, 'approved', 'active', ?, ?
+               FROM skill_revisions
+               WHERE revision_id = ? AND package_id = ? AND lifecycle_status = 'managed'
                ON CONFLICT(package_id) DO UPDATE SET
                  source_layer = excluded.source_layer,
                  active_revision_id = excluded.active_revision_id,
                  enabled = 1,
                  trust_level = excluded.trust_level,
                  install_status = 'active',
-                 updated_at = excluded.updated_at"#,
+                 updated_at = excluded.updated_at
+               RETURNING package_id"#,
         )
-        .bind(package_id.as_str())
         .bind(layer.as_str())
+        .bind(&now)
+        .bind(&now)
         .bind(revision_id)
-        .bind(&now)
-        .bind(&now)
-        .execute(&mut *tx)
+        .bind(package_id.as_str())
+        .fetch_optional(&mut *tx)
         .await?;
+        if activated.is_none() {
+            let error = activation_rejection(&mut *tx, package_id, revision_id).await;
+            tx.rollback().await?;
+            return Err(error?);
+        }
         insert_audit(
-            &mut tx,
+            &mut *tx,
             actor_id,
             "activate_revision",
             package_id,
@@ -460,71 +443,73 @@ impl SkillStateStore {
     ) -> anyhow::Result<SkillRevisionRecord> {
         validate_uuid_v4("revision_id", revision_id)?;
         let now = Utc::now();
-        let mut tx = self.storage.pool().begin().await?;
-        let select =
-            format!("SELECT {REVISION_COLUMNS} FROM skill_revisions WHERE revision_id = ?");
-        let row = sqlx::query(&select)
+        let mut tx = crate::skill_state_transactions::begin_immediate(self.storage.pool()).await?;
+        let result = async {
+            let select =
+                format!("SELECT {REVISION_COLUMNS} FROM skill_revisions WHERE revision_id = ?");
+            let row = sqlx::query(&select)
+                .bind(revision_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .with_context(|| format!("skill revision not found: {revision_id}"))?;
+            let revision = revision_from_row(&row)?;
+            if !matches!(
+                revision.status,
+                SkillRevisionStatus::Staging | SkillRevisionStatus::Managed
+            ) {
+                anyhow::bail!(
+                    "skill revision cannot be quarantined from {} state",
+                    revision.status.as_str()
+                );
+            }
+            let mut validation = match revision.validation_json {
+                Value::Object(map) => map,
+                value => Map::from_iter([("previousValidation".into(), value)]),
+            };
+            validation.insert("quarantined".into(), Value::Bool(true));
+            validation.insert("quarantineReason".into(), Value::String(reason.into()));
+            validation.insert("quarantinedAt".into(), Value::String(now.to_rfc3339()));
+            let validation = serde_json::to_string(&Value::Object(validation))?;
+            let storage_path = storage_path.unwrap_or(&revision.storage_path);
+            let result = sqlx::query(
+                r#"UPDATE skill_revisions
+                   SET storage_path = ?, lifecycle_status = 'quarantined', validation_json = ?
+                   WHERE revision_id = ? AND lifecycle_status IN ('staging', 'managed')"#,
+            )
+            .bind(storage_path)
+            .bind(validation)
             .bind(revision_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .with_context(|| format!("skill revision not found: {revision_id}"))?;
-        let revision = revision_from_row(&row)?;
-        if !matches!(
-            revision.status,
-            SkillRevisionStatus::Staging | SkillRevisionStatus::Managed
-        ) {
-            anyhow::bail!(
-                "skill revision cannot be quarantined from {} state",
-                revision.status.as_str()
-            );
-        }
-        let mut validation = match revision.validation_json {
-            Value::Object(map) => map,
-            value => Map::from_iter([("previousValidation".into(), value)]),
-        };
-        validation.insert("quarantined".into(), Value::Bool(true));
-        validation.insert("quarantineReason".into(), Value::String(reason.into()));
-        validation.insert("quarantinedAt".into(), Value::String(now.to_rfc3339()));
-        let validation = serde_json::to_string(&Value::Object(validation))?;
-        let storage_path = storage_path.unwrap_or(&revision.storage_path);
-        let result = sqlx::query(
-            r#"UPDATE skill_revisions
-               SET storage_path = ?, lifecycle_status = 'quarantined', validation_json = ?
-               WHERE revision_id = ? AND lifecycle_status IN ('staging', 'managed')"#,
-        )
-        .bind(storage_path)
-        .bind(validation)
-        .bind(revision_id)
-        .execute(&mut *tx)
-        .await?;
-        ensure_changed(result.rows_affected(), "skill revision", revision_id)?;
-        sqlx::query(
-            r#"UPDATE skill_installations
-               SET active_revision_id = NULL, enabled = 0, install_status = 'quarantined', updated_at = ?
-               WHERE package_id = ? AND active_revision_id = ?"#,
-        )
-        .bind(now.to_rfc3339())
-        .bind(revision.package_id.as_str())
-        .bind(revision_id)
-        .execute(&mut *tx)
-        .await?;
-        insert_audit(
-            &mut tx,
-            "system",
-            "mark_revision_quarantined",
-            &revision.package_id,
-            Some(revision_id),
-            "ok",
-            serde_json::json!({"reason": reason}),
-        )
-        .await?;
-        let row = sqlx::query(&select)
-            .bind(revision_id)
-            .fetch_one(&mut *tx)
+            .execute(&mut *tx)
             .await?;
-        let quarantined = revision_from_row(&row)?;
-        tx.commit().await?;
-        Ok(quarantined)
+            ensure_changed(result.rows_affected(), "skill revision", revision_id)?;
+            sqlx::query(
+                r#"UPDATE skill_installations
+                   SET active_revision_id = NULL, enabled = 0, install_status = 'quarantined', updated_at = ?
+                   WHERE package_id = ? AND active_revision_id = ?"#,
+            )
+            .bind(now.to_rfc3339())
+            .bind(revision.package_id.as_str())
+            .bind(revision_id)
+            .execute(&mut *tx)
+            .await?;
+            insert_audit(
+                &mut *tx,
+                "system",
+                "mark_revision_quarantined",
+                &revision.package_id,
+                Some(revision_id),
+                "ok",
+                serde_json::json!({"reason": reason}),
+            )
+            .await?;
+            let row = sqlx::query(&select)
+                .bind(revision_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            revision_from_row(&row)
+        }
+        .await;
+        crate::skill_state_transactions::finish(tx, result).await
     }
 
     pub async fn record_snapshot_candidate(
@@ -575,22 +560,17 @@ impl SkillStateStore {
             .await?
             .with_context(|| format!("skill snapshot not found: {generation}"))?;
         let target = snapshot_from_row(&row)?;
-        if target.status == SkillSnapshotStatus::Active {
+        if matches!(
+            target.status,
+            SkillSnapshotStatus::Active | SkillSnapshotStatus::LastKnownGood
+        ) {
             tx.commit().await?;
             return Ok(());
         }
-        sqlx::query("UPDATE skill_snapshots SET status = 'candidate' WHERE generation = ?")
-            .bind(generation)
-            .execute(&mut *tx)
-            .await?;
         sqlx::query(
-            "UPDATE skill_snapshots SET status = 'candidate' WHERE status = 'last_known_good'",
+            "UPDATE skill_snapshots SET status = 'candidate' WHERE status = 'active' AND generation != ?",
         )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE skill_snapshots SET status = 'last_known_good' WHERE status = 'active'",
-        )
+        .bind(generation)
         .execute(&mut *tx)
         .await?;
         let result = sqlx::query(
@@ -663,15 +643,18 @@ impl SkillStateStore {
     }
 }
 
-async fn insert_audit(
-    tx: &mut Transaction<'_, Sqlite>,
+async fn insert_audit<'e, E>(
+    executor: E,
     actor_id: &str,
     operation: &str,
     package_id: &SkillPackageId,
     revision_id: Option<&str>,
     result: &str,
     metadata: Value,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     sqlx::query(
         r#"INSERT INTO skill_audit_log
            (id, actor_id, operation, package_id, revision_id, result, metadata_json, created_at)
@@ -685,9 +668,43 @@ async fn insert_audit(
     .bind(result)
     .bind(serde_json::to_string(&metadata)?)
     .bind(Utc::now().to_rfc3339())
-    .execute(&mut **tx)
+    .execute(executor)
     .await?;
     Ok(())
+}
+
+async fn activation_rejection<'e, E>(
+    executor: E,
+    package_id: &SkillPackageId,
+    revision_id: &str,
+) -> anyhow::Result<anyhow::Error>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let row = sqlx::query(
+        "SELECT package_id, lifecycle_status FROM skill_revisions WHERE revision_id = ?",
+    )
+    .bind(revision_id)
+    .fetch_optional(executor)
+    .await?;
+    let Some(row) = row else {
+        return Ok(anyhow::anyhow!("skill revision not found: {revision_id}"));
+    };
+    let stored_package: String = row.try_get("package_id")?;
+    let stored_package = SkillPackageId::parse(&stored_package)?;
+    if &stored_package != package_id {
+        return Ok(anyhow::anyhow!(
+            "skill revision {revision_id} belongs to {}, not {}",
+            stored_package.as_str(),
+            package_id.as_str()
+        ));
+    }
+    let status: String = row.try_get("lifecycle_status")?;
+    let status = SkillRevisionStatus::parse(&status)?;
+    Ok(anyhow::anyhow!(
+        "skill revision is not activatable in {} state",
+        status.as_str()
+    ))
 }
 
 fn sqlite_generation(generation: u64) -> anyhow::Result<i64> {

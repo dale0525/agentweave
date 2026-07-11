@@ -1,4 +1,10 @@
+use crate::skill_state_rows::{
+    INSTALLATION_COLUMNS, REVISION_COLUMNS, SkillInstallStatus, installation_from_row,
+    revision_from_row,
+};
+use anyhow::Context;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
+use std::collections::HashSet;
 
 const CREATE_REVISIONS: &str = r#"CREATE TABLE skill_revisions (
   revision_id TEXT PRIMARY KEY,
@@ -119,8 +125,10 @@ async fn upgrade_task6_schema(
     )
     .execute(&mut **tx)
     .await?;
+    let revision_pairs = validate_revision_rows(tx, "skill_revisions").await?;
     sqlx::query(CREATE_INSTALLATIONS).execute(&mut **tx).await?;
     if installations_exist {
+        validate_installation_rows(tx, "skill_installations_task6_legacy", &revision_pairs).await?;
         copy_installations(tx, "skill_installations_task6_legacy").await?;
         sqlx::query("DROP TABLE skill_installations_task6_legacy")
             .execute(&mut **tx)
@@ -137,6 +145,8 @@ async fn rebuild_installations(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Resu
         .execute(&mut **tx)
         .await?;
     sqlx::query(CREATE_INSTALLATIONS).execute(&mut **tx).await?;
+    let revision_pairs = validate_revision_rows(tx, "skill_revisions").await?;
+    validate_installation_rows(tx, "skill_installations_legacy", &revision_pairs).await?;
     copy_installations(tx, "skill_installations_legacy").await?;
     sqlx::query("DROP TABLE skill_installations_legacy")
         .execute(&mut **tx)
@@ -157,6 +167,62 @@ async fn copy_installations(
            FROM {source_table}"#
     );
     sqlx::query(&statement).execute(&mut **tx).await?;
+    Ok(())
+}
+
+async fn validate_revision_rows(
+    tx: &mut Transaction<'_, Sqlite>,
+    table: &str,
+) -> anyhow::Result<HashSet<(String, String)>> {
+    let statement = format!("SELECT {REVISION_COLUMNS} FROM {table} ORDER BY revision_id");
+    let rows = sqlx::query(&statement).fetch_all(&mut **tx).await?;
+    let mut pairs = HashSet::with_capacity(rows.len());
+    for row in rows {
+        let identity: String = row
+            .try_get("revision_id")
+            .unwrap_or_else(|_| "<unreadable>".into());
+        let revision =
+            revision_from_row(&row).with_context(|| format!("skill_revisions row {identity}"))?;
+        pairs.insert((
+            revision.package_id.as_str().to_string(),
+            revision.revision_id,
+        ));
+    }
+    Ok(pairs)
+}
+
+async fn validate_installation_rows(
+    tx: &mut Transaction<'_, Sqlite>,
+    table: &str,
+    revision_pairs: &HashSet<(String, String)>,
+) -> anyhow::Result<()> {
+    let statement = format!("SELECT {INSTALLATION_COLUMNS} FROM {table} ORDER BY package_id");
+    let rows = sqlx::query(&statement).fetch_all(&mut **tx).await?;
+    for row in rows {
+        let identity: String = row
+            .try_get("package_id")
+            .unwrap_or_else(|_| "<unreadable>".into());
+        let installation = installation_from_row(&row)
+            .with_context(|| format!("skill_installations row {identity}"))?;
+        if installation.status == SkillInstallStatus::Active
+            && (!installation.enabled || installation.active_revision_id.is_none())
+        {
+            anyhow::bail!(
+                "skill_installations row {identity}: active installation must be enabled and reference a revision"
+            );
+        }
+        if let Some(revision_id) = &installation.active_revision_id {
+            let pair = (
+                installation.package_id.as_str().to_string(),
+                revision_id.clone(),
+            );
+            if !revision_pairs.contains(&pair) {
+                anyhow::bail!(
+                    "skill_installations row {identity}: revision {revision_id} does not belong to package"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
