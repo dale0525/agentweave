@@ -1,5 +1,6 @@
 use crate::skill::{SkillManifest, manifest_entry_resources};
 use crate::skill_package::SkillPackageId;
+use crate::skill_source::canonical_relative_path;
 use crate::skill_state::{SkillInstallStatus, SkillLayerRecord, SkillRevisionStatus};
 use crate::skill_store::SkillRevisionStore;
 use crate::skill_store_faults::StoreFaultPoint;
@@ -33,258 +34,131 @@ impl PreparedSkillExecution {
     }
 }
 
-pub(crate) fn execution_text_references_path(value: &str, protected: &Path, windows: bool) -> bool {
-    let protected = normalize_execution_text(&protected.to_string_lossy(), windows)
-        .trim_end_matches(if windows { '\\' } else { '/' })
-        .to_string();
-    if protected.is_empty() {
-        return false;
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum ExecutionCommandKind {
+    Bare,
+    PackagedRelative(PathBuf),
+    Absolute,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct NormalizedAbsolutePath {
+    prefix: String,
+    components: Vec<String>,
+}
+
+pub(crate) fn classify_execution_command(
+    command: &str,
+    windows: bool,
+) -> anyhow::Result<ExecutionCommandKind> {
+    if command.is_empty() || command.contains('\0') {
+        anyhow::bail!("invalid empty or nul execution command");
     }
-    let Some(protected) = lexically_normalize_absolute(&protected, windows) else {
-        return false;
-    };
+    if normalize_absolute_path(command, windows).is_some() {
+        return Ok(ExecutionCommandKind::Absolute);
+    }
+    if windows && has_windows_anchored_prefix(command) {
+        anyhow::bail!("execution command is not package-relative: {command}");
+    }
+    let has_separator = command.contains('/') || command.contains('\\');
+    if !has_separator {
+        if matches!(command, "." | "..") {
+            anyhow::bail!("execution command is not a bare executable name: {command}");
+        }
+        return Ok(ExecutionCommandKind::Bare);
+    }
 
-    text_references_normalized_path(value, &protected, windows)
-        || decoded_file_uri_paths(value, windows)
-            .iter()
-            .any(|path| text_references_normalized_path(path, &protected, windows))
-}
-
-fn is_embedded_path_boundary(character: char) -> bool {
-    !character.is_alphanumeric() && !matches!(character, '_' | '-' | '.' | '/' | '\\')
-}
-
-fn text_references_normalized_path(value: &str, protected: &str, windows: bool) -> bool {
-    let separator = if windows { '\\' } else { '/' };
-    absolute_path_candidates(value)
-        .into_iter()
-        .any(|candidate| {
-            let candidate = normalize_execution_text(candidate, windows);
-            lexically_normalize_absolute(&candidate, windows).is_some_and(|candidate| {
-                candidate == protected
-                    || candidate
-                        .strip_prefix(protected)
-                        .is_some_and(|suffix| suffix.starts_with(separator))
-            })
-        })
-}
-
-fn absolute_path_candidates(value: &str) -> Vec<&str> {
-    let bytes = value.as_bytes();
-    let mut candidates = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if is_absolute_path_candidate_start(value, index) {
-            let end = value[index..]
-                .char_indices()
-                .find_map(|(offset, character)| {
-                    (offset > 0
-                        && is_path_candidate_terminator(character)
-                        && !is_windows_extended_prefix_marker(value, index, offset, character))
-                    .then_some(index + offset)
-                })
-                .unwrap_or(bytes.len());
-            candidates.push(&value[index..end]);
-            index = end;
-        } else {
-            index += value[index..].chars().next().map_or(1, char::len_utf8);
+    let mut relative = PathBuf::new();
+    for component in command.split(['/', '\\']) {
+        match component {
+            "" | "." => {}
+            ".." => anyhow::bail!("unsafe packaged execution command: {command}"),
+            component => relative.push(component),
         }
     }
-    candidates
+    if relative.as_os_str().is_empty() {
+        anyhow::bail!("execution command has no packaged path: {command}");
+    }
+    canonical_relative_path(&relative)?;
+    Ok(ExecutionCommandKind::PackagedRelative(relative))
 }
 
-fn is_windows_extended_prefix_marker(
-    value: &str,
-    start: usize,
-    offset: usize,
-    character: char,
+pub(crate) fn absolute_execution_command_is_within(
+    command: &str,
+    root: &str,
+    windows: bool,
 ) -> bool {
-    let prefix = value.as_bytes().get(start..start + 2);
-    character == '?' && offset == 2 && (prefix == Some(&b"\\\\"[..]) || prefix == Some(&b"//"[..]))
-}
-
-fn is_absolute_path_candidate_start(value: &str, index: usize) -> bool {
-    let bytes = value.as_bytes();
-    let boundary = value[..index]
-        .chars()
-        .next_back()
-        .is_none_or(is_embedded_path_boundary);
-    if !boundary {
+    let Some(command) = normalize_absolute_path(command, windows) else {
         return false;
-    }
-    let remaining = &bytes[index..];
-    if remaining.starts_with(b"\\\\") {
-        return true;
-    }
-    if remaining.len() >= 3
-        && remaining[0].is_ascii_alphabetic()
-        && remaining[1] == b':'
-        && matches!(remaining[2], b'/' | b'\\')
-    {
-        return true;
-    }
-    if remaining.first() != Some(&b'/') {
-        return false;
-    }
-    let previous = bytes.get(index.wrapping_sub(1)).copied();
-    let before_previous = bytes.get(index.wrapping_sub(2)).copied();
-    let starts_uri_authority = previous == Some(b':') && remaining.get(1) == Some(&b'/');
-    let belongs_to_drive =
-        previous == Some(b':') && before_previous.is_some_and(|byte| byte.is_ascii_alphabetic());
-    !starts_uri_authority && !belongs_to_drive
-}
-
-fn is_path_candidate_terminator(character: char) -> bool {
-    character.is_whitespace()
-        || matches!(
-            character,
-            '\'' | '"'
-                | ','
-                | ';'
-                | '|'
-                | '&'
-                | '<'
-                | '>'
-                | '('
-                | ')'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '?'
-                | '#'
-        )
-}
-
-fn decoded_file_uri_paths(value: &str, windows: bool) -> Vec<String> {
-    let bytes = value.as_bytes();
-    let mut paths = Vec::new();
-    let mut index = 0;
-    while index + 5 <= bytes.len() {
-        let scheme = &bytes[index..index + 5];
-        let boundary = value[..index]
-            .chars()
-            .next_back()
-            .is_none_or(is_embedded_path_boundary);
-        if boundary && scheme.eq_ignore_ascii_case(b"file:") {
-            let payload_start = index + 5;
-            let payload_end = value[payload_start..]
-                .char_indices()
-                .find_map(|(offset, character)| {
-                    is_path_candidate_terminator(character).then_some(payload_start + offset)
-                })
-                .unwrap_or(bytes.len());
-            if let Some(decoded) = percent_decode_utf8(&value[payload_start..payload_end]) {
-                paths.push(normalize_file_uri_path(decoded, windows));
-            }
-            index = payload_end;
-        } else {
-            index += value[index..].chars().next().map_or(1, char::len_utf8);
-        }
-    }
-    paths
-}
-
-fn percent_decode_utf8(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) =
-                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
-        {
-            decoded.push((high << 4) | low);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(decoded).ok()
-}
-
-fn hex_value(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn normalize_file_uri_path(value: String, windows: bool) -> String {
-    if !windows {
-        return value;
-    }
-    let path = value.trim_start_matches(['/', '\\']);
-    let bytes = path.as_bytes();
-    if bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'/' | b'\\')
-    {
-        return path.to_string();
-    }
-    if value.len() - path.len() >= 2 {
-        format!(r"\\{path}")
-    } else {
-        value
-    }
-}
-
-fn lexically_normalize_absolute(value: &str, windows: bool) -> Option<String> {
-    let separator = if windows { '\\' } else { '/' };
-    let (prefix, remainder) = if windows {
-        let bytes = value.as_bytes();
-        if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'\\' {
-            (&value[..2], &value[3..])
-        } else if let Some(remainder) = value.strip_prefix("\\\\") {
-            ("\\\\", remainder)
-        } else {
-            return None;
-        }
-    } else if let Some(remainder) = value.strip_prefix('/') {
-        ("/", remainder)
-    } else {
-        return None;
     };
-    let mut components = Vec::new();
-    for component in remainder.split(separator) {
+    let Some(root) = normalize_absolute_path(root, windows) else {
+        return false;
+    };
+    command.prefix == root.prefix
+        && command.components.len() >= root.components.len()
+        && command.components[..root.components.len()] == root.components
+}
+
+fn has_windows_anchored_prefix(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    command.starts_with(['/', '\\'])
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+fn normalize_absolute_path(value: &str, windows: bool) -> Option<NormalizedAbsolutePath> {
+    if windows {
+        normalize_windows_absolute_path(value)
+    } else {
+        let remainder = value.strip_prefix('/')?;
+        Some(NormalizedAbsolutePath {
+            prefix: "/".into(),
+            components: normalize_components(remainder.split('/'), false),
+        })
+    }
+}
+
+fn normalize_windows_absolute_path(value: &str) -> Option<NormalizedAbsolutePath> {
+    let mut value = value.replace('/', "\\").to_lowercase();
+    if let Some(remainder) = value.strip_prefix(r"\\?\unc\") {
+        value = format!(r"\\{remainder}");
+    } else if let Some(remainder) = value.strip_prefix(r"\\?\") {
+        value = remainder.to_string();
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+        return Some(NormalizedAbsolutePath {
+            prefix: value[..2].to_string(),
+            components: normalize_components(value[3..].split('\\'), true),
+        });
+    }
+    let remainder = value.strip_prefix(r"\\")?;
+    let mut components = remainder
+        .split('\\')
+        .filter(|component| !component.is_empty());
+    let server = components.next()?;
+    let share = components.next()?;
+    Some(NormalizedAbsolutePath {
+        prefix: format!(r"\\{server}\{share}"),
+        components: normalize_components(components, true),
+    })
+}
+
+fn normalize_components<'a>(
+    components: impl IntoIterator<Item = &'a str>,
+    case_insensitive: bool,
+) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for component in components {
         match component {
             "" | "." => {}
             ".." => {
-                components.pop();
+                normalized.pop();
             }
-            component => components.push(component),
+            component if case_insensitive => normalized.push(component.to_lowercase()),
+            component => normalized.push(component.to_string()),
         }
     }
-    if prefix == "/" || prefix == "\\\\" {
-        Some(format!(
-            "{prefix}{}",
-            components.join(&separator.to_string())
-        ))
-    } else if components.is_empty() {
-        Some(format!("{prefix}{separator}"))
-    } else {
-        Some(format!(
-            "{prefix}{separator}{}",
-            components.join(&separator.to_string())
-        ))
-    }
-}
-
-fn normalize_execution_text(value: &str, windows: bool) -> String {
-    if windows {
-        value
-            .replace('/', "\\")
-            .to_lowercase()
-            .replace("\\\\?\\unc\\", "\\\\")
-            .replace("\\\\?\\", "")
-    } else {
-        value.to_string()
-    }
+    normalized
 }
 
 impl SkillRevisionStore {
@@ -349,7 +223,13 @@ impl SkillRevisionStore {
         if actual != expected_hash {
             anyhow::bail!("managed execution snapshot hash mismatch: {revision_id}");
         }
-        review_execution_binding(manifest, &self.paths, expected_path)?;
+        let command = prepare_execution_command(
+            &manifest.entry.command,
+            temporary.path(),
+            &self.paths,
+            expected_path,
+        )
+        .await?;
         for resource in manifest_entry_resources(manifest) {
             match open_regular_file_nofollow(temporary.path(), resource).await {
                 Ok(_) => {}
@@ -373,7 +253,9 @@ impl SkillRevisionStore {
             .await;
         let current_dir = temporary.path().to_path_buf();
         Ok(PreparedSkillExecution {
-            command: manifest.entry.command.clone(),
+            command,
+            // Arguments are process data, not a filesystem sandbox. Resource-shaped relative
+            // arguments were validated above; every other argument remains opaque.
             args: manifest.entry.args.clone(),
             current_dir,
             _temporary: temporary,
@@ -381,36 +263,71 @@ impl SkillRevisionStore {
     }
 }
 
-fn review_execution_binding(
-    manifest: &SkillManifest,
+async fn prepare_execution_command(
+    command: &str,
+    private_root: &Path,
+    paths: &crate::skill_store::SkillStorePaths,
+    authoritative_revision: &Path,
+) -> anyhow::Result<String> {
+    match classify_execution_command(command, cfg!(windows))? {
+        ExecutionCommandKind::Bare => Ok(command.to_string()),
+        ExecutionCommandKind::PackagedRelative(relative) => {
+            match open_regular_file_nofollow(private_root, &relative).await {
+                Ok(_) => {}
+                Err(error) if error_is_not_found(&error) => anyhow::bail!(
+                    "private execution command does not exist: {}",
+                    relative.display()
+                ),
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "private execution command is not a contained regular file: {}",
+                            relative.display()
+                        )
+                    });
+                }
+            }
+            Ok(private_root.join(relative).to_string_lossy().into_owned())
+        }
+        ExecutionCommandKind::Absolute => {
+            reject_absolute_managed_command(command, paths, authoritative_revision).await?;
+            Ok(command.to_string())
+        }
+    }
+}
+
+async fn reject_absolute_managed_command(
+    command: &str,
     paths: &crate::skill_store::SkillStorePaths,
     authoritative_revision: &Path,
 ) -> anyhow::Result<()> {
-    let locks = paths.managed.join(".locks");
-    let protected = [
-        ("authoritative revision", authoritative_revision),
-        ("locks root", locks.as_path()),
-        ("managed root", paths.managed.as_path()),
-        ("staging root", paths.staging.as_path()),
-        ("quarantine root", paths.quarantine.as_path()),
-    ];
-    reject_execution_store_reference("command", &manifest.entry.command, &protected)?;
-    for arg in &manifest.entry.args {
-        reject_execution_store_reference("argument", arg, &protected)?;
+    let managed_roots = [authoritative_revision, paths.managed.as_path()];
+    if managed_roots.iter().any(|root| {
+        absolute_execution_command_is_within(command, &root.to_string_lossy(), cfg!(windows))
+    }) {
+        anyhow::bail!("absolute managed command bypasses private execution snapshot: {command}");
     }
-    Ok(())
-}
 
-fn reject_execution_store_reference(
-    value_kind: &str,
-    value: &str,
-    protected: &[(&str, &Path)],
-) -> anyhow::Result<()> {
-    if let Some((root_kind, _)) = protected
-        .iter()
-        .find(|(_, path)| execution_text_references_path(value, path, cfg!(windows)))
-    {
-        anyhow::bail!("managed execution {value_kind} references skill store {root_kind}: {value}");
+    let resolved = match tokio::fs::canonicalize(command).await {
+        Ok(resolved) => resolved,
+        Err(_) => return Ok(()),
+    };
+    for root in managed_roots {
+        let resolved_root = tokio::fs::canonicalize(root).await.with_context(|| {
+            format!(
+                "failed to resolve managed command boundary: {}",
+                root.display()
+            )
+        })?;
+        if absolute_execution_command_is_within(
+            &resolved.to_string_lossy(),
+            &resolved_root.to_string_lossy(),
+            cfg!(windows),
+        ) {
+            anyhow::bail!(
+                "absolute managed command bypasses private execution snapshot: {command}"
+            );
+        }
     }
     Ok(())
 }

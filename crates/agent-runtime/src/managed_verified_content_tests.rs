@@ -288,69 +288,157 @@ async fn managed_execution_rejects_absolute_store_command_before_spawn() {
         .await
         .unwrap_err();
 
-    assert!(format!("{error:#}").contains("managed execution command references skill store"));
-    assert!(!marker.exists());
-}
-
-#[tokio::test]
-async fn managed_execution_rejects_absolute_store_argument_before_spawn() {
-    let fixture = VerifiedFixture::new().await;
-    let marker = fixture._app.path().join("absolute-arg.started");
-    let argument = fixture
-        .store
-        .paths()
-        .staging
-        .join("forbidden")
-        .to_string_lossy()
-        .into_owned();
-    fixture
-        .active_package(
-            "com.example.execution-absolute-arg",
-            write_runtime_package_with_entry(
-                "com.example.execution-absolute-arg",
-                "sh",
-                vec!["run.sh".into(), argument],
-                &format!(
-                    "printf started > '{}'; printf '{{\"ok\":true}}'\n",
-                    marker.display()
-                ),
-            )
-            .await,
-        )
-        .await;
-    let snapshot = SkillSnapshot::build(1, active_set(fixture.source.discover().await.unwrap()))
-        .await
-        .unwrap();
-
-    let error = snapshot
-        .registry()
-        .execute("verified_tool", json!({}))
-        .await
-        .unwrap_err();
-
-    assert!(format!("{error:#}").contains("managed execution argument references skill store"));
-    assert!(!marker.exists());
-}
-
-#[tokio::test]
-async fn managed_execution_rejects_embedded_store_argument_before_spawn() {
-    let fixture = VerifiedFixture::new().await;
-    let marker = fixture._app.path().join("embedded-arg.started");
-    let argument = format!(
-        "--config={}",
-        fixture.store.paths().quarantine.join("config").display()
+    assert!(
+        format!("{error:#}")
+            .contains("absolute managed command bypasses private execution snapshot")
     );
+    assert!(!marker.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_execution_rejects_absolute_command_resolving_into_managed_store() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let fixture = VerifiedFixture::new().await;
+    let command_link = fixture._app.path().join("external-command-link");
+    let package = write_runtime_package_with_entry(
+        "com.example.execution-resolved-command",
+        command_link.to_str().unwrap(),
+        Vec::new(),
+        "printf '{\"ok\":true}'\n",
+    )
+    .await;
+    let packaged_command = package.path().join("run.sh");
+    let mut permissions = tokio::fs::metadata(&packaged_command)
+        .await
+        .unwrap()
+        .permissions();
+    permissions.set_mode(0o700);
+    tokio::fs::set_permissions(&packaged_command, permissions)
+        .await
+        .unwrap();
+    let managed = fixture
+        .active_package("com.example.execution-resolved-command", package)
+        .await;
+    symlink(managed.path.join("run.sh"), &command_link).unwrap();
+    let snapshot = SkillSnapshot::build(1, active_set(fixture.source.discover().await.unwrap()))
+        .await
+        .unwrap();
+
+    let error = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}")
+            .contains("absolute managed command bypasses private execution snapshot"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
+async fn managed_execution_keeps_opaque_arguments_out_of_command_path_review() {
+    let fixture = VerifiedFixture::new().await;
+    let managed_path = fixture.store.paths().managed.join("with space");
+    let staging_path = fixture.store.paths().staging.join("path-list");
+    let args = vec![
+        "run.sh".into(),
+        "--url=https://example.test/a/b?next=/managed".into(),
+        format!(
+            "--paths={}:{}",
+            managed_path.display(),
+            staging_path.display()
+        ),
+        "--label=value with spaces".into(),
+        format!("--input=file://{}", fixture.store.paths().managed.display()),
+    ];
     fixture
         .active_package(
-            "com.example.execution-embedded-arg",
+            "com.example.execution-opaque-args",
             write_runtime_package_with_entry(
-                "com.example.execution-embedded-arg",
+                "com.example.execution-opaque-args",
                 "sh",
-                vec!["run.sh".into(), argument],
-                &format!(
-                    "printf started > '{}'; printf '{{\"ok\":true}}'\n",
-                    marker.display()
-                ),
+                args,
+                "printf '{\"ok\":true}'\n",
+            )
+            .await,
+        )
+        .await;
+    let snapshot = SkillSnapshot::build(1, active_set(fixture.source.discover().await.unwrap()))
+        .await
+        .unwrap();
+
+    let value = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap();
+
+    assert_eq!(value, json!({"ok": true}));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_execution_binds_relative_packaged_command_to_private_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = VerifiedFixture::new().await;
+    let command_record = fixture._app.path().join("relative-command.path");
+    let package = write_runtime_package_with_entry(
+        "com.example.execution-relative-command",
+        "./run.sh",
+        Vec::new(),
+        &format!(
+            "printf '%s' \"$0\" > '{}'; printf '{{\"ok\":true}}'\n",
+            command_record.display()
+        ),
+    )
+    .await;
+    let command = package.path().join("run.sh");
+    let mut permissions = tokio::fs::metadata(&command).await.unwrap().permissions();
+    permissions.set_mode(0o700);
+    tokio::fs::set_permissions(&command, permissions)
+        .await
+        .unwrap();
+    fixture
+        .active_package("com.example.execution-relative-command", package)
+        .await;
+    let snapshot = SkillSnapshot::build(1, active_set(fixture.source.discover().await.unwrap()))
+        .await
+        .unwrap();
+
+    let value = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap();
+
+    assert_eq!(value, json!({"ok": true}));
+    let command = tokio::fs::read_to_string(command_record).await.unwrap();
+    assert!(
+        Path::new(&command).is_absolute(),
+        "spawned command was {command}"
+    );
+    assert!(
+        command.contains("general-agent-skill-execution-"),
+        "spawned command was {command}"
+    );
+}
+
+#[tokio::test]
+async fn managed_execution_rejects_missing_relative_packaged_command_before_spawn() {
+    let fixture = VerifiedFixture::new().await;
+    fixture
+        .active_package(
+            "com.example.execution-missing-command",
+            write_runtime_package_with_entry(
+                "com.example.execution-missing-command",
+                "./missing.sh",
+                Vec::new(),
+                "printf '{\"ok\":true}'\n",
             )
             .await,
         )
@@ -365,8 +453,10 @@ async fn managed_execution_rejects_embedded_store_argument_before_spawn() {
         .await
         .unwrap_err();
 
-    assert!(format!("{error:#}").contains("managed execution argument references skill store"));
-    assert!(!marker.exists());
+    assert!(
+        format!("{error:#}").contains("private execution command does not exist"),
+        "{error:#}"
+    );
 }
 
 #[tokio::test]
@@ -397,161 +487,120 @@ async fn managed_execution_allows_system_node_with_private_relative_script() {
     assert_eq!(value, json!({"ok": true}));
 }
 
-#[test]
-fn managed_execution_store_reference_comparison_normalizes_windows_text() {
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            r"--config=c:/STORE/managed/config.json",
-            Path::new(r"C:\store\MANAGED"),
-            true,
-        )
-    );
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            r"--config=\\?\C:\store\managed\config.json",
-            Path::new(r"C:\store\managed"),
-            true,
-        )
-    );
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            r"--config=\\?\UNC\server\share\managed\config.json",
-            Path::new(r"\\server\share\managed"),
-            true,
-        )
-    );
-    assert!(
-        !crate::skill_store_execution::execution_text_references_path(
-            r"--config=c:/store/managed-peer/config.json",
-            Path::new(r"C:\store\managed"),
-            true,
-        )
-    );
-}
-
-#[test]
-fn managed_execution_store_reference_comparison_resolves_absolute_parent_components() {
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            "/private/cache/../store/managed/tool",
-            Path::new("/private/store/managed"),
-            false,
-        )
-    );
-}
-
-#[test]
-fn managed_execution_store_reference_comparison_resolves_embedded_posix_parent_components() {
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            "--config=/temporary/../protected/tool",
-            Path::new("/protected"),
-            false,
-        )
-    );
-}
-
-#[test]
-fn managed_execution_store_reference_comparison_resolves_embedded_windows_parent_components() {
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            r"--config=C:\temporary\..\protected\tool",
-            Path::new(r"C:\protected"),
-            true,
-        )
-    );
-}
-
-#[test]
-fn managed_execution_store_reference_comparison_decodes_file_uris() {
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            "--config=FiLe:///temporary/../protected/tool",
-            Path::new("/protected"),
-            false,
-        )
-    );
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            "--config=file:///C:/temporary/../protected/tool",
-            Path::new(r"C:\protected"),
-            true,
-        )
-    );
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            "--config=file:////server/share/temporary/../protected/tool",
-            Path::new(r"\\server\share\protected"),
-            true,
-        )
-    );
-}
-
-#[test]
-fn managed_execution_store_reference_comparison_decodes_percent_encoded_file_uris() {
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            "--config=FILE:%2f%2f%2ftemporary%2f%2e%2e%2fprotected%2ftool",
-            Path::new("/protected"),
-            false,
-        )
-    );
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            "--config=file:%2f%2f%2fC%3a%2ftemporary%2f%2e%2e%2fprotected%2ftool",
-            Path::new(r"C:\protected"),
-            true,
-        )
-    );
-    assert!(
-        crate::skill_store_execution::execution_text_references_path(
-            "--config=file:%2f%2f%2fC%3a%5ctemporary%5c%2e%2e%5cprotected%5ctool",
-            Path::new(r"C:\protected"),
-            true,
-        )
-    );
-}
-
-#[test]
-fn managed_execution_store_reference_comparison_ignores_adjacent_external_paths() {
-    assert!(
-        !crate::skill_store_execution::execution_text_references_path(
-            "--config=/external/protected/tool,/safe/index.js",
-            Path::new("/protected"),
-            false,
-        )
-    );
-    assert!(
-        !crate::skill_store_execution::execution_text_references_path(
-            "https://protected/tool",
-            Path::new("/protected"),
-            false,
-        )
-    );
-}
-
-#[test]
-fn managed_execution_store_reference_comparison_allows_relative_runtime_arguments() {
-    for value in ["node", "index.js", "node/index.js"] {
-        assert!(
-            !crate::skill_store_execution::execution_text_references_path(
-                value,
-                Path::new("/node"),
-                false,
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_execution_allows_absolute_host_executable_outside_managed_store() {
+    let fixture = VerifiedFixture::new().await;
+    fixture
+        .active_package(
+            "com.example.execution-host-shell",
+            write_runtime_package_with_entry(
+                "com.example.execution-host-shell",
+                "/bin/sh",
+                vec!["run.sh".into()],
+                "printf '{\"ok\":true}'\n",
             )
+            .await,
+        )
+        .await;
+    let snapshot = SkillSnapshot::build(1, active_set(fixture.source.discover().await.unwrap()))
+        .await
+        .unwrap();
+
+    let value = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap();
+
+    assert_eq!(value, json!({"ok": true}));
+}
+
+#[test]
+fn managed_execution_classifies_commands_without_scanning_arbitrary_text() {
+    use crate::skill_store_execution::{ExecutionCommandKind, classify_execution_command};
+
+    assert_eq!(
+        classify_execution_command("node", false).unwrap(),
+        ExecutionCommandKind::Bare
+    );
+    assert_eq!(
+        classify_execution_command("./run.sh", false).unwrap(),
+        ExecutionCommandKind::PackagedRelative(Path::new("run.sh").to_path_buf())
+    );
+    assert_eq!(
+        classify_execution_command("bin/runner", false).unwrap(),
+        ExecutionCommandKind::PackagedRelative(Path::new("bin/runner").to_path_buf())
+    );
+    assert_eq!(
+        classify_execution_command(r".\run.cmd", true).unwrap(),
+        ExecutionCommandKind::PackagedRelative(Path::new("run.cmd").to_path_buf())
+    );
+    assert_eq!(
+        classify_execution_command(r"bin\runner.exe", true).unwrap(),
+        ExecutionCommandKind::PackagedRelative(Path::new("bin").join("runner.exe"))
+    );
+    for command in ["../run.sh", r"..\run.cmd", r"C:run.cmd", r"\run.cmd"] {
+        assert!(
+            classify_execution_command(command, true).is_err(),
+            "{command}"
+        );
+    }
+    for command in [
+        "/opt/host runner",
+        r"C:\Program Files\host.exe",
+        r"\\server\share\host.exe",
+        r"\\?\C:\Store\host.exe",
+        r"\\?\UNC\server\share\host.exe",
+    ] {
+        assert_eq!(
+            classify_execution_command(command, command != "/opt/host runner").unwrap(),
+            ExecutionCommandKind::Absolute,
+            "{command}"
         );
     }
 }
 
 #[test]
-fn managed_execution_store_reference_comparison_ignores_external_substring_matches() {
-    assert!(
-        !crate::skill_store_execution::execution_text_references_path(
-            "/external/private/store/managed/tool",
-            Path::new("/private/store/managed"),
-            false,
-        )
-    );
+fn managed_execution_compares_only_structured_absolute_command_components() {
+    use crate::skill_store_execution::absolute_execution_command_is_within;
+
+    assert!(absolute_execution_command_is_within(
+        "/private/cache/../store/managed/tool",
+        "/private/store/managed",
+        false,
+    ));
+    assert!(absolute_execution_command_is_within(
+        r"C:\Store\Managed\revision\runner.exe",
+        r"c:/store/managed",
+        true,
+    ));
+    assert!(absolute_execution_command_is_within(
+        r"\\?\C:\Store\Managed\runner.exe",
+        r"C:\store\managed",
+        true,
+    ));
+    assert!(absolute_execution_command_is_within(
+        r"\\?\UNC\server\share\Managed Store\runner.exe",
+        r"\\server\share\managed store",
+        true,
+    ));
+    assert!(!absolute_execution_command_is_within(
+        r"C:\store\managed-peer\runner.exe",
+        r"C:\store\managed",
+        true,
+    ));
+    for opaque in [
+        r"--config=C:\store\managed\runner.exe",
+        r"C:\one;C:\store\managed\runner.exe",
+        r"file:///C:/store/managed/runner.exe",
+    ] {
+        assert!(!absolute_execution_command_is_within(
+            opaque,
+            r"C:\store\managed",
+            true,
+        ));
+    }
 }
 
 #[cfg(unix)]
