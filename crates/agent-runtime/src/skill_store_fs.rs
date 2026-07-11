@@ -57,51 +57,22 @@ pub(crate) async fn measure_package_tree(
     Ok(package_bytes)
 }
 
-pub(crate) async fn copy_package_tree(
+pub(crate) async fn copy_package_tree_into_reserved(
     source: &Path,
     destination: &Path,
     limits: PackageLimits,
     faults: &StoreFaults,
     copy_fault: StoreFaultPoint,
 ) -> anyhow::Result<()> {
-    reject_existing(destination).await?;
+    let metadata = tokio::fs::symlink_metadata(destination).await?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "reserved package destination must be a real directory: {}",
+            destination.display()
+        );
+    }
     let entries = collect_entries(source, limits).await?;
-    tokio::fs::create_dir(destination)
-        .await
-        .with_context(|| format!("failed to create package copy {}", destination.display()))?;
     copy_collected_entries(source, destination, entries, limits, faults, copy_fault).await
-}
-
-pub(crate) async fn reserve_and_copy_package_tree(
-    source: &Path,
-    destination: &Path,
-    limits: PackageLimits,
-    faults: &StoreFaults,
-    copy_fault: StoreFaultPoint,
-) -> anyhow::Result<()> {
-    let entries = collect_entries(source, limits).await?;
-    match tokio::fs::create_dir(destination).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            anyhow::bail!(
-                "skill store destination already exists: {}",
-                destination.display()
-            )
-        }
-        Err(error) => return Err(error.into()),
-    }
-    let copy =
-        copy_collected_entries(source, destination, entries, limits, faults, copy_fault).await;
-    match copy {
-        Ok(()) => Ok(()),
-        Err(error) => match tokio::fs::remove_dir_all(destination).await {
-            Ok(()) => Err(error),
-            Err(cleanup) => Err(error.context(format!(
-                "reserved destination cleanup failed for {}: {cleanup}",
-                destination.display()
-            ))),
-        },
-    }
 }
 
 async fn copy_collected_entries(
@@ -133,9 +104,9 @@ async fn copy_collected_entries(
     let mut directories = entries.directories;
     directories.sort_by_key(|directory| std::cmp::Reverse(directory.relative.components().count()));
     for directory in directories {
-        set_safe_mode(&destination.join(directory.relative), directory.mode).await?;
+        set_mode_nofollow(destination, Some(&directory.relative), directory.mode, true).await?;
     }
-    set_safe_mode(destination, entries.root_mode).await?;
+    set_mode_nofollow(destination, None, entries.root_mode, true).await?;
     Ok(())
 }
 
@@ -363,24 +334,24 @@ pub(crate) async fn remove_regular_file_nofollow(
 pub(crate) async fn make_tree_readonly(root: &Path, limits: PackageLimits) -> anyhow::Result<()> {
     let entries = collect_entries(root, limits).await?;
     for file in entries.files {
-        set_readonly(&root.join(file.relative)).await?;
+        set_readonly_nofollow(root, Some(&file.relative), false).await?;
     }
     let mut directories = entries.directories;
     directories.sort_by_key(|directory| std::cmp::Reverse(directory.relative.components().count()));
     for directory in directories {
-        set_readonly(&root.join(directory.relative)).await?;
+        set_readonly_nofollow(root, Some(&directory.relative), true).await?;
     }
-    set_readonly(root).await
+    set_readonly_nofollow(root, None, true).await
 }
 
 pub(crate) async fn make_tree_writable(root: &Path, limits: PackageLimits) -> anyhow::Result<()> {
     let entries = collect_entries(root, limits).await?;
-    set_writable(root, true).await?;
+    set_writable_nofollow(root, None, true).await?;
     for directory in &entries.directories {
-        set_writable(&root.join(&directory.relative), true).await?;
+        set_writable_nofollow(root, Some(&directory.relative), true).await?;
     }
     for file in entries.files {
-        set_writable(&root.join(file.relative), false).await?;
+        set_writable_nofollow(root, Some(&file.relative), false).await?;
     }
     Ok(())
 }
@@ -521,7 +492,6 @@ async fn copy_regular_file(
     max_file_bytes: u64,
 ) -> anyhow::Result<u64> {
     let source_path = source_root.join(&file.relative);
-    let destination_path = destination_root.join(&file.relative);
     let (mut source, opened_bytes, _) =
         open_regular_file_nofollow(source_root, &file.relative).await?;
     if opened_bytes != file.expected_bytes {
@@ -557,7 +527,7 @@ async fn copy_regular_file(
             source_path.display()
         );
     }
-    set_safe_mode(&destination_path, file.mode).await?;
+    set_mode_nofollow(destination_root, Some(&file.relative), file.mode, false).await?;
     Ok(bytes)
 }
 
@@ -581,28 +551,6 @@ fn checked_count_add(current: u64, maximum: u64, kind: &str) -> anyhow::Result<u
     Ok(total)
 }
 
-async fn reject_existing(path: &Path) -> anyhow::Result<()> {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(_) => anyhow::bail!("skill store destination already exists: {}", path.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-async fn set_readonly(path: &Path) -> anyhow::Result<()> {
-    let metadata = tokio::fs::symlink_metadata(path).await?;
-    let mut permissions = metadata.permissions();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        permissions.set_mode(permissions.mode() & !0o222);
-    }
-    #[cfg(not(unix))]
-    permissions.set_readonly(true);
-    tokio::fs::set_permissions(path, permissions).await?;
-    Ok(())
-}
-
 fn safe_mode(metadata: &std::fs::Metadata, _directory: bool) -> u32 {
     #[cfg(unix)]
     {
@@ -613,17 +561,6 @@ fn safe_mode(metadata: &std::fs::Metadata, _directory: bool) -> u32 {
     {
         if _directory { 0o755 } else { 0o644 }
     }
-}
-
-async fn set_safe_mode(path: &Path, mode: u32) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o777)).await?;
-    }
-    #[cfg(not(unix))]
-    let _ = (path, mode);
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -704,7 +641,7 @@ async fn atomic_replace_file_platform(
                 )
             },
         )?;
-        set_safe_mode(&root.join(relative), mode).await?;
+        set_mode_nofollow(root, Some(relative), mode, false).await?;
         let _ = open_regular_file_nofollow(root, relative).await?;
         Ok::<(), anyhow::Error>(())
     }
@@ -899,17 +836,110 @@ fn open_parent_nofollow<'a>(
     Ok((directory, name))
 }
 
-async fn set_writable(path: &Path, directory: bool) -> anyhow::Result<()> {
-    let metadata = tokio::fs::symlink_metadata(path).await?;
-    let mut permissions = metadata.permissions();
+#[cfg(unix)]
+fn open_mode_target(
+    root: &Path,
+    relative: Option<&Path>,
+    directory: bool,
+) -> anyhow::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    let flags = OFlags::RDONLY
+        | OFlags::CLOEXEC
+        | OFlags::NOFOLLOW
+        | if directory {
+            OFlags::DIRECTORY
+        } else {
+            OFlags::empty()
+        };
+    match relative {
+        None => open(root, flags, Mode::empty()).map_err(Into::into),
+        Some(relative) => {
+            let (parent, name) = open_parent_nofollow(root, relative)?;
+            openat(&parent, name, flags, Mode::empty()).map_err(Into::into)
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn set_mode_nofollow(
+    root: &Path,
+    relative: Option<&Path>,
+    mode: u32,
+    directory: bool,
+) -> anyhow::Result<()> {
+    use rustix::fs::{Mode, RawMode, fchmod};
+    let descriptor = open_mode_target(root, relative, directory)?;
+    fchmod(
+        descriptor,
+        Mode::from_raw_mode(RawMode::try_from(mode & 0o777)?),
+    )?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn set_mode_nofollow(
+    root: &Path,
+    relative: Option<&Path>,
+    _mode: u32,
+    _directory: bool,
+) -> anyhow::Result<()> {
+    revalidate_mode_path(root, relative).await.map(|_| ())
+}
+
+async fn set_readonly_nofollow(
+    root: &Path,
+    relative: Option<&Path>,
+    directory: bool,
+) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let owner_access = if directory { 0o700 } else { 0o600 };
-        permissions.set_mode(permissions.mode() | owner_access);
+        use rustix::fs::{Mode, RawMode, fchmod, fstat};
+        let descriptor = open_mode_target(root, relative, directory)?;
+        let mode = (u32::from(fstat(&descriptor)?.st_mode) & !0o222) & 0o777;
+        fchmod(descriptor, Mode::from_raw_mode(RawMode::try_from(mode)?))?;
+        Ok(())
     }
     #[cfg(not(unix))]
-    permissions.set_readonly(false);
-    tokio::fs::set_permissions(path, permissions).await?;
-    Ok(())
+    {
+        let path = revalidate_mode_path(root, relative).await?;
+        let mut permissions = tokio::fs::metadata(&path).await?.permissions();
+        permissions.set_readonly(true);
+        tokio::fs::set_permissions(path, permissions).await?;
+        Ok(())
+    }
+}
+
+async fn set_writable_nofollow(
+    root: &Path,
+    relative: Option<&Path>,
+    directory: bool,
+) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, RawMode, fchmod, fstat};
+        let descriptor = open_mode_target(root, relative, directory)?;
+        let access = if directory { 0o700 } else { 0o600 };
+        let mode = (u32::from(fstat(&descriptor)?.st_mode) | access) & 0o777;
+        fchmod(descriptor, Mode::from_raw_mode(RawMode::try_from(mode)?))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let path = revalidate_mode_path(root, relative).await?;
+        let mut permissions = tokio::fs::metadata(&path).await?.permissions();
+        permissions.set_readonly(false);
+        tokio::fs::set_permissions(path, permissions).await?;
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+async fn revalidate_mode_path(root: &Path, relative: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let path = relative.map_or_else(|| root.to_path_buf(), |relative| root.join(relative));
+    let canonical_root = tokio::fs::canonicalize(root).await?;
+    let canonical = tokio::fs::canonicalize(&path).await?;
+    if !canonical.starts_with(canonical_root) {
+        anyhow::bail!("permission target escapes package root: {}", path.display());
+    }
+    Ok(path)
 }

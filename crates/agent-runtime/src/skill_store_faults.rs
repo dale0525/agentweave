@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -19,6 +20,9 @@ pub(crate) enum StoreFaultPoint {
     QuarantineAfterLock,
     CopyBeforeFileOpen,
     WriteBeforeTempOpen,
+    WriteRestore,
+    WriteIsolationCopy,
+    WriteIsolationDatabase,
     PromoteBeforeDestinationCommit,
     ManagedReadonly,
     PromoteDestinationCleanup,
@@ -41,6 +45,7 @@ pub(crate) struct StoreFaults {
 struct StoreTestGateInner {
     entered: tokio::sync::Barrier,
     release: tokio::sync::Barrier,
+    has_entered: AtomicBool,
 }
 
 #[cfg(test)]
@@ -57,6 +62,10 @@ impl StoreTestGate {
 
     pub(crate) async fn release(&self) {
         self.inner.release.wait().await;
+    }
+
+    pub(crate) fn has_entered(&self) -> bool {
+        self.inner.has_entered.load(Ordering::Acquire)
     }
 }
 
@@ -79,6 +88,7 @@ impl StoreFaults {
         let inner = Arc::new(StoreTestGateInner {
             entered: tokio::sync::Barrier::new(2),
             release: tokio::sync::Barrier::new(2),
+            has_entered: AtomicBool::new(false),
         });
         self.gates.lock().unwrap().insert(point, inner.clone());
         StoreTestGate { inner }
@@ -100,6 +110,7 @@ impl StoreFaults {
     pub(crate) async fn checkpoint(&self, point: StoreFaultPoint) {
         let gate = self.gates.lock().unwrap().remove(&point);
         if let Some(gate) = gate {
+            gate.has_entered.store(true, Ordering::Release);
             gate.entered.wait().await;
             gate.release.wait().await;
         }

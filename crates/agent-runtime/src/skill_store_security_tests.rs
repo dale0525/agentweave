@@ -3,6 +3,7 @@ use crate::skill_store::{
     SkillRevisionStore, SkillStoreFaultPoint, SkillStoreLimits, SkillStorePaths,
     SkillStoreTestFaults,
 };
+use crate::skill_store_secure_fs::gate_secure_hash_after_open;
 use crate::storage::Storage;
 use serde_json::json;
 use std::path::Path;
@@ -158,6 +159,35 @@ async fn copy_open_rejects_file_swapped_to_symlink_after_scan() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn secure_hash_never_reads_outside_file_after_path_is_swapped_to_symlink() {
+    let source = write_package("com.example.hash-swap").await;
+    let expected = crate::skill_source::hash_package_tree(source.path())
+        .await
+        .unwrap();
+    let outside = tempdir().unwrap();
+    let outside_file = outside.path().join("outside");
+    tokio::fs::write(&outside_file, "outside-secret")
+        .await
+        .unwrap();
+    let gate = gate_secure_hash_after_open();
+    let root = source.path().to_path_buf();
+    let hashing = tokio::spawn(async move { crate::skill_source::hash_package_tree(&root).await });
+    gate.wait_entered().await;
+    tokio::fs::remove_file(source.path().join("SKILL.md"))
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink(&outside_file, source.path().join("SKILL.md")).unwrap();
+    gate.release().await;
+
+    assert_eq!(hashing.await.unwrap().unwrap(), expected);
+    assert_eq!(
+        tokio::fs::read_to_string(outside_file).await.unwrap(),
+        "outside-secret"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn staging_write_rejects_parent_swapped_to_symlink_before_temp_open() {
     let fixture = SecurityFixture::new(small_limits()).await;
     let source = write_package("com.example.write-swap").await;
@@ -256,6 +286,81 @@ async fn destination_empty_directory_created_after_check_is_not_replaced() {
     assert!(destination.is_dir());
     assert!(directory_is_empty(&destination).await);
     assert!(staged.path.is_dir());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn promotion_rejects_managed_root_swap_without_writing_external_tree() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.managed-root-swap").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::PromoteBeforeDestinationCommit);
+    let store = fixture.store.clone();
+    let revision_id = staged.revision_id.clone();
+    let promotion = tokio::spawn(async move { store.promote_revision(&revision_id).await });
+    gate.wait_entered().await;
+    let moved = fixture.paths.managed.with_extension("moved");
+    let outside = tempdir().unwrap();
+    tokio::fs::rename(&fixture.paths.managed, &moved)
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink(outside.path(), &fixture.paths.managed).unwrap();
+    gate.release().await;
+
+    let error = promotion.await.unwrap().unwrap_err();
+
+    assert!(format!("{error:#}").contains("trusted store root"));
+    assert!(staged.path.is_dir());
+    assert!(directory_is_empty(outside.path()).await);
+    assert_eq!(
+        fixture
+            .state
+            .get_revision(&staged.revision_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillRevisionStatus::Staging
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn quarantine_rejects_root_swap_without_writing_external_tree() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.quarantine-root-swap").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::QuarantineAfterLock);
+    let store = fixture.store.clone();
+    let revision_id = staged.revision_id.clone();
+    let quarantine =
+        tokio::spawn(async move { store.quarantine_revision(&revision_id, "root swap").await });
+    gate.wait_entered().await;
+    let moved = fixture.paths.quarantine.with_extension("moved");
+    let outside = tempdir().unwrap();
+    tokio::fs::rename(&fixture.paths.quarantine, &moved)
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink(outside.path(), &fixture.paths.quarantine).unwrap();
+    gate.release().await;
+
+    let error = quarantine.await.unwrap().unwrap_err();
+
+    assert!(format!("{error:#}").contains("store root must be a real directory"));
+    assert!(staged.path.is_dir());
+    assert!(directory_is_empty(outside.path()).await);
 }
 
 #[cfg(unix)]

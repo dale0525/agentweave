@@ -240,6 +240,25 @@ pub struct SkillRevisionPromotion {
     pub validation_json: Value,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillRevisionExpectation {
+    pub version: String,
+    pub content_hash: String,
+    pub storage_path: String,
+    pub status: SkillRevisionStatus,
+}
+
+impl From<&SkillRevisionRecord> for SkillRevisionExpectation {
+    fn from(record: &SkillRevisionRecord) -> Self {
+        Self {
+            version: record.version.clone(),
+            content_hash: record.content_hash.clone(),
+            storage_path: record.storage_path.clone(),
+            status: record.status,
+        }
+    }
+}
+
 pub struct SkillRevisionMetadata {
     pub version: String,
     pub content_hash: String,

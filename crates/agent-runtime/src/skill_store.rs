@@ -1,23 +1,29 @@
-use crate::skill_package::{SkillPackageDescriptor, SkillPackageId};
-use crate::skill_source::{canonical_relative_path, hash_package_tree};
+use crate::skill_package::SkillPackageId;
+use crate::skill_source::canonical_relative_path;
 use crate::skill_state::{
-    NewSkillRevision, SkillRevisionMetadata, SkillRevisionPromotion, SkillRevisionRecord,
-    SkillRevisionStatus, SkillStateStore,
+    NewSkillRevision, SkillRevisionExpectation, SkillRevisionMetadata, SkillRevisionPromotion,
+    SkillRevisionRecord, SkillRevisionStatus, SkillStateStore,
 };
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 use crate::skill_store_fs::{
-    PackageLimits, atomic_replace_file, copy_package_tree, ensure_directory_contained,
-    ensure_safe_write_parent, make_tree_readonly, make_tree_writable, measure_package_tree,
-    read_optional_regular_file, remove_created_directories, remove_regular_file_nofollow,
-    reserve_and_copy_package_tree,
+    PackageLimits, atomic_replace_file, copy_package_tree_into_reserved,
+    ensure_directory_contained, ensure_safe_write_parent, make_tree_readonly, make_tree_writable,
+    measure_package_tree, read_optional_regular_file, remove_created_directories,
+    remove_regular_file_nofollow,
+};
+use crate::skill_store_locks::{SkillStoreIdentity, acquire_revision_lock};
+use crate::skill_store_operations::{
+    TransitionPhase, TransitionState, cleanup_created_directories_error, combine_operation_errors,
+    ensure_exact_path, remove_tree_if_exists, storage_path, stored_revision, with_compensation,
+};
+use crate::skill_store_secure_fs::{
+    ensure_store_directory, reserve_store_directory, secure_package_hash, secure_package_snapshot,
 };
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock, Weak};
-use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard};
+use std::sync::{Arc, RwLock};
 
 pub const DEFAULT_MAX_SKILL_FILE_BYTES: u64 = 16 * 1024 * 1024;
 pub const DEFAULT_MAX_SKILL_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
@@ -58,7 +64,7 @@ impl Default for SkillStoreLimits {
 }
 
 impl SkillStoreLimits {
-    fn package_limits(self) -> PackageLimits {
+    pub(crate) fn package_limits(self) -> PackageLimits {
         PackageLimits {
             max_file_bytes: self.max_file_bytes,
             max_package_bytes: self.max_package_bytes,
@@ -76,16 +82,15 @@ pub struct SkillStorePaths {
     pub managed: PathBuf,
     pub staging: PathBuf,
     pub quarantine: PathBuf,
+    identity: SkillStoreIdentity,
 }
 
 impl SkillStorePaths {
     pub async fn prepare(app_data_root: &Path, cache_root: &Path) -> anyhow::Result<Self> {
-        let paths = Self {
-            managed: app_data_root.join("managed-skills"),
-            staging: cache_root.join("skill-staging"),
-            quarantine: app_data_root.join("skill-quarantine"),
-        };
-        for path in [&paths.managed, &paths.staging, &paths.quarantine] {
+        let managed = app_data_root.join("managed-skills");
+        let staging = cache_root.join("skill-staging");
+        let quarantine = app_data_root.join("skill-quarantine");
+        for path in [&managed, &staging, &quarantine] {
             tokio::fs::create_dir_all(path)
                 .await
                 .with_context(|| format!("failed to prepare skill store {}", path.display()))?;
@@ -99,7 +104,17 @@ impl SkillStorePaths {
                 );
             }
         }
-        Ok(paths)
+        let identity = SkillStoreIdentity::new(
+            tokio::fs::canonicalize(&managed).await?,
+            tokio::fs::canonicalize(&staging).await?,
+            tokio::fs::canonicalize(&quarantine).await?,
+        );
+        Ok(Self {
+            managed,
+            staging,
+            quarantine,
+            identity,
+        })
     }
 }
 
@@ -127,66 +142,7 @@ pub struct SkillRevisionStore {
     state: SkillStateStore,
     limits: SkillStoreLimits,
     faults: StoreFaults,
-    revision_locks: RevisionLockRegistry,
     maintenance_issues: Arc<RwLock<Vec<SkillStoreMaintenanceIssue>>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TransitionPhase {
-    Initial,
-    IncomingCopied,
-    DestinationReserved,
-    PermissionsApplied,
-    DatabaseCommitted,
-    SourceCleanupAttempted,
-}
-
-#[derive(Debug)]
-struct TransitionState {
-    operation: &'static str,
-    phase: TransitionPhase,
-}
-
-impl TransitionState {
-    fn new(operation: &'static str) -> Self {
-        Self {
-            operation,
-            phase: TransitionPhase::Initial,
-        }
-    }
-
-    fn advance(&mut self, phase: TransitionPhase) {
-        self.phase = phase;
-    }
-
-    fn context(&self, error: anyhow::Error) -> anyhow::Error {
-        error.context(format!(
-            "{} transition failed in {:?} phase",
-            self.operation, self.phase
-        ))
-    }
-}
-
-#[derive(Clone, Default)]
-struct RevisionLockRegistry {
-    locks: Arc<TokioMutex<HashMap<String, Weak<TokioMutex<()>>>>>,
-}
-
-impl RevisionLockRegistry {
-    async fn acquire(&self, revision_id: &str) -> OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self.locks.lock().await;
-            match locks.get(revision_id).and_then(Weak::upgrade) {
-                Some(lock) => lock,
-                None => {
-                    let lock = Arc::new(TokioMutex::new(()));
-                    locks.insert(revision_id.to_string(), Arc::downgrade(&lock));
-                    lock
-                }
-            }
-        };
-        lock.lock_owned().await
-    }
 }
 
 impl SkillRevisionStore {
@@ -204,7 +160,6 @@ impl SkillRevisionStore {
             state,
             limits,
             faults: StoreFaults::default(),
-            revision_locks: RevisionLockRegistry::default(),
             maintenance_issues: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -221,7 +176,6 @@ impl SkillRevisionStore {
             state,
             limits,
             faults,
-            revision_locks: RevisionLockRegistry::default(),
             maintenance_issues: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -241,6 +195,10 @@ impl SkillRevisionStore {
         self.state.clone()
     }
 
+    pub(crate) fn package_limits(&self) -> PackageLimits {
+        self.limits.package_limits()
+    }
+
     pub async fn create_staging_revision(
         &self,
         source: &Path,
@@ -250,7 +208,8 @@ impl SkillRevisionStore {
         let revision_id = SkillStateStore::allocate_revision_id();
         let destination = self.paths.staging.join(&revision_id);
         let result = async {
-            copy_package_tree(
+            reserve_store_directory(&self.paths.staging, Path::new(&revision_id)).await?;
+            copy_package_tree_into_reserved(
                 source,
                 &destination,
                 self.limits.package_limits(),
@@ -259,10 +218,11 @@ impl SkillRevisionStore {
             )
             .await?;
             make_tree_writable(&destination, self.limits.package_limits()).await?;
-            let loaded = SkillPackageDescriptor::load(&destination).await?;
+            let snapshot =
+                secure_package_snapshot(&destination, self.limits.package_limits()).await?;
+            let loaded = snapshot.descriptor;
             loaded.descriptor.validate()?;
-            measure_package_tree(&destination, self.limits.package_limits(), None).await?;
-            let content_hash = hash_package_tree(&destination).await?;
+            let content_hash = snapshot.content_hash;
             let record = self
                 .state
                 .create_staging_revision_record(
@@ -298,7 +258,7 @@ impl SkillRevisionStore {
     ) -> anyhow::Result<()> {
         canonical_relative_path(relative_path)?;
         let observed = self.staging_record(revision_id).await?;
-        let _revision_guard = self.revision_locks.acquire(revision_id).await;
+        let _revision_guard = acquire_revision_lock(&self.paths.identity, revision_id).await;
         let record = self.revision_after_wait(&observed).await?;
         self.faults
             .checkpoint(StoreFaultPoint::WriteAfterLock)
@@ -366,26 +326,40 @@ impl SkillRevisionStore {
         }
         let update = self.refresh_staging_metadata(&record, &root).await;
         if let Err(error) = update {
-            let restore = match previous {
-                Some(previous) => {
-                    atomic_replace_file(
-                        &root,
-                        relative_path,
-                        &previous.bytes,
-                        previous.mode,
-                        &self.faults,
-                    )
-                    .await
+            let restore = async {
+                self.faults.check(StoreFaultPoint::WriteRestore)?;
+                match previous {
+                    Some(previous) => {
+                        atomic_replace_file(
+                            &root,
+                            relative_path,
+                            &previous.bytes,
+                            previous.mode,
+                            &self.faults,
+                        )
+                        .await
+                    }
+                    None => remove_regular_file_nofollow(&root, relative_path).await,
                 }
-                None => remove_regular_file_nofollow(&root, relative_path).await,
-            };
+            }
+            .await;
+            if let Err(restore_error) = restore {
+                let directory_cleanup = remove_created_directories(&created_directories).await;
+                let primary = combine_operation_errors(
+                    error,
+                    [
+                        ("file restore", Err(restore_error)),
+                        ("parent cleanup", directory_cleanup),
+                    ],
+                );
+                return Err(self
+                    .isolate_failed_staging_write(&record, &root, primary)
+                    .await);
+            }
             let directory_cleanup = remove_created_directories(&created_directories).await;
             return Err(combine_operation_errors(
                 error,
-                [
-                    ("file restore", restore),
-                    ("parent cleanup", directory_cleanup),
-                ],
+                [("parent cleanup", directory_cleanup)],
             ));
         }
         Ok(())
@@ -393,7 +367,7 @@ impl SkillRevisionStore {
 
     pub async fn promote_revision(&self, revision_id: &str) -> anyhow::Result<StoredSkillRevision> {
         let observed = self.staging_record(revision_id).await?;
-        let _revision_guard = self.revision_locks.acquire(revision_id).await;
+        let _revision_guard = acquire_revision_lock(&self.paths.identity, revision_id).await;
         let record = self.revision_after_wait(&observed).await?;
         self.faults
             .checkpoint(StoreFaultPoint::PromoteAfterLock)
@@ -410,16 +384,20 @@ impl SkillRevisionStore {
             .join("revisions");
         let incoming_root = self.paths.managed.join(".incoming");
         ensure_directory_contained(&self.paths.managed, &self.paths.managed, "managed").await?;
-        tokio::fs::create_dir_all(&package_root).await?;
-        tokio::fs::create_dir_all(&incoming_root).await?;
+        let package_relative = PathBuf::from(record.package_id.as_str()).join("revisions");
+        ensure_store_directory(&self.paths.managed, &package_relative).await?;
+        ensure_store_directory(&self.paths.managed, Path::new(".incoming")).await?;
         ensure_directory_contained(&self.paths.managed, &package_root, "managed").await?;
         ensure_directory_contained(&self.paths.managed, &incoming_root, "managed").await?;
-        let incoming = incoming_root.join(format!("{revision_id}-{}", uuid::Uuid::new_v4()));
+        let incoming_name = format!("{revision_id}-{}", uuid::Uuid::new_v4());
+        let incoming_relative = PathBuf::from(".incoming").join(&incoming_name);
+        let incoming = incoming_root.join(&incoming_name);
         let destination = package_root.join(revision_id);
+        let destination_relative = package_relative.join(revision_id);
         let destination_storage = storage_path(&destination)?;
-        reject_path_exists(&destination).await?;
 
-        if let Err(error) = copy_package_tree(
+        reserve_store_directory(&self.paths.managed, &incoming_relative).await?;
+        if let Err(error) = copy_package_tree_into_reserved(
             &staged,
             &incoming,
             self.limits.package_limits(),
@@ -433,7 +411,8 @@ impl SkillRevisionStore {
                 .await;
         }
         transition.advance(TransitionPhase::IncomingCopied);
-        let incoming_hash = match hash_package_tree(&incoming).await {
+        let incoming_hash = match secure_package_hash(&incoming, self.limits.package_limits()).await
+        {
             Ok(hash) => hash,
             Err(error) => {
                 return self
@@ -455,7 +434,8 @@ impl SkillRevisionStore {
             .await;
         let reserve = async {
             self.faults.check(StoreFaultPoint::PromoteIncomingRename)?;
-            reserve_and_copy_package_tree(
+            reserve_store_directory(&self.paths.managed, &destination_relative).await?;
+            copy_package_tree_into_reserved(
                 &incoming,
                 &destination,
                 self.limits.package_limits(),
@@ -523,7 +503,11 @@ impl SkillRevisionStore {
         let database_result = async {
             self.faults.check(StoreFaultPoint::PromoteDatabase)?;
             self.state
-                .promote_revision_record_with_metadata(revision_id, promotion)
+                .promote_revision_record_with_metadata_cas(
+                    revision_id,
+                    SkillRevisionExpectation::from(&record),
+                    promotion,
+                )
                 .await
                 .context("promotion transition failed")
         }
@@ -575,7 +559,7 @@ impl SkillRevisionStore {
         if observed.status == SkillRevisionStatus::Quarantined {
             anyhow::bail!("revision is already quarantined: {revision_id}");
         }
-        let _revision_guard = self.revision_locks.acquire(revision_id).await;
+        let _revision_guard = acquire_revision_lock(&self.paths.identity, revision_id).await;
         let record = self.revision_after_wait(&observed).await?;
         self.faults
             .checkpoint(StoreFaultPoint::QuarantineAfterLock)
@@ -592,18 +576,19 @@ impl SkillRevisionStore {
         let quarantine_incoming_root = self.paths.quarantine.join(".incoming");
         ensure_directory_contained(&self.paths.quarantine, &self.paths.quarantine, "quarantine")
             .await?;
-        tokio::fs::create_dir_all(&quarantine_incoming_root).await?;
+        ensure_store_directory(&self.paths.quarantine, Path::new(".incoming")).await?;
         ensure_directory_contained(
             &self.paths.quarantine,
             &quarantine_incoming_root,
             "quarantine",
         )
         .await?;
-        let incoming =
-            quarantine_incoming_root.join(format!("{revision_id}-{}", uuid::Uuid::new_v4()));
+        let incoming_name = format!("{revision_id}-{}", uuid::Uuid::new_v4());
+        let incoming_relative = PathBuf::from(".incoming").join(&incoming_name);
+        let incoming = quarantine_incoming_root.join(&incoming_name);
         let destination = self.paths.quarantine.join(revision_id);
-        reject_path_exists(&destination).await?;
-        if let Err(error) = copy_package_tree(
+        reserve_store_directory(&self.paths.quarantine, &incoming_relative).await?;
+        if let Err(error) = copy_package_tree_into_reserved(
             &source,
             &incoming,
             self.limits.package_limits(),
@@ -620,7 +605,8 @@ impl SkillRevisionStore {
         let reserve = async {
             self.faults
                 .check(StoreFaultPoint::QuarantineIncomingRename)?;
-            reserve_and_copy_package_tree(
+            reserve_store_directory(&self.paths.quarantine, Path::new(revision_id)).await?;
+            copy_package_tree_into_reserved(
                 &incoming,
                 &destination,
                 self.limits.package_limits(),
@@ -670,7 +656,13 @@ impl SkillRevisionStore {
         let database_result = async {
             self.faults.check(StoreFaultPoint::QuarantineDatabase)?;
             self.state
-                .quarantine_revision_record(revision_id, &storage_path(&destination)?, reason)
+                .quarantine_revision_record_cas(
+                    revision_id,
+                    &storage_path(&destination)?,
+                    reason,
+                    SkillRevisionExpectation::from(&record),
+                    None,
+                )
                 .await
                 .context("quarantine transition failed")
         }
@@ -758,8 +750,8 @@ impl SkillRevisionStore {
         record: &SkillRevisionRecord,
         root: &Path,
     ) -> anyhow::Result<SkillRevisionMetadata> {
-        measure_package_tree(root, self.limits.package_limits(), None).await?;
-        let loaded = SkillPackageDescriptor::load(root).await?;
+        let snapshot = secure_package_snapshot(root, self.limits.package_limits()).await?;
+        let loaded = snapshot.descriptor;
         loaded.descriptor.validate()?;
         if loaded.descriptor.id != record.package_id {
             anyhow::bail!(
@@ -770,10 +762,102 @@ impl SkillRevisionStore {
         }
         Ok(SkillRevisionMetadata {
             version: loaded.descriptor.version.to_string(),
-            content_hash: hash_package_tree(root).await?,
+            content_hash: snapshot.content_hash,
             descriptor_json: serde_json::to_value(&loaded.descriptor)?,
             validation_json: json!({"status": "valid"}),
         })
+    }
+
+    async fn isolate_failed_staging_write(
+        &self,
+        record: &SkillRevisionRecord,
+        source: &Path,
+        primary: anyhow::Error,
+    ) -> anyhow::Error {
+        let metadata = match self.final_metadata(record, source).await {
+            Ok(metadata) => metadata,
+            Err(error) => return with_compensation(primary, error),
+        };
+        let destination = self.paths.quarantine.join(&record.revision_id);
+        let reserved =
+            reserve_store_directory(&self.paths.quarantine, Path::new(&record.revision_id)).await;
+        let copied = match reserved {
+            Ok(()) => {
+                let copy = async {
+                    self.faults.check(StoreFaultPoint::WriteIsolationCopy)?;
+                    copy_package_tree_into_reserved(
+                        source,
+                        &destination,
+                        self.limits.package_limits(),
+                        &self.faults,
+                        StoreFaultPoint::QuarantineCopyFile,
+                    )
+                    .await
+                }
+                .await;
+                match copy {
+                    Ok(()) => true,
+                    Err(error) => {
+                        let cleanup = remove_tree_if_exists(&destination).await;
+                        let recovery = combine_operation_errors(
+                            error,
+                            [("failed isolation cleanup", cleanup)],
+                        );
+                        self.record_maintenance_issue(
+                            &record.revision_id,
+                            "staging_write_isolation_copy",
+                            source,
+                            &recovery,
+                        );
+                        false
+                    }
+                }
+            }
+            Err(error) => {
+                self.record_maintenance_issue(
+                    &record.revision_id,
+                    "staging_write_isolation_reservation",
+                    source,
+                    &error,
+                );
+                false
+            }
+        };
+        let authoritative = if copied { &destination } else { source };
+        let database = async {
+            self.faults.check(StoreFaultPoint::WriteIsolationDatabase)?;
+            self.state
+                .quarantine_revision_record_cas(
+                    &record.revision_id,
+                    &storage_path(authoritative)?,
+                    "staging metadata update and file restore both failed",
+                    SkillRevisionExpectation::from(record),
+                    Some(metadata),
+                )
+                .await
+        }
+        .await;
+        match database {
+            Ok(_) if copied => {
+                let cleanup = remove_tree_if_exists(source).await;
+                combine_operation_errors(primary, [("staging source cleanup", cleanup)])
+            }
+            Ok(_) => primary,
+            Err(error) => {
+                let cleanup = if copied {
+                    remove_tree_if_exists(&destination).await
+                } else {
+                    Ok(())
+                };
+                combine_operation_errors(
+                    primary,
+                    [
+                        ("write isolation database transition", Err(error)),
+                        ("write isolation copy cleanup", cleanup),
+                    ],
+                )
+            }
+        }
     }
 
     fn expected_revision_path(&self, record: &SkillRevisionRecord) -> anyhow::Result<PathBuf> {
@@ -878,80 +962,4 @@ impl SkillRevisionStore {
             .push(issue.clone());
         issue
     }
-}
-
-fn stored_revision(
-    record: SkillRevisionRecord,
-    path: PathBuf,
-    maintenance_issues: Vec<SkillStoreMaintenanceIssue>,
-) -> StoredSkillRevision {
-    StoredSkillRevision {
-        revision_id: record.revision_id,
-        package_id: record.package_id,
-        path,
-        content_hash: record.content_hash,
-        maintenance_issues,
-    }
-}
-
-fn ensure_exact_path(actual: &Path, expected: &Path, label: &str) -> anyhow::Result<()> {
-    if actual != expected {
-        anyhow::bail!(
-            "{label} storage path mismatch: expected {}, found {}",
-            expected.display(),
-            actual.display()
-        );
-    }
-    Ok(())
-}
-
-fn storage_path(path: &Path) -> anyhow::Result<String> {
-    path.to_str()
-        .map(ToOwned::to_owned)
-        .with_context(|| format!("skill storage path must be UTF-8: {}", path.display()))
-}
-
-async fn reject_path_exists(path: &Path) -> anyhow::Result<()> {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(_) => anyhow::bail!("skill store destination already exists: {}", path.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-async fn remove_tree_if_exists(path: &Path) -> anyhow::Result<()> {
-    match tokio::fs::remove_dir_all(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-async fn cleanup_created_directories_error(
-    error: anyhow::Error,
-    created_directories: &[PathBuf],
-) -> anyhow::Result<()> {
-    match remove_created_directories(created_directories).await {
-        Ok(()) => Err(error),
-        Err(cleanup) => Err(with_compensation(error, cleanup)),
-    }
-}
-
-fn combine_operation_errors<const N: usize>(
-    primary: anyhow::Error,
-    compensations: [(&str, anyhow::Result<()>); N],
-) -> anyhow::Error {
-    let failures = compensations
-        .into_iter()
-        .filter_map(|(label, result)| result.err().map(|error| format!("{label}: {error:#}")))
-        .collect::<Vec<_>>();
-    if failures.is_empty() {
-        primary
-    } else {
-        primary.context(format!("compensation failed: {}", failures.join("; ")))
-    }
-}
-
-fn with_compensation(primary: anyhow::Error, compensation: anyhow::Error) -> anyhow::Error {
-    primary.context(format!("compensation failed: {compensation:#}"))
 }

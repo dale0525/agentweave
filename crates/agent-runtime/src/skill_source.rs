@@ -3,21 +3,18 @@ use crate::skill_state::{
     SkillLayerRecord, SkillRevisionRecord, SkillRevisionStatus, SkillStateStore,
 };
 use crate::skill_store::{SkillRevisionStore, SkillStorePaths};
+use crate::skill_store_secure_fs::{
+    secure_package_hash, secure_package_snapshot, secure_package_snapshot_beneath,
+    unbounded_package_limits,
+};
 use anyhow::Context;
 use async_trait::async_trait;
 use icu_casemap::CaseMapper;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use tokio::io::AsyncReadExt;
 use unicode_normalization::UnicodeNormalization;
-
-const TREE_HASH_DOMAIN: &[u8] = b"general-agent.skill-package-tree";
-const TREE_HASH_VERSION: u32 = 1;
-const TREE_HASH_FILE_ENTRY: u8 = 1;
-const TREE_HASH_READ_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SkillLayer {
@@ -97,7 +94,8 @@ impl SkillSource for DirectorySkillSource {
         let mut packages = Vec::with_capacity(roots.len());
         let mut seen = BTreeMap::new();
         for root in roots {
-            let loaded = SkillPackageDescriptor::load(&root).await?;
+            let snapshot = secure_package_snapshot(&root, unbounded_package_limits()).await?;
+            let loaded = snapshot.descriptor;
             loaded.descriptor.validate()?;
             if let Some(previous_root) =
                 seen.insert(loaded.descriptor.id.clone(), loaded.root.clone())
@@ -112,7 +110,7 @@ impl SkillSource for DirectorySkillSource {
             }
             packages.push(DiscoveredSkillPackage {
                 layer: self.layer,
-                content_hash: hash_package_tree(&loaded.root).await?,
+                content_hash: snapshot.content_hash,
                 root: loaded.root,
                 descriptor: loaded.descriptor,
                 warnings: loaded.warnings,
@@ -179,7 +177,6 @@ impl ManagedSkillSource {
         installation_package: &crate::skill_package::SkillPackageId,
         source_layer: SkillLayerRecord,
         revision_id: &str,
-        canonical_managed_root: &Path,
     ) -> anyhow::Result<DiscoveredSkillPackage> {
         if source_layer != SkillLayerRecord::Managed {
             anyhow::bail!(
@@ -194,35 +191,22 @@ impl ManagedSkillSource {
             .with_context(|| format!("active skill revision not found: {revision_id}"))?;
         validate_managed_record(&revision, installation_package, &self.paths.managed)?;
         let stored_path = PathBuf::from(&revision.storage_path);
-        let metadata = tokio::fs::symlink_metadata(&stored_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to inspect managed revision {}",
-                    stored_path.display()
-                )
-            })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            anyhow::bail!(
-                "managed revision root must be a real directory: {}",
+        let relative = PathBuf::from(revision.package_id.as_str())
+            .join("revisions")
+            .join(&revision.revision_id);
+        let snapshot = secure_package_snapshot_beneath(
+            &self.paths.managed,
+            &relative,
+            self.store.package_limits(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect managed revision {}",
                 stored_path.display()
-            );
-        }
-        let canonical_path = tokio::fs::canonicalize(&stored_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to canonicalize managed revision {}",
-                    stored_path.display()
-                )
-            })?;
-        if !canonical_path.starts_with(canonical_managed_root) {
-            anyhow::bail!(
-                "managed revision escapes managed root: {}",
-                stored_path.display()
-            );
-        }
-        let loaded = SkillPackageDescriptor::load(&stored_path).await?;
+            )
+        })?;
+        let loaded = snapshot.descriptor;
         loaded.descriptor.validate()?;
         if loaded.descriptor.id != revision.package_id {
             anyhow::bail!(
@@ -244,7 +228,7 @@ impl ManagedSkillSource {
                 revision.revision_id
             );
         }
-        let content_hash = hash_package_tree(&stored_path).await?;
+        let content_hash = snapshot.content_hash;
         if content_hash != revision.content_hash {
             anyhow::bail!(
                 "managed content hash mismatch for revision {}",
@@ -286,11 +270,13 @@ impl SkillSource for ManagedSkillSource {
                 self.paths.managed.display()
             );
         }
-        let canonical_managed_root = tokio::fs::canonicalize(&self.paths.managed).await?;
         let installations = self.state.list_active_installations().await?;
         let mut discovered = Vec::new();
         let mut issues = Vec::new();
         for installation in installations {
+            if installation.source_layer != SkillLayerRecord::Managed {
+                continue;
+            }
             let revision_id = installation
                 .active_revision_id
                 .as_deref()
@@ -300,7 +286,6 @@ impl SkillSource for ManagedSkillSource {
                     &installation.package_id,
                     installation.source_layer,
                     revision_id,
-                    &canonical_managed_root,
                 )
                 .await
             {
@@ -391,127 +376,7 @@ fn validate_managed_record(
 }
 
 pub async fn hash_package_tree(root: &Path) -> anyhow::Result<String> {
-    let metadata = tokio::fs::symlink_metadata(root)
-        .await
-        .with_context(|| format!("failed to inspect skill package root {}", root.display()))?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("skill package root cannot be a symlink: {}", root.display());
-    }
-    if !metadata.is_dir() {
-        anyhow::bail!("skill package root must be a directory: {}", root.display());
-    }
-
-    let mut files = collect_relative_files(root).await?;
-    files.sort_by(|left, right| left.canonical.cmp(&right.canonical));
-
-    let mut hasher = Sha256::new();
-    hasher.update(TREE_HASH_DOMAIN);
-    hasher.update(TREE_HASH_VERSION.to_be_bytes());
-    for file in files {
-        hash_file_entry(root, &file, &mut hasher).await?;
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
-#[derive(Debug)]
-struct CanonicalPackageFile {
-    relative: PathBuf,
-    canonical: Vec<u8>,
-}
-
-async fn collect_relative_files(root: &Path) -> anyhow::Result<Vec<CanonicalPackageFile>> {
-    let mut files = Vec::new();
-    let mut stack = vec![PathBuf::new()];
-    let mut portable_paths = BTreeMap::new();
-    while let Some(relative_directory) = stack.pop() {
-        let directory = root.join(&relative_directory);
-        let mut entries = tokio::fs::read_dir(&directory)
-            .await
-            .with_context(|| format!("failed to read package directory {}", directory.display()))?;
-        while let Some(entry) = entries.next_entry().await? {
-            let relative = relative_directory.join(entry.file_name());
-            let path = root.join(&relative);
-            let metadata = tokio::fs::symlink_metadata(&path)
-                .await
-                .with_context(|| format!("failed to inspect package path {}", path.display()))?;
-            let kind = metadata.file_type();
-            if kind.is_symlink() {
-                anyhow::bail!("skill package cannot contain symlinks: {}", path.display());
-            }
-            let identity = portable_path_identity(&relative)?;
-            register_portable_path(&mut portable_paths, &relative, &identity.collision_key)?;
-            if kind.is_dir() {
-                stack.push(relative);
-                continue;
-            }
-            if kind.is_file() {
-                files.push(CanonicalPackageFile {
-                    canonical: identity.canonical,
-                    relative,
-                });
-                continue;
-            }
-            anyhow::bail!(
-                "skill package cannot contain special files: {}",
-                path.display()
-            );
-        }
-    }
-    Ok(files)
-}
-
-async fn hash_file_entry(
-    root: &Path,
-    file: &CanonicalPackageFile,
-    hasher: &mut Sha256,
-) -> anyhow::Result<()> {
-    let path = root.join(&file.relative);
-    let metadata = tokio::fs::symlink_metadata(&path)
-        .await
-        .with_context(|| format!("failed to inspect package file {}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("skill package cannot contain symlinks: {}", path.display());
-    }
-    if !metadata.is_file() {
-        anyhow::bail!(
-            "skill package path must remain a regular file: {}",
-            path.display()
-        );
-    }
-
-    let path_length = u64::try_from(file.canonical.len())
-        .context("canonical package path is too long to hash")?;
-    let content_length = metadata.len();
-    hasher.update([TREE_HASH_FILE_ENTRY]);
-    hasher.update(path_length.to_be_bytes());
-    hasher.update(&file.canonical);
-    hasher.update(content_length.to_be_bytes());
-
-    let mut source = tokio::fs::File::open(&path)
-        .await
-        .with_context(|| format!("failed to open package file {}", path.display()))?;
-    let mut buffer = vec![0; TREE_HASH_READ_BUFFER_SIZE];
-    let mut bytes_read = 0_u64;
-    loop {
-        let count = source
-            .read(&mut buffer)
-            .await
-            .with_context(|| format!("failed to read package file {}", path.display()))?;
-        if count == 0 {
-            break;
-        }
-        bytes_read = bytes_read
-            .checked_add(u64::try_from(count)?)
-            .context("package file length overflowed while hashing")?;
-        hasher.update(&buffer[..count]);
-    }
-    if bytes_read != content_length {
-        anyhow::bail!(
-            "package file changed while hashing: {} (expected {content_length} bytes, read {bytes_read})",
-            path.display()
-        );
-    }
-    Ok(())
+    secure_package_hash(root, unbounded_package_limits()).await
 }
 
 #[derive(Debug)]

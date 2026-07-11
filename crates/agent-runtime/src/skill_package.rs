@@ -220,8 +220,30 @@ impl SkillPackageDescriptor {
             );
         }
 
-        let descriptor_path = package_root.join("general-agent.json");
-        if let Some(bytes) = read_optional_file(&descriptor_path).await? {
+        let descriptor_bytes = read_optional_file(&package_root.join("general-agent.json")).await?;
+        if let Some(bytes) = &descriptor_bytes {
+            let value: serde_json::Value = serde_json::from_slice(bytes)?;
+            if value.get("schemaVersion").is_some() {
+                return Self::load_from_file_bytes(package_root, descriptor_bytes, None, None);
+            }
+        }
+        let runtime_manifest = read_optional_file(&package_root.join("skill.json")).await?;
+        let instructions_file = read_optional_file(&package_root.join("SKILL.md")).await?;
+        Self::load_from_file_bytes(
+            package_root,
+            descriptor_bytes,
+            runtime_manifest,
+            instructions_file,
+        )
+    }
+
+    pub(crate) fn load_from_file_bytes(
+        package_root: &Path,
+        descriptor_bytes: Option<Vec<u8>>,
+        runtime_manifest: Option<Vec<u8>>,
+        instructions_file: Option<Vec<u8>>,
+    ) -> anyhow::Result<LoadedPackageDescriptor> {
+        if let Some(bytes) = descriptor_bytes {
             let value: serde_json::Value = serde_json::from_slice(&bytes)?;
             if value.get("schemaVersion").is_some() {
                 let descriptor: SkillPackageDescriptor = serde_json::from_value(value)?;
@@ -233,24 +255,28 @@ impl SkillPackageDescriptor {
                 });
             }
             let metadata: LegacyPackageMetadata = serde_json::from_value(value)?;
-            return load_legacy_descriptor(package_root, Some(metadata)).await;
+            return load_legacy_descriptor_from_files(
+                package_root,
+                Some(metadata),
+                runtime_manifest,
+                instructions_file,
+            );
         }
-
-        load_legacy_descriptor(package_root, None).await
+        load_legacy_descriptor_from_files(package_root, None, runtime_manifest, instructions_file)
     }
 }
 
-async fn load_legacy_descriptor(
+fn load_legacy_descriptor_from_files(
     package_root: &Path,
     metadata: Option<LegacyPackageMetadata>,
+    runtime_manifest: Option<Vec<u8>>,
+    instructions_file: Option<Vec<u8>>,
 ) -> anyhow::Result<LoadedPackageDescriptor> {
     let folder = package_root
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow::anyhow!("legacy package folder must be UTF-8"))?;
     let id = legacy_package_id(folder)?;
-    let runtime_manifest = read_optional_file(&package_root.join("skill.json")).await?;
-    let instructions_file = read_optional_file(&package_root.join("SKILL.md")).await?;
     if runtime_manifest.is_none() && instructions_file.is_none() {
         anyhow::bail!(
             "legacy skill package must contain SKILL.md or skill.json: {}",

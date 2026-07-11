@@ -14,8 +14,8 @@ use uuid::Uuid;
 pub use crate::skill_state_rows::{
     NewSkillApproval, NewSkillRevision, SkillApprovalRecord, SkillApprovalStatus, SkillAuditRecord,
     SkillCircuitStateRecord, SkillInstallStatus, SkillInstallationRecord, SkillLayerRecord,
-    SkillRevisionMetadata, SkillRevisionPromotion, SkillRevisionRecord, SkillRevisionStatus,
-    SkillSnapshotRecord, SkillSnapshotStatus,
+    SkillRevisionExpectation, SkillRevisionMetadata, SkillRevisionPromotion, SkillRevisionRecord,
+    SkillRevisionStatus, SkillSnapshotRecord, SkillSnapshotStatus,
 };
 
 #[derive(Clone)]
@@ -36,7 +36,6 @@ impl SkillStateStore {
         Uuid::new_v4().to_string()
     }
 
-    /// Compatibility entry point for importing already-validated immutable content directly as a
     /// managed revision. Runtime authoring and staging flows must use
     /// [`Self::create_staging_revision_record`] followed by [`Self::promote_revision_record`].
     pub async fn create_revision(
@@ -248,6 +247,49 @@ impl SkillStateStore {
                 return revision_from_row(&row);
             }
             promotion_rejection(&mut *tx, revision_id).await
+        }
+        .await;
+        crate::skill_state_transactions::finish(tx, result).await
+    }
+
+    pub async fn promote_revision_record_with_metadata_cas(
+        &self,
+        revision_id: &str,
+        expected: SkillRevisionExpectation,
+        promotion: SkillRevisionPromotion,
+    ) -> anyhow::Result<SkillRevisionRecord> {
+        validate_uuid_v4("revision_id", revision_id)?;
+        validate_storage_path(&expected.storage_path)?;
+        validate_storage_path(&promotion.storage_path)?;
+        let descriptor_json = serde_json::to_string(&promotion.descriptor_json)?;
+        let validation_json = serde_json::to_string(&promotion.validation_json)?;
+        let mut tx = crate::skill_state_transactions::begin_immediate(self.storage.pool()).await?;
+        let result = async {
+            let query = format!(
+                r#"UPDATE skill_revisions
+                   SET version = ?, content_hash = ?, storage_path = ?, descriptor_json = ?,
+                       validation_json = ?, lifecycle_status = 'managed'
+                   WHERE revision_id = ? AND lifecycle_status = ? AND version = ?
+                     AND content_hash = ? AND storage_path = ?
+                   RETURNING {REVISION_COLUMNS}"#
+            );
+            let updated = sqlx::query(&query)
+                .bind(&promotion.version)
+                .bind(&promotion.content_hash)
+                .bind(&promotion.storage_path)
+                .bind(&descriptor_json)
+                .bind(&validation_json)
+                .bind(revision_id)
+                .bind(expected.status.as_str())
+                .bind(&expected.version)
+                .bind(&expected.content_hash)
+                .bind(&expected.storage_path)
+                .fetch_optional(&mut *tx)
+                .await?;
+            if let Some(row) = updated {
+                return revision_from_row(&row);
+            }
+            revision_cas_rejection(&mut *tx, revision_id).await
         }
         .await;
         crate::skill_state_transactions::finish(tx, result).await
@@ -540,11 +582,43 @@ impl SkillStateStore {
             .await
     }
 
+    pub async fn quarantine_revision_record_cas(
+        &self,
+        revision_id: &str,
+        quarantined_storage_path: &str,
+        reason: &str,
+        expected: SkillRevisionExpectation,
+        replacement_metadata: Option<SkillRevisionMetadata>,
+    ) -> anyhow::Result<SkillRevisionRecord> {
+        validate_storage_path(quarantined_storage_path)?;
+        validate_storage_path(&expected.storage_path)?;
+        self.quarantine_revision_internal_cas(
+            revision_id,
+            Some(quarantined_storage_path),
+            reason,
+            Some(expected),
+            replacement_metadata,
+        )
+        .await
+    }
+
     async fn quarantine_revision_internal(
         &self,
         revision_id: &str,
         storage_path: Option<&str>,
         reason: &str,
+    ) -> anyhow::Result<SkillRevisionRecord> {
+        self.quarantine_revision_internal_cas(revision_id, storage_path, reason, None, None)
+            .await
+    }
+
+    async fn quarantine_revision_internal_cas(
+        &self,
+        revision_id: &str,
+        storage_path: Option<&str>,
+        reason: &str,
+        expected: Option<SkillRevisionExpectation>,
+        replacement_metadata: Option<SkillRevisionMetadata>,
     ) -> anyhow::Result<SkillRevisionRecord> {
         validate_uuid_v4("revision_id", revision_id)?;
         let now = Utc::now();
@@ -567,7 +641,33 @@ impl SkillStateStore {
                     revision.status.as_str()
                 );
             }
-            let mut validation = match revision.validation_json {
+            if let Some(expected) = &expected
+                && (revision.status != expected.status
+                    || revision.version != expected.version
+                    || revision.content_hash != expected.content_hash
+                    || revision.storage_path != expected.storage_path)
+            {
+                anyhow::bail!(
+                    "skill revision changed since operation observation: {revision_id}"
+                );
+            }
+            let (version, content_hash, descriptor_json, validation_json) =
+                if let Some(metadata) = replacement_metadata {
+                    (
+                        metadata.version,
+                        metadata.content_hash,
+                        serde_json::to_string(&metadata.descriptor_json)?,
+                        metadata.validation_json,
+                    )
+                } else {
+                    (
+                        revision.version.clone(),
+                        revision.content_hash.clone(),
+                        serde_json::to_string(&revision.descriptor_json)?,
+                        revision.validation_json.clone(),
+                    )
+                };
+            let mut validation = match validation_json {
                 Value::Object(map) => map,
                 value => Map::from_iter([("previousValidation".into(), value)]),
             };
@@ -576,16 +676,47 @@ impl SkillStateStore {
             validation.insert("quarantinedAt".into(), Value::String(now.to_rfc3339()));
             let validation = serde_json::to_string(&Value::Object(validation))?;
             let storage_path = storage_path.unwrap_or(&revision.storage_path);
-            let result = sqlx::query(
-                r#"UPDATE skill_revisions
-                   SET storage_path = ?, lifecycle_status = 'quarantined', validation_json = ?
-                   WHERE revision_id = ? AND lifecycle_status IN ('staging', 'managed')"#,
-            )
-            .bind(storage_path)
-            .bind(validation)
-            .bind(revision_id)
-            .execute(&mut *tx)
-            .await?;
+            let result = if let Some(expected) = &expected {
+                sqlx::query(
+                    r#"UPDATE skill_revisions
+                       SET version = ?, content_hash = ?, descriptor_json = ?, storage_path = ?,
+                           lifecycle_status = 'quarantined', validation_json = ?
+                       WHERE revision_id = ? AND lifecycle_status = ? AND version = ?
+                         AND content_hash = ? AND storage_path = ?"#,
+                )
+                .bind(&version)
+                .bind(&content_hash)
+                .bind(&descriptor_json)
+                .bind(storage_path)
+                .bind(&validation)
+                .bind(revision_id)
+                .bind(expected.status.as_str())
+                .bind(&expected.version)
+                .bind(&expected.content_hash)
+                .bind(&expected.storage_path)
+                .execute(&mut *tx)
+                .await?
+            } else {
+                sqlx::query(
+                    r#"UPDATE skill_revisions
+                       SET version = ?, content_hash = ?, descriptor_json = ?, storage_path = ?,
+                           lifecycle_status = 'quarantined', validation_json = ?
+                       WHERE revision_id = ? AND lifecycle_status IN ('staging', 'managed')"#,
+                )
+                .bind(&version)
+                .bind(&content_hash)
+                .bind(&descriptor_json)
+                .bind(storage_path)
+                .bind(&validation)
+                .bind(revision_id)
+                .execute(&mut *tx)
+                .await?
+            };
+            if result.rows_affected() == 0 && expected.is_some() {
+                anyhow::bail!(
+                    "skill revision changed since operation observation: {revision_id}"
+                );
+            }
             ensure_changed(result.rows_affected(), "skill revision", revision_id)?;
             sqlx::query(
                 r#"UPDATE skill_installations
@@ -802,6 +933,24 @@ where
         "skill revision cannot be promoted from {}: {revision_id}",
         status.as_str()
     )
+}
+
+async fn revision_cas_rejection<'e, E>(
+    executor: E,
+    revision_id: &str,
+) -> anyhow::Result<SkillRevisionRecord>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT revision_id FROM skill_revisions WHERE revision_id = ?")
+            .bind(revision_id)
+            .fetch_optional(executor)
+            .await?;
+    if exists.is_none() {
+        anyhow::bail!("skill revision not found: {revision_id}");
+    }
+    anyhow::bail!("skill revision changed since operation observation: {revision_id}")
 }
 
 async fn activation_rejection<'e, E>(
