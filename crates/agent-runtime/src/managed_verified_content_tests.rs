@@ -407,6 +407,20 @@ fn managed_execution_store_reference_comparison_normalizes_windows_text() {
         )
     );
     assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            r"--config=\\?\C:\store\managed\config.json",
+            Path::new(r"C:\store\managed"),
+            true,
+        )
+    );
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            r"--config=\\?\UNC\server\share\managed\config.json",
+            Path::new(r"\\server\share\managed"),
+            true,
+        )
+    );
+    assert!(
         !crate::skill_store_execution::execution_text_references_path(
             r"--config=c:/store/managed-peer/config.json",
             Path::new(r"C:\store\managed"),
@@ -424,6 +438,109 @@ fn managed_execution_store_reference_comparison_resolves_absolute_parent_compone
             false,
         )
     );
+}
+
+#[test]
+fn managed_execution_store_reference_comparison_resolves_embedded_posix_parent_components() {
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            "--config=/temporary/../protected/tool",
+            Path::new("/protected"),
+            false,
+        )
+    );
+}
+
+#[test]
+fn managed_execution_store_reference_comparison_resolves_embedded_windows_parent_components() {
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            r"--config=C:\temporary\..\protected\tool",
+            Path::new(r"C:\protected"),
+            true,
+        )
+    );
+}
+
+#[test]
+fn managed_execution_store_reference_comparison_decodes_file_uris() {
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            "--config=FiLe:///temporary/../protected/tool",
+            Path::new("/protected"),
+            false,
+        )
+    );
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            "--config=file:///C:/temporary/../protected/tool",
+            Path::new(r"C:\protected"),
+            true,
+        )
+    );
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            "--config=file:////server/share/temporary/../protected/tool",
+            Path::new(r"\\server\share\protected"),
+            true,
+        )
+    );
+}
+
+#[test]
+fn managed_execution_store_reference_comparison_decodes_percent_encoded_file_uris() {
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            "--config=FILE:%2f%2f%2ftemporary%2f%2e%2e%2fprotected%2ftool",
+            Path::new("/protected"),
+            false,
+        )
+    );
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            "--config=file:%2f%2f%2fC%3a%2ftemporary%2f%2e%2e%2fprotected%2ftool",
+            Path::new(r"C:\protected"),
+            true,
+        )
+    );
+    assert!(
+        crate::skill_store_execution::execution_text_references_path(
+            "--config=file:%2f%2f%2fC%3a%5ctemporary%5c%2e%2e%5cprotected%5ctool",
+            Path::new(r"C:\protected"),
+            true,
+        )
+    );
+}
+
+#[test]
+fn managed_execution_store_reference_comparison_ignores_adjacent_external_paths() {
+    assert!(
+        !crate::skill_store_execution::execution_text_references_path(
+            "--config=/external/protected/tool,/safe/index.js",
+            Path::new("/protected"),
+            false,
+        )
+    );
+    assert!(
+        !crate::skill_store_execution::execution_text_references_path(
+            "https://protected/tool",
+            Path::new("/protected"),
+            false,
+        )
+    );
+}
+
+#[test]
+fn managed_execution_store_reference_comparison_allows_relative_runtime_arguments() {
+    for value in ["node", "index.js", "node/index.js"] {
+        assert!(
+            !crate::skill_store_execution::execution_text_references_path(
+                value,
+                Path::new("/node"),
+                false,
+            )
+        );
+    }
 }
 
 #[test]

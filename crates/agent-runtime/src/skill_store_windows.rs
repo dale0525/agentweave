@@ -62,6 +62,38 @@ pub(crate) fn normalized_path_is_within(path: &str, root: &str) -> bool {
 }
 
 #[cfg(any(test, windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DirectoryBootstrapComponent {
+    Prefix,
+    Root,
+    Normal,
+}
+
+#[cfg(any(test, windows))]
+#[derive(Default)]
+pub(crate) struct DirectoryBootstrapState {
+    has_prefix: bool,
+    has_root: bool,
+}
+
+#[cfg(any(test, windows))]
+impl DirectoryBootstrapState {
+    pub(crate) fn should_open(&mut self, component: DirectoryBootstrapComponent) -> bool {
+        match component {
+            DirectoryBootstrapComponent::Prefix => {
+                self.has_prefix = true;
+                false
+            }
+            DirectoryBootstrapComponent::Root => {
+                self.has_root = self.has_prefix;
+                self.has_root
+            }
+            DirectoryBootstrapComponent::Normal => self.has_root,
+        }
+    }
+}
+
+#[cfg(any(test, windows))]
 pub(crate) fn finish_directory_child_creation<T, F>(
     create: std::io::Result<()>,
     open: F,
@@ -79,8 +111,9 @@ where
 #[cfg(windows)]
 mod platform {
     use super::{
-        atomic_replace_flags, attributes_are_reparse, component_open_flags, directory_share_mode,
-        lock_file_share_mode, normalized_path_is_within,
+        DirectoryBootstrapComponent, DirectoryBootstrapState, atomic_replace_flags,
+        attributes_are_reparse, component_open_flags, directory_share_mode, lock_file_share_mode,
+        normalized_path_is_within,
     };
     use anyhow::Context;
     use std::ffi::{OsStr, OsString};
@@ -113,9 +146,16 @@ mod platform {
         }
         let mut current = PathBuf::new();
         let mut opened = None;
+        let mut bootstrap = DirectoryBootstrapState::default();
         for component in path.components() {
             current.push(component.as_os_str());
-            if !matches!(component, Component::Normal(_)) {
+            let bootstrap_component = match component {
+                Component::Prefix(_) => DirectoryBootstrapComponent::Prefix,
+                Component::RootDir => DirectoryBootstrapComponent::Root,
+                Component::Normal(_) => DirectoryBootstrapComponent::Normal,
+                Component::CurDir | Component::ParentDir => continue,
+            };
+            if !bootstrap.should_open(bootstrap_component) {
                 continue;
             }
             let file = open_path(

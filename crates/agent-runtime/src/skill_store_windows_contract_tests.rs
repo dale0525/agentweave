@@ -1,9 +1,10 @@
 use crate::skill_store_windows::{
-    FILE_ATTRIBUTE_REPARSE_POINT_FLAG, FILE_FLAG_BACKUP_SEMANTICS_FLAG,
-    FILE_FLAG_OPEN_REPARSE_POINT_FLAG, FILE_SHARE_DELETE_FLAG, FILE_SHARE_READ_FLAG,
-    FILE_SHARE_WRITE_FLAG, MOVEFILE_REPLACE_EXISTING_FLAG, MOVEFILE_WRITE_THROUGH_FLAG,
-    atomic_replace_flags, attributes_are_reparse, component_open_flags, directory_share_mode,
-    finish_directory_child_creation, lock_file_share_mode, normalized_path_is_within,
+    DirectoryBootstrapComponent, DirectoryBootstrapState, FILE_ATTRIBUTE_REPARSE_POINT_FLAG,
+    FILE_FLAG_BACKUP_SEMANTICS_FLAG, FILE_FLAG_OPEN_REPARSE_POINT_FLAG, FILE_SHARE_DELETE_FLAG,
+    FILE_SHARE_READ_FLAG, FILE_SHARE_WRITE_FLAG, MOVEFILE_REPLACE_EXISTING_FLAG,
+    MOVEFILE_WRITE_THROUGH_FLAG, atomic_replace_flags, attributes_are_reparse,
+    component_open_flags, directory_share_mode, finish_directory_child_creation,
+    lock_file_share_mode, normalized_path_is_within,
 };
 
 #[test]
@@ -50,6 +51,31 @@ fn windows_containment_is_case_insensitive_and_component_bounded() {
         r"\\?\C:\Store\Managed-Escape\Revision",
         r"\\?\c:\store\managed"
     ));
+}
+
+#[test]
+fn windows_drive_root_bootstrap_opens_only_after_prefix_and_root() {
+    let mut bootstrap = DirectoryBootstrapState::default();
+
+    assert!(!bootstrap.should_open(DirectoryBootstrapComponent::Prefix));
+    assert!(bootstrap.should_open(DirectoryBootstrapComponent::Root));
+    assert!(bootstrap.should_open(DirectoryBootstrapComponent::Normal));
+}
+
+#[test]
+fn windows_unc_share_root_bootstrap_opens_the_prefix_root() {
+    let mut bootstrap = DirectoryBootstrapState::default();
+
+    assert!(!bootstrap.should_open(DirectoryBootstrapComponent::Prefix));
+    assert!(bootstrap.should_open(DirectoryBootstrapComponent::Root));
+}
+
+#[test]
+fn windows_drive_relative_prefix_never_bootstraps_a_handle() {
+    let mut bootstrap = DirectoryBootstrapState::default();
+
+    assert!(!bootstrap.should_open(DirectoryBootstrapComponent::Prefix));
+    assert!(!bootstrap.should_open(DirectoryBootstrapComponent::Normal));
 }
 
 #[test]

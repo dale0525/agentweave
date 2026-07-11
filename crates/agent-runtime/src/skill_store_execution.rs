@@ -34,39 +34,204 @@ impl PreparedSkillExecution {
 }
 
 pub(crate) fn execution_text_references_path(value: &str, protected: &Path, windows: bool) -> bool {
-    let value = normalize_execution_text(value, windows);
     let protected = normalize_execution_text(&protected.to_string_lossy(), windows)
         .trim_end_matches(if windows { '\\' } else { '/' })
         .to_string();
     if protected.is_empty() {
         return false;
     }
-    let separator = if windows { '\\' } else { '/' };
-    let mut remaining = value.as_str();
-    while let Some(index) = remaining.find(&protected) {
-        let prefix = &remaining[..index];
-        let suffix = &remaining[index + protected.len()..];
-        let prefix_boundary = prefix
-            .chars()
-            .next_back()
-            .is_none_or(is_embedded_path_boundary);
-        if prefix_boundary && (suffix.is_empty() || suffix.starts_with(separator)) {
-            return true;
-        }
-        remaining = &remaining[index + protected.len()..];
-    }
-    let Some(value) = lexically_normalize_absolute(&value, windows) else {
+    let Some(protected) = lexically_normalize_absolute(&protected, windows) else {
         return false;
     };
-    let protected = lexically_normalize_absolute(&protected, windows).unwrap_or(protected);
-    value == protected
-        || value
-            .strip_prefix(&protected)
-            .is_some_and(|suffix| suffix.starts_with(separator))
+
+    text_references_normalized_path(value, &protected, windows)
+        || decoded_file_uri_paths(value, windows)
+            .iter()
+            .any(|path| text_references_normalized_path(path, &protected, windows))
 }
 
 fn is_embedded_path_boundary(character: char) -> bool {
     !character.is_alphanumeric() && !matches!(character, '_' | '-' | '.' | '/' | '\\')
+}
+
+fn text_references_normalized_path(value: &str, protected: &str, windows: bool) -> bool {
+    let separator = if windows { '\\' } else { '/' };
+    absolute_path_candidates(value)
+        .into_iter()
+        .any(|candidate| {
+            let candidate = normalize_execution_text(candidate, windows);
+            lexically_normalize_absolute(&candidate, windows).is_some_and(|candidate| {
+                candidate == protected
+                    || candidate
+                        .strip_prefix(protected)
+                        .is_some_and(|suffix| suffix.starts_with(separator))
+            })
+        })
+}
+
+fn absolute_path_candidates(value: &str) -> Vec<&str> {
+    let bytes = value.as_bytes();
+    let mut candidates = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if is_absolute_path_candidate_start(value, index) {
+            let end = value[index..]
+                .char_indices()
+                .find_map(|(offset, character)| {
+                    (offset > 0
+                        && is_path_candidate_terminator(character)
+                        && !is_windows_extended_prefix_marker(value, index, offset, character))
+                    .then_some(index + offset)
+                })
+                .unwrap_or(bytes.len());
+            candidates.push(&value[index..end]);
+            index = end;
+        } else {
+            index += value[index..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    candidates
+}
+
+fn is_windows_extended_prefix_marker(
+    value: &str,
+    start: usize,
+    offset: usize,
+    character: char,
+) -> bool {
+    let prefix = value.as_bytes().get(start..start + 2);
+    character == '?' && offset == 2 && (prefix == Some(&b"\\\\"[..]) || prefix == Some(&b"//"[..]))
+}
+
+fn is_absolute_path_candidate_start(value: &str, index: usize) -> bool {
+    let bytes = value.as_bytes();
+    let boundary = value[..index]
+        .chars()
+        .next_back()
+        .is_none_or(is_embedded_path_boundary);
+    if !boundary {
+        return false;
+    }
+    let remaining = &bytes[index..];
+    if remaining.starts_with(b"\\\\") {
+        return true;
+    }
+    if remaining.len() >= 3
+        && remaining[0].is_ascii_alphabetic()
+        && remaining[1] == b':'
+        && matches!(remaining[2], b'/' | b'\\')
+    {
+        return true;
+    }
+    if remaining.first() != Some(&b'/') {
+        return false;
+    }
+    let previous = bytes.get(index.wrapping_sub(1)).copied();
+    let before_previous = bytes.get(index.wrapping_sub(2)).copied();
+    let starts_uri_authority = previous == Some(b':') && remaining.get(1) == Some(&b'/');
+    let belongs_to_drive =
+        previous == Some(b':') && before_previous.is_some_and(|byte| byte.is_ascii_alphabetic());
+    !starts_uri_authority && !belongs_to_drive
+}
+
+fn is_path_candidate_terminator(character: char) -> bool {
+    character.is_whitespace()
+        || matches!(
+            character,
+            '\'' | '"'
+                | ','
+                | ';'
+                | '|'
+                | '&'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '?'
+                | '#'
+        )
+}
+
+fn decoded_file_uri_paths(value: &str, windows: bool) -> Vec<String> {
+    let bytes = value.as_bytes();
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while index + 5 <= bytes.len() {
+        let scheme = &bytes[index..index + 5];
+        let boundary = value[..index]
+            .chars()
+            .next_back()
+            .is_none_or(is_embedded_path_boundary);
+        if boundary && scheme.eq_ignore_ascii_case(b"file:") {
+            let payload_start = index + 5;
+            let payload_end = value[payload_start..]
+                .char_indices()
+                .find_map(|(offset, character)| {
+                    is_path_candidate_terminator(character).then_some(payload_start + offset)
+                })
+                .unwrap_or(bytes.len());
+            if let Some(decoded) = percent_decode_utf8(&value[payload_start..payload_end]) {
+                paths.push(normalize_file_uri_path(decoded, windows));
+            }
+            index = payload_end;
+        } else {
+            index += value[index..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    paths
+}
+
+fn percent_decode_utf8(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn normalize_file_uri_path(value: String, windows: bool) -> String {
+    if !windows {
+        return value;
+    }
+    let path = value.trim_start_matches(['/', '\\']);
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+    {
+        return path.to_string();
+    }
+    if value.len() - path.len() >= 2 {
+        format!(r"\\{path}")
+    } else {
+        value
+    }
 }
 
 fn lexically_normalize_absolute(value: &str, windows: bool) -> Option<String> {
