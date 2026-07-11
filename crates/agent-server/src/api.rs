@@ -23,6 +23,7 @@ use model_gateway::{
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
 #[derive(Clone)]
@@ -32,6 +33,7 @@ pub struct AppState {
     skill_manager: SkillManager,
     skills_root: Option<PathBuf>,
     runtime_config: RuntimeConfig,
+    dev_skill_mutations: Arc<Mutex<()>>,
 }
 
 impl AppState {
@@ -55,6 +57,7 @@ impl AppState {
             skill_manager,
             skills_root: None,
             runtime_config,
+            dev_skill_mutations: Arc::new(Mutex::new(())),
         }
     }
 
@@ -97,6 +100,7 @@ impl AppState {
             skill_manager,
             skills_root: None,
             runtime_config: default_runtime_config(),
+            dev_skill_mutations: Arc::new(Mutex::new(())),
         }
     }
 
@@ -267,6 +271,10 @@ impl AppState {
 
     pub(crate) fn skills_root(&self) -> Option<PathBuf> {
         self.skills_root.clone()
+    }
+
+    pub(crate) fn dev_skill_mutations(&self) -> &Mutex<()> {
+        &self.dev_skill_mutations
     }
 }
 

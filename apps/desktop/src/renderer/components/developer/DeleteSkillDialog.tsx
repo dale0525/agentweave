@@ -6,12 +6,14 @@ import { DevSkillPackage } from "../../api";
 import { AppIconButton } from "../AppIconButton";
 
 type DeleteSkillDialogProps = {
+  disabled?: boolean;
   skillPackage: DevSkillPackage | null;
   onConfirm: (skillPackage: DevSkillPackage) => Promise<void>;
   onOpenChange: (open: boolean) => void;
 };
 
 export function DeleteSkillDialog({
+  disabled = false,
   skillPackage,
   onConfirm,
   onOpenChange
@@ -57,7 +59,7 @@ export function DeleteSkillDialog({
             </button>
             <button
               className="developer-danger-button"
-              disabled={!skillPackage || isDeleting}
+              disabled={disabled || !skillPackage || isDeleting}
               onClick={() => void confirmDelete()}
               type="button"
             >

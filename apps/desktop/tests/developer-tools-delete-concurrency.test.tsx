@@ -31,67 +31,63 @@ afterEach(() => {
 });
 
 describe("DeveloperTools delete concurrency", () => {
-  it("ignores stale delete success after a newer delete starts", async () => {
+  it("blocks delete while reload is pending and allows it after publication", async () => {
     const user = userEvent.setup();
-    const staleDelete = deferred<Response>();
-    const latestDelete = deferred<Response>();
-    mockFetch([
+    const pendingReload = deferred<Response>();
+    const fetchMock = mockFetch([
       jsonResponse(inventoryWith("echo", "planning")),
-      jsonResponse(reloadResponse(5, inventoryWith("echo", "planning"))),
-      staleDelete.promise,
-      latestDelete.promise
+      pendingReload.promise,
+      jsonResponse(inventoryWith("planning"))
     ]);
     render(<DeveloperTools onBack={() => undefined} />);
 
-    await user.click(await screen.findByRole("button", { name: "Reload diagnostics" }));
+    const reloadButton = await screen.findByRole("button", { name: "Reload diagnostics" });
     await user.click(screen.getByRole("button", { name: "Delete package" }));
+    const confirmDelete = screen.getByRole("button", { name: "Confirm delete echo" });
+    act(() => {
+      reloadButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      confirmDelete.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await settleDeferred(
+      pendingReload,
+      jsonResponse(reloadResponse(6, inventoryWith("echo", "planning")))
+    );
+    expect(screen.getByText("Active snapshot 6")).toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: "Confirm delete echo" }));
-    await user.click(screen.getByRole("button", { name: /planning/i }));
-    await user.click(screen.getByRole("button", { name: "Delete package" }));
-    await user.click(screen.getByRole("button", { name: "Confirm delete planning" }));
-
-    await settleDeferred(staleDelete, jsonResponse(inventoryWith("planning")));
-
-    expectWorkbenchBusy(true);
-    expect(screen.getByText("skills/planning")).toBeInTheDocument();
-    expect(screen.getByText("Active snapshot 5")).toBeInTheDocument();
-
-    await settleDeferred(latestDelete, jsonResponse(inventoryWith("echo")));
-    expect(await screen.findByText("skills/echo")).toBeInTheDocument();
-    expect(screen.getByText("Active snapshot 5")).toBeInTheDocument();
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
+    expect(screen.getByText("Active snapshot 6")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expectWorkbenchBusy(false);
   });
 
-  it("ignores stale delete failure after a newer delete starts", async () => {
+  it("blocks reload while delete is pending and allows reload after deletion", async () => {
     const user = userEvent.setup();
-    const staleDelete = deferred<Response>();
-    const latestDelete = deferred<Response>();
-    mockFetch([
+    const pendingDelete = deferred<Response>();
+    const fetchMock = mockFetch([
       jsonResponse(inventoryWith("echo", "planning")),
-      jsonResponse(reloadResponse(5, inventoryWith("echo", "planning"))),
-      staleDelete.promise,
-      latestDelete.promise
+      pendingDelete.promise,
+      jsonResponse(reloadResponse(7, inventoryWith("planning")))
     ]);
     render(<DeveloperTools onBack={() => undefined} />);
 
-    await user.click(await screen.findByRole("button", { name: "Reload diagnostics" }));
+    const reloadButton = await screen.findByRole("button", { name: "Reload diagnostics" });
     await user.click(screen.getByRole("button", { name: "Delete package" }));
-    await user.click(screen.getByRole("button", { name: "Confirm delete echo" }));
-    await user.click(screen.getByRole("button", { name: /planning/i }));
-    await user.click(screen.getByRole("button", { name: "Delete package" }));
-    await user.click(screen.getByRole("button", { name: "Confirm delete planning" }));
+    const confirmDelete = screen.getByRole("button", { name: "Confirm delete echo" });
+    act(() => {
+      confirmDelete.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      reloadButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
 
-    await rejectDeferred(staleDelete, new Error("stale delete failed"));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await settleDeferred(pendingDelete, jsonResponse(inventoryWith("planning")));
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
 
-    expectWorkbenchBusy(true);
-    expect(screen.getByText("skills/planning")).toBeInTheDocument();
-    expect(
-      screen.queryByText("Action failed. Keep the current inventory and try again.")
-    ).not.toBeInTheDocument();
-
-    await settleDeferred(latestDelete, jsonResponse(inventoryWith("echo")));
-    expect(await screen.findByText("skills/echo")).toBeInTheDocument();
-    expect(screen.getByText("Active snapshot 5")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reload diagnostics" }));
+    expect(await screen.findByText("Active snapshot 7")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expectWorkbenchBusy(false);
   });
 });
@@ -152,14 +148,6 @@ function deferred<T>() {
 async function settleDeferred<T>(pending: ReturnType<typeof deferred<T>>, value: T) {
   await act(async () => {
     pending.resolve(value);
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-}
-
-async function rejectDeferred<T>(pending: ReturnType<typeof deferred<T>>, error: Error) {
-  await act(async () => {
-    pending.reject(error);
     await Promise.resolve();
     await Promise.resolve();
   });

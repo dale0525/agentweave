@@ -9,6 +9,7 @@ import {
 } from "./skillPackageDiagnostics";
 
 type SkillPackageDetailProps = {
+  isBusy: boolean;
   inventory: DevSkillInventory | null;
   skillPackage: DevSkillPackage | null;
   onDelete: (skillPackage: DevSkillPackage) => void;
@@ -25,6 +26,7 @@ const kindLabel: Record<DevSkillPackageKind, string> = {
 };
 
 export function SkillPackageDetail({
+  isBusy,
   inventory,
   skillPackage,
   onDelete,
@@ -169,7 +171,12 @@ export function SkillPackageDetail({
           <Copy aria-hidden="true" size={16} />
           <span>{copyLabel}</span>
         </button>
-        <button className="developer-secondary-button" onClick={onReload} type="button">
+        <button
+          className="developer-secondary-button"
+          disabled={isBusy}
+          onClick={onReload}
+          type="button"
+        >
           <RefreshCw aria-hidden="true" size={16} />
           <span>Reload diagnostics</span>
         </button>
@@ -180,7 +187,12 @@ export function SkillPackageDetail({
           <h3>Danger zone</h3>
           <p>Deleting this package removes local developer assets for {skillPackage.name}.</p>
         </div>
-        <button className="developer-danger-button" onClick={() => onDelete(skillPackage)} type="button">
+        <button
+          className="developer-danger-button"
+          disabled={isBusy}
+          onClick={() => onDelete(skillPackage)}
+          type="button"
+        >
           <Trash2 aria-hidden="true" size={16} />
           <span>Delete package</span>
         </button>

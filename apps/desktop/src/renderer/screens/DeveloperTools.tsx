@@ -30,6 +30,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
   const [deletePackage, setDeletePackage] = useState<DevSkillPackage | null>(null);
   const inventoryRef = useRef<DevSkillInventory | null>(null);
   const operationSequenceRef = useRef(0);
+  const operationInFlightRef = useRef(false);
 
   useEffect(() => {
     inventoryRef.current = inventory;
@@ -40,14 +41,34 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
     [inventory, selectedId]
   );
 
+  const beginOperation = useCallback(() => {
+    if (operationInFlightRef.current) {
+      return null;
+    }
+    operationInFlightRef.current = true;
+    const operationId = ++operationSequenceRef.current;
+    setIsLoading(true);
+    setActionError(null);
+    return operationId;
+  }, []);
+
+  const finishOperation = useCallback((operationId: number) => {
+    if (operationId !== operationSequenceRef.current) {
+      return;
+    }
+    operationInFlightRef.current = false;
+    setIsLoading(false);
+  }, []);
+
   const loadInventory = useCallback(
     async (
       loader: () => Promise<DevSkillInventory> = listDevSkills,
       options?: { failureMessage?: string; preserveInventoryOnError?: boolean }
     ) => {
-      const operationId = ++operationSequenceRef.current;
-      setIsLoading(true);
-      setActionError(null);
+      const operationId = beginOperation();
+      if (operationId === null) {
+        return;
+      }
       if (!options?.preserveInventoryOnError) {
         setLoadError(null);
       }
@@ -79,12 +100,10 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
         setSelectedId(null);
         setLoadError("Development API is not available");
       } finally {
-        if (operationId === operationSequenceRef.current) {
-          setIsLoading(false);
-        }
+        finishOperation(operationId);
       }
     },
-    []
+    [beginOperation, finishOperation]
   );
 
   useEffect(() => {
@@ -92,9 +111,10 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
   }, [loadInventory]);
 
   const handleDelete = useCallback(async (skillPackage: DevSkillPackage) => {
-    const operationId = ++operationSequenceRef.current;
-    setIsLoading(true);
-    setActionError(null);
+    const operationId = beginOperation();
+    if (operationId === null) {
+      return;
+    }
     try {
       const nextInventory = await deleteDevSkill(skillPackage.id);
       if (operationId !== operationSequenceRef.current) {
@@ -110,16 +130,15 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
       setActionError("Action failed. Keep the current inventory and try again.");
       setDeletePackage(null);
     } finally {
-      if (operationId === operationSequenceRef.current) {
-        setIsLoading(false);
-      }
+      finishOperation(operationId);
     }
-  }, []);
+  }, [beginOperation, finishOperation]);
 
   const handleReload = useCallback(async () => {
-    const operationId = ++operationSequenceRef.current;
-    setIsLoading(true);
-    setActionError(null);
+    const operationId = beginOperation();
+    if (operationId === null) {
+      return;
+    }
     try {
       const response = await reloadDevSkills();
       if (operationId !== operationSequenceRef.current) {
@@ -141,11 +160,9 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
       }
       setActionError("Action failed. Keep the current inventory and try again.");
     } finally {
-      if (operationId === operationSequenceRef.current) {
-        setIsLoading(false);
-      }
+      finishOperation(operationId);
     }
-  }, []);
+  }, [beginOperation, finishOperation]);
 
   return (
     <main className="developer-screen" aria-label="Developer Tools">
@@ -159,6 +176,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
         </div>
         <div className="developer-top-bar-actions">
           <AppIconButton
+            disabled={isLoading}
             label="Refresh skill packages"
             onClick={() => {
               void loadInventory(listDevSkills, {
@@ -170,6 +188,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
             <RefreshCw aria-hidden="true" size={18} />
           </AppIconButton>
           <AppIconButton
+            disabled={isLoading}
             label="Validate all skill packages"
             onClick={() => {
               void loadInventory(validateDevSkills, {
@@ -212,6 +231,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
               onSelect={setSelectedId}
             />
             <SkillPackageDetail
+              isBusy={isLoading}
               inventory={inventory}
               onDelete={setDeletePackage}
               onModify={setPromptPackage}
@@ -234,6 +254,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
         promptPackage={promptPackage}
       />
       <DeleteSkillDialog
+        disabled={isLoading}
         onConfirm={handleDelete}
         onOpenChange={(open) => {
           if (!open) {

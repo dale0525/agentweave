@@ -57,7 +57,7 @@ impl AgentRunner for TestAgent {
 }
 
 #[tokio::test]
-async fn dev_reload_serializes_delete_until_snapshot_and_inventory_are_ready() {
+async fn dev_reload_serializes_delete_across_routers_sharing_app_state() {
     let workspace = unique_test_dir("reload-delete-serialization");
     let skills_root = workspace.join("skills");
     let package_root = skills_root.join("dynamic");
@@ -88,9 +88,10 @@ async fn dev_reload_serializes_delete_until_snapshot_and_inventory_are_ready() {
                     .without_builtin_tools(),
             ),
     );
-    let app = crate::api::router_with_dev_routes(state);
+    let reload_app = crate::api::router_with_dev_routes(state.clone());
+    let delete_app = crate::api::router_with_dev_routes(state.clone());
+    let snapshot_app = crate::api::router_with_dev_routes(state);
 
-    let reload_app = app.clone();
     let reload_task = tokio::spawn(async move {
         reload_app
             .oneshot(post_request("/dev/skills/reload"))
@@ -98,7 +99,6 @@ async fn dev_reload_serializes_delete_until_snapshot_and_inventory_are_ready() {
             .unwrap()
     });
     reload_started.notified().await;
-    let delete_app = app.clone();
     let mut delete_task = tokio::spawn(async move {
         delete_app
             .oneshot(delete_request("/dev/skills/dynamic"))
@@ -130,7 +130,13 @@ async fn dev_reload_serializes_delete_until_snapshot_and_inventory_are_ready() {
     assert_eq!(manager.current_snapshot().generation(), 2);
     assert!(!package_root.exists());
 
-    let tools = read_json(app.oneshot(get_request("/dev/tools")).await.unwrap()).await;
+    let tools = read_json(
+        snapshot_app
+            .oneshot(get_request("/dev/tools"))
+            .await
+            .unwrap(),
+    )
+    .await;
     assert!(
         tools["tools"]
             .as_array()
