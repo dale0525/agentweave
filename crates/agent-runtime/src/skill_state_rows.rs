@@ -232,6 +232,21 @@ pub struct NewSkillRevision {
     pub created_by: String,
 }
 
+pub struct SkillRevisionPromotion {
+    pub version: String,
+    pub content_hash: String,
+    pub storage_path: String,
+    pub descriptor_json: Value,
+    pub validation_json: Value,
+}
+
+pub struct SkillRevisionMetadata {
+    pub version: String,
+    pub content_hash: String,
+    pub descriptor_json: Value,
+    pub validation_json: Value,
+}
+
 pub struct NewSkillApproval {
     pub package_id: SkillPackageId,
     pub revision_id: String,

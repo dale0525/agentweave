@@ -1,10 +1,15 @@
 use crate::skill_package::SkillPackageDescriptor;
+use crate::skill_state::{
+    SkillLayerRecord, SkillRevisionRecord, SkillRevisionStatus, SkillStateStore,
+};
+use crate::skill_store::{SkillRevisionStore, SkillStorePaths};
 use anyhow::Context;
 use async_trait::async_trait;
 use icu_casemap::CaseMapper;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use tokio::io::AsyncReadExt;
 use unicode_normalization::UnicodeNormalization;
 
@@ -120,6 +125,232 @@ impl SkillSource for DirectorySkillSource {
         });
         Ok(packages)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedSkillIssue {
+    pub package_id: String,
+    pub revision_id: String,
+    pub reason: String,
+    pub quarantine_error: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct ManagedSkillSource {
+    paths: SkillStorePaths,
+    state: SkillStateStore,
+    store: SkillRevisionStore,
+    issues: Arc<RwLock<Vec<ManagedSkillIssue>>>,
+}
+
+impl ManagedSkillSource {
+    pub fn new(paths: SkillStorePaths, state: SkillStateStore) -> Self {
+        Self {
+            store: SkillRevisionStore::new(paths.clone(), state.clone()),
+            paths,
+            state,
+            issues: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub fn issues(&self) -> Vec<ManagedSkillIssue> {
+        self.issues
+            .read()
+            .expect("managed skill issue lock poisoned")
+            .clone()
+    }
+
+    async fn validate_revision(
+        &self,
+        installation_package: &crate::skill_package::SkillPackageId,
+        source_layer: SkillLayerRecord,
+        revision_id: &str,
+        canonical_managed_root: &Path,
+    ) -> anyhow::Result<DiscoveredSkillPackage> {
+        if source_layer != SkillLayerRecord::Managed {
+            anyhow::bail!(
+                "active managed revision installation has non-managed source layer: {}",
+                source_layer.as_str()
+            );
+        }
+        let revision = self
+            .state
+            .get_revision(revision_id)
+            .await?
+            .with_context(|| format!("active skill revision not found: {revision_id}"))?;
+        validate_managed_record(&revision, installation_package, &self.paths.managed)?;
+        let stored_path = PathBuf::from(&revision.storage_path);
+        let metadata = tokio::fs::symlink_metadata(&stored_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to inspect managed revision {}",
+                    stored_path.display()
+                )
+            })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!(
+                "managed revision root must be a real directory: {}",
+                stored_path.display()
+            );
+        }
+        let canonical_path = tokio::fs::canonicalize(&stored_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to canonicalize managed revision {}",
+                    stored_path.display()
+                )
+            })?;
+        if !canonical_path.starts_with(canonical_managed_root) {
+            anyhow::bail!(
+                "managed revision escapes managed root: {}",
+                stored_path.display()
+            );
+        }
+        let loaded = SkillPackageDescriptor::load(&stored_path).await?;
+        loaded.descriptor.validate()?;
+        if loaded.descriptor.id != revision.package_id {
+            anyhow::bail!(
+                "managed descriptor package {} does not match revision package {}",
+                loaded.descriptor.id.as_str(),
+                revision.package_id.as_str()
+            );
+        }
+        let descriptor_json = serde_json::to_value(&loaded.descriptor)?;
+        if descriptor_json != revision.descriptor_json {
+            anyhow::bail!(
+                "managed descriptor metadata mismatch for revision {}",
+                revision.revision_id
+            );
+        }
+        if loaded.descriptor.version.to_string() != revision.version {
+            anyhow::bail!(
+                "managed descriptor version does not match revision {}",
+                revision.revision_id
+            );
+        }
+        let content_hash = hash_package_tree(&stored_path).await?;
+        if content_hash != revision.content_hash {
+            anyhow::bail!(
+                "managed content hash mismatch for revision {}",
+                revision.revision_id
+            );
+        }
+        Ok(DiscoveredSkillPackage {
+            layer: SkillLayer::Managed,
+            root: stored_path,
+            descriptor: loaded.descriptor,
+            content_hash,
+            warnings: loaded.warnings,
+        })
+    }
+}
+
+#[async_trait]
+impl SkillSource for ManagedSkillSource {
+    fn layer(&self) -> SkillLayer {
+        SkillLayer::Managed
+    }
+
+    async fn discover(&self) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
+        let root_metadata = tokio::fs::symlink_metadata(&self.paths.managed)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to inspect managed skill root {}",
+                    self.paths.managed.display()
+                )
+            })?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+            anyhow::bail!(
+                "managed skill root must be a real directory: {}",
+                self.paths.managed.display()
+            );
+        }
+        let canonical_managed_root = tokio::fs::canonicalize(&self.paths.managed).await?;
+        let installations = self.state.list_active_installations().await?;
+        let mut discovered = Vec::new();
+        let mut issues = Vec::new();
+        for installation in installations {
+            let revision_id = installation
+                .active_revision_id
+                .as_deref()
+                .expect("active installation invariant validated by state rows");
+            match self
+                .validate_revision(
+                    &installation.package_id,
+                    installation.source_layer,
+                    revision_id,
+                    &canonical_managed_root,
+                )
+                .await
+            {
+                Ok(package) => discovered.push(package),
+                Err(error) => {
+                    let reason = format!("{error:#}");
+                    let quarantine_error = self
+                        .store
+                        .quarantine_revision(revision_id, &reason)
+                        .await
+                        .err()
+                        .map(|error| format!("{error:#}"));
+                    issues.push(ManagedSkillIssue {
+                        package_id: installation.package_id.as_str().to_string(),
+                        revision_id: revision_id.to_string(),
+                        reason,
+                        quarantine_error,
+                    });
+                }
+            }
+        }
+        discovered.sort_by(|left, right| {
+            left.descriptor
+                .id
+                .cmp(&right.descriptor.id)
+                .then_with(|| left.root.cmp(&right.root))
+        });
+        issues.sort_by(|left, right| {
+            left.package_id
+                .cmp(&right.package_id)
+                .then_with(|| left.revision_id.cmp(&right.revision_id))
+        });
+        *self
+            .issues
+            .write()
+            .expect("managed skill issue lock poisoned") = issues;
+        Ok(discovered)
+    }
+}
+
+fn validate_managed_record(
+    revision: &SkillRevisionRecord,
+    installation_package: &crate::skill_package::SkillPackageId,
+    managed_root: &Path,
+) -> anyhow::Result<()> {
+    if revision.status != SkillRevisionStatus::Managed {
+        anyhow::bail!("active revision {} is not managed", revision.revision_id);
+    }
+    if &revision.package_id != installation_package {
+        anyhow::bail!(
+            "active revision {} belongs to {}, not {}",
+            revision.revision_id,
+            revision.package_id.as_str(),
+            installation_package.as_str()
+        );
+    }
+    let expected = managed_root
+        .join(revision.package_id.as_str())
+        .join("revisions")
+        .join(&revision.revision_id);
+    if Path::new(&revision.storage_path) != expected {
+        anyhow::bail!(
+            "managed storage path mismatch: expected {}, found {}",
+            expected.display(),
+            revision.storage_path
+        );
+    }
+    Ok(())
 }
 
 pub async fn hash_package_tree(root: &Path) -> anyhow::Result<String> {
@@ -252,12 +483,10 @@ struct PortablePathIdentity {
     collision_key: Vec<u8>,
 }
 
-#[cfg(test)]
 pub(crate) fn canonical_relative_path(relative: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(portable_path_identity(relative)?.canonical)
 }
 
-#[cfg(test)]
 pub(crate) fn portable_collision_key(relative: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(portable_path_identity(relative)?.collision_key)
 }
@@ -302,7 +531,7 @@ fn portable_path_identity(relative: &Path) -> anyhow::Result<PortablePathIdentit
     })
 }
 
-fn register_portable_path(
+pub(crate) fn register_portable_path(
     portable_paths: &mut BTreeMap<Vec<u8>, PathBuf>,
     relative: &Path,
     collision_key: &[u8],

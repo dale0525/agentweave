@@ -14,7 +14,8 @@ use uuid::Uuid;
 pub use crate::skill_state_rows::{
     NewSkillApproval, NewSkillRevision, SkillApprovalRecord, SkillApprovalStatus, SkillAuditRecord,
     SkillCircuitStateRecord, SkillInstallStatus, SkillInstallationRecord, SkillLayerRecord,
-    SkillRevisionRecord, SkillRevisionStatus, SkillSnapshotRecord, SkillSnapshotStatus,
+    SkillRevisionMetadata, SkillRevisionPromotion, SkillRevisionRecord, SkillRevisionStatus,
+    SkillSnapshotRecord, SkillSnapshotStatus,
 };
 
 #[derive(Clone)]
@@ -148,23 +149,91 @@ impl SkillStateStore {
         ensure_changed(result.rows_affected(), "skill revision", revision_id)
     }
 
+    pub async fn refresh_staging_revision_metadata(
+        &self,
+        revision_id: &str,
+        metadata: SkillRevisionMetadata,
+    ) -> anyhow::Result<SkillRevisionRecord> {
+        validate_uuid_v4("revision_id", revision_id)?;
+        let descriptor_json = serde_json::to_string(&metadata.descriptor_json)?;
+        let validation_json = serde_json::to_string(&metadata.validation_json)?;
+        let query = format!(
+            r#"UPDATE skill_revisions
+               SET version = ?, content_hash = ?, descriptor_json = ?, validation_json = ?
+               WHERE revision_id = ? AND lifecycle_status = 'staging'
+               RETURNING {REVISION_COLUMNS}"#
+        );
+        let updated = sqlx::query(&query)
+            .bind(&metadata.version)
+            .bind(&metadata.content_hash)
+            .bind(descriptor_json)
+            .bind(validation_json)
+            .bind(revision_id)
+            .fetch_optional(self.storage.pool())
+            .await?;
+        if let Some(row) = updated {
+            return revision_from_row(&row);
+        }
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT lifecycle_status FROM skill_revisions WHERE revision_id = ?",
+        )
+        .bind(revision_id)
+        .fetch_optional(self.storage.pool())
+        .await?;
+        let status = status.with_context(|| format!("skill revision not found: {revision_id}"))?;
+        let status = SkillRevisionStatus::parse(&status)?;
+        anyhow::bail!(
+            "skill revision metadata cannot be refreshed from {}: {revision_id}",
+            status.as_str()
+        )
+    }
+
     pub async fn promote_revision_record(
         &self,
         revision_id: &str,
         managed_storage_path: &str,
     ) -> anyhow::Result<SkillRevisionRecord> {
+        let revision = self
+            .get_revision(revision_id)
+            .await?
+            .with_context(|| format!("skill revision not found: {revision_id}"))?;
+        self.promote_revision_record_with_metadata(
+            revision_id,
+            SkillRevisionPromotion {
+                version: revision.version,
+                content_hash: revision.content_hash,
+                storage_path: managed_storage_path.to_string(),
+                descriptor_json: revision.descriptor_json,
+                validation_json: revision.validation_json,
+            },
+        )
+        .await
+    }
+
+    pub async fn promote_revision_record_with_metadata(
+        &self,
+        revision_id: &str,
+        promotion: SkillRevisionPromotion,
+    ) -> anyhow::Result<SkillRevisionRecord> {
         validate_uuid_v4("revision_id", revision_id)?;
-        validate_storage_path(managed_storage_path)?;
-        let mut tx = self.storage.pool().begin().await?;
+        validate_storage_path(&promotion.storage_path)?;
+        let descriptor_json = serde_json::to_string(&promotion.descriptor_json)?;
+        let validation_json = serde_json::to_string(&promotion.validation_json)?;
+        let mut tx = crate::skill_state_transactions::begin_immediate(self.storage.pool()).await?;
         let result = async {
             let query = format!(
                 r#"UPDATE skill_revisions
-                   SET storage_path = ?, lifecycle_status = 'managed'
+                   SET version = ?, content_hash = ?, storage_path = ?, descriptor_json = ?,
+                       validation_json = ?, lifecycle_status = 'managed'
                    WHERE revision_id = ? AND lifecycle_status = 'staging'
                    RETURNING {REVISION_COLUMNS}"#
             );
             let updated = sqlx::query(&query)
-                .bind(managed_storage_path)
+                .bind(&promotion.version)
+                .bind(&promotion.content_hash)
+                .bind(&promotion.storage_path)
+                .bind(&descriptor_json)
+                .bind(&validation_json)
                 .bind(revision_id)
                 .fetch_optional(&mut *tx)
                 .await?;

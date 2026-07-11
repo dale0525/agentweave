@@ -18,6 +18,8 @@ pub mod skill_state;
 mod skill_state_migration;
 mod skill_state_rows;
 mod skill_state_transactions;
+pub mod skill_store;
+mod skill_store_fs;
 pub mod storage;
 pub mod subagent;
 pub mod tools;
@@ -48,3 +50,9 @@ mod skill_state_migration_tests;
 
 #[cfg(test)]
 mod skill_state_row_snapshot_tests;
+
+#[cfg(test)]
+mod skill_store_tests;
+
+#[cfg(test)]
+mod skill_store_failure_tests;

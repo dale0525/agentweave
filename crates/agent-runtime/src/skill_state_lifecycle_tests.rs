@@ -1,7 +1,7 @@
 use crate::skill_package::SkillPackageId;
 use crate::skill_state::{
     NewSkillApproval, NewSkillRevision, SkillApprovalStatus, SkillInstallStatus, SkillLayerRecord,
-    SkillRevisionStatus, SkillStateStore,
+    SkillRevisionPromotion, SkillRevisionStatus, SkillStateStore,
 };
 use crate::storage::Storage;
 use serde_json::json;
@@ -121,6 +121,53 @@ async fn authoritative_revision_id_drives_staging_promotion_and_activation() {
         .await
         .unwrap();
     assert_eq!(direct.status, SkillRevisionStatus::Managed);
+}
+
+#[tokio::test]
+async fn promotion_atomically_refreshes_final_revision_metadata() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let state = SkillStateStore::new(storage);
+    let package_id = package_id("com.example.calendar");
+    let revision_id = SkillStateStore::allocate_revision_id();
+    state
+        .create_staging_revision_record(
+            &revision_id,
+            revision_input(package_id.clone(), format!("staging/{revision_id}")),
+        )
+        .await
+        .unwrap();
+    let descriptor = json!({
+        "schemaVersion": 1,
+        "id": package_id.as_str(),
+        "version": "2.0.0"
+    });
+    let validation = json!({"status": "valid", "checkedAtPromotion": true});
+    let managed_path = format!("managed/{}/revisions/{revision_id}", package_id.as_str());
+
+    let promoted = state
+        .promote_revision_record_with_metadata(
+            &revision_id,
+            SkillRevisionPromotion {
+                version: "2.0.0".into(),
+                content_hash: "final-content-hash".into(),
+                storage_path: managed_path.clone(),
+                descriptor_json: descriptor.clone(),
+                validation_json: validation.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(promoted.version, "2.0.0");
+    assert_eq!(promoted.content_hash, "final-content-hash");
+    assert_eq!(promoted.storage_path, managed_path);
+    assert_eq!(promoted.descriptor_json, descriptor);
+    assert_eq!(promoted.validation_json, validation);
+    assert_eq!(promoted.status, SkillRevisionStatus::Managed);
+    assert_eq!(
+        state.get_revision(&revision_id).await.unwrap(),
+        Some(promoted)
+    );
 }
 
 #[tokio::test]
