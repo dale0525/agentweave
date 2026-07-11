@@ -71,6 +71,39 @@ async fn failed_reload_keeps_the_previous_snapshot() {
 }
 
 #[tokio::test]
+async fn pre_publish_check_failure_keeps_the_previous_snapshot() {
+    let root = tempdir().unwrap();
+    write_instruction_package(
+        root.path(),
+        "first",
+        "com.example.first",
+        "First",
+        "First body",
+    )
+    .await;
+    let manager = test_manager(root.path()).await;
+    let previous = manager.current_snapshot();
+    write_instruction_package(
+        root.path(),
+        "second",
+        "com.example.second",
+        "Second",
+        "Second body",
+    )
+    .await;
+
+    let error = manager
+        .reload_with_pre_publish(|_| async {
+            Err::<(), _>(anyhow::anyhow!("diagnostics unavailable"))
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("diagnostics unavailable"));
+    assert!(Arc::ptr_eq(&previous, &manager.current_snapshot()));
+}
+
+#[tokio::test]
 async fn published_snapshot_keeps_instruction_content_after_source_changes() {
     let root = tempdir().unwrap();
     let package_root = write_instruction_package(

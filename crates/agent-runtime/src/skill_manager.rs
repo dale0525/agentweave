@@ -8,6 +8,7 @@ use crate::skill_source::SkillSource;
 use anyhow::Context;
 use semver::Version;
 use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
@@ -114,6 +115,19 @@ impl SkillManager {
     }
 
     pub async fn reload(&self) -> anyhow::Result<SkillReloadReport> {
+        let (report, ()) = self.reload_with_pre_publish(|_| async { Ok(()) }).await?;
+        Ok(report)
+    }
+
+    /// Builds a candidate under the reload lock and publishes it only after preparation succeeds.
+    pub async fn reload_with_pre_publish<T, F, Fut>(
+        &self,
+        pre_publish: F,
+    ) -> anyhow::Result<(SkillReloadReport, T)>
+    where
+        F: FnOnce(Arc<SkillSnapshot>) -> Fut,
+        Fut: Future<Output = anyhow::Result<T>>,
+    {
         let _guard = self.inner.reload_lock.lock().await;
         let SkillManagerMode::Dynamic(config) = &self.inner.mode else {
             anyhow::bail!("static skill manager cannot reload");
@@ -124,6 +138,7 @@ impl SkillManager {
             .checked_add(1)
             .context("skill snapshot generation overflow")?;
         let candidate = Arc::new(build_snapshot(config, generation).await?);
+        let prepared = pre_publish(candidate.clone()).await?;
         let report = SkillReloadReport {
             previous_generation: previous.generation(),
             active_generation: candidate.generation(),
@@ -135,7 +150,7 @@ impl SkillManager {
             .current
             .write()
             .expect("skill snapshot lock poisoned") = candidate;
-        Ok(report)
+        Ok((report, prepared))
     }
 
     fn with_mode(

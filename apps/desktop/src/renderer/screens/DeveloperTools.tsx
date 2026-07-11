@@ -29,6 +29,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
   const [promptPackage, setPromptPackage] = useState<DevSkillPackage | "new" | null>(null);
   const [deletePackage, setDeletePackage] = useState<DevSkillPackage | null>(null);
   const inventoryRef = useRef<DevSkillInventory | null>(null);
+  const operationSequenceRef = useRef(0);
 
   useEffect(() => {
     inventoryRef.current = inventory;
@@ -44,6 +45,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
       loader: () => Promise<DevSkillInventory> = listDevSkills,
       options?: { failureMessage?: string; preserveInventoryOnError?: boolean }
     ) => {
+      const operationId = ++operationSequenceRef.current;
       setIsLoading(true);
       setActionError(null);
       if (!options?.preserveInventoryOnError) {
@@ -51,6 +53,9 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
       }
       try {
         const nextInventory = await loader();
+        if (operationId !== operationSequenceRef.current) {
+          return;
+        }
         setInventory(nextInventory);
         setLoadError(null);
         setSelectedId((current) => {
@@ -60,6 +65,9 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
           return nextInventory.packages[0]?.id ?? null;
         });
       } catch {
+        if (operationId !== operationSequenceRef.current) {
+          return;
+        }
         if (options?.preserveInventoryOnError && inventoryRef.current) {
           setActionError(
             options.failureMessage ?? "Action failed. Keep the current inventory and try again."
@@ -71,7 +79,9 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
         setSelectedId(null);
         setLoadError("Development API is not available");
       } finally {
-        setIsLoading(false);
+        if (operationId === operationSequenceRef.current) {
+          setIsLoading(false);
+        }
       }
     },
     []
@@ -95,10 +105,14 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
   }, []);
 
   const handleReload = useCallback(async () => {
+    const operationId = ++operationSequenceRef.current;
     setIsLoading(true);
     setActionError(null);
     try {
       const response = await reloadDevSkills();
+      if (operationId !== operationSequenceRef.current) {
+        return;
+      }
       const nextInventory = response.inventory;
       setInventory(nextInventory);
       setLoadError(null);
@@ -110,9 +124,14 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
       });
       setActiveSnapshotGeneration(response.activeGeneration);
     } catch {
+      if (operationId !== operationSequenceRef.current) {
+        return;
+      }
       setActionError("Action failed. Keep the current inventory and try again.");
     } finally {
-      setIsLoading(false);
+      if (operationId === operationSequenceRef.current) {
+        setIsLoading(false);
+      }
     }
   }, []);
 

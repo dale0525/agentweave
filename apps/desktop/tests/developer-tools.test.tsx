@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -366,7 +366,115 @@ describe("DeveloperTools", () => {
     expect(screen.getAllByText("echo").length).toBeGreaterThan(0);
     expect(screen.queryByText("Development API is not available")).not.toBeInTheDocument();
   });
+
+  it("ignores a stale reload response after a newer refresh completes", async () => {
+    const user = userEvent.setup();
+    const staleReload = deferred<Response>();
+    const latestRefresh = deferred<Response>();
+    mockFetch([
+      jsonResponse(inventoryWith("echo")),
+      jsonResponse(reloadResponse(5, inventoryWith("echo"))),
+      staleReload.promise,
+      latestRefresh.promise
+    ]);
+
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await user.click(await screen.findByRole("button", { name: "Reload diagnostics" }));
+    expect(await screen.findByText("Active snapshot 5")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reload diagnostics" }));
+    await user.click(screen.getByRole("button", { name: "Refresh skill packages" }));
+    latestRefresh.resolve(jsonResponse(inventoryWith("planning")));
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
+
+    await act(async () => {
+      staleReload.resolve(jsonResponse(reloadResponse(6, inventoryWith("echo"))));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("skills/planning")).toBeInTheDocument();
+      expect(screen.getByText("Active snapshot 5")).toBeInTheDocument();
+      expect(screen.queryByText("Active snapshot 6")).not.toBeInTheDocument();
+    });
+  });
+
+  it("ignores a stale refresh failure after a newer reload completes", async () => {
+    const user = userEvent.setup();
+    const staleRefresh = deferred<Response>();
+    const latestReload = deferred<Response>();
+    mockFetch([
+      jsonResponse(inventoryWith("echo")),
+      staleRefresh.promise,
+      latestReload.promise
+    ]);
+
+    render(<DeveloperTools onBack={() => undefined} />);
+
+    await screen.findByText("skills/echo");
+    await user.click(screen.getByRole("button", { name: "Refresh skill packages" }));
+    await user.click(screen.getByRole("button", { name: "Reload diagnostics" }));
+    latestReload.resolve(jsonResponse(reloadResponse(2, inventoryWith("planning"))));
+    expect(await screen.findByText("skills/planning")).toBeInTheDocument();
+    expect(screen.getByText("Active snapshot 2")).toBeInTheDocument();
+
+    await act(async () => {
+      staleRefresh.reject(new Error("stale refresh failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("skills/planning")).toBeInTheDocument();
+      expect(screen.getByText("Active snapshot 2")).toBeInTheDocument();
+      expect(
+        screen.queryByText("Action failed. Keep the current inventory and try again.")
+      ).not.toBeInTheDocument();
+    });
+  });
 });
+
+function inventoryWith(id: string) {
+  return {
+    root: "/repo/skills",
+    packages: [
+      {
+        id,
+        path: id,
+        name: id,
+        description: `${id} package.`,
+        hasSkillMd: true,
+        hasRuntimeManifest: true,
+        runtimeTools: [`${id}_tool`],
+        packageKind: "combined",
+        bundleReady: true,
+        validation: { ok: true, errors: [], warnings: [] }
+      }
+    ]
+  };
+}
+
+function reloadResponse(activeGeneration: number, inventory: ReturnType<typeof inventoryWith>) {
+  return {
+    inventory,
+    previousGeneration: activeGeneration - 1,
+    activeGeneration,
+    activePackages: inventory.packages.length,
+    inactivePackages: 0,
+    reloadStatus: "published"
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
