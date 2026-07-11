@@ -705,21 +705,41 @@ async fn managed_execution_reaps_child_after_stdin_write_failure() {
     let snapshot = SkillSnapshot::build(1, active_set(packages)).await.unwrap();
     let input = json!({"payload": "x".repeat(8 * 1024 * 1024)});
 
-    snapshot
+    let error = snapshot
         .registry()
         .execute("verified_tool", input)
         .await
         .unwrap_err();
+    assert!(
+        error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe)
+        }),
+        "expected stdin write to fail with BrokenPipe, got: {error:#}"
+    );
 
     let pid = tokio::fs::read_to_string(&pid_path).await.unwrap();
     let process = std::process::Command::new("ps")
         .args(["-p", pid.trim(), "-o", "stat="])
         .output()
         .unwrap();
+    let stdout = String::from_utf8_lossy(&process.stdout);
+    let stderr = String::from_utf8_lossy(&process.stderr);
+    assert!(
+        process.stderr.is_empty(),
+        "ps wrote to stderr for child {pid}: status={}, stdout={stdout:?}, stderr={stderr:?}",
+        process.status
+    );
+    assert!(
+        matches!(process.status.code(), Some(0 | 1)),
+        "ps returned an unexpected status for child {pid}: status={}, stdout={stdout:?}, stderr={stderr:?}",
+        process.status
+    );
     assert!(
         process.stdout.is_empty(),
-        "child {pid} was not reaped: {}",
-        String::from_utf8_lossy(&process.stdout)
+        "child {pid} was not reaped: status={}, stdout={stdout:?}, stderr={stderr:?}",
+        process.status
     );
 }
 
