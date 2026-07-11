@@ -120,6 +120,7 @@ async fn activation_rejects_missing_or_wrong_package_revision_without_writes() {
     let state = SkillStateStore::new(storage);
     let calendar = package_id("com.example.calendar");
     let mail = package_id("com.example.mail");
+    let missing_revision = uuid::Uuid::new_v4().to_string();
     let revision = state
         .create_revision(new_revision(calendar.clone()))
         .await
@@ -129,7 +130,7 @@ async fn activation_rejects_missing_or_wrong_package_revision_without_writes() {
         state
             .activate_revision(
                 &calendar,
-                "missing-revision",
+                &missing_revision,
                 SkillLayerRecord::Managed,
                 "owner-1",
             )
@@ -195,7 +196,7 @@ async fn revision_round_trip_and_validation_update_are_typed() {
     );
     assert!(
         state
-            .update_revision_validation("missing-revision", json!({}))
+            .update_revision_validation(&uuid::Uuid::new_v4().to_string(), json!({}))
             .await
             .is_err()
     );
@@ -329,29 +330,33 @@ async fn row_conversion_rejects_unknown_enum_values() {
 async fn row_conversion_rejects_bad_json_and_bad_timestamps() {
     let storage = Storage::connect("sqlite::memory:").await.unwrap();
     let state = SkillStateStore::new(storage.clone());
+    let bad_json_id = uuid::Uuid::new_v4().to_string();
+    let bad_time_id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
         r#"INSERT INTO skill_revisions
            (revision_id, package_id, version, content_hash, storage_path, descriptor_json,
-            validation_json, created_by, created_at)
-           VALUES ('bad-json', 'com.example.calendar', '1.0.0', 'hash-1', 'path-1',
-                   '{not-json', '{}', 'owner-1', '2026-01-01T00:00:00Z')"#,
+            validation_json, created_by, created_at, lifecycle_status)
+           VALUES (?, 'com.example.calendar', '1.0.0', 'hash-1', 'path-1',
+                   '{not-json', '{}', 'owner-1', '2026-01-01T00:00:00Z', 'managed')"#,
     )
+    .bind(&bad_json_id)
     .execute(storage.pool())
     .await
     .unwrap();
     sqlx::query(
         r#"INSERT INTO skill_revisions
            (revision_id, package_id, version, content_hash, storage_path, descriptor_json,
-            validation_json, created_by, created_at)
-           VALUES ('bad-time', 'com.example.calendar', '1.0.1', 'hash-2', 'path-2',
-                   '{}', '{}', 'owner-1', 'not-a-time')"#,
+            validation_json, created_by, created_at, lifecycle_status)
+           VALUES (?, 'com.example.calendar', '1.0.1', 'hash-2', 'path-2',
+                   '{}', '{}', 'owner-1', 'not-a-time', 'managed')"#,
     )
+    .bind(&bad_time_id)
     .execute(storage.pool())
     .await
     .unwrap();
 
-    assert!(state.get_revision("bad-json").await.is_err());
-    assert!(state.get_revision("bad-time").await.is_err());
+    assert!(state.get_revision(&bad_json_id).await.is_err());
+    assert!(state.get_revision(&bad_time_id).await.is_err());
 }
 
 #[tokio::test]
@@ -456,7 +461,7 @@ async fn quarantining_revision_disables_only_matching_installation_and_records_r
     assert_eq!(quarantine.metadata_json["reason"], "signature revoked");
     assert!(
         state
-            .mark_revision_quarantined("missing-revision", "bad")
+            .mark_revision_quarantined(&uuid::Uuid::new_v4().to_string(), "bad")
             .await
             .is_err()
     );

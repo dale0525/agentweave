@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, Row, Sqlite, SqlitePool};
 use std::str::FromStr;
+use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -13,7 +14,9 @@ pub struct Storage {
 
 impl Storage {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
-        let options = SqliteConnectOptions::from_str(url)?.foreign_keys(true);
+        let options = SqliteConnectOptions::from_str(url)?
+            .foreign_keys(true)
+            .busy_timeout(StdDuration::from_secs(5));
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
         let storage = Self { pool };
         storage.migrate().await?;
