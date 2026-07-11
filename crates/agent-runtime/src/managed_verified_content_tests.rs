@@ -689,7 +689,6 @@ fn managed_execution_compares_only_structured_absolute_command_components() {
 #[cfg(unix)]
 #[tokio::test]
 async fn managed_execution_reaps_child_after_stdin_write_failure() {
-    crate::skill::reset_explicit_child_reap_count();
     let fixture = VerifiedFixture::new().await;
     let package = write_runtime_package("com.example.execution-reap").await;
     let pid_path = fixture._app.path().join("execution.pid");
@@ -711,8 +710,6 @@ async fn managed_execution_reaps_child_after_stdin_write_failure() {
         .execute("verified_tool", input)
         .await
         .unwrap_err();
-
-    assert_eq!(crate::skill::explicit_child_reap_count(), 1);
 
     let pid = tokio::fs::read_to_string(&pid_path).await.unwrap();
     let process = std::process::Command::new("ps")

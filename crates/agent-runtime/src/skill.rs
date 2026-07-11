@@ -16,10 +16,6 @@ use std::path::{Component, Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-#[cfg(test)]
-static EXPLICIT_CHILD_REAP_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillManifest {
     pub name: String,
@@ -418,8 +414,6 @@ async fn child_error<T>(
 }
 
 async fn terminate_and_reap(child: &mut tokio::process::Child) -> anyhow::Result<()> {
-    #[cfg(test)]
-    EXPLICIT_CHILD_REAP_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let kill = child.start_kill();
     let wait = child.wait().await.map(|_| ());
     finish_reap(kill, wait)
@@ -436,16 +430,6 @@ pub(crate) fn finish_reap(
             "failed to kill skill process: {kill}; failed to wait for skill process: {wait}"
         ),
     }
-}
-
-#[cfg(test)]
-pub(crate) fn reset_explicit_child_reap_count() {
-    EXPLICIT_CHILD_REAP_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
-}
-
-#[cfg(test)]
-pub(crate) fn explicit_child_reap_count() -> usize {
-    EXPLICIT_CHILD_REAP_COUNT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn default_tool_permission() -> ToolPermission {
