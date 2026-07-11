@@ -100,6 +100,7 @@ pub enum ToolPermission {
     ReadWorkspace,
     WriteWorkspace,
     ExecuteCommand,
+    ManageSkills,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -144,6 +145,7 @@ pub fn permission_allowed(
         ToolPermission::ExecuteCommand => {
             mode == RuntimeMode::WorkspaceWrite && command_mode == CommandMode::Allowed
         }
+        ToolPermission::ManageSkills => false,
     }
 }
 
@@ -521,3 +523,29 @@ fn skill_error_code(message: &str) -> &'static str {
 
 #[cfg(test)]
 mod registry_tests;
+
+#[cfg(test)]
+mod management_permission_tests {
+    use super::*;
+
+    #[test]
+    fn skill_management_permission_is_never_enabled_by_runtime_modes() {
+        for mode in [RuntimeMode::ReadOnly, RuntimeMode::WorkspaceWrite] {
+            for command_mode in [CommandMode::Disabled, CommandMode::Allowed] {
+                assert!(!permission_allowed(
+                    mode,
+                    command_mode,
+                    ToolPermission::ManageSkills
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn skill_management_permission_has_stable_metadata_name() {
+        assert_eq!(
+            serde_json::to_value(ToolPermission::ManageSkills).unwrap(),
+            serde_json::json!("manage_skills")
+        );
+    }
+}

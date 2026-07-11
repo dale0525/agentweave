@@ -10,6 +10,10 @@ pub enum ApprovalPolicy {
 
 impl ApprovalPolicy {
     pub fn requires_approval(self, permission: ToolPermission) -> bool {
+        if permission == ToolPermission::ManageSkills {
+            return false;
+        }
+
         match self {
             Self::Never => false,
             Self::OnWorkspaceWrite => {
@@ -67,6 +71,17 @@ mod tests {
         assert!(ApprovalPolicy::OnWorkspaceWrite.requires_approval(ToolPermission::ExecuteCommand));
         assert!(!ApprovalPolicy::OnCommand.requires_approval(ToolPermission::WriteWorkspace));
         assert!(ApprovalPolicy::OnCommand.requires_approval(ToolPermission::ExecuteCommand));
+    }
+
+    #[test]
+    fn generic_approval_policy_never_approves_skill_management() {
+        for policy in [
+            ApprovalPolicy::Never,
+            ApprovalPolicy::OnWorkspaceWrite,
+            ApprovalPolicy::OnCommand,
+        ] {
+            assert!(!policy.requires_approval(ToolPermission::ManageSkills));
+        }
     }
 
     #[test]

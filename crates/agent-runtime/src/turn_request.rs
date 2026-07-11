@@ -1,3 +1,5 @@
+use crate::skill_policy::ActorContext;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnGoal {
     pub objective: String,
@@ -17,6 +19,7 @@ pub struct TurnRequest {
     pub goal: Option<TurnGoal>,
     pub token_budget: Option<u64>,
     pub context_budget_bytes: Option<usize>,
+    pub actor_context: ActorContext,
 }
 
 impl TurnRequest {
@@ -26,6 +29,7 @@ impl TurnRequest {
             goal: None,
             token_budget: None,
             context_budget_bytes: None,
+            actor_context: ActorContext::anonymous(),
         }
     }
 
@@ -41,6 +45,11 @@ impl TurnRequest {
 
     pub fn with_context_budget_bytes(mut self, context_budget_bytes: usize) -> Self {
         self.context_budget_bytes = Some(context_budget_bytes);
+        self
+    }
+
+    pub fn with_actor_context(mut self, actor_context: ActorContext) -> Self {
+        self.actor_context = actor_context;
         self
     }
 }
@@ -85,6 +94,7 @@ impl BudgetPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skill_policy::{ActorContext, SkillGrant};
 
     #[test]
     fn budget_policy_tracks_total_tokens() {
@@ -95,5 +105,26 @@ mod tests {
 
         assert_eq!(usage.total_tokens, 11);
         assert!(usage.exceeded);
+    }
+
+    #[test]
+    fn new_request_uses_anonymous_actor_without_grants() {
+        let request = TurnRequest::new("inspect skills");
+
+        assert_eq!(request.actor_context, ActorContext::anonymous());
+        assert!(request.actor_context.grants.is_empty());
+    }
+
+    #[test]
+    fn actor_context_builder_carries_host_identity_without_changing_grants() {
+        let mut actor =
+            ActorContext::owner("owner-1", [SkillGrant::Activate, SkillGrant::Activate]);
+        actor.tenant_id = Some("tenant-1".into());
+        actor.device_id = Some("device-1".into());
+
+        let request = TurnRequest::new("activate skill").with_actor_context(actor.clone());
+
+        assert_eq!(request.actor_context, actor);
+        assert_eq!(request.actor_context.grants.len(), 1);
     }
 }

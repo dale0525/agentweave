@@ -12,6 +12,7 @@ pub mod skill_catalog;
 mod skill_entry_resource;
 pub mod skill_manager;
 pub mod skill_package;
+pub mod skill_policy;
 pub mod skill_resolver;
 pub mod skill_snapshot;
 pub mod skill_source;
@@ -46,6 +47,9 @@ pub mod vfs;
 
 #[cfg(test)]
 mod skill_package_tests;
+
+#[cfg(test)]
+mod skill_policy_tests;
 
 #[cfg(test)]
 mod skill_manager_tests;

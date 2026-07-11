@@ -1,4 +1,5 @@
 use crate::policy::ApprovalPolicy;
+use crate::skill_policy::SkillOperation;
 use crate::tools::ToolPermission;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,6 +21,21 @@ pub enum RuntimeEvent {
         name: String,
         permission: ToolPermission,
         policy: ApprovalPolicy,
+    },
+    SkillApprovalRequired {
+        approval_id: String,
+        operation: SkillOperation,
+        package_id: String,
+        revision_id: String,
+        permission_diff: Value,
+    },
+    SkillSnapshotPublished {
+        generation: u64,
+    },
+    SkillRevisionRolledBack {
+        package_id: String,
+        revision_id: String,
+        generation: u64,
     },
     ToolCallStarted {
         call_id: String,
@@ -67,6 +83,7 @@ pub enum RuntimeEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skill_policy::SkillOperation;
 
     #[test]
     fn runtime_event_serializes_with_snake_case_type() {
@@ -77,5 +94,60 @@ mod tests {
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["type"], "assistant_text_delta");
         assert_eq!(json["text"], "hello");
+    }
+
+    #[test]
+    fn skill_approval_required_serializes_exact_payload() {
+        let event = RuntimeEvent::SkillApprovalRequired {
+            approval_id: "approval-1".into(),
+            operation: SkillOperation::Activate,
+            package_id: "com.example.calendar".into(),
+            revision_id: "revision-1".into(),
+            permission_diff: serde_json::json!({"added": ["calendar.write"]}),
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "skill_approval_required",
+                "approval_id": "approval-1",
+                "operation": "activate",
+                "package_id": "com.example.calendar",
+                "revision_id": "revision-1",
+                "permission_diff": {"added": ["calendar.write"]}
+            })
+        );
+    }
+
+    #[test]
+    fn skill_snapshot_published_serializes_exact_payload() {
+        let event = RuntimeEvent::SkillSnapshotPublished { generation: 7 };
+
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "skill_snapshot_published",
+                "generation": 7
+            })
+        );
+    }
+
+    #[test]
+    fn skill_revision_rolled_back_serializes_exact_payload() {
+        let event = RuntimeEvent::SkillRevisionRolledBack {
+            package_id: "com.example.calendar".into(),
+            revision_id: "revision-1".into(),
+            generation: 8,
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "skill_revision_rolled_back",
+                "package_id": "com.example.calendar",
+                "revision_id": "revision-1",
+                "generation": 8
+            })
+        );
     }
 }
