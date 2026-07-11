@@ -3,7 +3,11 @@ use crate::storage::Storage;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
+use tokio::sync::{Barrier, mpsc};
+use tokio::time::timeout;
 use uuid::Uuid;
 
 fn file_database() -> (TempDir, String) {
@@ -22,6 +26,132 @@ async fn raw_pool(url: &str) -> SqlitePool {
         .connect_with(options)
         .await
         .unwrap()
+}
+
+async fn await_operation_entries(receiver: &mut mpsc::UnboundedReceiver<()>) {
+    for _ in 0..2 {
+        timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("connect task did not reach the operation entry")
+            .expect("operation entry channel closed");
+    }
+}
+
+async fn await_task<T>(task: tokio::task::JoinHandle<T>) -> T {
+    timeout(Duration::from_secs(3), task)
+        .await
+        .expect("connect task did not finish")
+        .expect("connect task panicked")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_storage_connect_serializes_skill_migration_without_sqlite_busy() {
+    let (_directory, url) = file_database();
+    let pool = raw_pool(&url).await;
+    create_core_storage_tables(&pool).await;
+    create_legacy_task6_tables(&pool).await;
+    create_legacy_approval_table(&pool).await;
+    let revision_id = Uuid::new_v4().to_string();
+    let approval_id = Uuid::new_v4().to_string();
+    insert_legacy_revision(
+        &pool,
+        &revision_id,
+        "com.example.calendar",
+        "{}",
+        "{}",
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    insert_legacy_installation(
+        &pool,
+        "com.example.calendar",
+        Some(&revision_id),
+        1,
+        "active",
+    )
+    .await;
+    insert_legacy_approval(&pool, &approval_id, "pending", None, None).await;
+
+    let mut lock = pool.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let (entered, mut entries) = mpsc::unbounded_channel();
+    let first_barrier = barrier.clone();
+    let first_entered = entered.clone();
+    let first_url = url.clone();
+    let first = tokio::spawn(async move {
+        first_barrier.wait().await;
+        first_entered.send(()).unwrap();
+        Storage::connect(&first_url).await
+    });
+    let second_barrier = barrier.clone();
+    let second_entered = entered.clone();
+    let second_url = url.clone();
+    let second = tokio::spawn(async move {
+        second_barrier.wait().await;
+        second_entered.send(()).unwrap();
+        Storage::connect(&second_url).await
+    });
+    drop(entered);
+    barrier.wait().await;
+    await_operation_entries(&mut entries).await;
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!first.is_finished());
+    assert!(!second.is_finished());
+    sqlx::query("COMMIT").execute(&mut *lock).await.unwrap();
+    drop(lock);
+    pool.close().await;
+
+    let first = await_task(first).await;
+    let second = await_task(second).await;
+    let storage = first.unwrap_or_else(|error| panic!("first connect failed: {error:#}"));
+    let _second = second.unwrap_or_else(|error| panic!("second connect failed: {error:#}"));
+    let state = SkillStateStore::new(storage.clone());
+    assert_eq!(
+        state
+            .get_revision(&revision_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillRevisionStatus::Managed
+    );
+    assert!(
+        state
+            .get_installation(
+                &crate::skill_package::SkillPackageId::parse("com.example.calendar").unwrap()
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    assert_eq!(
+        state
+            .get_approval(&approval_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillApprovalStatus::Pending
+    );
+    let legacy_tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE '%legacy%'",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
+    assert_eq!(legacy_tables, 0);
+    let foreign_key_errors = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(storage.pool())
+        .await
+        .unwrap();
+    assert!(foreign_key_errors.is_empty());
 }
 
 #[tokio::test]

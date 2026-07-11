@@ -423,6 +423,57 @@ async fn approval_reads_reject_resolution_column_invariant_violations() {
 }
 
 #[tokio::test]
+async fn installation_reads_reject_active_invariant_violations() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let state = SkillStateStore::new(storage.clone());
+    let now = "2026-01-01T00:00:00Z";
+    let mut connection = storage.pool().acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"INSERT INTO skill_installations
+           (package_id, source_layer, active_revision_id, enabled, trust_level,
+            install_status, installed_at, updated_at)
+           VALUES ('com.example.disabledactive', 'managed', ?, 0, 'approved', 'active', ?, ?)"#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(now)
+    .bind(now)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO skill_installations
+           (package_id, source_layer, active_revision_id, enabled, trust_level,
+            install_status, installed_at, updated_at)
+           VALUES ('com.example.missingactive', 'managed', NULL, 1, 'approved', 'active', ?, ?)"#,
+    )
+    .bind(now)
+    .bind(now)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    drop(connection);
+
+    let disabled = state
+        .get_installation(&package_id("com.example.disabledactive"))
+        .await
+        .unwrap_err();
+    assert!(disabled.to_string().contains("active installation"));
+    let missing = state
+        .get_installation(&package_id("com.example.missingactive"))
+        .await
+        .unwrap_err();
+    assert!(missing.to_string().contains("active installation"));
+}
+
+#[tokio::test]
 async fn snapshot_and_circuit_reads_are_typed_and_reject_corruption() {
     let storage = Storage::connect("sqlite::memory:").await.unwrap();
     let state = SkillStateStore::new(storage.clone());

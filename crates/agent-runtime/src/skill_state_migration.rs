@@ -1,6 +1,6 @@
 use crate::skill_state_rows::{
-    APPROVAL_COLUMNS, INSTALLATION_COLUMNS, REVISION_COLUMNS, SkillInstallStatus,
-    approval_from_row, installation_from_row, revision_from_row,
+    APPROVAL_COLUMNS, INSTALLATION_COLUMNS, REVISION_COLUMNS, approval_from_row,
+    installation_from_row, revision_from_row, validate_installation_invariant,
 };
 use anyhow::Context;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
@@ -52,30 +52,33 @@ const CREATE_APPROVALS: &str = r#"CREATE TABLE skill_approvals (
 )"#;
 
 pub(crate) async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
-    let mut tx = pool.begin().await?;
-    migrate_approvals(&mut tx).await?;
-    create_supporting_tables(&mut tx).await?;
+    let mut tx = crate::skill_state_transactions::begin_immediate(pool).await?;
+    let result = async {
+        migrate_approvals(&mut tx).await?;
+        create_supporting_tables(&mut tx).await?;
 
-    let revisions_exist = table_exists(&mut tx, "skill_revisions").await?;
-    let installations_exist = table_exists(&mut tx, "skill_installations").await?;
-    if !revisions_exist {
-        sqlx::query(CREATE_REVISIONS).execute(&mut *tx).await?;
-        if installations_exist {
-            rebuild_installations(&mut tx).await?;
-        } else {
+        let revisions_exist = table_exists(&mut tx, "skill_revisions").await?;
+        let installations_exist = table_exists(&mut tx, "skill_installations").await?;
+        if !revisions_exist {
+            sqlx::query(CREATE_REVISIONS).execute(&mut *tx).await?;
+            if installations_exist {
+                rebuild_installations(&mut tx).await?;
+            } else {
+                sqlx::query(CREATE_INSTALLATIONS).execute(&mut *tx).await?;
+            }
+        } else if !column_exists(&mut tx, "skill_revisions", "lifecycle_status").await? {
+            upgrade_task6_schema(&mut tx, installations_exist).await?;
+        } else if !installations_exist {
             sqlx::query(CREATE_INSTALLATIONS).execute(&mut *tx).await?;
+        } else if !installation_schema_is_final(&mut tx).await? {
+            rebuild_installations(&mut tx).await?;
         }
-    } else if !column_exists(&mut tx, "skill_revisions", "lifecycle_status").await? {
-        upgrade_task6_schema(&mut tx, installations_exist).await?;
-    } else if !installations_exist {
-        sqlx::query(CREATE_INSTALLATIONS).execute(&mut *tx).await?;
-    } else if !installation_schema_is_final(&mut tx).await? {
-        rebuild_installations(&mut tx).await?;
-    }
 
-    create_indexes(&mut tx).await?;
-    tx.commit().await?;
-    Ok(())
+        create_indexes(&mut tx).await?;
+        Ok(())
+    }
+    .await;
+    crate::skill_state_transactions::finish(tx, result).await
 }
 
 async fn create_supporting_tables(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> {
@@ -263,13 +266,12 @@ async fn validate_installation_rows(
             .unwrap_or_else(|_| "<unreadable>".into());
         let installation = installation_from_row(&row)
             .with_context(|| format!("skill_installations row {identity}"))?;
-        if installation.status == SkillInstallStatus::Active
-            && (!installation.enabled || installation.active_revision_id.is_none())
-        {
-            anyhow::bail!(
-                "skill_installations row {identity}: active installation must be enabled and reference a revision"
-            );
-        }
+        validate_installation_invariant(
+            installation.status,
+            installation.enabled,
+            installation.active_revision_id.as_deref(),
+        )
+        .with_context(|| format!("skill_installations row {identity}"))?;
         if let Some(revision_id) = &installation.active_revision_id {
             let pair = (
                 installation.package_id.as_str().to_string(),

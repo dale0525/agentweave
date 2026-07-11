@@ -268,16 +268,31 @@ pub(crate) fn installation_from_row(row: &SqliteRow) -> anyhow::Result<SkillInst
     if let Some(revision_id) = &active_revision_id {
         validate_uuid_v4("active_revision_id", revision_id)?;
     }
+    let layer = SkillLayerRecord::parse(&layer)?;
+    let status = SkillInstallStatus::parse(&status)?;
+    let enabled = parse_bool("enabled", enabled)?;
+    validate_installation_invariant(status, enabled, active_revision_id.as_deref())?;
     Ok(SkillInstallationRecord {
         package_id: parse_package_id(row, "package_id")?,
-        source_layer: SkillLayerRecord::parse(&layer)?,
+        source_layer: layer,
         active_revision_id,
-        enabled: parse_bool("enabled", enabled)?,
+        enabled,
         trust_level: row.try_get("trust_level")?,
-        status: SkillInstallStatus::parse(&status)?,
+        status,
         installed_at: parse_row_timestamp(row, "installed_at")?,
         updated_at: parse_row_timestamp(row, "updated_at")?,
     })
+}
+
+pub(crate) fn validate_installation_invariant(
+    status: SkillInstallStatus,
+    enabled: bool,
+    active_revision_id: Option<&str>,
+) -> anyhow::Result<()> {
+    if status == SkillInstallStatus::Active && (!enabled || active_revision_id.is_none()) {
+        anyhow::bail!("active installation must be enabled and reference a revision");
+    }
+    Ok(())
 }
 
 pub(crate) fn approval_from_row(row: &SqliteRow) -> anyhow::Result<SkillApprovalRecord> {

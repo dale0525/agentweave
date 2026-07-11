@@ -594,6 +594,182 @@ async fn concurrent_quarantine_has_one_business_winner_without_sqlite_busy() {
     assert_eq!(quarantine_audits, 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_promotion_has_one_business_winner_without_sqlite_busy() {
+    let (_directory, url) = file_database();
+    let first_storage = Storage::connect(&url).await.unwrap();
+    let second_storage = Storage::connect(&url).await.unwrap();
+    let lock_storage = Storage::connect(&url).await.unwrap();
+    let first = SkillStateStore::new(first_storage.clone());
+    let second = SkillStateStore::new(second_storage);
+    let revision_id = SkillStateStore::allocate_revision_id();
+    first
+        .create_staging_revision_record(
+            &revision_id,
+            revision_input(
+                package_id("com.example.calendar"),
+                format!("staging/{revision_id}"),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let mut lock = lock_storage.pool().acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let (entered, mut entries) = mpsc::unbounded_channel();
+    let first_barrier = barrier.clone();
+    let first_entered = entered.clone();
+    let first_revision = revision_id.clone();
+    let first_task = tokio::spawn(async move {
+        first_barrier.wait().await;
+        first_entered.send(()).unwrap();
+        first
+            .promote_revision_record(&first_revision, "managed/first")
+            .await
+    });
+    let second_barrier = barrier.clone();
+    let second_entered = entered.clone();
+    let second_revision = revision_id.clone();
+    let second_task = tokio::spawn(async move {
+        second_barrier.wait().await;
+        second_entered.send(()).unwrap();
+        second
+            .promote_revision_record(&second_revision, "managed/second")
+            .await
+    });
+    drop(entered);
+    barrier.wait().await;
+    await_operation_entries(&mut entries).await;
+    assert!(!first_task.is_finished());
+    assert!(!second_task.is_finished());
+    sqlx::query("COMMIT").execute(&mut *lock).await.unwrap();
+    drop(lock);
+
+    let first_result = await_task(first_task).await;
+    let second_result = await_task(second_task).await;
+    assert_eq!(first_result.is_ok() as u8 + second_result.is_ok() as u8, 1);
+    let winner_path = first_result
+        .as_ref()
+        .ok()
+        .or_else(|| second_result.as_ref().ok())
+        .unwrap()
+        .storage_path
+        .clone();
+    let loser = first_result
+        .err()
+        .or_else(|| second_result.err())
+        .unwrap()
+        .to_string();
+    assert!(loser.contains("cannot be promoted from managed"), "{loser}");
+    assert!(!loser.contains("database is locked"));
+    assert!(!loser.contains("SQLITE_BUSY"));
+    let stored = SkillStateStore::new(first_storage)
+        .get_revision(&revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, SkillRevisionStatus::Managed);
+    assert_eq!(stored.storage_path, winner_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_activation_has_business_winner_and_wrong_package_loser_without_sqlite_busy() {
+    let (_directory, url) = file_database();
+    let first_storage = Storage::connect(&url).await.unwrap();
+    let second_storage = Storage::connect(&url).await.unwrap();
+    let lock_storage = Storage::connect(&url).await.unwrap();
+    let correct_package = package_id("com.example.calendar");
+    let wrong_package = package_id("com.example.mail");
+    let first = SkillStateStore::new(first_storage.clone());
+    let second = SkillStateStore::new(second_storage);
+    let revision = first
+        .create_revision(revision_input(
+            correct_package.clone(),
+            "managed/com.example.calendar/revisions/race".into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut lock = lock_storage.pool().acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let (entered, mut entries) = mpsc::unbounded_channel();
+    let winner_barrier = barrier.clone();
+    let winner_entered = entered.clone();
+    let winner_package = correct_package.clone();
+    let winner_revision = revision.revision_id.clone();
+    let winner = tokio::spawn(async move {
+        winner_barrier.wait().await;
+        winner_entered.send(()).unwrap();
+        first
+            .activate_revision(
+                &winner_package,
+                &winner_revision,
+                SkillLayerRecord::Managed,
+                "owner-1",
+            )
+            .await
+    });
+    let loser_barrier = barrier.clone();
+    let loser_entered = entered.clone();
+    let loser_package = wrong_package.clone();
+    let loser_revision = revision.revision_id.clone();
+    let loser = tokio::spawn(async move {
+        loser_barrier.wait().await;
+        loser_entered.send(()).unwrap();
+        second
+            .activate_revision(
+                &loser_package,
+                &loser_revision,
+                SkillLayerRecord::Managed,
+                "owner-2",
+            )
+            .await
+    });
+    drop(entered);
+    barrier.wait().await;
+    await_operation_entries(&mut entries).await;
+    assert!(!winner.is_finished());
+    assert!(!loser.is_finished());
+    sqlx::query("COMMIT").execute(&mut *lock).await.unwrap();
+    drop(lock);
+
+    let winner = await_task(winner).await;
+    let loser = await_task(loser).await;
+    assert!(winner.is_ok(), "correct-package activation failed");
+    let loser = loser.unwrap_err();
+    let message = format!("{loser:#}");
+    assert!(message.contains("belongs to com.example.calendar, not com.example.mail"));
+    assert!(!message.contains("database is locked"));
+    assert!(!message.contains("SQLITE_BUSY"));
+
+    let state = SkillStateStore::new(first_storage);
+    let installation = state
+        .get_installation(&correct_package)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        installation.active_revision_id.as_deref(),
+        Some(revision.revision_id.as_str())
+    );
+    assert!(
+        state
+            .get_installation(&wrong_package)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(state.list_audit(&correct_package).await.unwrap().len(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn storage_busy_timeout_is_configured_and_waits_for_a_held_write_lock() {
     let (_directory, url) = file_database();
