@@ -325,6 +325,12 @@ impl ToolRegistry {
 
     pub async fn execute(&self, name: &str, call_id: &str, arguments: Value) -> ToolResult {
         let started = Instant::now();
+        if let Some(context) = &self.management
+            && SkillManagementTools::handles(context, name)
+        {
+            let result = SkillManagementTools::execute(context, name, call_id, arguments).await;
+            return self.apply_output_limit(result);
+        }
         let execution = tokio::time::timeout(
             self.tool_timeout,
             self.execute_without_timeout(name, call_id, arguments, started),
@@ -356,12 +362,6 @@ impl ToolRegistry {
 
         if let Some(tool) = self.external_tool(name) {
             return self.execute_external_tool(tool, name, call_id, started);
-        }
-
-        if let Some(context) = &self.management
-            && SkillManagementTools::handles(context, name)
-        {
-            return SkillManagementTools::execute(context, name, call_id, arguments).await;
         }
 
         let skill_tools = self.skills.tools();

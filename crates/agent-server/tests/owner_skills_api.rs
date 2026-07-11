@@ -6,7 +6,7 @@ use agent_runtime::skill_policy::{
     ActorContext, SkillGrant, SkillManagementMode, SkillManagementPolicy,
 };
 use agent_runtime::skill_state::SkillStateStore;
-use agent_runtime::skill_store::{SkillRevisionStore, SkillStorePaths};
+use agent_runtime::skill_store::{SkillRevisionStore, SkillStoreLimits, SkillStorePaths};
 use agent_runtime::storage::Storage;
 use agent_runtime::tools::RuntimeConfig;
 use agent_runtime::turn::{ModelClient, ModelEventStream};
@@ -22,21 +22,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-struct NoopModel;
-
-#[async_trait::async_trait]
-impl ModelClient for NoopModel {
-    async fn stream(&self, _request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
-        Ok(Box::pin(stream::iter(vec![Ok(GatewayEvent::Completed)])))
-    }
-}
-
 struct OwnerTestApp {
     app: Router,
     service: OwnerSkillManagementService,
     state: SkillStateStore,
     store: SkillRevisionStore,
     roots: TestRoots,
+    chat_tools: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+struct CapturingChatModel {
+    tools: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl ModelClient for CapturingChatModel {
+    async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
+        *self.tools.lock().unwrap() = request.tools.into_iter().map(|tool| tool.name).collect();
+        Ok(Box::pin(stream::iter(vec![
+            Ok(GatewayEvent::TextDelta {
+                text: "done".into(),
+            }),
+            Ok(GatewayEvent::Completed),
+        ])))
+    }
 }
 
 struct TestRoots {
@@ -72,21 +81,33 @@ async fn owner_test_app(
     token: &str,
     actor: ActorContext,
 ) -> OwnerTestApp {
+    owner_test_app_with_limits(policy, token, actor, SkillStoreLimits::default()).await
+}
+
+async fn owner_test_app_with_limits(
+    policy: SkillManagementPolicy,
+    token: &str,
+    actor: ActorContext,
+    limits: SkillStoreLimits,
+) -> OwnerTestApp {
     let roots = TestRoots::new();
     let paths = SkillStorePaths::prepare(&roots.app_root, &roots.cache_root)
         .await
         .unwrap();
     let storage = Storage::connect("sqlite::memory:").await.unwrap();
     let state = SkillStateStore::new(storage.clone());
-    let store = SkillRevisionStore::new(paths, state.clone());
+    let store = SkillRevisionStore::with_limits(paths, state.clone(), limits);
     let manager =
         SkillManager::from_registry_and_catalog(SkillRegistry::empty(), SkillCatalog::empty());
     let service =
         OwnerSkillManagementService::new(manager.clone(), store.clone(), state.clone(), policy);
     let owner = OwnerApiConfig::new(service.clone(), OwnerAuth::new(token, actor).unwrap());
+    let chat_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
     let app_state = Arc::new(AppState::new_with_model_skill_manager_and_owner(
         storage,
-        NoopModel,
+        CapturingChatModel {
+            tools: chat_tools.clone(),
+        },
         manager,
         RuntimeConfig::read_only(".", ".").without_builtin_tools(),
         owner,
@@ -97,6 +118,7 @@ async fn owner_test_app(
         state,
         store,
         roots,
+        chat_tools,
     }
 }
 
@@ -401,6 +423,81 @@ async fn authorized_owner_can_create_list_and_read_audit() {
         .await
         .unwrap();
     assert_eq!(direct.len(), 1);
+}
+
+#[tokio::test]
+async fn ordinary_chat_does_not_inherit_owner_api_actor_or_management_tools() {
+    let test = owner_test_app(
+        SkillManagementPolicy::owner_only(),
+        "secret-token",
+        owner_actor(),
+    )
+    .await;
+    let session = test
+        .app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/sessions",
+            None,
+            Some(json!({"title": "Ordinary chat"})),
+        ))
+        .await
+        .unwrap();
+    let session: Value =
+        serde_json::from_slice(&to_bytes(session.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let response = test
+        .app
+        .oneshot(request(
+            "POST",
+            &format!("/sessions/{}/messages", session["id"].as_str().unwrap()),
+            None,
+            Some(json!({"content": "create a skill"})),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !test
+            .chat_tools
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|name| name == "create_skill_draft")
+    );
+    assert!(directory_is_empty(&test.store.paths().staging).await);
+}
+
+#[tokio::test]
+async fn oversized_owner_draft_request_is_bad_request_not_internal_error() {
+    let test = owner_test_app_with_limits(
+        SkillManagementPolicy::owner_only(),
+        "secret-token",
+        owner_actor(),
+        SkillStoreLimits {
+            max_file_bytes: 128,
+            max_package_bytes: 256,
+            ..SkillStoreLimits::default()
+        },
+    )
+    .await;
+    let mut body = draft_body("com.example.api-oversized");
+    body["description"] = Value::String("x".repeat(512));
+
+    let response = test
+        .app
+        .oneshot(request(
+            "POST",
+            "/owner/skills/drafts",
+            Some("Bearer secret-token"),
+            Some(body),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(directory_is_empty(&test.store.paths().staging).await);
 }
 
 async fn directory_is_empty(path: &std::path::Path) -> bool {

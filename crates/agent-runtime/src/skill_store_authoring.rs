@@ -18,6 +18,10 @@ use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
 impl SkillRevisionStore {
+    pub(crate) fn validate_authored_input(&self, files: &[StagingSkillFile]) -> anyhow::Result<()> {
+        validate_authored_files(files, self.limits)
+    }
+
     pub async fn create_authored_staging_revision(
         &self,
         expected_package_id: &SkillPackageId,
@@ -25,7 +29,7 @@ impl SkillRevisionStore {
         files: &[StagingSkillFile],
         actor_id: &str,
     ) -> anyhow::Result<StoredSkillRevision> {
-        validate_authored_files(files, self.limits)?;
+        self.validate_authored_input(files)?;
         self.paths.verify_identity()?;
         ensure_directory_contained(&self.paths.staging, &self.paths.staging, "staging").await?;
         let revision_id = self

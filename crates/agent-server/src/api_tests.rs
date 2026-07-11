@@ -1,9 +1,14 @@
 use super::*;
+use crate::owner_api::{OwnerApiConfig, OwnerAuth};
 use agent_runtime::{
     platform::{CapabilitySet, PlatformId},
     skill::SkillRegistry,
+    skill_management::OwnerSkillManagementService,
     skill_manager::{SkillManager, SkillManagerConfig},
+    skill_policy::{ActorContext, SkillGrant, SkillManagementPolicy},
     skill_source::{DirectorySkillSource, SkillLayer},
+    skill_state::SkillStateStore,
+    skill_store::{SkillRevisionStore, SkillStorePaths},
     storage::Storage,
     tools::RuntimeConfig,
     turn::{ModelClient, ModelEventStream, TurnRunner},
@@ -334,6 +339,77 @@ async fn post_message_uses_supplied_model_settings_for_agent_turn() {
     }));
 
     remove_test_dir(workspace).await;
+}
+
+#[tokio::test]
+async fn custom_model_settings_preserve_management_service_and_request_actor() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let app_root = unique_test_dir("settings-owner-app");
+    let cache_root = unique_test_dir("settings-owner-cache");
+    tokio::fs::create_dir_all(&app_root).await.unwrap();
+    tokio::fs::create_dir_all(&cache_root).await.unwrap();
+    let paths = SkillStorePaths::prepare(&app_root, &cache_root)
+        .await
+        .unwrap();
+    let state_store = SkillStateStore::new(storage.clone());
+    let manager = SkillManager::from_registry_and_catalog(
+        SkillRegistry::empty(),
+        agent_runtime::skill_catalog::SkillCatalog::empty(),
+    );
+    let service = OwnerSkillManagementService::new(
+        manager.clone(),
+        SkillRevisionStore::new(paths, state_store.clone()),
+        state_store,
+        SkillManagementPolicy::owner_only(),
+    );
+    let owner = ActorContext::owner("owner-1", [SkillGrant::Inspect, SkillGrant::CreateDraft]);
+    let owner_config = OwnerApiConfig::new(
+        service,
+        OwnerAuth::new("secret-token", owner.clone()).unwrap(),
+    );
+    let default_tools = Arc::new(Mutex::new(Vec::new()));
+    let state = AppState::new_with_model_skill_manager_and_owner(
+        storage,
+        ToolSchemaCaptureModel {
+            tool_names: default_tools,
+        },
+        manager,
+        RuntimeConfig::read_only(".", ".").without_builtin_tools(),
+        owner_config,
+    );
+    let provider_capture = Arc::new(ProviderCapture::default());
+    let provider_base_url = spawn_provider_server(provider_capture.clone()).await;
+    let request = UserMessageRequest {
+        content: "owner custom model turn".into(),
+        model_settings: Some(ModelConnectionTestRequest {
+            api_key: None,
+            base_url: provider_base_url,
+            endpoint_type: EndpointType::ChatCompletions,
+            model_name: "qwen2.5".into(),
+        }),
+    };
+
+    run_agent_turn_for_actor(&state, &request, owner)
+        .await
+        .unwrap();
+
+    let body = provider_capture
+        .request
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .body
+        .clone();
+    assert!(
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| { tool["function"]["name"] == "create_skill_draft" })
+    );
+    remove_test_dir(app_root).await;
+    remove_test_dir(cache_root).await;
 }
 
 #[tokio::test]

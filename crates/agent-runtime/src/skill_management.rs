@@ -4,7 +4,7 @@ use crate::skill_package::{SkillPackageId, SkillPackageKind};
 use crate::skill_policy::{ActorContext, SkillManagementPolicy, SkillOperation};
 use crate::skill_resolver::SkillResolutionStatus;
 use crate::skill_source::SkillLayer;
-use crate::skill_state::{SkillAuditRecord, SkillInstallStatus, SkillLayerRecord, SkillStateStore};
+use crate::skill_state::{SkillAuditRecord, SkillInstallStatus, SkillStateStore};
 use crate::skill_store::SkillRevisionStore;
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +81,9 @@ impl OwnerSkillManagementService {
     ) -> anyhow::Result<SkillDraftSummary> {
         self.authorize(actor, SkillOperation::CreateDraft, request.kind)?;
         let authored = build_package_draft(&request)?;
+        self.revisions
+            .validate_authored_input(authored.files())
+            .map_err(|error| SkillManagementError::InvalidRequest(error.to_string()))?;
         let revision = self
             .revisions
             .create_authored_staging_revision(
@@ -105,15 +108,6 @@ impl OwnerSkillManagementService {
         actor: &ActorContext,
     ) -> anyhow::Result<Vec<SkillPackageStatus>> {
         self.authorize_inspect(actor)?;
-        let active_installations = self.state.list_active_installations().await?;
-        let active_revisions = active_installations
-            .into_iter()
-            .filter_map(|installation| {
-                installation
-                    .active_revision_id
-                    .map(|revision| (installation.package_id, revision))
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
         let snapshot = self.manager.current_snapshot();
         let mut statuses = snapshot
             .packages()
@@ -124,7 +118,7 @@ impl OwnerSkillManagementService {
                 source_layer: layer_name(resolved.package.layer).into(),
                 status: "active".into(),
                 reason: resolved.reason.clone(),
-                active_revision_id: resolved_revision_id(resolved, &active_revisions),
+                active_revision_id: resolved_revision_id(resolved),
             })
             .chain(
                 snapshot
@@ -136,7 +130,7 @@ impl OwnerSkillManagementService {
                         source_layer: layer_name(resolved.package.layer).into(),
                         status: resolution_status_name(resolved.status).into(),
                         reason: resolved.reason.clone(),
-                        active_revision_id: resolved_revision_id(resolved, &active_revisions),
+                        active_revision_id: resolved_revision_id(resolved),
                     }),
             )
             .collect::<Vec<_>>();
@@ -150,22 +144,15 @@ impl OwnerSkillManagementService {
     ) -> anyhow::Result<Vec<SkillPackageStatus>> {
         self.authorize_inspect(actor)?;
         let mut statuses = Vec::new();
-        for installation in self.state.list_installations().await? {
-            if installation.source_layer != SkillLayerRecord::Managed {
-                continue;
-            }
-            let version = match installation.active_revision_id.as_deref() {
-                Some(revision_id) => self
-                    .state
-                    .get_revision(revision_id)
-                    .await?
-                    .map(|revision| revision.version)
-                    .unwrap_or_default(),
-                None => String::new(),
-            };
+        for row in self
+            .state
+            .list_managed_installations_with_revisions()
+            .await?
+        {
+            let installation = row.installation;
             statuses.push(SkillPackageStatus {
                 package_id: installation.package_id,
-                version,
+                version: row.active_version.unwrap_or_default(),
                 source_layer: "managed".into(),
                 status: installation.status.as_str().into(),
                 reason: installation_reason(installation.status, installation.enabled).into(),
@@ -217,17 +204,14 @@ fn layer_name(layer: SkillLayer) -> &'static str {
     }
 }
 
-fn resolved_revision_id(
-    resolved: &crate::skill_resolver::ResolvedSkillPackage,
-    active_revisions: &std::collections::BTreeMap<SkillPackageId, String>,
-) -> Option<String> {
-    (resolved.package.layer == SkillLayer::Managed)
-        .then(|| {
-            active_revisions
-                .get(&resolved.package.descriptor.id)
-                .cloned()
-        })
-        .flatten()
+fn resolved_revision_id(resolved: &crate::skill_resolver::ResolvedSkillPackage) -> Option<String> {
+    resolved
+        .package
+        .verified_content
+        .as_ref()?
+        .execution_binding
+        .as_ref()
+        .map(|binding| binding.revision_id.clone())
 }
 
 fn resolution_status_name(status: SkillResolutionStatus) -> &'static str {

@@ -328,6 +328,12 @@ fn parse_skill_front_matter(content: &str) -> anyhow::Result<SkillFrontMatter> {
 }
 
 fn unquote_scalar(value: &str) -> String {
+    if value.starts_with('"')
+        && value.ends_with('"')
+        && let Ok(decoded) = serde_json::from_str::<String>(value)
+    {
+        return decoded;
+    }
     value
         .strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))

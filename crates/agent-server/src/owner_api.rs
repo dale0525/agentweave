@@ -2,7 +2,7 @@ use crate::api::{AppState, ErrorResponse};
 use agent_runtime::skill_management::{
     CreateSkillDraftRequest, OwnerSkillManagementService, SkillManagementError, SkillPackageStatus,
 };
-use agent_runtime::skill_management_tools::{SkillManagementToolContext, SkillManagementTools};
+use agent_runtime::skill_management_tools::SkillManagementTools;
 use agent_runtime::skill_policy::{ActorContext, SkillManagementMode, SkillManagementPolicy};
 use agent_runtime::skill_state::SkillAuditRecord;
 use axum::extract::rejection::JsonRejection;
@@ -58,11 +58,8 @@ impl OwnerApiConfig {
         Self { service, auth }
     }
 
-    pub fn tool_context(&self) -> SkillManagementToolContext {
-        SkillManagementToolContext {
-            service: self.service.clone(),
-            actor: self.auth.actor.clone(),
-        }
+    pub fn management_service(&self) -> OwnerSkillManagementService {
+        self.service.clone()
     }
 
     fn policy(&self) -> &SkillManagementPolicy {

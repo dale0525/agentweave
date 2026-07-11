@@ -36,6 +36,7 @@ mod skill_store_locks;
 mod skill_store_operations;
 mod skill_store_path_prepare;
 mod skill_store_prepared_fs;
+mod skill_store_public_types;
 mod skill_store_recovery;
 mod skill_store_secure_fs;
 mod skill_store_secure_fs_faults;

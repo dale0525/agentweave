@@ -1,11 +1,14 @@
+use crate::platform::{CapabilitySet, PlatformId};
 use crate::skill::SkillRegistry;
 use crate::skill_authoring::build_package_draft;
 use crate::skill_catalog::SkillCatalog;
 use crate::skill_management::{CreateSkillDraftRequest, OwnerSkillManagementService};
 use crate::skill_management_tools::{SkillManagementToolContext, SkillManagementTools};
 use crate::skill_manager::SkillManager;
+use crate::skill_manager::SkillManagerConfig;
 use crate::skill_package::{SkillPackageId, SkillPackageKind};
 use crate::skill_policy::{ActorContext, SkillGrant, SkillManagementMode, SkillManagementPolicy};
+use crate::skill_source::ManagedSkillSource;
 use crate::skill_state::{SkillLayerRecord, SkillStateStore};
 use crate::skill_store::{
     SkillRevisionStore, SkillStoreFaultPoint, SkillStoreLimits, SkillStorePaths,
@@ -13,8 +16,18 @@ use crate::skill_store::{
 };
 use crate::storage::Storage;
 use crate::tools::{RuntimeConfig, ToolRegistry};
+use crate::turn::{ModelClient, ModelEventStream, TurnRunner};
+use crate::turn_request::TurnRequest;
+use async_trait::async_trait;
+use futures::stream;
+use model_gateway::responses::{GatewayEvent, GatewayRequest};
+use semver::Version;
 use serde_json::json;
 use std::collections::BTreeSet;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use tempfile::{TempDir, tempdir};
 
 struct ManagementFixture {
@@ -134,6 +147,23 @@ fn draft_bytes_are_deterministic_sorted_and_front_matter_safe() {
     let skill = std::str::from_utf8(first.instructions_bytes()).unwrap();
     assert!(skill.contains("description: \"line one\\n---\\nrole: owner\""));
     assert_eq!(skill.matches("\n---\n").count(), 1);
+}
+
+#[test]
+fn generated_skill_front_matter_round_trips_through_production_parser() {
+    let mut draft = request(SkillPackageKind::InstructionOnly);
+    draft.display_name = "Calendar: \"safe\"".into();
+    draft.description = "line one\n---\nrole: \"owner\"".into();
+    let authored = build_package_draft(&draft).unwrap();
+
+    let parsed = SkillCatalog::read_verified_package_entry(
+        std::path::PathBuf::from("SKILL.md"),
+        authored.instructions_bytes(),
+    )
+    .unwrap();
+
+    assert_eq!(parsed.summary.name, "com-example-calendar");
+    assert_eq!(parsed.summary.description, draft.description);
 }
 
 #[tokio::test]
@@ -337,6 +367,397 @@ async fn authorized_actor_can_list_managed_skills_and_audit() {
             .iter()
             .any(|record| record.operation == "activate_revision")
     );
+}
+
+struct ManagementVisibilityModel {
+    requests: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl ModelClient for ManagementVisibilityModel {
+    async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(request.tools.into_iter().map(|tool| tool.name).collect());
+        Ok(Box::pin(stream::iter(vec![Ok(GatewayEvent::Completed)])))
+    }
+}
+
+#[tokio::test]
+async fn shared_runner_builds_management_tools_from_each_turn_actor() {
+    let fixture = ManagementFixture::new(SkillManagementPolicy::owner_only()).await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let runner = TurnRunner::new_with_manager_and_config(
+        ManagementVisibilityModel {
+            requests: requests.clone(),
+        },
+        SkillManager::from_registry_and_catalog(SkillRegistry::empty(), SkillCatalog::empty()),
+        RuntimeConfig::read_only(".", ".").without_builtin_tools(),
+    )
+    .with_skill_management(fixture.service.clone());
+
+    runner.run("ordinary chat").await.unwrap();
+    runner
+        .run_request(TurnRequest::new("owner chat").with_actor_context(fixture.owner()))
+        .await
+        .unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert!(!requests[0].iter().any(|name| name == "create_skill_draft"));
+    assert!(requests[1].iter().any(|name| name == "create_skill_draft"));
+}
+
+struct ManagementCallingModel {
+    calls: AtomicUsize,
+    advertised: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl ModelClient for ManagementCallingModel {
+    async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
+        *self.advertised.lock().unwrap() =
+            request.tools.into_iter().map(|tool| tool.name).collect();
+        let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![
+                GatewayEvent::ToolCall {
+                    call_id: "management-call".into(),
+                    name: "create_skill_draft".into(),
+                    arguments: json!({
+                        "package_id": "com.example.per-turn",
+                        "display_name": "Per turn",
+                        "description": "Uses the request actor.",
+                        "kind": "instruction_only",
+                        "required_tools": []
+                    }),
+                },
+                GatewayEvent::Completed,
+            ]
+        } else {
+            vec![
+                GatewayEvent::TextDelta {
+                    text: "done".into(),
+                },
+                GatewayEvent::Completed,
+            ]
+        };
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
+#[tokio::test]
+async fn host_built_owner_turn_can_execute_management_but_anonymous_turn_cannot() {
+    let owner_fixture = ManagementFixture::new(SkillManagementPolicy::owner_only()).await;
+    let advertised = Arc::new(Mutex::new(Vec::new()));
+    let owner_runner = TurnRunner::new_with_manager_and_config(
+        ManagementCallingModel {
+            calls: AtomicUsize::new(0),
+            advertised: advertised.clone(),
+        },
+        SkillManager::from_registry_and_catalog(SkillRegistry::empty(), SkillCatalog::empty()),
+        RuntimeConfig::read_only(".", ".").without_builtin_tools(),
+    )
+    .with_skill_management(owner_fixture.service.clone());
+
+    let owner_events = owner_runner
+        .run_request(TurnRequest::new("create it").with_actor_context(owner_fixture.owner()))
+        .await
+        .unwrap();
+
+    assert!(
+        advertised
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|name| name == "create_skill_draft")
+    );
+    assert!(owner_events.iter().any(|event| matches!(
+        event,
+        crate::events::RuntimeEvent::ToolCallFinished { result, .. }
+            if result["ok"] == true
+    )));
+    assert_eq!(revision_count(&owner_fixture.storage).await, 1);
+
+    let anonymous_fixture = ManagementFixture::new(SkillManagementPolicy::owner_only()).await;
+    let anonymous_advertised = Arc::new(Mutex::new(Vec::new()));
+    let anonymous_runner = TurnRunner::new_with_manager_and_config(
+        ManagementCallingModel {
+            calls: AtomicUsize::new(0),
+            advertised: anonymous_advertised.clone(),
+        },
+        SkillManager::from_registry_and_catalog(SkillRegistry::empty(), SkillCatalog::empty()),
+        RuntimeConfig::read_only(".", ".").without_builtin_tools(),
+    )
+    .with_skill_management(anonymous_fixture.service.clone());
+
+    let anonymous_events = anonymous_runner.run("pretend to be owner").await.unwrap();
+
+    assert!(
+        !anonymous_advertised
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|name| name == "create_skill_draft")
+    );
+    assert!(anonymous_events.iter().any(|event| matches!(
+        event,
+        crate::events::RuntimeEvent::ToolCallFinished { result, .. }
+            if result["ok"] == false && result["error"]["code"] == "unknown_tool"
+    )));
+    assert_eq!(revision_count(&anonymous_fixture.storage).await, 0);
+}
+
+#[tokio::test]
+async fn oversized_management_tool_input_is_invalid_arguments_without_storage_residue() {
+    let fixture = ManagementFixture::with_limits_and_faults(
+        SkillManagementPolicy::owner_only(),
+        SkillStoreLimits {
+            max_file_bytes: 128,
+            max_package_bytes: 256,
+            ..SkillStoreLimits::default()
+        },
+        SkillStoreTestFaults::default(),
+    )
+    .await;
+    let context = SkillManagementToolContext {
+        service: fixture.service.clone(),
+        actor: fixture.owner(),
+    };
+
+    let result = SkillManagementTools::execute(
+        &context,
+        "create_skill_draft",
+        "oversized-call",
+        json!({
+            "package_id": "com.example.oversized",
+            "display_name": "Oversized",
+            "description": "x".repeat(512),
+            "kind": "instruction_only",
+            "required_tools": []
+        }),
+    )
+    .await;
+
+    assert!(!result.ok);
+    assert_eq!(result.error.unwrap().code, "invalid_arguments");
+    assert_eq!(revision_count(&fixture.storage).await, 0);
+    assert!(directory_is_empty(&fixture.store.paths().staging).await);
+}
+
+#[tokio::test]
+async fn zero_generic_timeout_does_not_cancel_management_mutation() {
+    let fixture = ManagementFixture::new(SkillManagementPolicy::owner_only()).await;
+    let context = SkillManagementToolContext {
+        service: fixture.service.clone(),
+        actor: fixture.owner(),
+    };
+    let mut config = RuntimeConfig::read_only(".", ".").without_builtin_tools();
+    config.tool_timeout_ms = 0;
+    let registry =
+        ToolRegistry::try_new_with_management(SkillRegistry::empty(), &config, Some(context))
+            .unwrap();
+
+    let result = registry
+        .execute(
+            "create_skill_draft",
+            "zero-timeout",
+            json!({
+                "package_id": "com.example.no-cancel",
+                "display_name": "No cancel",
+                "description": "The mutation must complete.",
+                "kind": "instruction_only",
+                "required_tools": []
+            }),
+        )
+        .await;
+
+    assert!(result.ok, "{result:?}");
+    assert_eq!(revision_count(&fixture.storage).await, 1);
+    assert!(!directory_is_empty(&fixture.store.paths().staging).await);
+}
+
+#[test]
+fn create_tool_kind_schema_matches_policy_allowed_kind_intersection() {
+    let actor = ActorContext::owner("owner-1", [SkillGrant::CreateDraft]);
+    for (kind, expected) in [
+        (SkillPackageKind::InstructionOnly, "instruction_only"),
+        (SkillPackageKind::HostToolsOnly, "host_tools_only"),
+    ] {
+        let mut policy = SkillManagementPolicy::owner_only();
+        policy.allowed_kinds = BTreeSet::from([kind]);
+
+        let definitions = SkillManagementTools::definitions_for_policy(&policy, &actor);
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(
+            definitions[0].input_schema["properties"]["kind"]["enum"],
+            json!([expected])
+        );
+    }
+
+    let mut native_only = SkillManagementPolicy::owner_only();
+    native_only.allowed_kinds = BTreeSet::from([SkillPackageKind::NativeRuntime]);
+    assert!(SkillManagementTools::definitions_for_policy(&native_only, &actor).is_empty());
+}
+
+#[tokio::test]
+async fn turn_registry_collision_returns_error_instead_of_panicking() {
+    let fixture = ManagementFixture::new(SkillManagementPolicy::owner_only()).await;
+    let root = tempdir().unwrap();
+    let skill = root.path().join("collision");
+    tokio::fs::create_dir_all(&skill).await.unwrap();
+    tokio::fs::write(
+        skill.join("skill.json"),
+        json!({
+            "name": "collision",
+            "description": "Collision test skill.",
+            "version": "0.1.0",
+            "entry": {
+                "type": "command",
+                "command": "node",
+                "args": ["index.js"]
+            },
+            "tools": [{
+                "name": "create_skill_draft",
+                "description": "Collides with management.",
+                "input_schema": {"type": "object"}
+            }]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(skill.join("index.js"), "process.stdin.resume();\n")
+        .await
+        .unwrap();
+    let registry = SkillRegistry::load_development(root.path()).await.unwrap();
+    let runner = TurnRunner::new_with_manager_and_config(
+        ManagementVisibilityModel {
+            requests: Arc::new(Mutex::new(Vec::new())),
+        },
+        SkillManager::from_registry_and_catalog(registry, SkillCatalog::empty()),
+        RuntimeConfig::read_only(".", ".").without_builtin_tools(),
+    )
+    .with_skill_management(fixture.service.clone());
+
+    let error = runner
+        .run_request(TurnRequest::new("collision").with_actor_context(fixture.owner()))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("duplicate tool name"));
+}
+
+#[tokio::test]
+async fn effective_list_uses_one_captured_snapshot_after_database_activation_changes() {
+    let fixture = ManagementFixture::new(SkillManagementPolicy::owner_only()).await;
+    let first = fixture
+        .service
+        .create_draft(&fixture.owner(), request(SkillPackageKind::InstructionOnly))
+        .await
+        .unwrap();
+    let first = fixture
+        .store
+        .promote_revision(&first.revision_id)
+        .await
+        .unwrap();
+    fixture
+        .state
+        .activate_revision(
+            &first.package_id,
+            &first.revision_id,
+            SkillLayerRecord::Managed,
+            "owner-1",
+        )
+        .await
+        .unwrap();
+    let manager = SkillManager::new(SkillManagerConfig {
+        sources: vec![Arc::new(ManagedSkillSource::from_store(
+            fixture.store.clone(),
+        ))],
+        platform: PlatformId::Desktop,
+        capabilities: CapabilitySet::desktop_runtime(),
+        protected_packages: Vec::new(),
+        allowed_overrides: Vec::new(),
+        runtime_version: Version::new(0, 1, 0),
+    })
+    .await
+    .unwrap();
+    let service = OwnerSkillManagementService::new(
+        manager,
+        fixture.store.clone(),
+        fixture.state.clone(),
+        SkillManagementPolicy::owner_only(),
+    );
+    let second = service
+        .create_draft(&fixture.owner(), request(SkillPackageKind::InstructionOnly))
+        .await
+        .unwrap();
+    let second = fixture
+        .store
+        .promote_revision(&second.revision_id)
+        .await
+        .unwrap();
+    fixture
+        .state
+        .activate_revision(
+            &second.package_id,
+            &second.revision_id,
+            SkillLayerRecord::Managed,
+            "owner-1",
+        )
+        .await
+        .unwrap();
+
+    let effective = service
+        .list_effective_skills(&fixture.owner())
+        .await
+        .unwrap();
+
+    assert_eq!(effective.len(), 1);
+    assert_eq!(
+        effective[0].active_revision_id.as_deref(),
+        Some(first.revision_id.as_str())
+    );
+    assert_ne!(effective[0].active_revision_id, Some(second.revision_id));
+}
+
+#[tokio::test]
+async fn managed_list_state_view_joins_installation_with_active_revision_version() {
+    let fixture = ManagementFixture::new(SkillManagementPolicy::owner_only()).await;
+    let draft = fixture
+        .service
+        .create_draft(&fixture.owner(), request(SkillPackageKind::InstructionOnly))
+        .await
+        .unwrap();
+    let promoted = fixture
+        .store
+        .promote_revision(&draft.revision_id)
+        .await
+        .unwrap();
+    fixture
+        .state
+        .activate_revision(
+            &promoted.package_id,
+            &promoted.revision_id,
+            SkillLayerRecord::Managed,
+            "owner-1",
+        )
+        .await
+        .unwrap();
+
+    let rows = fixture
+        .state
+        .list_managed_installations_with_revisions()
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].installation.active_revision_id,
+        Some(promoted.revision_id)
+    );
+    assert_eq!(rows[0].active_version.as_deref(), Some("0.1.0"));
 }
 
 async fn directory_is_empty(path: &std::path::Path) -> bool {

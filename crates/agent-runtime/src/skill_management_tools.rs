@@ -38,23 +38,25 @@ impl SkillManagementTools {
         policy: &SkillManagementPolicy,
         actor: &ActorContext,
     ) -> Vec<ToolDefinition> {
-        let can_create = policy.allows(
-            actor,
-            SkillOperation::CreateDraft,
-            SkillPackageKind::InstructionOnly,
-        ) || policy.allows(
-            actor,
-            SkillOperation::CreateDraft,
-            SkillPackageKind::HostToolsOnly,
-        );
-        if !can_create {
+        let allowed_kinds = [
+            (SkillPackageKind::InstructionOnly, "instruction_only"),
+            (SkillPackageKind::HostToolsOnly, "host_tools_only"),
+        ]
+        .into_iter()
+        .filter_map(|(kind, name)| {
+            policy
+                .allows(actor, SkillOperation::CreateDraft, kind)
+                .then_some(name)
+        })
+        .collect::<Vec<_>>();
+        if allowed_kinds.is_empty() {
             return Vec::new();
         }
         vec![ToolDefinition {
             name: CREATE_SKILL_DRAFT_TOOL.into(),
             namespace: Some("generalagent_skill_management".into()),
             description: "Create an inactive owner-managed skill draft.".into(),
-            input_schema: create_draft_schema(),
+            input_schema: create_draft_schema(&allowed_kinds),
             output_schema: None,
             permission: ToolPermission::ManageSkills,
             source: ToolSource::BuiltIn,
@@ -102,7 +104,7 @@ impl SkillManagementTools {
     }
 }
 
-fn create_draft_schema() -> Value {
+fn create_draft_schema(allowed_kinds: &[&str]) -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -113,7 +115,7 @@ fn create_draft_schema() -> Value {
             "description": {"type": "string"},
             "kind": {
                 "type": "string",
-                "enum": ["instruction_only", "host_tools_only"]
+                "enum": allowed_kinds
             },
             "required_tools": {
                 "type": "array",

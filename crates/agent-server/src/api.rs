@@ -5,9 +5,11 @@ use agent_runtime::{
     skill::SkillRegistry,
     skill_catalog::SkillCatalog,
     skill_manager::SkillManager,
+    skill_policy::ActorContext,
     storage::Storage,
     tools::RuntimeConfig,
     turn::{AgentRunner, ModelClient, TurnRunner},
+    turn_request::TurnRequest,
 };
 #[cfg(test)]
 use async_trait::async_trait;
@@ -79,7 +81,7 @@ impl AppState {
             skill_manager.clone(),
             runtime_config.clone(),
         )
-        .with_skill_management(owner_management.tool_context());
+        .with_skill_management(owner_management.management_service());
         Self {
             storage,
             agent: Arc::new(runner),
@@ -394,15 +396,29 @@ async fn run_agent_turn(
     state: &AppState,
     request: &UserMessageRequest,
 ) -> Result<Vec<RuntimeEvent>, ApiError> {
+    run_agent_turn_for_actor(state, request, ActorContext::anonymous()).await
+}
+
+async fn run_agent_turn_for_actor(
+    state: &AppState,
+    request: &UserMessageRequest,
+    actor: ActorContext,
+) -> Result<Vec<RuntimeEvent>, ApiError> {
     if let Some(model_settings) = request.model_settings.clone() {
         let profile = provider_profile_from_request(model_settings)?;
-        let runner = TurnRunner::new_with_manager_and_config(
+        let mut runner = TurnRunner::new_with_manager_and_config(
             GatewayHttpClient::new(profile),
             state.skill_manager(),
             state.runtime_config.clone(),
         );
+        if let Some(owner_management) = state.owner_management() {
+            runner = runner.with_skill_management(owner_management.management_service());
+        }
 
-        return runner.run(&request.content).await.map_err(agent_turn_error);
+        return runner
+            .run_request(TurnRequest::new(&request.content).with_actor_context(actor))
+            .await
+            .map_err(agent_turn_error);
     }
 
     state

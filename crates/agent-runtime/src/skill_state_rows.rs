@@ -8,6 +8,7 @@ use uuid::{Uuid, Version};
 
 pub(crate) const REVISION_COLUMNS: &str = "revision_id, package_id, version, content_hash, storage_path, descriptor_json, validation_json, created_by, created_at, lifecycle_status";
 pub(crate) const INSTALLATION_COLUMNS: &str = "package_id, source_layer, active_revision_id, enabled, trust_level, install_status, installed_at, updated_at";
+pub(crate) const MANAGED_INSTALLATION_VIEW_COLUMNS: &str = "i.package_id AS package_id, i.source_layer AS source_layer, i.active_revision_id AS active_revision_id, i.enabled AS enabled, i.trust_level AS trust_level, i.install_status AS install_status, i.installed_at AS installed_at, i.updated_at AS updated_at, r.version AS active_version";
 pub(crate) const APPROVAL_COLUMNS: &str = "approval_id, package_id, revision_id, operation, requested_by, approved_by, status, permission_diff, created_at, resolved_at";
 pub(crate) const SNAPSHOT_COLUMNS: &str =
     "generation, status, members_json, created_at, activated_at";
@@ -178,6 +179,12 @@ pub struct SkillInstallationRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedSkillInstallationView {
+    pub installation: SkillInstallationRecord,
+    pub active_version: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkillApprovalRecord {
     pub approval_id: String,
@@ -320,6 +327,15 @@ pub(crate) fn installation_from_row(row: &SqliteRow) -> anyhow::Result<SkillInst
         status,
         installed_at: parse_row_timestamp(row, "installed_at")?,
         updated_at: parse_row_timestamp(row, "updated_at")?,
+    })
+}
+
+pub(crate) fn managed_installation_view_from_row(
+    row: &SqliteRow,
+) -> anyhow::Result<ManagedSkillInstallationView> {
+    Ok(ManagedSkillInstallationView {
+        installation: installation_from_row(row)?,
+        active_version: row.try_get("active_version")?,
     })
 }
 
