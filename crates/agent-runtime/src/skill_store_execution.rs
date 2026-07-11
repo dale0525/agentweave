@@ -54,7 +54,7 @@ pub(crate) fn classify_execution_command(
     if command.is_empty() || command.contains('\0') {
         anyhow::bail!("invalid empty or nul execution command");
     }
-    if normalize_absolute_path(command, windows).is_some() {
+    if is_absolute_path(command, windows) {
         return Ok(ExecutionCommandKind::Absolute);
     }
     if windows && has_windows_anchored_prefix(command) {
@@ -81,6 +81,14 @@ pub(crate) fn classify_execution_command(
     }
     canonical_relative_path(&relative)?;
     Ok(ExecutionCommandKind::PackagedRelative(relative))
+}
+
+pub(crate) fn is_portable_absolute_path(value: &str) -> bool {
+    is_absolute_path(value, false) || is_absolute_path(value, true)
+}
+
+fn is_absolute_path(value: &str, windows: bool) -> bool {
+    normalize_absolute_path(value, windows).is_some()
 }
 
 pub(crate) fn absolute_execution_command_is_within(

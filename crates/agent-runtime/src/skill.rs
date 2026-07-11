@@ -3,6 +3,7 @@ use crate::skill_availability::{
     SkillAvailability, SkillAvailabilityStatus, SkillCapabilityMetadata,
     evaluate_skill_availability,
 };
+use crate::skill_store_execution::is_portable_absolute_path;
 use crate::skill_store_fs::PackageLimits;
 use crate::tools::ToolPermission;
 use crate::tools::process::read_limited_child_output;
@@ -493,7 +494,7 @@ pub(crate) fn validate_manifest_semantics(manifest: &SkillManifest) -> anyhow::R
     for arg in &manifest.entry.args {
         let path = Path::new(arg);
         if looks_like_entry_resource(arg)
-            && !path.is_absolute()
+            && !is_portable_absolute_path(arg)
             && !is_safe_packaged_skill_path(path)
         {
             anyhow::bail!("unsafe skill entry resource path: {arg}");
@@ -544,6 +545,8 @@ pub(crate) fn manifest_entry_resources(manifest: &SkillManifest) -> impl Iterato
         .args
         .iter()
         .filter(|arg| looks_like_entry_resource(arg))
+        .filter(|arg| !is_portable_absolute_path(arg))
+        .filter(|arg| is_safe_packaged_skill_path(Path::new(arg)))
         .map(Path::new)
 }
 
@@ -605,7 +608,7 @@ fn looks_like_entry_resource(arg: &str) -> bool {
     }
 
     let path = Path::new(arg);
-    path.extension().is_some() || path.components().count() > 1
+    path.extension().is_some() || path.components().count() > 1 || arg.contains('\\')
 }
 
 fn is_safe_packaged_skill_path(path: &Path) -> bool {

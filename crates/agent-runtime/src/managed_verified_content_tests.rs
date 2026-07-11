@@ -103,6 +103,93 @@ impl VerifiedFixture {
     }
 }
 
+#[test]
+fn manifest_entry_resources_keep_only_portable_relative_candidates() {
+    use crate::skill::manifest_entry_resources;
+
+    let manifest = runtime_manifest_with_args(vec![
+        "index.js",
+        "dir/file",
+        r"dir\file",
+        "/host/config.json",
+        r"C:\host\config.json",
+        r"\\server\share\config.json",
+        r"\\?\C:\host\config.json",
+        r"\\?\UNC\server\share\config.json",
+        "../x",
+    ]);
+
+    let resources: Vec<_> = manifest_entry_resources(&manifest)
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(resources, ["index.js", "dir/file", r"dir\file"]);
+}
+
+#[test]
+fn manifest_semantics_reject_unsafe_relative_entry_resource() {
+    use crate::skill::validate_manifest_semantics;
+
+    let error = validate_manifest_semantics(&runtime_manifest_with_args(vec!["../x"])).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("unsafe skill entry resource path: ../x")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_execution_keeps_separated_absolute_runtime_argument_opaque() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = VerifiedFixture::new().await;
+    let marker = fixture._app.path().join("opaque-args.received");
+    let command = fixture._app.path().join("opaque-args-command.sh");
+    tokio::fs::write(
+        &command,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n%s\\n' \"$1\" \"$2\" > '{}'\ncat >/dev/null\nprintf '{{\"ok\":true}}'\n",
+            marker.display()
+        ),
+    )
+    .await
+    .unwrap();
+    let mut permissions = tokio::fs::metadata(&command).await.unwrap().permissions();
+    permissions.set_mode(0o700);
+    tokio::fs::set_permissions(&command, permissions)
+        .await
+        .unwrap();
+    fixture
+        .active_package(
+            "com.example.execution-separated-absolute-arg",
+            write_runtime_package_with_entry(
+                "com.example.execution-separated-absolute-arg",
+                command.to_str().unwrap(),
+                vec!["--config".into(), "/host/config.json".into()],
+                "printf '{\"ok\":true}'\n",
+            )
+            .await,
+        )
+        .await;
+    let snapshot = SkillSnapshot::build(1, active_set(fixture.source.discover().await.unwrap()))
+        .await
+        .unwrap();
+
+    let value = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap();
+
+    assert_eq!(value, json!({"ok": true}));
+    assert_eq!(
+        tokio::fs::read_to_string(marker).await.unwrap(),
+        "--config\n/host/config.json\n"
+    );
+}
+
 #[tokio::test]
 async fn managed_snapshot_uses_discovery_verified_manifest_and_instructions_bytes() {
     let fixture = VerifiedFixture::new().await;
@@ -743,6 +830,21 @@ fn active_set(packages: Vec<crate::skill_source::DiscoveredSkillPackage>) -> Res
             .collect(),
         inactive: Vec::new(),
     }
+}
+
+fn runtime_manifest_with_args(args: Vec<&str>) -> crate::skill::SkillManifest {
+    serde_json::from_value(json!({
+        "name": "portable-resources",
+        "description": "portable resource test",
+        "version": "1.0.0",
+        "entry": {"type": "command", "command": "node", "args": args},
+        "tools": [{
+            "name": "verified_tool",
+            "description": "verified tool",
+            "input_schema": {"type": "object"}
+        }]
+    }))
+    .unwrap()
 }
 
 async fn write_runtime_package(id: &str) -> TempDir {
