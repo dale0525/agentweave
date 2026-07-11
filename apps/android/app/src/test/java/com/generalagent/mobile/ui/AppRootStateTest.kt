@@ -89,7 +89,7 @@ class AppRootStateTest {
   }
 
   @Test
-  fun activeNavigationGeometryMatchesStitchRoutes() {
+  fun activeNavigationGeometryMatchesExpectedRoutes() {
     assertEquals(NavigationSize(64, 48), AppTab.Chat.activeNavigationSize())
     assertEquals(NavigationSize(72, 60), AppTab.Settings.activeNavigationSize())
     assertEquals(NavigationSize(64, 48), AppTab.Skills.activeNavigationSize())
