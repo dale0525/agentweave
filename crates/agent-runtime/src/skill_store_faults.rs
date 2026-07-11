@@ -1,0 +1,107 @@
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum StoreFaultPoint {
+    StagingCopyFile,
+    IncomingCopyFile,
+    QuarantineCopyFile,
+    PromoteStagingRename,
+    PromoteIncomingRename,
+    PromoteDatabase,
+    PromoteRestoreRename,
+    QuarantineIncomingRename,
+    QuarantineSourceRename,
+    QuarantineDatabase,
+    QuarantineRestoreRename,
+    WriteAfterLock,
+    PromoteAfterLock,
+    QuarantineAfterLock,
+    CopyBeforeFileOpen,
+    WriteBeforeTempOpen,
+    PromoteBeforeDestinationCommit,
+    ManagedReadonly,
+    PromoteDestinationCleanup,
+    PromoteDestinationCleanupAfter,
+    PromoteSourceCleanup,
+    PromoteSourceCleanupAfter,
+    QuarantineDestinationCleanup,
+    QuarantineDestinationCleanupAfter,
+    QuarantineSourceCleanup,
+    QuarantineSourceCleanupAfter,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct StoreFaults {
+    failures: Arc<Mutex<BTreeMap<StoreFaultPoint, usize>>>,
+    gates: Arc<Mutex<BTreeMap<StoreFaultPoint, Arc<StoreTestGateInner>>>>,
+}
+
+#[derive(Debug)]
+struct StoreTestGateInner {
+    entered: tokio::sync::Barrier,
+    release: tokio::sync::Barrier,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct StoreTestGate {
+    inner: Arc<StoreTestGateInner>,
+}
+
+#[cfg(test)]
+impl StoreTestGate {
+    pub(crate) async fn wait_entered(&self) {
+        self.inner.entered.wait().await;
+    }
+
+    pub(crate) async fn release(&self) {
+        self.inner.release.wait().await;
+    }
+}
+
+impl StoreFaults {
+    #[cfg(test)]
+    pub(crate) fn fail_once(&self, point: StoreFaultPoint) {
+        self.failures.lock().unwrap().insert(point, 0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_after(&self, point: StoreFaultPoint, successful_checks: usize) {
+        self.failures
+            .lock()
+            .unwrap()
+            .insert(point, successful_checks);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gate_once(&self, point: StoreFaultPoint) -> StoreTestGate {
+        let inner = Arc::new(StoreTestGateInner {
+            entered: tokio::sync::Barrier::new(2),
+            release: tokio::sync::Barrier::new(2),
+        });
+        self.gates.lock().unwrap().insert(point, inner.clone());
+        StoreTestGate { inner }
+    }
+
+    pub(crate) fn check(&self, point: StoreFaultPoint) -> anyhow::Result<()> {
+        let mut failures = self.failures.lock().unwrap();
+        let Some(remaining) = failures.get_mut(&point) else {
+            return Ok(());
+        };
+        if *remaining == 0 {
+            failures.remove(&point);
+            anyhow::bail!("injected skill store failure at {point:?}")
+        }
+        *remaining -= 1;
+        Ok(())
+    }
+
+    pub(crate) async fn checkpoint(&self, point: StoreFaultPoint) {
+        let gate = self.gates.lock().unwrap().remove(&point);
+        if let Some(gate) = gate {
+            gate.entered.wait().await;
+            gate.release.wait().await;
+        }
+    }
+}

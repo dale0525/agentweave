@@ -31,6 +31,7 @@ impl StoreFixture {
             SkillStoreLimits {
                 max_file_bytes: 1024,
                 max_package_bytes: 4096,
+                ..SkillStoreLimits::default()
             },
             SkillStoreTestFaults::default(),
         )
@@ -179,6 +180,7 @@ async fn staging_enforces_file_and_package_limits_without_leaving_state() {
         SkillStoreLimits {
             max_file_bytes: 300,
             max_package_bytes: 4096,
+            ..SkillStoreLimits::default()
         },
         SkillStoreTestFaults::default(),
     )
@@ -206,6 +208,7 @@ async fn staging_enforces_file_and_package_limits_without_leaving_state() {
         SkillStoreLimits {
             max_file_bytes: 1024,
             max_package_bytes: 320,
+            ..SkillStoreLimits::default()
         },
         SkillStoreTestFaults::default(),
     )
@@ -276,6 +279,7 @@ async fn staging_copy_failure_cleans_directory_and_database() {
         SkillStoreLimits {
             max_file_bytes: 1024,
             max_package_bytes: 4096,
+            ..SkillStoreLimits::default()
         },
         faults,
     )
@@ -304,6 +308,7 @@ async fn promotion_copy_and_rename_failures_restore_staging_and_clean_incoming()
             SkillStoreLimits {
                 max_file_bytes: 1024,
                 max_package_bytes: 4096,
+                ..SkillStoreLimits::default()
             },
             faults.clone(),
         )
@@ -322,16 +327,9 @@ async fn promotion_copy_and_rename_failures_restore_staging_and_clean_incoming()
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains(&format!("{point:?}")));
+        assert!(format!("{error:#}").contains(&format!("{point:?}")));
         assert!(staged.path.is_dir());
-        assert!(
-            !fixture
-                .paths
-                .managed
-                .join(".incoming")
-                .join(&staged.revision_id)
-                .exists()
-        );
+        assert!(directory_is_empty(&fixture.paths.managed.join(".incoming")).await);
         assert_eq!(
             fixture
                 .state
@@ -388,6 +386,7 @@ async fn promotion_database_failure_restores_staging_and_removes_managed_copy() 
         SkillStoreLimits {
             max_file_bytes: 1024,
             max_package_bytes: 4096,
+            ..SkillStoreLimits::default()
         },
         faults.clone(),
     )
@@ -406,7 +405,7 @@ async fn promotion_database_failure_restores_staging_and_removes_managed_copy() 
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("PromoteDatabase"));
+    assert!(format!("{error:#}").contains("PromoteDatabase"));
     assert!(staged.path.is_dir());
     assert!(!managed_path(&fixture, &staged.revision_id).exists());
     let record = fixture
@@ -420,12 +419,13 @@ async fn promotion_database_failure_restores_staging_and_removes_managed_copy() 
 }
 
 #[tokio::test]
-async fn promotion_compensation_failure_quarantines_content_and_reports_both_errors() {
+async fn promotion_cleanup_failure_keeps_staging_authoritative_and_reports_both_errors() {
     let faults = SkillStoreTestFaults::default();
     let fixture = StoreFixture::with_limits_and_faults(
         SkillStoreLimits {
             max_file_bytes: 1024,
             max_package_bytes: 4096,
+            ..SkillStoreLimits::default()
         },
         faults.clone(),
     )
@@ -448,24 +448,18 @@ async fn promotion_compensation_failure_quarantines_content_and_reports_both_err
 
     assert!(message.contains("PromoteDatabase"), "{message}");
     assert!(message.contains("PromoteRestoreRename"), "{message}");
-    assert!(!staged.path.exists());
-    assert!(!managed_path(&fixture, &staged.revision_id).exists());
-    assert!(fixture.paths.quarantine.join(&staged.revision_id).is_dir());
+    assert!(staged.path.exists());
+    assert!(managed_path(&fixture, &staged.revision_id).exists());
+    assert!(!fixture.paths.quarantine.join(&staged.revision_id).exists());
     let record = fixture
         .state
         .get_revision(&staged.revision_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(record.status, SkillRevisionStatus::Quarantined);
-    assert_eq!(
-        record.storage_path,
-        fixture
-            .paths
-            .quarantine
-            .join(&staged.revision_id)
-            .to_string_lossy()
-    );
+    assert_eq!(record.status, SkillRevisionStatus::Staging);
+    assert_eq!(record.storage_path, staged.path.to_string_lossy());
+    assert_eq!(fixture.store.maintenance_issues().len(), 1);
 }
 
 #[tokio::test]
@@ -521,6 +515,7 @@ async fn quarantine_database_failure_restores_original_path_and_lifecycle() {
         SkillStoreLimits {
             max_file_bytes: 1024,
             max_package_bytes: 4096,
+            ..SkillStoreLimits::default()
         },
         faults.clone(),
     )
@@ -539,7 +534,7 @@ async fn quarantine_database_failure_restores_original_path_and_lifecycle() {
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("QuarantineDatabase"));
+    assert!(format!("{error:#}").contains("QuarantineDatabase"));
     assert!(staged.path.is_dir());
     assert!(!fixture.paths.quarantine.join(&staged.revision_id).exists());
     assert_eq!(
@@ -555,12 +550,13 @@ async fn quarantine_database_failure_restores_original_path_and_lifecycle() {
 }
 
 #[tokio::test]
-async fn quarantine_restore_failure_keeps_content_quarantined_and_reports_both_errors() {
+async fn quarantine_cleanup_failure_keeps_source_authoritative_and_reports_both_errors() {
     let faults = SkillStoreTestFaults::default();
     let fixture = StoreFixture::with_limits_and_faults(
         SkillStoreLimits {
             max_file_bytes: 1024,
             max_package_bytes: 4096,
+            ..SkillStoreLimits::default()
         },
         faults.clone(),
     )
@@ -583,7 +579,7 @@ async fn quarantine_restore_failure_keeps_content_quarantined_and_reports_both_e
 
     assert!(message.contains("QuarantineDatabase"), "{message}");
     assert!(message.contains("QuarantineRestoreRename"), "{message}");
-    assert!(!staged.path.exists());
+    assert!(staged.path.exists());
     assert!(fixture.paths.quarantine.join(&staged.revision_id).is_dir());
     assert_eq!(
         fixture
@@ -593,8 +589,9 @@ async fn quarantine_restore_failure_keeps_content_quarantined_and_reports_both_e
             .unwrap()
             .unwrap()
             .status,
-        SkillRevisionStatus::Quarantined
+        SkillRevisionStatus::Staging
     );
+    assert_eq!(fixture.store.maintenance_issues().len(), 1);
 }
 
 #[tokio::test]
@@ -711,6 +708,7 @@ async fn managed_source_and_manager_reload_use_final_managed_path_hash_and_gener
         SkillStoreLimits {
             max_file_bytes: 1024,
             max_package_bytes: 4096,
+            ..SkillStoreLimits::default()
         },
         faults.clone(),
     )
@@ -744,7 +742,7 @@ async fn managed_source_and_manager_reload_use_final_managed_path_hash_and_gener
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("PromoteDatabase"));
+    assert!(format!("{error:#}").contains("PromoteDatabase"));
     assert!(Arc::ptr_eq(&previous, &manager.current_snapshot()));
     assert_eq!(manager.current_snapshot().generation(), 1);
 }

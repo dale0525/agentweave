@@ -1,0 +1,445 @@
+use crate::skill_state::{SkillRevisionStatus, SkillStateStore};
+use crate::skill_store::{
+    SkillRevisionStore, SkillStoreFaultPoint, SkillStoreLimits, SkillStorePaths,
+    SkillStoreTestFaults,
+};
+use crate::storage::Storage;
+use serde_json::json;
+use std::path::Path;
+use tempfile::{TempDir, tempdir};
+
+struct SecurityFixture {
+    _app: TempDir,
+    _cache: TempDir,
+    storage: Storage,
+    state: SkillStateStore,
+    paths: SkillStorePaths,
+    store: SkillRevisionStore,
+    faults: SkillStoreTestFaults,
+}
+
+impl SecurityFixture {
+    async fn new(limits: SkillStoreLimits) -> Self {
+        let app = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let paths = SkillStorePaths::prepare(app.path(), cache.path())
+            .await
+            .unwrap();
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let state = SkillStateStore::new(storage.clone());
+        let faults = SkillStoreTestFaults::default();
+        let store = SkillRevisionStore::with_test_faults(
+            paths.clone(),
+            state.clone(),
+            limits,
+            faults.clone(),
+        );
+        Self {
+            _app: app,
+            _cache: cache,
+            storage,
+            state,
+            paths,
+            store,
+            faults,
+        }
+    }
+}
+
+fn small_limits() -> SkillStoreLimits {
+    SkillStoreLimits {
+        max_file_bytes: 2048,
+        max_package_bytes: 8192,
+        max_entries: 64,
+        max_files: 32,
+        max_directories: 16,
+        max_depth: 8,
+        max_relative_path_bytes: 256,
+    }
+}
+
+#[tokio::test]
+async fn package_tree_limits_reject_entry_file_directory_depth_and_path_count_bypasses() {
+    let source = write_package("com.example.limits").await;
+    tokio::fs::create_dir_all(source.path().join("nested/deeper"))
+        .await
+        .unwrap();
+    tokio::fs::write(source.path().join("nested/deeper/zero"), [])
+        .await
+        .unwrap();
+    tokio::fs::write(source.path().join("another-zero"), [])
+        .await
+        .unwrap();
+
+    for (name, limits, expected) in [
+        (
+            "entries",
+            SkillStoreLimits {
+                max_entries: 2,
+                ..small_limits()
+            },
+            "entry count",
+        ),
+        (
+            "files",
+            SkillStoreLimits {
+                max_files: 2,
+                ..small_limits()
+            },
+            "file count",
+        ),
+        (
+            "directories",
+            SkillStoreLimits {
+                max_directories: 1,
+                ..small_limits()
+            },
+            "directory count",
+        ),
+        (
+            "depth",
+            SkillStoreLimits {
+                max_depth: 2,
+                ..small_limits()
+            },
+            "depth",
+        ),
+        (
+            "path bytes",
+            SkillStoreLimits {
+                max_relative_path_bytes: 8,
+                ..small_limits()
+            },
+            "relative path",
+        ),
+    ] {
+        let fixture = SecurityFixture::new(limits).await;
+        let error = fixture
+            .store
+            .create_staging_revision(source.path(), "owner-1")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{name}: {error:#}");
+        assert!(directory_is_empty(&fixture.paths.staging).await);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn copy_open_rejects_file_swapped_to_symlink_after_scan() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.swap").await;
+    let outside = tempdir().unwrap();
+    let outside_file = outside.path().join("outside");
+    tokio::fs::write(&outside_file, "outside").await.unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::CopyBeforeFileOpen);
+    let store = fixture.store.clone();
+    let source_path = source.path().to_path_buf();
+    let stage =
+        tokio::spawn(async move { store.create_staging_revision(&source_path, "owner-1").await });
+    gate.wait_entered().await;
+    tokio::fs::remove_file(source.path().join("SKILL.md"))
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink(&outside_file, source.path().join("SKILL.md")).unwrap();
+
+    gate.release().await;
+    let error = stage.await.unwrap().unwrap_err();
+
+    assert!(format!("{error:#}").contains("symlink"));
+    assert_eq!(
+        tokio::fs::read_to_string(outside_file).await.unwrap(),
+        "outside"
+    );
+    assert!(directory_is_empty(&fixture.paths.staging).await);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn staging_write_rejects_parent_swapped_to_symlink_before_temp_open() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.write-swap").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    tokio::fs::create_dir(staged.path.join("nested"))
+        .await
+        .unwrap();
+    let outside = tempdir().unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::WriteBeforeTempOpen);
+    let store = fixture.store.clone();
+    let revision_id = staged.revision_id.clone();
+    let write = tokio::spawn(async move {
+        store
+            .write_staging_file(&revision_id, Path::new("nested/file"), b"secret")
+            .await
+    });
+    gate.wait_entered().await;
+    tokio::fs::rename(staged.path.join("nested"), staged.path.join("nested-old"))
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink(outside.path(), staged.path.join("nested")).unwrap();
+
+    gate.release().await;
+    let error = write.await.unwrap().unwrap_err();
+
+    assert!(format!("{error:#}").contains("symlink"));
+    assert!(!outside.path().join("file").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn staging_write_rejects_store_root_swapped_to_symlink() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.root-swap").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let moved_root = fixture.paths.staging.with_extension("moved");
+    tokio::fs::rename(&fixture.paths.staging, &moved_root)
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink(&moved_root, &fixture.paths.staging).unwrap();
+
+    let error = fixture
+        .store
+        .write_staging_file(
+            &staged.revision_id,
+            Path::new("SKILL.md"),
+            b"---\nname: root-swap\ndescription: bad\n---\nbad\n",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("store root must be a real directory"));
+    let content = tokio::fs::read_to_string(moved_root.join(&staged.revision_id).join("SKILL.md"))
+        .await
+        .unwrap();
+    assert!(!content.contains("description: bad"));
+}
+
+#[tokio::test]
+async fn destination_empty_directory_created_after_check_is_not_replaced() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.reserve").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::PromoteBeforeDestinationCommit);
+    let store = fixture.store.clone();
+    let revision_id = staged.revision_id.clone();
+    let promote = tokio::spawn(async move { store.promote_revision(&revision_id).await });
+    gate.wait_entered().await;
+    let destination = fixture
+        .paths
+        .managed
+        .join("com.example.reserve/revisions")
+        .join(&staged.revision_id);
+    tokio::fs::create_dir(&destination).await.unwrap();
+
+    gate.release().await;
+    let error = promote.await.unwrap().unwrap_err();
+
+    assert!(format!("{error:#}").contains("already exists"));
+    assert!(destination.is_dir());
+    assert!(directory_is_empty(&destination).await);
+    assert!(staged.path.is_dir());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn promotion_preserves_executable_bits_and_clears_only_write_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.mode").await;
+    let script = source.path().join("run.sh");
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o755)
+        .open(&script)
+        .await
+        .unwrap();
+    tokio::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .await
+        .unwrap();
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+
+    let managed = fixture
+        .store
+        .promote_revision(&staged.revision_id)
+        .await
+        .unwrap();
+
+    let mode = tokio::fs::metadata(managed.path.join("run.sh"))
+        .await
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o111, 0o111);
+    assert_eq!(mode & 0o222, 0);
+}
+
+#[tokio::test]
+async fn readonly_failure_rolls_back_before_database_promotion() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.permission").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    fixture
+        .faults
+        .fail_once(SkillStoreFaultPoint::ManagedReadonly);
+
+    let error = fixture
+        .store
+        .promote_revision(&staged.revision_id)
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("ManagedReadonly"));
+    assert!(staged.path.is_dir());
+    assert_eq!(
+        fixture
+            .state
+            .get_revision(&staged.revision_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillRevisionStatus::Staging
+    );
+}
+
+#[tokio::test]
+async fn failed_new_staging_write_removes_created_empty_parent_directories() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.parents").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"CREATE TRIGGER fail_nested_metadata
+           BEFORE UPDATE OF content_hash ON skill_revisions
+           BEGIN SELECT RAISE(ABORT, 'nested metadata failed'); END"#,
+    )
+    .execute(fixture.storage.pool())
+    .await
+    .unwrap();
+
+    let error = fixture
+        .store
+        .write_staging_file(&staged.revision_id, Path::new("new/deep/file.txt"), b"new")
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("nested metadata failed"));
+    assert!(!staged.path.join("new").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn readonly_source_is_copied_into_an_editable_staging_tree_without_losing_execute_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.readonly-source").await;
+    let script = source.path().join("run.sh");
+    tokio::fs::write(&script, "#!/bin/sh\n").await.unwrap();
+    tokio::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o555))
+        .await
+        .unwrap();
+    tokio::fs::set_permissions(
+        source.path().join("SKILL.md"),
+        std::fs::Permissions::from_mode(0o444),
+    )
+    .await
+    .unwrap();
+    tokio::fs::set_permissions(source.path(), std::fs::Permissions::from_mode(0o555))
+        .await
+        .unwrap();
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+
+    fixture
+        .store
+        .write_staging_file(
+            &staged.revision_id,
+            Path::new("SKILL.md"),
+            b"---\nname: readonly-source\ndescription: editable\n---\nedited\n",
+        )
+        .await
+        .unwrap();
+
+    let script_mode = tokio::fs::metadata(staged.path.join("run.sh"))
+        .await
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(script_mode & 0o111, 0o111);
+    assert_ne!(script_mode & 0o200, 0);
+}
+
+async fn write_package(id: &str) -> TempDir {
+    let root = tempdir().unwrap();
+    let name = id.rsplit('.').next().unwrap();
+    tokio::fs::write(
+        root.path().join("general-agent.json"),
+        json!({
+            "schemaVersion": 1,
+            "id": id,
+            "version": "1.0.0",
+            "displayName": name,
+            "kind": "instruction_only",
+            "package": {
+                "includeInstructions": true,
+                "includeRuntime": false
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        root.path().join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {name}\n---\n{name}\n"),
+    )
+    .await
+    .unwrap();
+    root
+}
+
+async fn directory_is_empty(path: &Path) -> bool {
+    tokio::fs::read_dir(path)
+        .await
+        .unwrap()
+        .next_entry()
+        .await
+        .unwrap()
+        .is_none()
+}

@@ -193,21 +193,28 @@ impl SkillStateStore {
         revision_id: &str,
         managed_storage_path: &str,
     ) -> anyhow::Result<SkillRevisionRecord> {
-        let revision = self
-            .get_revision(revision_id)
-            .await?
-            .with_context(|| format!("skill revision not found: {revision_id}"))?;
-        self.promote_revision_record_with_metadata(
-            revision_id,
-            SkillRevisionPromotion {
-                version: revision.version,
-                content_hash: revision.content_hash,
-                storage_path: managed_storage_path.to_string(),
-                descriptor_json: revision.descriptor_json,
-                validation_json: revision.validation_json,
-            },
-        )
-        .await
+        validate_uuid_v4("revision_id", revision_id)?;
+        validate_storage_path(managed_storage_path)?;
+        let mut tx = crate::skill_state_transactions::begin_immediate(self.storage.pool()).await?;
+        let result = async {
+            let query = format!(
+                r#"UPDATE skill_revisions
+                   SET storage_path = ?, lifecycle_status = 'managed'
+                   WHERE revision_id = ? AND lifecycle_status = 'staging'
+                   RETURNING {REVISION_COLUMNS}"#
+            );
+            let updated = sqlx::query(&query)
+                .bind(managed_storage_path)
+                .bind(revision_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            if let Some(row) = updated {
+                return revision_from_row(&row);
+            }
+            promotion_rejection(&mut *tx, revision_id).await
+        }
+        .await;
+        crate::skill_state_transactions::finish(tx, result).await
     }
 
     pub async fn promote_revision_record_with_metadata(
@@ -240,19 +247,7 @@ impl SkillStateStore {
             if let Some(row) = updated {
                 return revision_from_row(&row);
             }
-            let status: Option<String> = sqlx::query_scalar(
-                "SELECT lifecycle_status FROM skill_revisions WHERE revision_id = ?",
-            )
-            .bind(revision_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let status =
-                status.with_context(|| format!("skill revision not found: {revision_id}"))?;
-            let status = SkillRevisionStatus::parse(&status)?;
-            anyhow::bail!(
-                "skill revision cannot be promoted from {}: {revision_id}",
-                status.as_str()
-            )
+            promotion_rejection(&mut *tx, revision_id).await
         }
         .await;
         crate::skill_state_transactions::finish(tx, result).await
@@ -499,6 +494,29 @@ impl SkillStateStore {
             .iter()
             .map(audit_from_row)
             .collect()
+    }
+
+    pub async fn record_revision_diagnostic(
+        &self,
+        package_id: &SkillPackageId,
+        revision_id: &str,
+        operation: &str,
+        metadata: Value,
+    ) -> anyhow::Result<()> {
+        validate_uuid_v4("revision_id", revision_id)?;
+        if operation.trim().is_empty() {
+            anyhow::bail!("diagnostic operation cannot be empty");
+        }
+        insert_audit(
+            self.storage.pool(),
+            "managed-skill-source",
+            operation,
+            package_id,
+            Some(revision_id),
+            "error",
+            metadata,
+        )
+        .await
     }
 
     pub async fn mark_revision_quarantined(
@@ -764,6 +782,26 @@ where
     .execute(executor)
     .await?;
     Ok(())
+}
+
+async fn promotion_rejection<'e, E>(
+    executor: E,
+    revision_id: &str,
+) -> anyhow::Result<SkillRevisionRecord>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT lifecycle_status FROM skill_revisions WHERE revision_id = ?")
+            .bind(revision_id)
+            .fetch_optional(executor)
+            .await?;
+    let status = status.with_context(|| format!("skill revision not found: {revision_id}"))?;
+    let status = SkillRevisionStatus::parse(&status)?;
+    anyhow::bail!(
+        "skill revision cannot be promoted from {}: {revision_id}",
+        status.as_str()
+    )
 }
 
 async fn activation_rejection<'e, E>(

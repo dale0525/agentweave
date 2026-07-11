@@ -170,6 +170,66 @@ async fn promotion_atomically_refreshes_final_revision_metadata() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_promotion_does_not_overwrite_metadata_updated_before_transaction() {
+    let (_directory, url) = file_database();
+    let storage = Storage::connect(&url).await.unwrap();
+    let lock_storage = Storage::connect(&url).await.unwrap();
+    let state = SkillStateStore::new(storage.clone());
+    let revision_id = SkillStateStore::allocate_revision_id();
+    state
+        .create_staging_revision_record(
+            &revision_id,
+            revision_input(
+                package_id("com.example.compatibility"),
+                format!("staging/{revision_id}"),
+            ),
+        )
+        .await
+        .unwrap();
+    let mut lock = lock_storage.pool().acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let promotion_state = state.clone();
+    let promotion_revision = revision_id.clone();
+    let promotion = tokio::spawn(async move {
+        promotion_state
+            .promote_revision_record(&promotion_revision, "managed/compatibility")
+            .await
+    });
+    sleep(Duration::from_millis(50)).await;
+    assert!(!promotion.is_finished());
+    sqlx::query(
+        r#"UPDATE skill_revisions
+           SET version = '2.0.0', content_hash = 'new-hash',
+               descriptor_json = '{"version":"2.0.0"}',
+               validation_json = '{"status":"new"}'
+           WHERE revision_id = ?"#,
+    )
+    .bind(&revision_id)
+    .execute(&mut *lock)
+    .await
+    .unwrap();
+    sqlx::query("COMMIT").execute(&mut *lock).await.unwrap();
+    drop(lock);
+
+    promotion.await.unwrap().unwrap();
+    let record = SkillStateStore::new(storage)
+        .get_revision(&revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(record.version, "2.0.0");
+    assert_eq!(record.content_hash, "new-hash");
+    assert_eq!(record.descriptor_json, json!({"version": "2.0.0"}));
+    assert_eq!(record.validation_json, json!({"status": "new"}));
+    assert_eq!(record.storage_path, "managed/compatibility");
+    assert_eq!(record.status, SkillRevisionStatus::Managed);
+}
+
 #[tokio::test]
 async fn create_revision_is_a_trusted_managed_import_compatibility_contract() {
     let storage = Storage::connect("sqlite::memory:").await.unwrap();

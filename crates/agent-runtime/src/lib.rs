@@ -19,6 +19,7 @@ mod skill_state_migration;
 mod skill_state_rows;
 mod skill_state_transactions;
 pub mod skill_store;
+mod skill_store_faults;
 mod skill_store_fs;
 pub mod storage;
 pub mod subagent;
@@ -56,3 +57,15 @@ mod skill_store_tests;
 
 #[cfg(test)]
 mod skill_store_failure_tests;
+
+#[cfg(test)]
+mod skill_store_concurrency_tests;
+
+#[cfg(test)]
+mod skill_store_security_tests;
+
+#[cfg(test)]
+mod skill_store_compensation_tests;
+
+#[cfg(test)]
+mod managed_skill_source_tests;

@@ -34,6 +34,7 @@ impl FailureFixture {
             SkillStoreLimits {
                 max_file_bytes: 1024,
                 max_package_bytes: 4096,
+                ..SkillStoreLimits::default()
             },
             faults,
         );
@@ -195,7 +196,7 @@ async fn promotion_staging_rename_failure_cleans_incoming_and_preserves_staging(
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("PromoteStagingRename"));
+    assert!(format!("{error:#}").contains("PromoteStagingRename"));
     assert!(staged.path.is_dir());
     assert!(
         !fixture
@@ -218,7 +219,7 @@ async fn promotion_staging_rename_failure_cleans_incoming_and_preserves_staging(
 }
 
 #[tokio::test]
-async fn persistent_promotion_and_quarantine_db_failures_fall_back_to_staging() {
+async fn persistent_promotion_and_cleanup_failures_leave_staging_authoritative() {
     let faults = SkillStoreTestFaults::default();
     let fixture = FailureFixture::new(faults.clone()).await;
     let source = write_package("com.example.fallback").await;
@@ -252,10 +253,10 @@ async fn persistent_promotion_and_quarantine_db_failures_fall_back_to_staging() 
         "{message}"
     );
     assert!(message.contains("PromoteRestoreRename"), "{message}");
-    assert!(message.contains("fallback restored staging"), "{message}");
     assert!(staged.path.is_dir());
     assert!(!fixture.paths.quarantine.join(&staged.revision_id).exists());
-    assert!(!managed_path(&fixture, "com.example.fallback", &staged.revision_id).exists());
+    assert!(managed_path(&fixture, "com.example.fallback", &staged.revision_id).exists());
+    assert_eq!(fixture.store.maintenance_issues().len(), 1);
     assert_eq!(
         fixture
             .state
@@ -325,17 +326,10 @@ async fn quarantine_rename_failures_clean_temporary_content_and_preserve_source(
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains(&format!("{point:?}")));
+        assert!(format!("{error:#}").contains(&format!("{point:?}")));
         assert!(staged.path.is_dir());
         assert!(!fixture.paths.quarantine.join(&staged.revision_id).exists());
-        assert!(
-            !fixture
-                .paths
-                .quarantine
-                .join(".incoming")
-                .join(&staged.revision_id)
-                .exists()
-        );
+        assert!(directory_is_empty(&fixture.paths.quarantine.join(".incoming")).await);
         assert_eq!(
             fixture
                 .state
@@ -350,7 +344,7 @@ async fn quarantine_rename_failures_clean_temporary_content_and_preserve_source(
 }
 
 #[tokio::test]
-async fn persistent_quarantine_db_failure_after_restore_fault_falls_back_to_managed() {
+async fn persistent_quarantine_and_cleanup_failures_leave_managed_authoritative() {
     let faults = SkillStoreTestFaults::default();
     let fixture = FailureFixture::new(faults.clone()).await;
     let managed = promote_activate(&fixture, "com.example.fallback").await;
@@ -379,12 +373,9 @@ async fn persistent_quarantine_db_failure_after_restore_fault_falls_back_to_mana
         "{message}"
     );
     assert!(message.contains("QuarantineRestoreRename"), "{message}");
-    assert!(
-        message.contains("fallback restored original path"),
-        "{message}"
-    );
     assert!(managed.path.is_dir());
-    assert!(!fixture.paths.quarantine.join(&managed.revision_id).exists());
+    assert!(fixture.paths.quarantine.join(&managed.revision_id).exists());
+    assert_eq!(fixture.store.maintenance_issues().len(), 1);
     assert_eq!(
         fixture
             .state

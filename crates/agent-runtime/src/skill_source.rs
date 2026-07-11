@@ -6,6 +6,7 @@ use crate::skill_store::{SkillRevisionStore, SkillStorePaths};
 use anyhow::Context;
 use async_trait::async_trait;
 use icu_casemap::CaseMapper;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -133,6 +134,8 @@ pub struct ManagedSkillIssue {
     pub revision_id: String,
     pub reason: String,
     pub quarantine_error: Option<String>,
+    pub diagnostic_error: Option<String>,
+    pub recorded_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Clone)]
@@ -149,6 +152,17 @@ impl ManagedSkillSource {
             store: SkillRevisionStore::new(paths.clone(), state.clone()),
             paths,
             state,
+            issues: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub fn from_store(store: SkillRevisionStore) -> Self {
+        let paths = store.paths().clone();
+        let state = store.state_store();
+        Self {
+            paths,
+            state,
+            store,
             issues: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -254,6 +268,10 @@ impl SkillSource for ManagedSkillSource {
     }
 
     async fn discover(&self) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
+        self.issues
+            .write()
+            .expect("managed skill issue lock poisoned")
+            .clear();
         let root_metadata = tokio::fs::symlink_metadata(&self.paths.managed)
             .await
             .with_context(|| {
@@ -295,11 +313,30 @@ impl SkillSource for ManagedSkillSource {
                         .await
                         .err()
                         .map(|error| format!("{error:#}"));
+                    let diagnostic_error = if let Some(quarantine_error) = &quarantine_error {
+                        self.state
+                            .record_revision_diagnostic(
+                                &installation.package_id,
+                                revision_id,
+                                "managed_discovery_quarantine_failed",
+                                json!({
+                                    "reason": reason,
+                                    "quarantine_error": quarantine_error,
+                                }),
+                            )
+                            .await
+                            .err()
+                            .map(|error| format!("{error:#}"))
+                    } else {
+                        None
+                    };
                     issues.push(ManagedSkillIssue {
                         package_id: installation.package_id.as_str().to_string(),
                         revision_id: revision_id.to_string(),
                         reason,
                         quarantine_error,
+                        diagnostic_error,
+                        recorded_at: chrono::Utc::now(),
                     });
                 }
             }

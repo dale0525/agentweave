@@ -3,7 +3,9 @@ use agent_runtime::{
     skill::SkillRegistry,
     skill_catalog::SkillCatalog,
     skill_manager::{SkillManager, SkillManagerConfig},
-    skill_source::{DirectorySkillSource, SkillLayer},
+    skill_source::{DirectorySkillSource, ManagedSkillSource, SkillLayer, SkillSource},
+    skill_state::SkillStateStore,
+    skill_store::{SkillRevisionStore, SkillStorePaths},
     storage::Storage,
     tools::{CommandMode, RuntimeConfig},
 };
@@ -24,6 +26,20 @@ const DEFAULT_SKILLS_ROOT: &str = "skills";
 const DEFAULT_MODEL_BASE_URL: &str = "http://127.0.0.1:11434/v1";
 const DEFAULT_MODEL_NAME: &str = "local-agent-model";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManagedSkillsConfig {
+    app_data_root: PathBuf,
+    cache_root: PathBuf,
+}
+
+struct LoadedSkillManager {
+    manager: SkillManager,
+    #[cfg(test)]
+    managed_store: Option<SkillRevisionStore>,
+    #[cfg(test)]
+    managed_source: Option<ManagedSkillSource>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -34,7 +50,10 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("GENERAL_AGENT_DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.into());
     let storage = Storage::connect(&database_url).await?;
     let skills_root = skills_root_from_env();
-    let skill_manager = load_skill_manager(&skills_root).await?;
+    let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
+    let skill_manager = load_skill_manager(&skills_root, storage.clone(), managed_skills)
+        .await?
+        .manager;
     let model = GatewayHttpClient::new(model_profile_from_env());
     let runtime_config = runtime_config_from_env();
     let state = Arc::new(
@@ -77,25 +96,83 @@ fn skills_root_from_env() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_SKILLS_ROOT))
 }
 
-async fn load_skill_manager(root: &Path) -> anyhow::Result<SkillManager> {
+fn managed_skills_config_from_lookup<F>(lookup: F) -> anyhow::Result<Option<ManagedSkillsConfig>>
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    if lookup("GENERAL_AGENT_MANAGED_SKILLS").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return Ok(None);
+    }
+    let required_root = |name: &str| -> anyhow::Result<PathBuf> {
+        let value = lookup(name).ok_or_else(|| {
+            anyhow::anyhow!("{name} is required when GENERAL_AGENT_MANAGED_SKILLS=1")
+        })?;
+        if value.is_empty() {
+            anyhow::bail!("{name} cannot be empty when GENERAL_AGENT_MANAGED_SKILLS=1");
+        }
+        Ok(PathBuf::from(value))
+    };
+    Ok(Some(ManagedSkillsConfig {
+        app_data_root: required_root("GENERAL_AGENT_APP_DATA_ROOT")?,
+        cache_root: required_root("GENERAL_AGENT_CACHE_ROOT")?,
+    }))
+}
+
+async fn load_skill_manager(
+    root: &Path,
+    storage: Storage,
+    managed_config: Option<ManagedSkillsConfig>,
+) -> anyhow::Result<LoadedSkillManager> {
     if root.join("skill-bundle.json").is_file() {
+        if managed_config.is_some() {
+            anyhow::bail!("managed skills cannot be composed with a legacy packaged skill bundle");
+        }
         let registry = SkillRegistry::load_packaged(root).await?;
         let catalog = load_packaged_instruction_skills(root).await;
-        return Ok(SkillManager::from_registry_and_catalog(registry, catalog));
+        return Ok(LoadedSkillManager {
+            manager: SkillManager::from_registry_and_catalog(registry, catalog),
+            #[cfg(test)]
+            managed_store: None,
+            #[cfg(test)]
+            managed_source: None,
+        });
     }
 
-    SkillManager::new(SkillManagerConfig {
-        sources: vec![Arc::new(DirectorySkillSource::new(
-            SkillLayer::Builtin,
-            root,
-        ))],
+    let mut sources: Vec<Arc<dyn SkillSource>> = vec![Arc::new(DirectorySkillSource::new(
+        SkillLayer::Builtin,
+        root,
+    ))];
+    #[cfg(test)]
+    let mut managed_store = None;
+    #[cfg(test)]
+    let mut managed_source = None;
+    if let Some(config) = managed_config {
+        let paths = SkillStorePaths::prepare(&config.app_data_root, &config.cache_root).await?;
+        let store = SkillRevisionStore::new(paths, SkillStateStore::new(storage));
+        let source = ManagedSkillSource::from_store(store.clone());
+        sources.push(Arc::new(source.clone()));
+        #[cfg(test)]
+        {
+            managed_store = Some(store);
+            managed_source = Some(source);
+        }
+    }
+    let manager = SkillManager::new(SkillManagerConfig {
+        sources,
         platform: PlatformId::Desktop,
         capabilities: CapabilitySet::desktop_runtime(),
         protected_packages: Vec::new(),
         allowed_overrides: Vec::new(),
         runtime_version: env!("CARGO_PKG_VERSION").parse()?,
     })
-    .await
+    .await?;
+    Ok(LoadedSkillManager {
+        manager,
+        #[cfg(test)]
+        managed_store,
+        #[cfg(test)]
+        managed_source,
+    })
 }
 
 async fn load_packaged_instruction_skills(root: &Path) -> SkillCatalog {
@@ -136,6 +213,7 @@ fn model_endpoint_type_from_env() -> EndpointType {
 mod tests {
     use super::*;
     use agent_runtime::turn::{ModelClient, ModelEventStream};
+    use agent_runtime::{skill_package::SkillPackageId, skill_state::SkillLayerRecord};
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -169,13 +247,44 @@ mod tests {
         assert!(!runtime_config_from_env().built_in_tools_enabled);
     }
 
+    #[test]
+    fn managed_skills_are_disabled_without_explicit_opt_in() {
+        let config = managed_skills_config_from_lookup(|_| None).unwrap();
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn managed_skills_opt_in_requires_both_roots_without_global_env_mutation() {
+        let error = managed_skills_config_from_lookup(|name| match name {
+            "GENERAL_AGENT_MANAGED_SKILLS" => Some("1".into()),
+            "GENERAL_AGENT_APP_DATA_ROOT" => Some("/tmp/app".into()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("GENERAL_AGENT_CACHE_ROOT"));
+
+        let config = managed_skills_config_from_lookup(|name| match name {
+            "GENERAL_AGENT_MANAGED_SKILLS" => Some("1".into()),
+            "GENERAL_AGENT_APP_DATA_ROOT" => Some("/tmp/app".into()),
+            "GENERAL_AGENT_CACHE_ROOT" => Some("/tmp/cache".into()),
+            _ => None,
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.app_data_root, PathBuf::from("/tmp/app"));
+        assert_eq!(config.cache_root, PathBuf::from("/tmp/cache"));
+    }
+
     #[tokio::test]
     async fn production_state_and_runner_share_one_skill_manager() {
         let root = unique_test_dir("shared-manager");
         let package_root = root.join("runtime");
         write_runtime_package(&package_root, "first_tool").await;
-        let manager = load_skill_manager(&root).await.unwrap();
         let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let manager = load_skill_manager(&root, storage.clone(), None)
+            .await
+            .unwrap()
+            .manager;
         let session = storage.create_session("Shared manager").await.unwrap();
         let tool_names = Arc::new(Mutex::new(Vec::new()));
         let state = Arc::new(
@@ -229,7 +338,11 @@ mod tests {
         .await
         .unwrap();
 
-        let manager = load_skill_manager(&root).await.unwrap();
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let manager = load_skill_manager(&root, storage, None)
+            .await
+            .unwrap()
+            .manager;
 
         assert_eq!(
             manager.current_snapshot().registry().tools()[0].name,
@@ -237,6 +350,112 @@ mod tests {
         );
         assert!(manager.reload().await.is_err());
         remove_test_dir(root).await;
+    }
+
+    #[tokio::test]
+    async fn production_loader_composes_builtin_and_managed_without_publishing_failed_promotion() {
+        let root = unique_test_dir("managed-composition");
+        write_runtime_package(&root.join("builtin"), "builtin_tool").await;
+        let app_root = unique_test_dir("managed-app");
+        let cache_root = unique_test_dir("managed-cache");
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let loaded = load_skill_manager(
+            &root,
+            storage.clone(),
+            Some(ManagedSkillsConfig {
+                app_data_root: app_root.clone(),
+                cache_root: cache_root.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        let store = loaded.managed_store.clone().unwrap();
+        let managed_source = loaded.managed_source.clone().unwrap();
+        let state = SkillStateStore::new(storage);
+        let valid_source = unique_test_dir("managed-valid-source");
+        write_instruction_package(&valid_source, "com.example.server-managed").await;
+        let valid = store
+            .create_staging_revision(&valid_source, "owner-1")
+            .await
+            .unwrap();
+        let valid = store.promote_revision(&valid.revision_id).await.unwrap();
+        state
+            .activate_revision(
+                &SkillPackageId::parse("com.example.server-managed").unwrap(),
+                &valid.revision_id,
+                SkillLayerRecord::Managed,
+                "owner-1",
+            )
+            .await
+            .unwrap();
+        let corrupt_source = unique_test_dir("managed-corrupt-source");
+        write_instruction_package(&corrupt_source, "com.example.server-corrupt").await;
+        let corrupt = store
+            .create_staging_revision(&corrupt_source, "owner-1")
+            .await
+            .unwrap();
+        let corrupt = store.promote_revision(&corrupt.revision_id).await.unwrap();
+        state
+            .activate_revision(
+                &SkillPackageId::parse("com.example.server-corrupt").unwrap(),
+                &corrupt.revision_id,
+                SkillLayerRecord::Managed,
+                "owner-1",
+            )
+            .await
+            .unwrap();
+        make_test_tree_writable(&corrupt.path).await;
+        tokio::fs::write(corrupt.path.join("SKILL.md"), "corrupt")
+            .await
+            .unwrap();
+
+        loaded.manager.reload().await.unwrap();
+
+        let snapshot = loaded.manager.current_snapshot();
+        let package_ids = snapshot
+            .packages()
+            .iter()
+            .map(|resolved| resolved.package.descriptor.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(package_ids.contains(&"com.example.server-runtime"));
+        assert!(package_ids.contains(&"com.example.server-managed"));
+        assert!(!package_ids.contains(&"com.example.server-corrupt"));
+        assert_eq!(managed_source.issues().len(), 1);
+
+        let failed_source = unique_test_dir("managed-failed-source");
+        write_instruction_package(&failed_source, "com.example.server-failed").await;
+        let failed = store
+            .create_staging_revision(&failed_source, "owner-1")
+            .await
+            .unwrap();
+        let collision = store
+            .paths()
+            .managed
+            .join("com.example.server-failed/revisions")
+            .join(&failed.revision_id);
+        tokio::fs::create_dir_all(collision.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::create_dir(&collision).await.unwrap();
+        let generation = loaded.manager.current_snapshot().generation();
+        let promotion_store = store.clone();
+        let failed_revision = failed.revision_id.clone();
+        let reload = loaded
+            .manager
+            .reload_with_pre_publish(move |_| async move {
+                promotion_store.promote_revision(&failed_revision).await?;
+                Ok(())
+            })
+            .await;
+
+        assert!(reload.is_err());
+        assert_eq!(loaded.manager.current_snapshot().generation(), generation);
+        remove_test_dir(root).await;
+        remove_test_dir(app_root).await;
+        remove_test_dir(cache_root).await;
+        remove_test_dir(valid_source).await;
+        remove_test_dir(corrupt_source).await;
+        remove_test_dir(failed_source).await;
     }
 
     async fn write_runtime_package(package_root: &Path, tool_name: &str) {
@@ -284,6 +503,48 @@ mod tests {
             .unwrap();
     }
 
+    async fn write_instruction_package(package_root: &Path, id: &str) {
+        tokio::fs::create_dir_all(package_root).await.unwrap();
+        let name = id.rsplit('.').next().unwrap();
+        tokio::fs::write(
+            package_root.join("general-agent.json"),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "id": id,
+                "version": "1.0.0",
+                "displayName": name,
+                "kind": "instruction_only",
+                "package": {
+                    "includeInstructions": true,
+                    "includeRuntime": false
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            package_root.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {name}\n---\n{name}\n"),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn make_test_tree_writable(root: &Path) {
+        let mut entries = tokio::fs::read_dir(root).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let mut permissions = entry.metadata().await.unwrap().permissions();
+            set_test_writable(&mut permissions, false);
+            tokio::fs::set_permissions(entry.path(), permissions)
+                .await
+                .unwrap();
+        }
+        let mut permissions = tokio::fs::metadata(root).await.unwrap().permissions();
+        set_test_writable(&mut permissions, true);
+        tokio::fs::set_permissions(root, permissions).await.unwrap();
+    }
+
     fn unique_test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "general-agent-main-{name}-{}",
@@ -293,7 +554,35 @@ mod tests {
 
     async fn remove_test_dir(path: PathBuf) {
         if path.exists() {
+            let mut stack = vec![path.clone()];
+            while let Some(current) = stack.pop() {
+                let mut permissions = tokio::fs::symlink_metadata(&current)
+                    .await
+                    .unwrap()
+                    .permissions();
+                set_test_writable(&mut permissions, current.is_dir());
+                tokio::fs::set_permissions(&current, permissions)
+                    .await
+                    .unwrap();
+                if current.is_dir() {
+                    let mut entries = tokio::fs::read_dir(&current).await.unwrap();
+                    while let Some(entry) = entries.next_entry().await.unwrap() {
+                        stack.push(entry.path());
+                    }
+                }
+            }
             tokio::fs::remove_dir_all(path).await.unwrap();
         }
+    }
+
+    fn set_test_writable(permissions: &mut std::fs::Permissions, directory: bool) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let owner_access = if directory { 0o700 } else { 0o600 };
+            permissions.set_mode(permissions.mode() | owner_access);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
     }
 }
