@@ -145,16 +145,22 @@ impl SkillRevisionStore {
                         recorded.as_ref().expect("authoring record committed"),
                     )
                     .await;
-                let tree_cleanup =
-                    remove_opened_tree(reserved.as_ref().expect("authoring reservation recorded"))
+                match row_cleanup {
+                    Ok(()) => {
+                        let tree_cleanup = remove_opened_tree(
+                            reserved.as_ref().expect("authoring reservation recorded"),
+                        )
                         .await;
-                Err(combine_operation_errors(
-                    error,
-                    [
-                        ("staging row cleanup", row_cleanup),
-                        ("opened authored tree cleanup", tree_cleanup),
-                    ],
-                ))
+                        Err(combine_operation_errors(
+                            error,
+                            [("opened authored tree cleanup", tree_cleanup)],
+                        ))
+                    }
+                    Err(row_cleanup) => Err(combine_operation_errors(
+                        error,
+                        [("staging row cleanup", Err(row_cleanup))],
+                    )),
+                }
             }
         }
     }

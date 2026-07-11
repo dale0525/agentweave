@@ -1,10 +1,10 @@
 use crate::skill_authoring::build_package_draft;
 use crate::skill_management::CreateSkillDraftRequest;
 use crate::skill_package::{SkillPackageId, SkillPackageKind};
-use crate::skill_state::SkillStateStore;
+use crate::skill_state::{SkillRevisionPromotion, SkillRevisionStatus, SkillStateStore};
 use crate::skill_store::{
     SkillRevisionStore, SkillStoreFaultPoint, SkillStoreLimits, SkillStorePaths,
-    SkillStoreTestFaults,
+    SkillStoreTestFaults, StagingSkillFile,
 };
 use crate::storage::Storage;
 use tempfile::{TempDir, tempdir};
@@ -80,6 +80,136 @@ async fn staging_root_replacement_after_record_deletes_only_the_inserted_staging
         true,
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changed_row_keeps_the_opened_authored_tree_after_identity_failure() {
+    let revision_id = uuid::Uuid::new_v4().to_string();
+    let faults = SkillStoreTestFaults::default();
+    faults.set_revision_id_once(&revision_id);
+    let gate = faults.gate_once(SkillStoreFaultPoint::StagingAuthorAfterRecord);
+    let fixture = AuthoringFixture::new(faults).await;
+    let request = draft_request();
+    let authored = build_package_draft(&request).unwrap();
+    let expected_files = authored.files().to_vec();
+    let store = fixture.store.clone();
+    let package_id = request.package_id.clone();
+    let package_storage_id = request.package_id.clone();
+    let operation = tokio::spawn(async move {
+        store
+            .create_authored_staging_revision(
+                &package_id,
+                request.kind,
+                authored.files(),
+                "owner-1",
+            )
+            .await
+    });
+    gate.wait_entered().await;
+
+    let staging = fixture.store.paths().staging.clone();
+    let replacement = staging.join(&revision_id);
+    let state = SkillStateStore::new(fixture.storage.clone());
+    let inserted = state.get_revision(&revision_id).await.unwrap().unwrap();
+    let taken_over = fixture
+        .store
+        .paths()
+        .managed
+        .join(package_storage_id.as_str())
+        .join("revisions")
+        .join(&revision_id);
+    tokio::fs::create_dir_all(taken_over.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::rename(&replacement, &taken_over).await.unwrap();
+    tokio::fs::create_dir(&replacement).await.unwrap();
+    tokio::fs::write(replacement.join("replacement-marker"), b"replacement")
+        .await
+        .unwrap();
+    let promoted = state
+        .promote_revision_record_with_metadata(
+            &revision_id,
+            SkillRevisionPromotion {
+                version: inserted.version.clone(),
+                content_hash: inserted.content_hash.clone(),
+                storage_path: taken_over.to_str().unwrap().to_string(),
+                descriptor_json: inserted.descriptor_json.clone(),
+                validation_json: serde_json::json!({"status": "validated"}),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(promoted.status, SkillRevisionStatus::Managed);
+
+    gate.release().await;
+    let error = operation.await.unwrap().unwrap_err();
+    let message = format!("{error:#}");
+    let retained = SkillStateStore::new(fixture.storage.clone())
+        .get_revision(&revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_identity_and_row_cleanup_diagnostics(&message, "changed before compensation");
+    assert_eq!(retained.status, SkillRevisionStatus::Managed);
+    assert_eq!(retained.storage_path, taken_over.to_str().unwrap());
+    assert_eq!(retained.version, inserted.version);
+    assert_eq!(retained.content_hash, inserted.content_hash);
+    assert_eq!(retained.descriptor_json, inserted.descriptor_json);
+    assert_eq!(
+        retained.validation_json,
+        serde_json::json!({"status": "validated"})
+    );
+    assert_authored_tree_intact(&taken_over, &expected_files).await;
+    assert_replacement_marker_intact(&replacement).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_row_delete_sqlite_failure_keeps_the_opened_authored_tree() {
+    let revision_id = uuid::Uuid::new_v4().to_string();
+    let faults = SkillStoreTestFaults::default();
+    faults.set_revision_id_once(&revision_id);
+    let gate = faults.gate_once(SkillStoreFaultPoint::StagingAuthorAfterRecord);
+    let fixture = AuthoringFixture::new(faults).await;
+    let request = draft_request();
+    let authored = build_package_draft(&request).unwrap();
+    let expected_files = authored.files().to_vec();
+    let store = fixture.store.clone();
+    let package_id = request.package_id.clone();
+    let operation = tokio::spawn(async move {
+        store
+            .create_authored_staging_revision(
+                &package_id,
+                request.kind,
+                authored.files(),
+                "owner-1",
+            )
+            .await
+    });
+    gate.wait_entered().await;
+
+    sqlx::query(
+        r#"CREATE TRIGGER fail_exact_staging_compensation
+           BEFORE DELETE ON skill_revisions
+           BEGIN
+             SELECT RAISE(FAIL, 'injected exact row delete failure');
+           END"#,
+    )
+    .execute(fixture.storage.pool())
+    .await
+    .unwrap();
+    let staging = fixture.store.paths().staging.clone();
+    let opened_authored =
+        replace_store_path(&staging, &revision_id, ReplacementTarget::StagingRoot).await;
+
+    gate.release().await;
+    let error = operation.await.unwrap().unwrap_err();
+    let message = format!("{error:#}");
+
+    assert_identity_and_row_cleanup_diagnostics(&message, "injected exact row delete failure");
+    assert_eq!(revision_count(&fixture.storage, &revision_id).await, 1);
+    assert_authored_tree_intact(&opened_authored, &expected_files).await;
+    assert_replacement_marker_intact(&staging.join(&revision_id)).await;
 }
 
 async fn assert_replacement_rejected(
@@ -189,6 +319,37 @@ async fn revision_count(storage: &Storage, revision_id: &str) -> i64 {
         .fetch_one(storage.pool())
         .await
         .unwrap()
+}
+
+fn assert_identity_and_row_cleanup_diagnostics(message: &str, row_error: &str) {
+    assert!(
+        message.contains("identity changed") || message.contains("identity mismatch"),
+        "{message}"
+    );
+    assert!(message.contains("compensation failed"), "{message}");
+    assert!(message.contains("staging row cleanup"), "{message}");
+    assert!(message.contains(row_error), "{message}");
+}
+
+async fn assert_authored_tree_intact(path: &std::path::Path, files: &[StagingSkillFile]) {
+    assert!(path.is_dir(), "authored tree missing: {}", path.display());
+    for file in files {
+        assert_eq!(
+            tokio::fs::read(path.join(&file.path)).await.unwrap(),
+            file.bytes,
+            "authored file changed: {}",
+            file.path.display()
+        );
+    }
+}
+
+async fn assert_replacement_marker_intact(path: &std::path::Path) {
+    assert_eq!(
+        tokio::fs::read(path.join("replacement-marker"))
+            .await
+            .unwrap(),
+        b"replacement"
+    );
 }
 
 async fn directory_is_empty(path: &std::path::Path) -> bool {
