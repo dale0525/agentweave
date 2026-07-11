@@ -14,6 +14,7 @@ pub mod skill_package;
 pub mod skill_resolver;
 pub mod skill_snapshot;
 pub mod skill_source;
+pub mod skill_state;
 pub mod storage;
 pub mod subagent;
 pub mod tools;
@@ -32,3 +33,6 @@ mod skill_resolver_tests;
 
 #[cfg(test)]
 mod skill_runtime_tests;
+
+#[cfg(test)]
+mod skill_state_tests;

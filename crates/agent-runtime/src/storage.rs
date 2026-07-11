@@ -60,7 +60,13 @@ impl Storage {
         .execute(&self.pool)
         .await?;
 
+        crate::skill_state::migrate(self.pool()).await?;
+
         Ok(())
+    }
+
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     pub async fn create_session(&self, title: &str) -> anyhow::Result<Session> {
