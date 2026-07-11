@@ -75,7 +75,24 @@ async fn build_registry(packages: &[ResolvedSkillPackage]) -> anyhow::Result<Ski
     let mut skills = Vec::new();
     for resolved in packages {
         if resolved.package.descriptor.package.include_runtime {
-            skills.push(SkillRegistry::load_development_skill(&resolved.package.root).await?);
+            match &resolved.package.verified_content {
+                Some(verified) => {
+                    let bytes = verified.runtime_manifest.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("managed runtime package has no verified skill.json bytes")
+                    })?;
+                    skills.push(
+                        SkillRegistry::load_verified_skill(
+                            resolved.package.root.clone(),
+                            bytes,
+                            verified.expected_content_hash.clone(),
+                            verified.limits.package_limits(),
+                        )
+                        .await?,
+                    );
+                }
+                None => skills
+                    .push(SkillRegistry::load_development_skill(&resolved.package.root).await?),
+            }
         }
     }
     SkillRegistry::from_installed(skills)
@@ -85,7 +102,22 @@ async fn build_catalog(packages: &[ResolvedSkillPackage]) -> anyhow::Result<Skil
     let mut entries = Vec::<SkillCatalogEntry>::new();
     for resolved in packages {
         if resolved.package.descriptor.package.include_instructions {
-            entries.push(SkillCatalog::read_package_entry(&resolved.package.root).await?);
+            match &resolved.package.verified_content {
+                Some(verified) => {
+                    let bytes = verified.instructions_file.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "managed instruction package has no verified SKILL.md bytes"
+                        )
+                    })?;
+                    entries.push(SkillCatalog::read_verified_package_entry(
+                        std::path::PathBuf::from("SKILL.md"),
+                        bytes,
+                    )?);
+                }
+                None => {
+                    entries.push(SkillCatalog::read_package_entry(&resolved.package.root).await?)
+                }
+            }
         }
     }
     SkillCatalog::from_entries(entries)

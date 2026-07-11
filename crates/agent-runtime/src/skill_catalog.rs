@@ -174,6 +174,16 @@ impl SkillCatalog {
         .await
     }
 
+    pub(crate) fn read_verified_package_entry(
+        source: PathBuf,
+        bytes: &[u8],
+    ) -> anyhow::Result<SkillCatalogEntry> {
+        let content = std::str::from_utf8(bytes)
+            .context("verified skill instructions are not UTF-8")?
+            .to_string();
+        instruction_entry_from_content(content, source)
+    }
+
     pub fn summaries(&self) -> &[SkillSummary] {
         &self.summaries
     }
@@ -360,7 +370,6 @@ async fn read_instruction_entry(
     let content = tokio::fs::read_to_string(&canonical_path)
         .await
         .with_context(|| format!("failed to read {}", canonical_path.display()))?;
-    let front_matter = parse_skill_front_matter(&content)?;
     let source = match source {
         Some(source) => source,
         None => canonical_path
@@ -368,6 +377,14 @@ async fn read_instruction_entry(
             .with_context(|| format!("make {} relative to root", canonical_path.display()))?
             .to_path_buf(),
     };
+    instruction_entry_from_content(content, source)
+}
+
+fn instruction_entry_from_content(
+    content: String,
+    source: PathBuf,
+) -> anyhow::Result<SkillCatalogEntry> {
+    let front_matter = parse_skill_front_matter(&content)?;
     let original_bytes = content.len();
     let name = front_matter.name;
     Ok(SkillCatalogEntry {

@@ -1,5 +1,5 @@
 use crate::skill_package::SkillPackageId;
-use crate::skill_source::{ManagedSkillSource, SkillSource};
+use crate::skill_source::{ManagedSkillSource, SkillSource, hash_package_tree};
 use crate::skill_state::{SkillLayerRecord, SkillStateStore};
 use crate::skill_store::{SkillRevisionStore, SkillStorePaths};
 use crate::storage::Storage;
@@ -99,6 +99,36 @@ async fn managed_issue_has_discovery_timestamp() {
     let issue = fixture.source.issues().into_iter().next().unwrap();
     assert!(issue.recorded_at >= before);
     assert!(issue.recorded_at <= Utc::now() + Duration::seconds(1));
+}
+
+#[tokio::test]
+async fn invalid_descriptor_quarantine_persists_actual_hash_and_parse_error() {
+    let fixture = SourceFixture::new().await;
+    let managed = fixture
+        .active("com.example.invalid-descriptor-actual")
+        .await;
+    make_writable(&managed.path).await;
+    tokio::fs::write(managed.path.join("general-agent.json"), "{invalid")
+        .await
+        .unwrap();
+    let actual_hash = hash_package_tree(&managed.path).await.unwrap();
+
+    assert!(fixture.source.discover().await.unwrap().is_empty());
+
+    let record = fixture
+        .state
+        .get_revision(&managed.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.content_hash, actual_hash);
+    assert_eq!(record.version, "1.0.0");
+    assert_eq!(
+        record.descriptor_json["id"],
+        "com.example.invalid-descriptor-actual"
+    );
+    assert!(record.validation_json["descriptorError"].is_string());
+    assert_eq!(record.validation_json["quarantined"], true);
 }
 
 #[tokio::test]

@@ -3,6 +3,7 @@ use crate::skill_availability::{
     SkillAvailability, SkillAvailabilityStatus, SkillCapabilityMetadata,
     evaluate_skill_availability,
 };
+use crate::skill_store_fs::PackageLimits;
 use crate::tools::ToolPermission;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,13 @@ pub struct SkillExecutionContext {
 pub struct InstalledSkill {
     pub(crate) root: PathBuf,
     pub(crate) manifest: SkillManifest,
+    pub(crate) verification: Option<InstalledSkillVerification>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InstalledSkillVerification {
+    pub(crate) expected_content_hash: String,
+    pub(crate) limits: PackageLimits,
 }
 
 impl InstalledSkill {
@@ -255,6 +263,7 @@ impl SkillRegistry {
         if availability.status != SkillAvailabilityStatus::Available {
             anyhow::bail!("{}", availability.reason);
         }
+        crate::skill_verified::verify_before_execution(skill).await?;
 
         let mut child = Command::new(&skill.manifest.entry.command)
             .args(&skill.manifest.entry.args)
@@ -316,7 +325,11 @@ impl SkillRegistry {
         })?;
         validate_manifest(&root, &manifest).await?;
 
-        Ok(InstalledSkill { root, manifest })
+        Ok(InstalledSkill {
+            root,
+            manifest,
+            verification: None,
+        })
     }
 
     fn skill_is_available(&self, skill: &InstalledSkill) -> bool {
@@ -443,7 +456,7 @@ async fn read_limited_stream(
     }
 }
 
-async fn validate_manifest(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
+pub(crate) async fn validate_manifest(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
     if manifest.name.trim().is_empty() {
         anyhow::bail!("skill manifest name must not be empty");
     }
@@ -525,7 +538,7 @@ async fn validate_entry_resources(root: &Path, manifest: &SkillManifest) -> anyh
     Ok(())
 }
 
-async fn canonical_skill_root(root: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) async fn canonical_skill_root(root: &Path) -> anyhow::Result<PathBuf> {
     let metadata = tokio::fs::symlink_metadata(root)
         .await
         .with_context(|| format!("failed to inspect skill package root {}", root.display()))?;

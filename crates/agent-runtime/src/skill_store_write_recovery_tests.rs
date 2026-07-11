@@ -199,6 +199,18 @@ async fn isolation_database_failure_leaves_db_path_existing_and_combines_errors(
         .unwrap();
     assert_eq!(record.status, SkillRevisionStatus::Staging);
     assert!(Path::new(&record.storage_path).is_dir());
+    assert_eq!(
+        record.content_hash,
+        hash_package_tree(Path::new(&record.storage_path))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(Path::new(&record.storage_path).join("SKILL.md"))
+            .await
+            .unwrap(),
+        std::str::from_utf8(initial_skill()).unwrap()
+    );
 }
 
 #[tokio::test]
@@ -309,10 +321,27 @@ async fn invalid_descriptor_isolation_db_failure_keeps_db_path_existing() {
         .unwrap();
     assert_eq!(record.status, SkillRevisionStatus::Staging);
     assert!(Path::new(&record.storage_path).is_dir());
+    assert_eq!(
+        record.content_hash,
+        hash_package_tree(Path::new(&record.storage_path))
+            .await
+            .unwrap()
+    );
+    let descriptor: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(Path::new(&record.storage_path).join("general-agent.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(descriptor["id"], record.descriptor_json["id"]);
 }
 
 fn edited_skill() -> &'static [u8] {
     b"---\nname: recovery\ndescription: edited\n---\nedited\n"
+}
+
+fn initial_skill() -> &'static [u8] {
+    b"---\nname: recovery\ndescription: initial\n---\ninitial\n"
 }
 
 async fn write_package() -> TempDir {
@@ -331,7 +360,7 @@ async fn write_package() -> TempDir {
     )
     .await
     .unwrap();
-    tokio::fs::write(root.path().join("SKILL.md"), edited_skill())
+    tokio::fs::write(root.path().join("SKILL.md"), initial_skill())
         .await
         .unwrap();
     root

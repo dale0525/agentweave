@@ -1,17 +1,51 @@
 use crate::skill_state::{SkillRevisionExpectation, SkillRevisionMetadata, SkillRevisionRecord};
 use crate::skill_store::SkillRevisionStore;
 use crate::skill_store_faults::StoreFaultPoint;
-use crate::skill_store_fs::copy_package_tree_into_reserved;
+use crate::skill_store_fs::{
+    atomic_replace_file, copy_package_tree_into_reserved, remove_regular_file_nofollow,
+};
+use crate::skill_store_fs_types::StoredFileContents;
 use crate::skill_store_operations::{combine_operation_errors, storage_path, with_compensation};
 use crate::skill_store_secure_fs::{reserve_store_directory, secure_tree_snapshot};
 use serde_json::json;
 use std::path::Path;
 
 impl SkillRevisionStore {
+    pub(crate) async fn actual_quarantine_metadata(
+        &self,
+        record: &SkillRevisionRecord,
+        source: &Path,
+        reason: &str,
+    ) -> anyhow::Result<SkillRevisionMetadata> {
+        let tree = secure_tree_snapshot(source, self.limits.package_limits()).await?;
+        let mut validation = json!({
+            "status": "invalid",
+            "validationError": reason,
+        });
+        let (version, descriptor_json) = match tree.load_descriptor(source) {
+            Ok(loaded) => (
+                loaded.descriptor.version.to_string(),
+                serde_json::to_value(&loaded.descriptor)?,
+            ),
+            Err(error) => {
+                validation["descriptorError"] = json!(format!("{error:#}"));
+                (record.version.clone(), record.descriptor_json.clone())
+            }
+        };
+        Ok(SkillRevisionMetadata {
+            version,
+            content_hash: tree.content_hash,
+            descriptor_json,
+            validation_json: validation,
+        })
+    }
+
     pub(crate) async fn isolate_failed_staging_write(
         &self,
         record: &SkillRevisionRecord,
         source: &Path,
+        relative_path: &Path,
+        previous: Option<&StoredFileContents>,
         primary: anyhow::Error,
     ) -> anyhow::Error {
         let tree = match secure_tree_snapshot(source, self.limits.package_limits()).await {
@@ -107,7 +141,19 @@ impl SkillRevisionStore {
             }
             Ok(_) => primary,
             Err(error) => {
-                let cleanup = if copied {
+                let restore = match previous {
+                    Some(previous) => atomic_replace_file(
+                        source,
+                        relative_path,
+                        &previous.bytes,
+                        previous.mode,
+                        &self.faults,
+                    )
+                    .await
+                    .map_err(|failure| failure.into_error()),
+                    None => remove_regular_file_nofollow(source, relative_path).await,
+                };
+                let cleanup = if copied && restore.is_ok() {
                     self.remove_store_tree_path(&destination).await
                 } else {
                     Ok(())
@@ -116,6 +162,7 @@ impl SkillRevisionStore {
                     primary,
                     [
                         ("write isolation database transition", Err(error)),
+                        ("authoritative staging restore", restore),
                         ("write isolation copy cleanup", cleanup),
                     ],
                 )

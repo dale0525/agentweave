@@ -15,6 +15,12 @@ impl SkillStateStore {
         metadata: SkillRevisionMetadata,
     ) -> anyhow::Result<SkillRevisionRecord> {
         validate_uuid_v4("revision_id", revision_id)?;
+        if expected.status != crate::skill_state::SkillRevisionStatus::Staging {
+            anyhow::bail!(
+                "staging metadata CAS expected staging lifecycle, got {}",
+                expected.status.as_str()
+            );
+        }
         validate_storage_path(&expected.storage_path)?;
         let descriptor_json = serde_json::to_string(&metadata.descriptor_json)?;
         let validation_json = serde_json::to_string(&metadata.validation_json)?;
@@ -23,7 +29,7 @@ impl SkillStateStore {
             let query = format!(
                 r#"UPDATE skill_revisions
                    SET version = ?, content_hash = ?, descriptor_json = ?, validation_json = ?
-                   WHERE revision_id = ? AND lifecycle_status = 'staging'
+                   WHERE revision_id = ? AND lifecycle_status = ?
                      AND version = ? AND content_hash = ? AND storage_path = ?
                    RETURNING {REVISION_COLUMNS}"#
             );
@@ -33,6 +39,7 @@ impl SkillStateStore {
                 .bind(&descriptor_json)
                 .bind(&validation_json)
                 .bind(revision_id)
+                .bind(expected.status.as_str())
                 .bind(&expected.version)
                 .bind(&expected.content_hash)
                 .bind(&expected.storage_path)

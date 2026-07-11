@@ -2,7 +2,7 @@ use crate::skill_package::SkillPackageDescriptor;
 use crate::skill_state::{
     SkillLayerRecord, SkillRevisionRecord, SkillRevisionStatus, SkillStateStore,
 };
-use crate::skill_store::{SkillRevisionStore, SkillStorePaths};
+use crate::skill_store::{SkillRevisionStore, SkillStoreLimits, SkillStorePaths};
 use crate::skill_store_secure_fs::{
     secure_package_hash, secure_package_snapshot, secure_package_snapshot_beneath,
     unbounded_package_limits,
@@ -30,6 +30,21 @@ pub struct DiscoveredSkillPackage {
     pub descriptor: SkillPackageDescriptor,
     pub content_hash: String,
     pub warnings: Vec<String>,
+    /// Discovery-bound bytes used to build managed snapshots without reopening mutable paths.
+    pub verified_content: Option<VerifiedPackageContent>,
+}
+
+/// Small, security-sensitive package inputs captured by managed discovery.
+#[derive(Clone, Debug)]
+pub struct VerifiedPackageContent {
+    /// Verified `skill.json` bytes, when runtime content is declared.
+    pub runtime_manifest: Option<Arc<[u8]>>,
+    /// Verified `SKILL.md` bytes, when instruction content is declared.
+    pub instructions_file: Option<Arc<[u8]>>,
+    /// Hash of the complete package tree observed with these bytes.
+    pub expected_content_hash: String,
+    /// Bounds that must also be applied when rechecking before execution.
+    pub limits: SkillStoreLimits,
 }
 
 #[async_trait]
@@ -114,6 +129,7 @@ impl SkillSource for DirectorySkillSource {
                 root: loaded.root,
                 descriptor: loaded.descriptor,
                 warnings: loaded.warnings,
+                verified_content: None,
             });
         }
         packages.sort_by(|left, right| {
@@ -178,6 +194,7 @@ impl ManagedSkillSource {
         source_layer: SkillLayerRecord,
         revision_id: &str,
     ) -> anyhow::Result<DiscoveredSkillPackage> {
+        self.paths.verify_identity()?;
         if source_layer != SkillLayerRecord::Managed {
             anyhow::bail!(
                 "active managed revision installation has non-managed source layer: {}",
@@ -240,8 +257,14 @@ impl ManagedSkillSource {
             layer: SkillLayer::Managed,
             root: stored_path,
             descriptor: loaded.descriptor,
-            content_hash,
+            content_hash: content_hash.clone(),
             warnings: loaded.warnings,
+            verified_content: Some(VerifiedPackageContent {
+                runtime_manifest: snapshot.runtime_manifest.map(Arc::from),
+                instructions_file: snapshot.instructions_file.map(Arc::from),
+                expected_content_hash: content_hash,
+                limits: self.store.limits,
+            }),
         })
     }
 }
@@ -257,6 +280,7 @@ impl SkillSource for ManagedSkillSource {
             .write()
             .expect("managed skill issue lock poisoned")
             .clear();
+        self.paths.verify_identity()?;
         let root_metadata = tokio::fs::symlink_metadata(&self.paths.managed)
             .await
             .with_context(|| {

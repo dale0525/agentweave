@@ -125,6 +125,26 @@ async fn package_tree_limits_reject_entry_file_directory_depth_and_path_count_by
     }
 }
 
+#[tokio::test]
+async fn staging_rejects_real_root_replacement_without_writing_replacement() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.real-root-swap").await;
+    let old = fixture.paths.staging.with_extension("old");
+    tokio::fs::rename(&fixture.paths.staging, &old)
+        .await
+        .unwrap();
+    tokio::fs::create_dir(&fixture.paths.staging).await.unwrap();
+
+    let error = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("identity"));
+    assert!(directory_is_empty(&fixture.paths.staging).await);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn copy_open_rejects_file_swapped_to_symlink_after_scan() {
@@ -313,7 +333,7 @@ async fn promotion_rejects_managed_root_swap_without_writing_external_tree() {
 
     let error = promotion.await.unwrap().unwrap_err();
 
-    assert!(format!("{error:#}").contains("trusted store root"));
+    assert!(format!("{error:#}").contains("identity"));
     assert!(staged.path.is_dir());
     assert!(directory_is_empty(outside.path()).await);
     assert_eq!(
@@ -326,6 +346,36 @@ async fn promotion_rejects_managed_root_swap_without_writing_external_tree() {
             .status,
         SkillRevisionStatus::Staging
     );
+}
+
+#[tokio::test]
+async fn promotion_rejects_real_managed_root_swap_during_destination_commit() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.real-managed-root-swap").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::PromoteBeforeDestinationCommit);
+    let store = fixture.store.clone();
+    let revision_id = staged.revision_id.clone();
+    let promotion = tokio::spawn(async move { store.promote_revision(&revision_id).await });
+    gate.wait_entered().await;
+    let moved = fixture.paths.managed.with_extension("moved-real");
+    tokio::fs::rename(&fixture.paths.managed, &moved)
+        .await
+        .unwrap();
+    tokio::fs::create_dir(&fixture.paths.managed).await.unwrap();
+    gate.release().await;
+
+    let error = promotion.await.unwrap().unwrap_err();
+
+    assert!(format!("{error:#}").contains("identity"));
+    assert!(directory_is_empty(&fixture.paths.managed).await);
+    assert!(staged.path.is_dir());
 }
 
 #[cfg(unix)]
@@ -356,9 +406,42 @@ async fn quarantine_rejects_root_swap_without_writing_external_tree() {
 
     let error = quarantine.await.unwrap().unwrap_err();
 
-    assert!(format!("{error:#}").contains("store root must be a real directory"));
+    assert!(format!("{error:#}").contains("identity"));
     assert!(staged.path.is_dir());
     assert!(directory_is_empty(outside.path()).await);
+}
+
+#[tokio::test]
+async fn quarantine_rejects_real_root_swap_during_operation() {
+    let fixture = SecurityFixture::new(small_limits()).await;
+    let source = write_package("com.example.real-quarantine-root-swap").await;
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner-1")
+        .await
+        .unwrap();
+    let gate = fixture
+        .faults
+        .gate_once(SkillStoreFaultPoint::QuarantineAfterLock);
+    let store = fixture.store.clone();
+    let revision_id = staged.revision_id.clone();
+    let quarantine =
+        tokio::spawn(async move { store.quarantine_revision(&revision_id, "root swap").await });
+    gate.wait_entered().await;
+    let moved = fixture.paths.quarantine.with_extension("moved-real");
+    tokio::fs::rename(&fixture.paths.quarantine, &moved)
+        .await
+        .unwrap();
+    tokio::fs::create_dir(&fixture.paths.quarantine)
+        .await
+        .unwrap();
+    gate.release().await;
+
+    let error = quarantine.await.unwrap().unwrap_err();
+
+    assert!(format!("{error:#}").contains("identity"));
+    assert!(directory_is_empty(&fixture.paths.quarantine).await);
+    assert!(staged.path.is_dir());
 }
 
 #[cfg(unix)]

@@ -16,9 +16,10 @@ use crate::skill_store_operations::{
     TransitionPhase, TransitionState, cleanup_created_directories_error, combine_operation_errors,
     ensure_exact_path, storage_path, stored_revision, with_compensation,
 };
+use crate::skill_store_path_prepare::prepare_canonical_directory;
 use crate::skill_store_secure_fs::{
-    ensure_store_directory, prepare_canonical_directory, remove_store_tree,
-    reserve_store_directory, secure_package_hash, secure_package_snapshot,
+    ensure_store_directory, remove_store_tree, reserve_store_directory, secure_package_hash,
+    secure_package_snapshot,
 };
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -83,7 +84,7 @@ pub struct SkillStorePaths {
     pub managed: PathBuf,
     pub staging: PathBuf,
     pub quarantine: PathBuf,
-    identity: SkillStoreIdentity,
+    pub(crate) identity: SkillStoreIdentity,
 }
 
 impl SkillStorePaths {
@@ -115,17 +116,21 @@ impl SkillStorePaths {
                 );
             }
         }
-        let identity = SkillStoreIdentity::new(
+        let identity = SkillStoreIdentity::capture(
             tokio::fs::canonicalize(&managed).await?,
             tokio::fs::canonicalize(&staging).await?,
             tokio::fs::canonicalize(&quarantine).await?,
-        );
+        )?;
         Ok(Self {
             managed,
             staging,
             quarantine,
             identity,
         })
+    }
+
+    pub(crate) fn verify_identity(&self) -> anyhow::Result<()> {
+        self.identity.verify()
     }
 }
 
@@ -227,6 +232,7 @@ impl SkillRevisionStore {
         source: &Path,
         actor_id: &str,
     ) -> anyhow::Result<StoredSkillRevision> {
+        self.paths.verify_identity()?;
         ensure_directory_contained(&self.paths.staging, &self.paths.staging, "staging").await?;
         let revision_id = self
             .faults
@@ -237,6 +243,7 @@ impl SkillRevisionStore {
         let result = async {
             reserve_store_directory(&self.paths.staging, Path::new(&revision_id)).await?;
             reserved = true;
+            self.paths.verify_identity()?;
             copy_package_tree_into_reserved(
                 source,
                 &destination,
@@ -292,6 +299,7 @@ impl SkillRevisionStore {
         self.faults
             .checkpoint(StoreFaultPoint::WriteAfterLock)
             .await;
+        self.paths.verify_identity()?;
         let root = PathBuf::from(&record.storage_path);
         let expected = self.paths.staging.join(revision_id);
         ensure_exact_path(&root, &expected, "staging")?;
@@ -376,7 +384,7 @@ impl SkillRevisionStore {
         if let Err(error) = update {
             let restore = async {
                 self.faults.check(StoreFaultPoint::WriteRestore)?;
-                match previous {
+                match &previous {
                     Some(previous) => atomic_replace_file(
                         &root,
                         relative_path,
@@ -400,7 +408,13 @@ impl SkillRevisionStore {
                     ],
                 );
                 return Err(self
-                    .isolate_failed_staging_write(&record, &root, primary)
+                    .isolate_failed_staging_write(
+                        &record,
+                        &root,
+                        relative_path,
+                        previous.as_ref(),
+                        primary,
+                    )
                     .await);
             }
             let directory_cleanup = remove_created_directories(&created_directories).await;
@@ -419,6 +433,7 @@ impl SkillRevisionStore {
         self.faults
             .checkpoint(StoreFaultPoint::PromoteAfterLock)
             .await;
+        self.paths.verify_identity()?;
         let mut transition = TransitionState::new("promotion");
         let staged = PathBuf::from(&record.storage_path);
         ensure_exact_path(&staged, &self.paths.staging.join(revision_id), "staging")?;
@@ -479,6 +494,7 @@ impl SkillRevisionStore {
         self.faults
             .checkpoint(StoreFaultPoint::PromoteBeforeDestinationCommit)
             .await;
+        self.paths.verify_identity()?;
         let reserve = async {
             self.faults.check(StoreFaultPoint::PromoteIncomingRename)?;
             reserve_store_directory(&self.paths.managed, &destination_relative).await?;
@@ -623,6 +639,7 @@ impl SkillRevisionStore {
         self.faults
             .checkpoint(StoreFaultPoint::QuarantineAfterLock)
             .await;
+        self.paths.verify_identity()?;
         let mut transition = TransitionState::new("quarantine");
         let source = self.expected_revision_path(&record)?;
         let source_root = match record.status {
@@ -632,6 +649,9 @@ impl SkillRevisionStore {
         };
         ensure_directory_contained(source_root, &source, "revision").await?;
         measure_package_tree(&source, self.limits.package_limits(), None).await?;
+        let replacement_metadata = self
+            .actual_quarantine_metadata(&record, &source, reason)
+            .await?;
         let quarantine_incoming_root = self.paths.quarantine.join(".incoming");
         ensure_directory_contained(&self.paths.quarantine, &self.paths.quarantine, "quarantine")
             .await?;
@@ -732,7 +752,7 @@ impl SkillRevisionStore {
                     &storage_path(&destination)?,
                     reason,
                     SkillRevisionExpectation::from(&record),
-                    None,
+                    Some(replacement_metadata),
                 )
                 .await
                 .context("quarantine transition failed")

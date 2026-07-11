@@ -25,8 +25,11 @@ mod skill_store_fs;
 mod skill_store_fs_types;
 mod skill_store_locks;
 mod skill_store_operations;
+mod skill_store_path_prepare;
 mod skill_store_recovery;
 mod skill_store_secure_fs;
+mod skill_store_secure_fs_faults;
+mod skill_verified;
 pub mod storage;
 pub mod subagent;
 pub mod tools;
@@ -87,3 +90,6 @@ mod managed_skill_source_tests;
 
 #[cfg(test)]
 mod managed_skill_source_limits_tests;
+
+#[cfg(test)]
+mod managed_verified_content_tests;

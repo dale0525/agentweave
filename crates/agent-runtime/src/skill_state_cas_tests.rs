@@ -1,7 +1,7 @@
 use crate::skill_package::SkillPackageId;
 use crate::skill_state::{
     NewSkillRevision, SkillRevisionExpectation, SkillRevisionMetadata, SkillRevisionPromotion,
-    SkillStateStore,
+    SkillRevisionStatus, SkillStateStore,
 };
 use crate::storage::Storage;
 use serde_json::json;
@@ -140,4 +140,27 @@ async fn staging_metadata_cas_rejects_metadata_changed_after_observation() {
         .unwrap()
         .unwrap();
     assert_eq!(record.content_hash, "external-hash");
+}
+
+#[tokio::test]
+async fn staging_metadata_cas_rejects_non_staging_expectation_before_sql() {
+    let (state, record) = staging_revision().await;
+    let mut expected = SkillRevisionExpectation::from(&record);
+    expected.status = SkillRevisionStatus::Managed;
+
+    let error = state
+        .refresh_staging_revision_metadata_cas(
+            &record.revision_id,
+            expected,
+            SkillRevisionMetadata {
+                version: record.version.clone(),
+                content_hash: record.content_hash.clone(),
+                descriptor_json: record.descriptor_json.clone(),
+                validation_json: json!({"status": "valid"}),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("expected staging lifecycle"));
 }

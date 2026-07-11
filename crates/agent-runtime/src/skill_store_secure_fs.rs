@@ -70,7 +70,12 @@ fn checkpoint_secure_hash_after_open() {}
 pub(crate) struct SecurePackageSnapshot {
     pub descriptor: LoadedPackageDescriptor,
     pub content_hash: String,
+    pub runtime_manifest: Option<Vec<u8>>,
+    pub instructions_file: Option<Vec<u8>>,
 }
+
+#[cfg(test)]
+pub(crate) use crate::skill_store_secure_fs_faults::inject_transient_directory_open_once;
 
 pub(crate) struct SecureTreeSnapshot {
     pub content_hash: String,
@@ -162,34 +167,6 @@ pub(crate) async fn prepare_directory_path(path: &Path) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || prepare_directory_path_platform(&path))
         .await
         .context("secure directory path preparation worker failed")?
-}
-
-pub(crate) async fn prepare_canonical_directory(path: &Path) -> anyhow::Result<PathBuf> {
-    if let Ok(canonical) = tokio::fs::canonicalize(path).await {
-        return Ok(canonical);
-    }
-    let mut current = path;
-    let mut missing = Vec::new();
-    let canonical_ancestor = loop {
-        if let Ok(canonical) = tokio::fs::canonicalize(current).await {
-            break canonical;
-        }
-        missing.push(
-            current
-                .file_name()
-                .context("skill store path has no existing ancestor")?
-                .to_os_string(),
-        );
-        current = current
-            .parent()
-            .context("skill store path has no existing ancestor")?;
-    };
-    let mut prepared = canonical_ancestor;
-    for component in missing.into_iter().rev() {
-        prepared.push(component);
-    }
-    prepare_directory_path(&prepared).await?;
-    Ok(tokio::fs::canonicalize(prepared).await?)
 }
 
 pub(crate) async fn remove_store_tree(trusted_root: &Path, relative: &Path) -> anyhow::Result<()> {
@@ -538,13 +515,15 @@ fn snapshot_opened(
     let scanned = scan_relative_files(display_root, &root_fd, state.files_to_hash)?;
     let descriptor = SkillPackageDescriptor::load_from_file_bytes(
         display_root,
-        scanned.descriptor_bytes,
-        scanned.runtime_manifest,
-        scanned.instructions_file,
+        scanned.descriptor_bytes.clone(),
+        scanned.runtime_manifest.clone(),
+        scanned.instructions_file.clone(),
     )?;
     Ok(SecurePackageSnapshot {
         descriptor,
         content_hash: scanned.content_hash,
+        runtime_manifest: scanned.runtime_manifest,
+        instructions_file: scanned.instructions_file,
     })
 }
 
@@ -592,17 +571,22 @@ fn walk_open_directory(
         let name = OsStr::from_bytes(bytes);
         let relative = relative_directory.join(name);
         validate_relative_entry(&relative, state)?;
+        crate::skill_store_secure_fs_faults::check_directory_open(display_root)?;
         let directory_open = openat(
             directory,
             name,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
             Mode::empty(),
         );
-        if let Ok(child) = directory_open {
-            state.directories =
-                checked_count(state.directories, state.limits.max_directories, "directory")?;
-            walk_open_directory(&child, &relative, display_root, state)?;
-            continue;
+        match directory_open {
+            Ok(child) => {
+                state.directories =
+                    checked_count(state.directories, state.limits.max_directories, "directory")?;
+                walk_open_directory(&child, &relative, display_root, state)?;
+                continue;
+            }
+            Err(rustix::io::Errno::NOTDIR) | Err(rustix::io::Errno::LOOP) => {}
+            Err(error) => return Err(error.into()),
         }
         let entry_stat = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
         let entry_type = FileType::from_raw_mode(entry_stat.st_mode);
@@ -843,13 +827,15 @@ fn snapshot_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<Secur
     let scanned = scan_fallback(root, limits)?;
     let descriptor = SkillPackageDescriptor::load_from_file_bytes(
         root,
-        scanned.descriptor_bytes,
-        scanned.runtime_manifest,
-        scanned.instructions_file,
+        scanned.descriptor_bytes.clone(),
+        scanned.runtime_manifest.clone(),
+        scanned.instructions_file.clone(),
     )?;
     Ok(SecurePackageSnapshot {
         descriptor,
         content_hash: scanned.content_hash,
+        runtime_manifest: scanned.runtime_manifest,
+        instructions_file: scanned.instructions_file,
     })
 }
 

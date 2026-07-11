@@ -5,6 +5,7 @@ use crate::skill_store::{
     SkillRevisionStore, SkillStoreFaultPoint, SkillStoreLimits, SkillStorePaths,
     SkillStoreTestFaults,
 };
+use crate::skill_store_secure_fs::inject_transient_directory_open_once;
 use crate::storage::Storage;
 use serde_json::json;
 use std::path::Path;
@@ -203,6 +204,32 @@ async fn transient_managed_validation_error_skips_without_quarantine_and_keeps_v
         crate::skill_state::SkillRevisionStatus::Managed
     );
     assert!(transient.path.is_dir());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn transient_real_walker_directory_open_skips_without_quarantine() {
+    let fixture = LimitsFixture::new().await;
+    let transient = fixture.active("com.example.alpha-walker-transient").await;
+    let valid = fixture.active("com.example.zeta-walker-valid").await;
+    inject_transient_directory_open_once(&transient.path);
+    let source = fixture.bounded_source();
+
+    let discovered = source.discover().await.unwrap();
+
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].root, valid.path);
+    assert_eq!(source.issues().len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .get_revision(&transient.revision_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        crate::skill_state::SkillRevisionStatus::Managed
+    );
 }
 
 async fn write_package(id: &str) -> TempDir {

@@ -9,12 +9,14 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true
+fs2.workspace = true
 hex.workspace = true
 icu_casemap.workspace = true
 model-gateway = { path = "../model-gateway" }
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+same-file.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
@@ -24,7 +26,6 @@ tracing.workspace = true
 unicode-normalization.workspace = true
 uuid.workspace = true
 
-[target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
 [dev-dependencies]

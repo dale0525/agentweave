@@ -2,7 +2,8 @@ use crate::platform::{CapabilitySet, PlatformId};
 use crate::skill_manager::{SkillManager, SkillManagerConfig};
 use crate::skill_package::SkillPackageId;
 use crate::skill_source::{
-    ManagedSkillSource, SkillLayer, SkillSource, portable_collision_key, register_portable_path,
+    ManagedSkillSource, SkillLayer, SkillSource, hash_package_tree, portable_collision_key,
+    register_portable_path,
 };
 use crate::skill_state::{SkillLayerRecord, SkillRevisionStatus, SkillStateStore};
 use crate::skill_store::{
@@ -603,6 +604,7 @@ async fn managed_source_discovers_valid_revision_and_quarantines_corrupt_peer_wi
     tokio::fs::write(corrupt.path.join("SKILL.md"), "corrupt after promotion")
         .await
         .unwrap();
+    let actual_hash = hash_package_tree(&corrupt.path).await.unwrap();
     let source = ManagedSkillSource::new(fixture.paths.clone(), fixture.state.clone());
 
     let discovered = source.discover().await.unwrap();
@@ -618,15 +620,20 @@ async fn managed_source_discovers_valid_revision_and_quarantines_corrupt_peer_wi
     assert!(issues[0].reason.contains("content hash mismatch"));
     assert!(issues[0].quarantine_error.is_none());
     assert!(fixture.paths.quarantine.join(&corrupt.revision_id).is_dir());
-    assert_eq!(
-        fixture
-            .state
-            .get_revision(&corrupt.revision_id)
-            .await
+    let record = fixture
+        .state
+        .get_revision(&corrupt.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, SkillRevisionStatus::Quarantined);
+    assert_eq!(record.content_hash, actual_hash);
+    assert_eq!(record.validation_json["status"], "invalid");
+    assert!(
+        record.validation_json["quarantineReason"]
+            .as_str()
             .unwrap()
-            .unwrap()
-            .status,
-        SkillRevisionStatus::Quarantined
+            .contains("content hash mismatch")
     );
 }
 

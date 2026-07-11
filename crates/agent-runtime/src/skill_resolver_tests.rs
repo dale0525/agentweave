@@ -30,6 +30,7 @@ fn package(id: &str, layer: SkillLayer) -> DiscoveredSkillPackage {
         },
         content_hash: format!("hash-{id}-{layer:?}"),
         warnings: Vec::new(),
+        verified_content: None,
     }
 }
 
