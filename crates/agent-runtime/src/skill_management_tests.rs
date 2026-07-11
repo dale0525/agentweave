@@ -576,6 +576,93 @@ async fn zero_generic_timeout_does_not_cancel_management_mutation() {
     assert!(!directory_is_empty(&fixture.store.paths().staging).await);
 }
 
+#[tokio::test]
+async fn tiny_generic_output_limit_does_not_rewrite_committed_management_success() {
+    let fixture = ManagementFixture::new(SkillManagementPolicy::owner_only()).await;
+    let context = SkillManagementToolContext {
+        service: fixture.service.clone(),
+        actor: fixture.owner(),
+    };
+    let mut config = RuntimeConfig::read_only(".", ".").without_builtin_tools();
+    config.output_limit_bytes = 1;
+    let registry =
+        ToolRegistry::try_new_with_management(SkillRegistry::empty(), &config, Some(context))
+            .unwrap();
+
+    let result = registry
+        .execute(
+            "create_skill_draft",
+            "tiny-output-limit",
+            json!({
+                "package_id": "com.example.output-safe",
+                "display_name": "Output safe",
+                "description": "The bounded success must be returned after commit.",
+                "kind": "instruction_only",
+                "required_tools": []
+            }),
+        )
+        .await;
+
+    assert!(result.ok, "{result:?}");
+    assert_eq!(revision_count(&fixture.storage).await, 1);
+    assert_eq!(
+        directory_entry_count(&fixture.store.paths().staging).await,
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborting_outer_draft_request_after_reservation_still_commits_one_consistent_revision() {
+    let faults = SkillStoreTestFaults::default();
+    let gate = faults.gate_once(SkillStoreFaultPoint::StagingAuthorAfterReservation);
+    let fixture = ManagementFixture::with_limits_and_faults(
+        SkillManagementPolicy::owner_only(),
+        SkillStoreLimits::default(),
+        faults,
+    )
+    .await;
+    let service = fixture.service.clone();
+    let actor = fixture.owner();
+    let outer = tokio::spawn(async move {
+        service
+            .create_draft(&actor, request(SkillPackageKind::InstructionOnly))
+            .await
+    });
+    gate.wait_entered().await;
+
+    outer.abort();
+    assert!(outer.await.unwrap_err().is_cancelled());
+    let release = tokio::spawn(async move { gate.release().await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if revision_count(&fixture.storage).await == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("owned authoring operation should finish after its outer waiter is aborted");
+    release.await.unwrap();
+
+    let (revision_id, storage_path): (String, String) =
+        sqlx::query_as("SELECT revision_id, storage_path FROM skill_revisions")
+            .fetch_one(fixture.storage.pool())
+            .await
+            .unwrap();
+    let stored_path = std::path::PathBuf::from(storage_path);
+    assert_eq!(
+        stored_path.file_name().unwrap(),
+        std::ffi::OsStr::new(&revision_id)
+    );
+    assert!(stored_path.is_dir());
+    assert_eq!(
+        directory_entry_count(&fixture.store.paths().staging).await,
+        1
+    );
+}
+
 #[test]
 fn create_tool_kind_schema_matches_policy_allowed_kind_intersection() {
     let actor = ActorContext::owner("owner-1", [SkillGrant::CreateDraft]);
@@ -768,6 +855,15 @@ async fn directory_is_empty(path: &std::path::Path) -> bool {
         .await
         .unwrap()
         .is_none()
+}
+
+async fn directory_entry_count(path: &std::path::Path) -> usize {
+    let mut entries = tokio::fs::read_dir(path).await.unwrap();
+    let mut count = 0;
+    while entries.next_entry().await.unwrap().is_some() {
+        count += 1;
+    }
+    count
 }
 
 async fn revision_count(storage: &Storage) -> i64 {

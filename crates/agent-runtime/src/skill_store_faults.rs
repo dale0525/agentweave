@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) enum StoreFaultPoint {
     StagingCopyFile,
     StagingAuthorFile,
+    StagingAuthorAfterReservation,
     IncomingCopyFile,
     QuarantineCopyFile,
     PromoteStagingRename,

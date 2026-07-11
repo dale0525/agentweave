@@ -20,6 +20,7 @@ pub mod skill_resolver;
 pub mod skill_snapshot;
 pub mod skill_source;
 pub mod skill_state;
+mod skill_state_management;
 mod skill_state_migration;
 mod skill_state_revision_cas;
 mod skill_state_rows;

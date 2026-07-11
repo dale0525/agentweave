@@ -1,0 +1,77 @@
+use crate::skill_package::SkillPackageId;
+use crate::skill_state::SkillStateStore;
+use crate::skill_state_rows::{
+    INSTALLATION_COLUMNS, SkillInstallationRecord, installation_from_row,
+};
+use sqlx::Row;
+use sqlx::sqlite::SqliteRow;
+
+const MANAGED_INSTALLATION_VIEW_COLUMNS: &str = "i.package_id AS package_id, i.source_layer AS source_layer, i.active_revision_id AS active_revision_id, i.enabled AS enabled, i.trust_level AS trust_level, i.install_status AS install_status, i.installed_at AS installed_at, i.updated_at AS updated_at, r.version AS active_version";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedSkillInstallationView {
+    pub installation: SkillInstallationRecord,
+    pub active_version: Option<String>,
+}
+
+impl SkillStateStore {
+    pub async fn get_installation(
+        &self,
+        package_id: &SkillPackageId,
+    ) -> anyhow::Result<Option<SkillInstallationRecord>> {
+        let query =
+            format!("SELECT {INSTALLATION_COLUMNS} FROM skill_installations WHERE package_id = ?");
+        sqlx::query(&query)
+            .bind(package_id.as_str())
+            .fetch_optional(self.pool())
+            .await?
+            .map(|row| installation_from_row(&row))
+            .transpose()
+    }
+
+    pub async fn list_active_installations(&self) -> anyhow::Result<Vec<SkillInstallationRecord>> {
+        let query = format!(
+            "SELECT {INSTALLATION_COLUMNS} FROM skill_installations WHERE enabled = 1 AND install_status = 'active' ORDER BY package_id"
+        );
+        sqlx::query(&query)
+            .fetch_all(self.pool())
+            .await?
+            .iter()
+            .map(installation_from_row)
+            .collect()
+    }
+
+    pub async fn list_installations(&self) -> anyhow::Result<Vec<SkillInstallationRecord>> {
+        let query =
+            format!("SELECT {INSTALLATION_COLUMNS} FROM skill_installations ORDER BY package_id");
+        sqlx::query(&query)
+            .fetch_all(self.pool())
+            .await?
+            .iter()
+            .map(installation_from_row)
+            .collect()
+    }
+
+    pub async fn list_managed_installations_with_revisions(
+        &self,
+    ) -> anyhow::Result<Vec<ManagedSkillInstallationView>> {
+        let query = format!(
+            "SELECT {MANAGED_INSTALLATION_VIEW_COLUMNS} FROM skill_installations i LEFT JOIN skill_revisions r ON r.revision_id = i.active_revision_id WHERE i.source_layer = 'managed' ORDER BY i.package_id"
+        );
+        sqlx::query(&query)
+            .fetch_all(self.pool())
+            .await?
+            .iter()
+            .map(managed_installation_view_from_row)
+            .collect()
+    }
+}
+
+fn managed_installation_view_from_row(
+    row: &SqliteRow,
+) -> anyhow::Result<ManagedSkillInstallationView> {
+    Ok(ManagedSkillInstallationView {
+        installation: installation_from_row(row)?,
+        active_version: row.try_get("active_version")?,
+    })
+}

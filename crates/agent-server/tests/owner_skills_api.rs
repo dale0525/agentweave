@@ -13,13 +13,16 @@ use agent_runtime::turn::{ModelClient, ModelEventStream};
 use agent_server::api::{self, AppState};
 use agent_server::owner_api::{OwnerApiConfig, OwnerAuth};
 use axum::Router;
-use axum::body::{Body, to_bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::http::{Request, StatusCode};
 use futures::stream;
 use model_gateway::responses::{GatewayEvent, GatewayRequest};
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tower::ServiceExt;
 
 struct OwnerTestApp {
@@ -139,6 +142,17 @@ fn request(method: &str, uri: &str, token: Option<&str>, body: Option<Value>) ->
         .unwrap()
 }
 
+fn raw_json_request(token: Option<&str>, body: impl Into<Body>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/owner/skills/drafts")
+        .header("content-type", "application/json");
+    if let Some(token) = token {
+        builder = builder.header("authorization", token);
+    }
+    builder.body(body.into()).unwrap()
+}
+
 fn draft_body(package_id: &str) -> Value {
     json!({
         "package_id": package_id,
@@ -204,6 +218,65 @@ async fn owner_routes_require_an_exact_host_token_without_echoing_it() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn owner_auth_rejects_before_polling_the_request_body() {
+    let test = owner_test_app(
+        SkillManagementPolicy::owner_only(),
+        "secret-token",
+        owner_actor(),
+    )
+    .await;
+    let polled = Arc::new(AtomicBool::new(false));
+    let body_polled = polled.clone();
+    let body = Body::from_stream(stream::once(async move {
+        body_polled.store(true, Ordering::SeqCst);
+        Ok::<_, std::io::Error>(Bytes::from_static(b"{"))
+    }));
+
+    let response = test
+        .app
+        .oneshot(raw_json_request(None, body))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(!polled.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn owner_auth_precedes_malformed_and_oversized_json_errors() {
+    let test = owner_test_app(
+        SkillManagementPolicy::owner_only(),
+        "secret-token",
+        owner_actor(),
+    )
+    .await;
+    let malformed = r#"{"package_id":"#.to_string();
+    let oversized = format!(
+        r#"{{"package_id":"com.example.large","display_name":"Large","description":"{}","kind":"instruction_only","required_tools":[]}}"#,
+        "x".repeat(2 * 1024 * 1024)
+    );
+
+    for token in [None, Some("Bearer wrong-token")] {
+        for body in [&malformed, &oversized] {
+            let response = test
+                .app
+                .clone()
+                .oneshot(raw_json_request(token, body.clone()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    let response = test
+        .app
+        .oneshot(raw_json_request(Some("Bearer secret-token"), malformed))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

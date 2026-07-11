@@ -329,6 +329,9 @@ impl ToolRegistry {
             && SkillManagementTools::handles(context, name)
         {
             let result = SkillManagementTools::execute(context, name, call_id, arguments).await;
+            if name == "create_skill_draft" {
+                return result;
+            }
             return self.apply_output_limit(result);
         }
         let execution = tokio::time::timeout(

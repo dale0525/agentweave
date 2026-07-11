@@ -5,9 +5,11 @@ use agent_runtime::skill_management::{
 use agent_runtime::skill_management_tools::SkillManagementTools;
 use agent_runtime::skill_policy::{ActorContext, SkillManagementMode, SkillManagementPolicy};
 use agent_runtime::skill_state::SkillAuditRecord;
+use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -85,24 +87,22 @@ pub(crate) fn router(state: &Arc<AppState>) -> Option<Router<Arc<AppState>>> {
     if !SkillManagementTools::definitions(&owner.service, &owner.auth.actor).is_empty() {
         router = router.route("/owner/skills/drafts", post(create_draft));
     }
-    Some(router)
+    Some(router.route_layer(middleware::from_fn_with_state(state.clone(), require_owner)))
 }
 
 async fn owner_policy(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(_actor): Extension<ActorContext>,
 ) -> Result<Json<SkillManagementPolicy>, OwnerApiError> {
     let owner = owner_config(&state)?;
-    owner.auth.authenticate(&headers)?;
     Ok(Json(owner.policy().clone()))
 }
 
 async fn list_skills(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<ActorContext>,
 ) -> Result<Json<OwnerSkillsResponse>, OwnerApiError> {
     let owner = owner_config(&state)?;
-    let actor = owner.auth.authenticate(&headers)?;
     let effective = owner
         .service
         .list_effective_skills(&actor)
@@ -118,11 +118,10 @@ async fn list_skills(
 
 async fn list_audit(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<ActorContext>,
     Path(package_id): Path<String>,
 ) -> Result<Json<Vec<SkillAuditRecord>>, OwnerApiError> {
     let owner = owner_config(&state)?;
-    let actor = owner.auth.authenticate(&headers)?;
     let package_id = agent_runtime::skill_package::SkillPackageId::parse(&package_id)
         .map_err(|_| OwnerApiError::BadRequest)?;
     let audit = owner
@@ -135,11 +134,10 @@ async fn list_audit(
 
 async fn create_draft(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(actor): Extension<ActorContext>,
     payload: Result<Json<CreateSkillDraftRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, OwnerApiError> {
     let owner = owner_config(&state)?;
-    let actor = owner.auth.authenticate(&headers)?;
     let Json(request) = payload.map_err(|_| OwnerApiError::BadRequest)?;
     let summary = owner
         .service
@@ -147,6 +145,20 @@ async fn create_draft(
         .await
         .map_err(OwnerApiError::from_service)?;
     Ok((StatusCode::CREATED, Json(summary)))
+}
+
+async fn require_owner(
+    State(state): State<Arc<AppState>>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    let actor =
+        match owner_config(&state).and_then(|owner| owner.auth.authenticate(request.headers())) {
+            Ok(actor) => actor,
+            Err(error) => return error.into_response(),
+        };
+    request.extensions_mut().insert(actor);
+    next.run(request).await
 }
 
 fn owner_config(state: &AppState) -> Result<&OwnerApiConfig, OwnerApiError> {

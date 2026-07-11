@@ -30,6 +30,31 @@ impl SkillRevisionStore {
         actor_id: &str,
     ) -> anyhow::Result<StoredSkillRevision> {
         self.validate_authored_input(files)?;
+        let store = self.clone();
+        let expected_package_id = expected_package_id.clone();
+        let files = files.to_vec();
+        let actor_id = actor_id.to_string();
+        tokio::spawn(async move {
+            store
+                .create_authored_staging_revision_inner(
+                    expected_package_id,
+                    expected_kind,
+                    files,
+                    actor_id,
+                )
+                .await
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("authored staging operation task failed: {error}"))?
+    }
+
+    async fn create_authored_staging_revision_inner(
+        &self,
+        expected_package_id: SkillPackageId,
+        expected_kind: SkillPackageKind,
+        files: Vec<StagingSkillFile>,
+        actor_id: String,
+    ) -> anyhow::Result<StoredSkillRevision> {
         self.paths.verify_identity()?;
         ensure_directory_contained(&self.paths.staging, &self.paths.staging, "staging").await?;
         let revision_id = self
@@ -43,8 +68,11 @@ impl SkillRevisionStore {
                 reserve_opened_directory(self.paths.staging_identity(), Path::new(&revision_id))
                     .await?;
             reserved = Some(reserved_directory.clone());
+            self.faults
+                .checkpoint(StoreFaultPoint::StagingAuthorAfterReservation)
+                .await;
             self.paths.verify_identity()?;
-            for file in files {
+            for file in &files {
                 self.faults.check(StoreFaultPoint::StagingAuthorFile)?;
                 if let Some(parent) = file.path.parent()
                     && !parent.as_os_str().is_empty()
@@ -59,7 +87,7 @@ impl SkillRevisionStore {
             let snapshot =
                 opened_package_snapshot(&reserved_directory, self.limits.package_limits()).await?;
             snapshot.descriptor.descriptor.validate()?;
-            if &snapshot.descriptor.descriptor.id != expected_package_id {
+            if snapshot.descriptor.descriptor.id != expected_package_id {
                 anyhow::bail!("draft package id changed during creation");
             }
             if snapshot.descriptor.descriptor.kind != expected_kind {
@@ -78,7 +106,7 @@ impl SkillRevisionStore {
                         storage_path: storage_path(&destination)?,
                         descriptor_json: serde_json::to_value(&descriptor)?,
                         validation_json: json!({"status": "pending"}),
-                        created_by: actor_id.to_string(),
+                        created_by: actor_id,
                     },
                 )
                 .await?;

@@ -1,9 +1,8 @@
 use crate::skill_package::SkillPackageId;
 use crate::skill_state_rows::{
-    APPROVAL_COLUMNS, AUDIT_COLUMNS, CIRCUIT_COLUMNS, INSTALLATION_COLUMNS,
-    MANAGED_INSTALLATION_VIEW_COLUMNS, REVISION_COLUMNS, SNAPSHOT_COLUMNS, approval_from_row,
-    audit_from_row, circuit_from_row, installation_from_row, managed_installation_view_from_row,
-    parse_json, revision_from_row, snapshot_from_row, validate_storage_path, validate_uuid_v4,
+    APPROVAL_COLUMNS, AUDIT_COLUMNS, CIRCUIT_COLUMNS, REVISION_COLUMNS, SNAPSHOT_COLUMNS,
+    approval_from_row, audit_from_row, circuit_from_row, parse_json, revision_from_row,
+    snapshot_from_row, validate_storage_path, validate_uuid_v4,
 };
 use crate::storage::Storage;
 use anyhow::Context;
@@ -12,12 +11,12 @@ use serde_json::{Map, Value};
 use sqlx::{Executor, Row, Sqlite, SqlitePool};
 use uuid::Uuid;
 
+pub use crate::skill_state_management::ManagedSkillInstallationView;
 pub use crate::skill_state_rows::{
-    ManagedSkillInstallationView, NewSkillApproval, NewSkillRevision, SkillApprovalRecord,
-    SkillApprovalStatus, SkillAuditRecord, SkillCircuitStateRecord, SkillInstallStatus,
-    SkillInstallationRecord, SkillLayerRecord, SkillRevisionExpectation, SkillRevisionMetadata,
-    SkillRevisionPromotion, SkillRevisionRecord, SkillRevisionStatus, SkillSnapshotRecord,
-    SkillSnapshotStatus,
+    NewSkillApproval, NewSkillRevision, SkillApprovalRecord, SkillApprovalStatus, SkillAuditRecord,
+    SkillCircuitStateRecord, SkillInstallStatus, SkillInstallationRecord, SkillLayerRecord,
+    SkillRevisionExpectation, SkillRevisionMetadata, SkillRevisionPromotion, SkillRevisionRecord,
+    SkillRevisionStatus, SkillSnapshotRecord, SkillSnapshotStatus,
 };
 
 #[derive(Clone)]
@@ -256,57 +255,6 @@ impl SkillStateStore {
         }
         .await;
         crate::skill_state_transactions::finish(tx, result).await
-    }
-
-    pub async fn get_installation(
-        &self,
-        package_id: &SkillPackageId,
-    ) -> anyhow::Result<Option<SkillInstallationRecord>> {
-        let query =
-            format!("SELECT {INSTALLATION_COLUMNS} FROM skill_installations WHERE package_id = ?");
-        sqlx::query(&query)
-            .bind(package_id.as_str())
-            .fetch_optional(self.storage.pool())
-            .await?
-            .map(|row| installation_from_row(&row))
-            .transpose()
-    }
-
-    pub async fn list_active_installations(&self) -> anyhow::Result<Vec<SkillInstallationRecord>> {
-        let query = format!(
-            "SELECT {INSTALLATION_COLUMNS} FROM skill_installations WHERE enabled = 1 AND install_status = 'active' ORDER BY package_id"
-        );
-        sqlx::query(&query)
-            .fetch_all(self.storage.pool())
-            .await?
-            .iter()
-            .map(installation_from_row)
-            .collect()
-    }
-
-    pub async fn list_installations(&self) -> anyhow::Result<Vec<SkillInstallationRecord>> {
-        let query =
-            format!("SELECT {INSTALLATION_COLUMNS} FROM skill_installations ORDER BY package_id");
-        sqlx::query(&query)
-            .fetch_all(self.storage.pool())
-            .await?
-            .iter()
-            .map(installation_from_row)
-            .collect()
-    }
-
-    pub async fn list_managed_installations_with_revisions(
-        &self,
-    ) -> anyhow::Result<Vec<ManagedSkillInstallationView>> {
-        let query = format!(
-            "SELECT {MANAGED_INSTALLATION_VIEW_COLUMNS} FROM skill_installations i LEFT JOIN skill_revisions r ON r.revision_id = i.active_revision_id WHERE i.source_layer = 'managed' ORDER BY i.package_id"
-        );
-        sqlx::query(&query)
-            .fetch_all(self.storage.pool())
-            .await?
-            .iter()
-            .map(managed_installation_view_from_row)
-            .collect()
     }
 
     pub async fn activate_revision(
