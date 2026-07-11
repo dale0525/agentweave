@@ -1,4 +1,4 @@
-use crate::skill_management::{CreateSkillDraftRequest, SkillManagementError};
+use crate::skill_management::{CreateSkillDraftRequest, DraftFileUpdate, SkillManagementError};
 use crate::skill_package::{
     SKILL_PACKAGE_SCHEMA_VERSION, SkillCompatibility, SkillPackageDescriptor, SkillPackageKind,
     SkillPackageRequirements, SkillPackageTargets,
@@ -6,6 +6,64 @@ use crate::skill_package::{
 use crate::skill_store::StagingSkillFile;
 use semver::Version;
 use std::path::PathBuf;
+
+const MAX_DRAFT_FILE_BYTES: usize = 256 * 1024;
+
+pub fn validate_draft_updates(
+    updates: Vec<DraftFileUpdate>,
+) -> Result<Vec<StagingSkillFile>, SkillManagementError> {
+    if updates.is_empty() {
+        return Err(SkillManagementError::InvalidRequest(
+            "draft update must contain at least one file".into(),
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut files = Vec::with_capacity(updates.len());
+    for update in updates {
+        if !allowed_draft_path(&update.path) {
+            return Err(SkillManagementError::InvalidRequest(format!(
+                "draft path is not allowed: {}",
+                update.path.display()
+            )));
+        }
+        if !seen.insert(update.path.clone()) {
+            return Err(SkillManagementError::InvalidRequest(format!(
+                "duplicate draft path: {}",
+                update.path.display()
+            )));
+        }
+        if update.content.len() > MAX_DRAFT_FILE_BYTES {
+            return Err(SkillManagementError::InvalidRequest(format!(
+                "draft file exceeds 256 KiB: {}",
+                update.path.display()
+            )));
+        }
+        files.push(StagingSkillFile {
+            path: update.path,
+            bytes: update.content.into_bytes(),
+        });
+    }
+    Ok(files)
+}
+
+fn allowed_draft_path(path: &std::path::Path) -> bool {
+    let mut components = path.components();
+    let Some(std::path::Component::Normal(first)) = components.next() else {
+        return false;
+    };
+    if first.is_empty()
+        || components
+            .clone()
+            .any(|component| !matches!(component, std::path::Component::Normal(name) if !name.is_empty()))
+    {
+        return false;
+    }
+    match first.to_str() {
+        Some("general-agent.json" | "SKILL.md") => components.next().is_none(),
+        Some("references" | "assets") => components.next().is_some(),
+        _ => false,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthoredSkillPackage {
@@ -108,11 +166,7 @@ fn normalize_required_tools(values: &[String]) -> Result<Vec<String>, SkillManag
     let mut tools = Vec::with_capacity(values.len());
     for value in values {
         let tool = value.trim();
-        let valid = !tool.is_empty()
-            && tool.len() <= 64
-            && tool
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
+        let valid = !tool.is_empty() && tool.len() <= 64 && valid_required_tool(tool);
         if !valid {
             return Err(SkillManagementError::InvalidRequest(format!(
                 "invalid required tool: {value}"
@@ -123,6 +177,25 @@ fn normalize_required_tools(values: &[String]) -> Result<Vec<String>, SkillManag
     tools.sort();
     tools.dedup();
     Ok(tools)
+}
+
+fn valid_required_tool(tool: &str) -> bool {
+    let valid_leaf = |value: &str| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    };
+    if valid_leaf(tool) {
+        return true;
+    }
+    let Some((namespace, leaf)) = tool.split_once('/') else {
+        return false;
+    };
+    !leaf.contains('/')
+        && valid_leaf(leaf)
+        && namespace.split('.').count() >= 3
+        && namespace.split('.').all(valid_leaf)
 }
 
 fn validate_kind_requirements(

@@ -47,6 +47,9 @@ pub(crate) async fn open_regular_file(
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
         anyhow::bail!("prepared package source is not a regular file");
     }
+    if stat.st_nlink != 1 {
+        anyhow::bail!("prepared package source must not be a hard link");
+    }
     Ok((
         tokio::fs::File::from_std(File::from(descriptor)),
         u64::try_from(stat.st_size).context("package file has negative size")?,

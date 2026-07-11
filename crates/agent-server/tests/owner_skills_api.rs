@@ -1,10 +1,11 @@
-use agent_runtime::skill::SkillRegistry;
-use agent_runtime::skill_catalog::SkillCatalog;
+use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::skill_management::OwnerSkillManagementService;
-use agent_runtime::skill_manager::SkillManager;
+use agent_runtime::skill_manager::{SkillManager, SkillManagerConfig};
+use agent_runtime::skill_package::SkillPackageId;
 use agent_runtime::skill_policy::{
     ActorContext, SkillGrant, SkillManagementMode, SkillManagementPolicy,
 };
+use agent_runtime::skill_source::ManagedSkillSource;
 use agent_runtime::skill_state::SkillStateStore;
 use agent_runtime::skill_store::{SkillRevisionStore, SkillStoreLimits, SkillStorePaths};
 use agent_runtime::storage::Storage;
@@ -28,6 +29,8 @@ use tower::ServiceExt;
 struct OwnerTestApp {
     app: Router,
     service: OwnerSkillManagementService,
+    storage: Storage,
+    manager: SkillManager,
     state: SkillStateStore,
     store: SkillRevisionStore,
     roots: TestRoots,
@@ -54,6 +57,8 @@ impl ModelClient for CapturingChatModel {
 struct TestRoots {
     app_root: PathBuf,
     cache_root: PathBuf,
+    import_root: PathBuf,
+    export_root: PathBuf,
 }
 
 impl TestRoots {
@@ -62,11 +67,17 @@ impl TestRoots {
             std::env::temp_dir().join(format!("general-agent-owner-api-{}", uuid::Uuid::new_v4()));
         let app_root = base.join("app");
         let cache_root = base.join("cache");
+        let import_root = base.join("imports");
+        let export_root = base.join("exports");
         std::fs::create_dir_all(&app_root).unwrap();
         std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&import_root).unwrap();
+        std::fs::create_dir_all(&export_root).unwrap();
         Self {
             app_root,
             cache_root,
+            import_root,
+            export_root,
         }
     }
 }
@@ -100,24 +111,36 @@ async fn owner_test_app_with_limits(
     let storage = Storage::connect("sqlite::memory:").await.unwrap();
     let state = SkillStateStore::new(storage.clone());
     let store = SkillRevisionStore::with_limits(paths, state.clone(), limits);
-    let manager =
-        SkillManager::from_registry_and_catalog(SkillRegistry::empty(), SkillCatalog::empty());
+    let manager = SkillManager::new(SkillManagerConfig {
+        sources: vec![Arc::new(ManagedSkillSource::from_store(store.clone()))],
+        platform: PlatformId::Server,
+        capabilities: CapabilitySet::from_names(Vec::<String>::new()),
+        protected_packages: policy.protected_packages.iter().cloned().collect(),
+        allowed_overrides: policy.allowed_overrides.iter().cloned().collect(),
+        runtime_version: "0.1.0".parse().unwrap(),
+    })
+    .await
+    .unwrap();
     let service =
-        OwnerSkillManagementService::new(manager.clone(), store.clone(), state.clone(), policy);
+        OwnerSkillManagementService::new(manager.clone(), store.clone(), state.clone(), policy)
+            .with_transfer_roots(&roots.import_root, &roots.export_root)
+            .unwrap();
     let owner = OwnerApiConfig::new(service.clone(), OwnerAuth::new(token, actor).unwrap());
     let chat_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
     let app_state = Arc::new(AppState::new_with_model_skill_manager_and_owner(
-        storage,
+        storage.clone(),
         CapturingChatModel {
             tools: chat_tools.clone(),
         },
-        manager,
+        manager.clone(),
         RuntimeConfig::read_only(".", ".").without_builtin_tools(),
         owner,
     ));
     OwnerTestApp {
         app: api::router(app_state),
         service,
+        storage,
+        manager,
         state,
         store,
         roots,
@@ -571,6 +594,179 @@ async fn oversized_owner_draft_request_is_bad_request_not_internal_error() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(directory_is_empty(&test.store.paths().staging).await);
+}
+
+fn task10_actor(id: &str) -> ActorContext {
+    ActorContext::owner(
+        id,
+        [
+            SkillGrant::Inspect,
+            SkillGrant::CreateDraft,
+            SkillGrant::EditDraft,
+            SkillGrant::Validate,
+            SkillGrant::Test,
+            SkillGrant::Activate,
+            SkillGrant::Import,
+            SkillGrant::Export,
+        ],
+    )
+}
+
+async fn response_json(response: axum::response::Response) -> Value {
+    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn owner_task10_routes_complete_authoring_and_request_flow() {
+    let test = owner_test_app(
+        SkillManagementPolicy::owner_only(),
+        "secret-token",
+        task10_actor("owner-1"),
+    )
+    .await;
+    let token = Some("Bearer secret-token");
+    let created = test
+        .app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/owner/skills/drafts",
+            token,
+            Some(draft_body("com.example.task10")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created = response_json(created).await;
+    let revision_id = created["revision_id"].as_str().unwrap();
+
+    for (method, suffix, body, expected) in [
+        (
+            "PUT",
+            "",
+            json!({"files": [{"path": "references/guide.md", "content": "guide"}]}),
+            StatusCode::OK,
+        ),
+        ("POST", "/validate", json!({}), StatusCode::OK),
+        ("POST", "/test", json!({}), StatusCode::OK),
+        ("POST", "/activation", json!({}), StatusCode::ACCEPTED),
+    ] {
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                method,
+                &format!("/owner/skills/drafts/{revision_id}{suffix}"),
+                token,
+                Some(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{method} {suffix}");
+    }
+
+    let package_id = SkillPackageId::parse("com.example.task10").unwrap();
+    let approval_audit = test
+        .state
+        .list_audit(&package_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.operation == "skill_approval_required")
+        .unwrap();
+    let approval_id = approval_audit.metadata_json["approvalId"].as_str().unwrap();
+    let approver_owner = OwnerApiConfig::new(
+        test.service.clone(),
+        OwnerAuth::new("approver-token", task10_actor("approver-2")).unwrap(),
+    );
+    let approver_state = Arc::new(AppState::new_with_model_skill_manager_and_owner(
+        test.storage.clone(),
+        CapturingChatModel {
+            tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+        },
+        test.manager.clone(),
+        RuntimeConfig::read_only(".", ".").without_builtin_tools(),
+        approver_owner,
+    ));
+    let approved = api::router(approver_state)
+        .oneshot(request(
+            "POST",
+            &format!("/owner/skills/approvals/{approval_id}"),
+            Some("Bearer approver-token"),
+            Some(json!({"decision": "approve"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+    assert_eq!(test.manager.current_snapshot().generation(), 2);
+}
+
+#[tokio::test]
+async fn all_task10_mutations_authenticate_before_json_and_reject_actor_spoofing() {
+    let test = owner_test_app(
+        SkillManagementPolicy::owner_only(),
+        "secret-token",
+        task10_actor("owner-1"),
+    )
+    .await;
+    for (method, uri) in [
+        ("POST", "/owner/skills/drafts/import"),
+        (
+            "PUT",
+            "/owner/skills/drafts/00000000-0000-4000-8000-000000000001",
+        ),
+        (
+            "POST",
+            "/owner/skills/drafts/00000000-0000-4000-8000-000000000001/validate",
+        ),
+        (
+            "POST",
+            "/owner/skills/drafts/00000000-0000-4000-8000-000000000001/test",
+        ),
+        (
+            "POST",
+            "/owner/skills/drafts/00000000-0000-4000-8000-000000000001/activation",
+        ),
+        ("POST", "/owner/skills/com.example.calendar/export"),
+        (
+            "POST",
+            "/owner/skills/approvals/00000000-0000-4000-8000-000000000001",
+        ),
+    ] {
+        let response = test
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri}"
+        );
+    }
+
+    let spoofed = test
+        .app
+        .oneshot(request(
+            "POST",
+            "/owner/skills/drafts/import",
+            Some("Bearer secret-token"),
+            Some(json!({
+                "name": "calendar",
+                "actor": {"actor_id": "attacker", "role": "owner"}
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(spoofed.status(), StatusCode::BAD_REQUEST);
 }
 
 async fn directory_is_empty(path: &std::path::Path) -> bool {

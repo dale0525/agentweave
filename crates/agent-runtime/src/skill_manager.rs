@@ -114,6 +114,31 @@ impl SkillManager {
         self.inner.runtime_context.as_ref()
     }
 
+    pub(crate) fn validation_runtime(&self) -> (PlatformId, CapabilitySet, Version) {
+        match &self.inner.mode {
+            SkillManagerMode::Dynamic(config) => (
+                config.platform,
+                config.capabilities.clone(),
+                config.runtime_version.clone(),
+            ),
+            SkillManagerMode::Static => {
+                let (platform, capabilities) = self.inner.runtime_context.as_ref().map_or_else(
+                    || {
+                        (
+                            PlatformId::Server,
+                            CapabilitySet::from_names(Vec::<String>::new()),
+                        )
+                    },
+                    |context| (context.platform, context.capabilities.clone()),
+                );
+                let version = env!("CARGO_PKG_VERSION")
+                    .parse()
+                    .expect("crate package version must be valid semver");
+                (platform, capabilities, version)
+            }
+        }
+    }
+
     pub async fn reload(&self) -> anyhow::Result<SkillReloadReport> {
         let (report, ()) = self.reload_with_pre_publish(|_| async { Ok(()) }).await?;
         Ok(report)

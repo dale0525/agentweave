@@ -10,9 +10,7 @@ pub mod search;
 
 use crate::policy::{ApprovalPolicy, SandboxProfile};
 use crate::skill::{SkillExecutionContext, SkillRegistry};
-use crate::skill_management_tools::{
-    CREATE_SKILL_DRAFT_TOOL, SkillManagementToolContext, SkillManagementTools,
-};
+use crate::skill_management_tools::{SkillManagementToolContext, SkillManagementTools};
 use builtin::BuiltInTools;
 use discovery::{ConnectorMetadata, ExternalToolConfig, ExternalToolExecution, ToolDiscoveryItem};
 use result::{ToolError, ToolResult, ToolResultMetadata};
@@ -337,10 +335,7 @@ impl ToolRegistry {
         {
             if SkillManagementTools::handles(context, name) {
                 let result = SkillManagementTools::execute(context, name, call_id, arguments).await;
-                if name == CREATE_SKILL_DRAFT_TOOL {
-                    return result;
-                }
-                return self.apply_output_limit(result);
+                return result;
             }
             return registry_failure(
                 name,

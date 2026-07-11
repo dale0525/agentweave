@@ -355,6 +355,16 @@ async fn collect_entries(root: &Path, limits: PackageLimits) -> anyhow::Result<P
                     path.display()
                 );
             }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.nlink() != 1 {
+                    anyhow::bail!(
+                        "skill package cannot contain hard links: {}",
+                        path.display()
+                    );
+                }
+            }
             if metadata.len() > limits.max_file_bytes {
                 anyhow::bail!(
                     "skill package file exceeds {} byte limit: {}",
@@ -529,6 +539,12 @@ pub(crate) async fn open_regular_file_nofollow(
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
         anyhow::bail!(
             "package path is not a regular file after no-follow open: {}",
+            root.join(relative).display()
+        );
+    }
+    if stat.st_nlink != 1 {
+        anyhow::bail!(
+            "package file must not be a hard link: {}",
             root.join(relative).display()
         );
     }

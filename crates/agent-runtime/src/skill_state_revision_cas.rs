@@ -8,6 +8,81 @@ use crate::skill_state_rows::{
 use sqlx::{Executor, Sqlite};
 
 impl SkillStateStore {
+    pub async fn refresh_quarantined_revision_validation_cas(
+        &self,
+        revision_id: &str,
+        expected: SkillRevisionExpectation,
+        validation_json: serde_json::Value,
+    ) -> anyhow::Result<SkillRevisionRecord> {
+        validate_uuid_v4("revision_id", revision_id)?;
+        if expected.status != crate::skill_state::SkillRevisionStatus::Quarantined {
+            anyhow::bail!("quarantine validation CAS requires quarantined lifecycle");
+        }
+        let expected_descriptor = serde_json::to_string(&expected.descriptor_json)?;
+        let expected_validation = serde_json::to_string(&expected.validation_json)?;
+        let validation = serde_json::to_string(&validation_json)?;
+        let query = format!(
+            r#"UPDATE skill_revisions SET validation_json = ?
+               WHERE revision_id = ? AND lifecycle_status = ? AND version = ?
+                 AND content_hash = ? AND storage_path = ? AND descriptor_json = ?
+                 AND validation_json = ? RETURNING {REVISION_COLUMNS}"#
+        );
+        let row = sqlx::query(&query)
+            .bind(validation)
+            .bind(revision_id)
+            .bind(expected.status.as_str())
+            .bind(&expected.version)
+            .bind(&expected.content_hash)
+            .bind(&expected.storage_path)
+            .bind(expected_descriptor)
+            .bind(expected_validation)
+            .fetch_optional(self.pool())
+            .await?;
+        match row {
+            Some(row) => revision_from_row(&row),
+            None => revision_cas_rejection(self.pool(), revision_id).await,
+        }
+    }
+
+    pub async fn release_quarantined_revision_cas(
+        &self,
+        revision_id: &str,
+        expected: SkillRevisionExpectation,
+        staging_storage_path: &str,
+        validation_json: serde_json::Value,
+    ) -> anyhow::Result<SkillRevisionRecord> {
+        validate_uuid_v4("revision_id", revision_id)?;
+        validate_storage_path(staging_storage_path)?;
+        if expected.status != crate::skill_state::SkillRevisionStatus::Quarantined {
+            anyhow::bail!("quarantine release CAS requires quarantined lifecycle");
+        }
+        let expected_descriptor = serde_json::to_string(&expected.descriptor_json)?;
+        let expected_validation = serde_json::to_string(&expected.validation_json)?;
+        let validation = serde_json::to_string(&validation_json)?;
+        let query = format!(
+            r#"UPDATE skill_revisions SET storage_path = ?, validation_json = ?, lifecycle_status = 'staging'
+               WHERE revision_id = ? AND lifecycle_status = ? AND version = ?
+                 AND content_hash = ? AND storage_path = ? AND descriptor_json = ?
+                 AND validation_json = ? RETURNING {REVISION_COLUMNS}"#
+        );
+        let row = sqlx::query(&query)
+            .bind(staging_storage_path)
+            .bind(validation)
+            .bind(revision_id)
+            .bind(expected.status.as_str())
+            .bind(&expected.version)
+            .bind(&expected.content_hash)
+            .bind(&expected.storage_path)
+            .bind(expected_descriptor)
+            .bind(expected_validation)
+            .fetch_optional(self.pool())
+            .await?;
+        match row {
+            Some(row) => revision_from_row(&row),
+            None => revision_cas_rejection(self.pool(), revision_id).await,
+        }
+    }
+
     pub async fn refresh_staging_revision_metadata_cas(
         &self,
         revision_id: &str,

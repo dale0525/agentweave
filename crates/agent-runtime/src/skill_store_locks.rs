@@ -73,7 +73,11 @@ pub(crate) struct StoreRootIdentity {
 }
 
 impl StoreRootIdentity {
-    fn capture(path: PathBuf) -> anyhow::Result<Self> {
+    pub(crate) fn capture(path: PathBuf) -> anyhow::Result<Self> {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("store root must be a real directory: {}", path.display());
+        }
         #[cfg(unix)]
         let descriptor = File::open(&path)?;
         #[cfg(unix)]

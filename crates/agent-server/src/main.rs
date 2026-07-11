@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
     let loaded = load_skill_manager(&skills_root, storage.clone(), managed_skills).await?;
     let owner_host = owner_host_config_from_lookup(|name| std::env::var_os(name))?;
-    let owner_management = build_owner_api_config(owner_host, &loaded, storage.clone())?;
+    let owner_management = build_owner_api_config(owner_host, &loaded, storage.clone()).await?;
     let model = GatewayHttpClient::new(model_profile_from_env());
     let runtime_config = runtime_config_from_env();
     let state = if let Some(owner_management) = owner_management {
@@ -177,7 +177,16 @@ where
     let actor = match policy.mode {
         SkillManagementMode::OwnerOnly => ActorContext::owner(
             "local-owner",
-            [SkillGrant::Inspect, SkillGrant::CreateDraft],
+            [
+                SkillGrant::Inspect,
+                SkillGrant::CreateDraft,
+                SkillGrant::EditDraft,
+                SkillGrant::Validate,
+                SkillGrant::Test,
+                SkillGrant::Activate,
+                SkillGrant::Import,
+                SkillGrant::Export,
+            ],
         ),
         SkillManagementMode::DiagnosticsOnly | SkillManagementMode::OrganizationManaged => {
             ActorContext::anonymous().with_grants([SkillGrant::Inspect])
@@ -191,7 +200,7 @@ where
     }))
 }
 
-fn build_owner_api_config(
+async fn build_owner_api_config(
     host: Option<OwnerHostConfig>,
     loaded: &LoadedSkillManager,
     storage: Storage,
@@ -205,8 +214,17 @@ fn build_owner_api_config(
         )
     })?;
     let state = SkillStateStore::new(storage);
+    let app_data_root = revisions
+        .paths()
+        .quarantine
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("skill quarantine root has no app-data parent"))?;
+    let import_root = app_data_root.join("skill-imports");
+    let export_root = app_data_root.join("skill-exports");
     let service =
-        OwnerSkillManagementService::new(loaded.manager.clone(), revisions, state, host.policy);
+        OwnerSkillManagementService::new(loaded.manager.clone(), revisions, state, host.policy)
+            .with_prepared_transfer_roots(import_root, export_root)
+            .await?;
     let auth = OwnerAuth::new(host.token.as_ref(), host.actor)?;
     Ok(Some(OwnerApiConfig::new(service, auth)))
 }
@@ -411,9 +429,18 @@ mod tests {
         assert_eq!(config.actor.role, "owner");
         assert_eq!(
             config.actor.grants,
-            [SkillGrant::Inspect, SkillGrant::CreateDraft]
-                .into_iter()
-                .collect()
+            [
+                SkillGrant::Inspect,
+                SkillGrant::CreateDraft,
+                SkillGrant::EditDraft,
+                SkillGrant::Validate,
+                SkillGrant::Test,
+                SkillGrant::Activate,
+                SkillGrant::Import,
+                SkillGrant::Export,
+            ]
+            .into_iter()
+            .collect()
         );
         assert_eq!(config.token.as_ref(), b"secret-token");
     }

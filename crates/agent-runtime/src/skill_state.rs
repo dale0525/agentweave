@@ -68,6 +68,15 @@ impl SkillStateStore {
             .await
     }
 
+    pub async fn create_quarantined_revision_record(
+        &self,
+        revision_id: &str,
+        input: NewSkillRevision,
+    ) -> anyhow::Result<SkillRevisionRecord> {
+        self.insert_revision(revision_id, input, SkillRevisionStatus::Quarantined)
+            .await
+    }
+
     async fn insert_revision(
         &self,
         revision_id: &str,
@@ -830,7 +839,7 @@ impl SkillStateStore {
     }
 }
 
-async fn insert_audit<'e, E>(
+pub(crate) async fn insert_audit<'e, E>(
     executor: E,
     actor_id: &str,
     operation: &str,

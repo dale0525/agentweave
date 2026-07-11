@@ -408,6 +408,12 @@ fn walk_open_directory(
                 display_root.join(&relative).display()
             );
         }
+        if entry_stat.st_nlink != 1 {
+            anyhow::bail!(
+                "skill package cannot contain hard links: {}",
+                display_root.join(&relative).display()
+            );
+        }
         let expected_bytes =
             u64::try_from(entry_stat.st_size).context("package file has negative size")?;
         if expected_bytes > state.limits.max_file_bytes {

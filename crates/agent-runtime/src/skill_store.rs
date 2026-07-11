@@ -3,7 +3,6 @@ use crate::skill_state::{
     NewSkillRevision, SkillRevisionExpectation, SkillRevisionMetadata, SkillRevisionPromotion,
     SkillRevisionRecord, SkillRevisionStatus, SkillStateStore,
 };
-use crate::skill_store_atomic_write::atomic_replace_file;
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 use crate::skill_store_fs::{
     PackageLimits, copy_package_tree_into_prepared, copy_prepared_package_tree_into_prepared,
@@ -11,16 +10,14 @@ use crate::skill_store_fs::{
 };
 use crate::skill_store_locks::{SkillStoreIdentity, acquire_revision_lock};
 use crate::skill_store_operations::{
-    TransitionPhase, TransitionState, combine_operation_errors, ensure_exact_path,
-    error_is_not_found, storage_path, stored_revision, with_compensation,
+    TransitionPhase, TransitionState, combine_operation_errors, ensure_exact_path, storage_path,
+    stored_revision, with_compensation,
 };
 use crate::skill_store_path_prepare::prepare_canonical_directory;
-use crate::skill_store_prepared_fs::open_regular_file as open_prepared_regular_file;
 use crate::skill_store_secure_fs::ensure_store_directory;
 use crate::skill_store_secure_roots::{
-    ensure_directory as ensure_prepared_directory, ensure_opened_child_directory,
-    open_prepared_directory, opened_package_snapshot,
-    remove_opened_tree as remove_opened_prepared_tree,
+    ensure_directory as ensure_prepared_directory, open_prepared_directory,
+    opened_package_snapshot, remove_opened_tree as remove_opened_prepared_tree,
     reserve_opened_directory as reserve_opened_prepared_directory,
 };
 use anyhow::Context;
@@ -247,145 +244,6 @@ impl SkillRevisionStore {
                 }
             }
         }
-    }
-
-    pub async fn write_staging_file(
-        &self,
-        revision_id: &str,
-        relative_path: &Path,
-        bytes: &[u8],
-    ) -> anyhow::Result<()> {
-        canonical_relative_path(relative_path)?;
-        let observed = self.staging_record(revision_id).await?;
-        let _revision_guard =
-            acquire_revision_lock(&self.paths.identity, revision_id, &self.faults).await?;
-        let record = self.revision_after_wait(&observed).await?;
-        self.faults
-            .checkpoint(StoreFaultPoint::WriteAfterLock)
-            .await;
-        self.paths.verify_identity()?;
-        let (root, source_relative) = self.staging_revision_path(&record)?;
-        ensure_directory_contained(&self.paths.staging, &root, "staging").await?;
-        let prepared_root =
-            open_prepared_directory(self.paths.staging_identity(), &source_relative).await?;
-        let byte_count = u64::try_from(bytes.len())?;
-        if byte_count > self.limits.max_file_bytes {
-            anyhow::bail!(
-                "staging file exceeds {} byte limit",
-                self.limits.max_file_bytes
-            );
-        }
-        let candidate_name = format!("{revision_id}.candidate.{}", uuid::Uuid::new_v4());
-        let candidate_relative = PathBuf::from(&candidate_name);
-        let candidate = self.paths.staging.join(&candidate_relative);
-        let candidate_directory =
-            reserve_opened_prepared_directory(self.paths.staging_identity(), &candidate_relative)
-                .await?;
-        if let Err(error) = copy_prepared_package_tree_into_prepared(
-            &prepared_root,
-            &candidate_directory,
-            self.limits.package_limits(),
-            &self.faults,
-            StoreFaultPoint::StagingCopyFile,
-        )
-        .await
-        {
-            return self
-                .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
-                .await;
-        }
-        if let Err(error) =
-            make_tree_writable(&candidate_directory, self.limits.package_limits()).await
-        {
-            return self
-                .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
-                .await;
-        }
-        if let Some(parent) = relative_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            if let Err(error) = ensure_opened_child_directory(&candidate_directory, parent).await {
-                return self
-                    .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
-                    .await;
-            }
-        }
-        let mode = match open_prepared_regular_file(&candidate_directory, relative_path).await {
-            Ok((file, _, mode)) => {
-                drop(file);
-                mode
-            }
-            Err(error) if error_is_not_found(&error) => 0o644,
-            Err(error) => {
-                return self
-                    .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
-                    .await;
-            }
-        };
-        if let Err(failure) = atomic_replace_file(
-            &candidate_directory,
-            relative_path,
-            bytes,
-            mode,
-            &self.faults,
-        )
-        .await
-        {
-            if let Some(temp_path) = &failure.temp_path {
-                self.record_maintenance_issue(
-                    revision_id,
-                    "staging_write_temp_cleanup",
-                    temp_path,
-                    &anyhow::anyhow!("temporary file cleanup failed"),
-                );
-            }
-            let error = failure.into_error();
-            return self
-                .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
-                .await;
-        }
-        let metadata = match self.final_metadata(&record, &candidate_directory).await {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                return self
-                    .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
-                    .await;
-            }
-        };
-        self.faults
-            .checkpoint(StoreFaultPoint::WriteBeforeMetadataCommit)
-            .await;
-        let candidate_storage_path = match storage_path(&candidate) {
-            Ok(path) => path,
-            Err(error) => {
-                return self
-                    .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
-                    .await;
-            }
-        };
-        let update = self
-            .state
-            .replace_staging_revision_cas(
-                revision_id,
-                SkillRevisionExpectation::from(&record),
-                &candidate_storage_path,
-                metadata,
-            )
-            .await;
-        if let Err(error) = update {
-            return self
-                .cleanup_staging_candidate_error(revision_id, error, &candidate_directory)
-                .await;
-        }
-        if let Err(error) = remove_opened_prepared_tree(&prepared_root).await {
-            self.record_maintenance_issue(
-                revision_id,
-                "staging_write_previous_cleanup",
-                &root,
-                &error,
-            );
-        }
-        Ok(())
     }
 
     pub async fn promote_revision(&self, revision_id: &str) -> anyhow::Result<StoredSkillRevision> {
@@ -809,7 +667,10 @@ impl SkillRevisionStore {
         Ok(stored_revision(quarantined, destination, issues))
     }
 
-    async fn staging_record(&self, revision_id: &str) -> anyhow::Result<SkillRevisionRecord> {
+    pub(crate) async fn staging_record(
+        &self,
+        revision_id: &str,
+    ) -> anyhow::Result<SkillRevisionRecord> {
         let record = self
             .state
             .get_revision(revision_id)
@@ -821,7 +682,7 @@ impl SkillRevisionStore {
         Ok(record)
     }
 
-    async fn revision_after_wait(
+    pub(crate) async fn revision_after_wait(
         &self,
         observed: &SkillRevisionRecord,
     ) -> anyhow::Result<SkillRevisionRecord> {
@@ -858,11 +719,23 @@ impl SkillRevisionStore {
             version: loaded.descriptor.version.to_string(),
             content_hash: snapshot.content_hash,
             descriptor_json: serde_json::to_value(&loaded.descriptor)?,
-            validation_json: json!({"status": "valid"}),
+            validation_json: if record
+                .validation_json
+                .get("ok")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                record.validation_json.clone()
+            } else {
+                json!({"status": "valid"})
+            },
         })
     }
 
-    fn expected_revision_path(&self, record: &SkillRevisionRecord) -> anyhow::Result<PathBuf> {
+    pub(crate) fn expected_revision_path(
+        &self,
+        record: &SkillRevisionRecord,
+    ) -> anyhow::Result<PathBuf> {
         let expected = match record.status {
             SkillRevisionStatus::Staging => {
                 return self.staging_revision_path(record).map(|value| value.0);
@@ -881,7 +754,7 @@ impl SkillRevisionStore {
         Ok(expected)
     }
 
-    fn staging_revision_path(
+    pub(crate) fn staging_revision_path(
         &self,
         record: &SkillRevisionRecord,
     ) -> anyhow::Result<(PathBuf, PathBuf)> {
