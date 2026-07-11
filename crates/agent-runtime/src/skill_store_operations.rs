@@ -1,6 +1,5 @@
 use crate::skill_state::SkillRevisionRecord;
 use crate::skill_store::{SkillStoreMaintenanceIssue, StoredSkillRevision};
-use crate::skill_store_fs::remove_created_directories;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
@@ -93,12 +92,17 @@ pub(crate) fn with_compensation(
     primary.context(format!("compensation failed: {compensation:#}"))
 }
 
-pub(crate) async fn cleanup_created_directories_error(
-    error: anyhow::Error,
-    created_directories: &[PathBuf],
-) -> anyhow::Result<()> {
-    match remove_created_directories(created_directories).await {
-        Ok(()) => Err(error),
-        Err(cleanup) => Err(with_compensation(error, cleanup)),
-    }
+pub(crate) fn error_is_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let io_not_found = cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        #[cfg(unix)]
+        let platform_not_found = cause
+            .downcast_ref::<rustix::io::Errno>()
+            .is_some_and(|error| *error == rustix::io::Errno::NOENT);
+        #[cfg(not(unix))]
+        let platform_not_found = false;
+        io_not_found || platform_not_found
+    })
 }

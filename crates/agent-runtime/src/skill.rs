@@ -5,14 +5,19 @@ use crate::skill_availability::{
 };
 use crate::skill_store_fs::PackageLimits;
 use crate::tools::ToolPermission;
+use crate::tools::process::read_limited_child_output;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+
+#[cfg(test)]
+static EXPLICIT_CHILD_REAP_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillManifest {
@@ -285,31 +290,58 @@ impl SkillRegistry {
             .kill_on_drop(true)
             .spawn()?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("skill command stdout unavailable"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("skill command stderr unavailable"))?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("skill command stdin unavailable"))?;
-        stdin
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                return child_error(
+                    &mut child,
+                    anyhow::anyhow!("skill command stdout unavailable"),
+                )
+                .await;
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                return child_error(
+                    &mut child,
+                    anyhow::anyhow!("skill command stderr unavailable"),
+                )
+                .await;
+            }
+        };
+        let mut stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                return child_error(
+                    &mut child,
+                    anyhow::anyhow!("skill command stdin unavailable"),
+                )
+                .await;
+            }
+        };
+        if let Err(error) = stdin
             .write_all(serde_json::to_vec(&input)?.as_slice())
-            .await?;
+            .await
+        {
+            return child_error(&mut child, error.into()).await;
+        }
         drop(stdin);
 
-        let output = read_limited_child_output(stdout, stderr, context.output_limit_bytes).await?;
+        let output =
+            match read_limited_child_output(stdout, stderr, context.output_limit_bytes).await {
+                Ok(output) => output,
+                Err(error) => return child_error(&mut child, error).await,
+            };
         if output.stdout_truncated || output.stderr_truncated {
-            child.kill().await?;
-            let _ = child.wait().await;
+            terminate_and_reap(&mut child).await;
             anyhow::bail!("tool output exceeded runtime output limit");
         }
 
-        let status = child.wait().await?;
+        let status = match child.wait().await {
+            Ok(status) => status,
+            Err(error) => return child_error(&mut child, error.into()).await,
+        };
         if !status.success() {
             anyhow::bail!("skill command failed: {}", status);
         }
@@ -359,108 +391,41 @@ impl SkillRegistry {
     }
 }
 
+async fn child_error<T>(
+    child: &mut tokio::process::Child,
+    error: anyhow::Error,
+) -> anyhow::Result<T> {
+    terminate_and_reap(child).await;
+    Err(error)
+}
+
+async fn terminate_and_reap(child: &mut tokio::process::Child) {
+    #[cfg(test)]
+    EXPLICIT_CHILD_REAP_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+#[cfg(test)]
+pub(crate) fn reset_explicit_child_reap_count() {
+    EXPLICIT_CHILD_REAP_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn explicit_child_reap_count() -> usize {
+    EXPLICIT_CHILD_REAP_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 fn default_tool_permission() -> ToolPermission {
     ToolPermission::ReadWorkspace
 }
 
-struct LimitedOutput {
-    bytes: Vec<u8>,
-    truncated: bool,
-}
-
-struct LimitedChildOutput {
-    stdout: Vec<u8>,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
-}
-
-async fn read_limited_child_output(
-    stdout: tokio::process::ChildStdout,
-    stderr: tokio::process::ChildStderr,
-    output_limit_bytes: usize,
-) -> anyhow::Result<LimitedChildOutput> {
-    let stdout_future = read_limited_stream(stdout, output_limit_bytes);
-    let stderr_future = read_limited_stream(stderr, output_limit_bytes);
-    tokio::pin!(stdout_future);
-    tokio::pin!(stderr_future);
-
-    let mut stdout_output: Option<LimitedOutput> = None;
-    let mut stderr_output: Option<LimitedOutput> = None;
-
-    while stdout_output.is_none() || stderr_output.is_none() {
-        tokio::select! {
-            output = &mut stdout_future, if stdout_output.is_none() => {
-                stdout_output = Some(output?);
-            }
-            output = &mut stderr_future, if stderr_output.is_none() => {
-                stderr_output = Some(output?);
-            }
-        }
-
-        let stdout_truncated = stdout_output
-            .as_ref()
-            .map(|output| output.truncated)
-            .unwrap_or(false);
-        let stderr_truncated = stderr_output
-            .as_ref()
-            .map(|output| output.truncated)
-            .unwrap_or(false);
-        if stdout_truncated || stderr_truncated {
-            return Ok(LimitedChildOutput {
-                stdout: stdout_output.map(|output| output.bytes).unwrap_or_default(),
-                stdout_truncated,
-                stderr_truncated,
-            });
-        }
-    }
-
-    let stdout = stdout_output.expect("stdout output should be captured");
-    let stderr = stderr_output.expect("stderr output should be captured");
-    Ok(LimitedChildOutput {
-        stdout: stdout.bytes,
-        stdout_truncated: stdout.truncated,
-        stderr_truncated: stderr.truncated,
-    })
-}
-
-async fn read_limited_stream(
-    mut stream: impl AsyncRead + Unpin,
-    output_limit_bytes: usize,
-) -> anyhow::Result<LimitedOutput> {
-    let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    let hard_limit = output_limit_bytes.saturating_add(1);
-
-    loop {
-        let remaining = hard_limit.saturating_sub(bytes.len());
-        if remaining == 0 {
-            return Ok(LimitedOutput {
-                bytes,
-                truncated: true,
-            });
-        }
-
-        let read_len = remaining.min(buffer.len());
-        let read = stream.read(&mut buffer[..read_len]).await?;
-        if read == 0 {
-            return Ok(LimitedOutput {
-                bytes,
-                truncated: false,
-            });
-        }
-
-        bytes.extend_from_slice(&buffer[..read]);
-        if bytes.len() > output_limit_bytes {
-            bytes.truncate(output_limit_bytes);
-            return Ok(LimitedOutput {
-                bytes,
-                truncated: true,
-            });
-        }
-    }
-}
-
 pub(crate) async fn validate_manifest(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
+    validate_manifest_semantics(manifest)?;
+    validate_entry_resources(root, manifest).await
+}
+
+pub(crate) fn validate_manifest_semantics(manifest: &SkillManifest) -> anyhow::Result<()> {
     if manifest.name.trim().is_empty() {
         anyhow::bail!("skill manifest name must not be empty");
     }
@@ -493,7 +458,12 @@ pub(crate) async fn validate_manifest(root: &Path, manifest: &SkillManifest) -> 
             anyhow::bail!("skill manifest tool name must be unique: {}", tool.name);
         }
     }
-    validate_entry_resources(root, manifest).await?;
+
+    for arg in &manifest.entry.args {
+        if looks_like_entry_resource(arg) && !is_safe_packaged_skill_path(Path::new(arg)) {
+            anyhow::bail!("unsafe skill entry resource path: {arg}");
+        }
+    }
 
     Ok(())
 }
@@ -526,20 +496,20 @@ fn is_tool_name(name: &str) -> bool {
 }
 
 async fn validate_entry_resources(root: &Path, manifest: &SkillManifest) -> anyhow::Result<()> {
-    for arg in &manifest.entry.args {
-        if !looks_like_entry_resource(arg) {
-            continue;
-        }
-
-        let path = Path::new(arg);
-        if !is_safe_packaged_skill_path(path) {
-            anyhow::bail!("unsafe skill entry resource path: {arg}");
-        }
-
+    for path in manifest_entry_resources(manifest) {
         resolve_skill_package_file(root, path, "skill manifest entry resource").await?;
     }
 
     Ok(())
+}
+
+pub(crate) fn manifest_entry_resources(manifest: &SkillManifest) -> impl Iterator<Item = &Path> {
+    manifest
+        .entry
+        .args
+        .iter()
+        .filter(|arg| looks_like_entry_resource(arg))
+        .map(Path::new)
 }
 
 pub(crate) async fn canonical_skill_root(root: &Path) -> anyhow::Result<PathBuf> {

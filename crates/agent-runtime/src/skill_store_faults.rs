@@ -26,9 +26,9 @@ pub(crate) enum StoreFaultPoint {
     WriteAfterRenameMode,
     WriteAfterRenameRevalidate,
     WriteTempCleanup,
+    #[cfg(test)]
     WriteRestore,
-    WriteIsolationCopy,
-    WriteIsolationDatabase,
+    #[cfg(test)]
     WriteIsolationRestore,
     ManagedDiscoveryTransientIo,
     ExecutionAfterSnapshot,

@@ -28,11 +28,6 @@ pub(crate) struct PackageFile {
     pub mode: u32,
 }
 
-pub(crate) struct StoredFileContents {
-    pub bytes: Vec<u8>,
-    pub mode: u32,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AtomicReplaceCommitState {
     NotCommitted,

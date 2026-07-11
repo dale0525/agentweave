@@ -167,21 +167,15 @@ async fn atomic_replace_file_platform(
     faults: &StoreFaults,
 ) -> Result<(), AtomicReplaceFailure> {
     canonical_relative_path(relative).map_err(not_committed)?;
-    let root_path = crate::skill_store_windows::final_path_for_file(root.windows_descriptor())
-        .map_err(not_committed)?;
-    let destination = root_path.join(relative);
-    let parent = destination
-        .parent()
-        .context("staging file has no parent")
-        .map_err(not_committed)?;
-    let temporary = parent.join(format!(".skill-write-{}.tmp", uuid::Uuid::new_v4()));
+    let (parent, destination_name) =
+        crate::skill_store_windows::open_stable_parent(root.windows_descriptor(), relative)
+            .map_err(not_committed)?;
+    let temporary_name =
+        std::ffi::OsString::from(format!(".skill-write-{}.tmp", uuid::Uuid::new_v4()));
+    let temporary = parent.child_path(&temporary_name);
     let mut committed = false;
     let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .await?;
+        let mut file = tokio::fs::File::from_std(parent.create_new_regular(&temporary_name)?);
         if !file.metadata().await?.is_file() {
             anyhow::bail!("staging temporary path is not a regular file");
         }
@@ -190,7 +184,7 @@ async fn atomic_replace_file_platform(
         drop(file);
         root.verify()?;
         faults.check(StoreFaultPoint::WriteBeforeRename)?;
-        crate::skill_store_windows::atomic_replace(&temporary, &destination)?;
+        parent.atomic_replace(&temporary_name, &destination_name)?;
         committed = true;
         faults.check(StoreFaultPoint::WriteAfterRenameMode)?;
         faults.check(StoreFaultPoint::WriteAfterRenameRevalidate)?;
@@ -198,7 +192,17 @@ async fn atomic_replace_file_platform(
         Ok::<(), anyhow::Error>(())
     }
     .await;
-    finish_platform_result(result, committed, faults, temporary).await
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if committed => Err(failure(error, AtomicReplaceCommitState::Committed, None)),
+        Err(error) => {
+            let cleanup = match faults.check(StoreFaultPoint::WriteTempCleanup) {
+                Ok(()) => parent.remove_regular(&temporary_name),
+                Err(cleanup) => Err(cleanup),
+            };
+            finish_uncommitted(error, cleanup, temporary)
+        }
+    }
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -239,7 +243,7 @@ async fn atomic_replace_file_platform(
     finish_platform_result(result, committed, faults, temporary).await
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 async fn finish_platform_result(
     result: anyhow::Result<()>,
     committed: bool,

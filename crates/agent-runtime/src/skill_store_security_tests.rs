@@ -264,10 +264,11 @@ async fn staging_write_rejects_parent_swapped_to_symlink_before_temp_open() {
             .await
     });
     gate.wait_entered().await;
-    tokio::fs::rename(staged.path.join("nested"), staged.path.join("nested-old"))
+    let candidate = staging_candidate_path(&fixture.paths.staging, &staged.revision_id).await;
+    tokio::fs::rename(candidate.join("nested"), candidate.join("nested-old"))
         .await
         .unwrap();
-    std::os::unix::fs::symlink(outside.path(), staged.path.join("nested")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), candidate.join("nested")).unwrap();
 
     gate.release().await;
     let error = write.await.unwrap().unwrap_err();
@@ -301,15 +302,16 @@ async fn staging_write_rejects_revision_replacement_before_temp_open() {
             .await
     });
     gate.wait_entered().await;
-    let original = staged.path.with_extension("original");
-    tokio::fs::rename(&staged.path, &original).await.unwrap();
-    tokio::fs::create_dir(&staged.path).await.unwrap();
+    let candidate = staging_candidate_path(&fixture.paths.staging, &staged.revision_id).await;
+    let original = candidate.with_extension("original");
+    tokio::fs::rename(&candidate, &original).await.unwrap();
+    tokio::fs::create_dir(&candidate).await.unwrap();
     for name in ["general-agent.json", "SKILL.md"] {
-        tokio::fs::copy(original.join(name), staged.path.join(name))
+        tokio::fs::copy(original.join(name), candidate.join(name))
             .await
             .unwrap();
     }
-    let replacement_before = tokio::fs::read(staged.path.join("SKILL.md")).await.unwrap();
+    let replacement_before = tokio::fs::read(candidate.join("SKILL.md")).await.unwrap();
 
     gate.release().await;
     let result = write.await.unwrap();
@@ -319,7 +321,7 @@ async fn staging_write_rejects_revision_replacement_before_temp_open() {
         "replacement revision must invalidate the write"
     );
     assert_eq!(
-        tokio::fs::read(staged.path.join("SKILL.md")).await.unwrap(),
+        tokio::fs::read(candidate.join("SKILL.md")).await.unwrap(),
         replacement_before
     );
 }
@@ -806,7 +808,7 @@ async fn temp_cleanup_failure_is_reported_as_maintenance_issue_without_db_change
     let issues = fixture.store.maintenance_issues();
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].operation, "staging_write_temp_cleanup");
-    assert!(issues[0].path.exists());
+    assert!(!issues[0].path.exists());
 }
 
 #[tokio::test]
@@ -874,13 +876,30 @@ async fn readonly_source_is_copied_into_an_editable_staging_tree_without_losing_
         .await
         .unwrap();
 
-    let script_mode = tokio::fs::metadata(staged.path.join("run.sh"))
+    let record = fixture
+        .state
+        .get_revision(&staged.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let script_mode = tokio::fs::metadata(Path::new(&record.storage_path).join("run.sh"))
         .await
         .unwrap()
         .permissions()
         .mode();
     assert_eq!(script_mode & 0o111, 0o111);
     assert_ne!(script_mode & 0o200, 0);
+}
+
+async fn staging_candidate_path(staging: &Path, revision_id: &str) -> std::path::PathBuf {
+    let prefix = format!("{revision_id}.candidate.");
+    let mut entries = tokio::fs::read_dir(staging).await.unwrap();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            return entry.path();
+        }
+    }
+    panic!("staging candidate was not created")
 }
 
 async fn write_package(id: &str) -> TempDir {

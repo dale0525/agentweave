@@ -116,6 +116,24 @@ async fn managed_snapshot_uses_discovery_verified_manifest_and_instructions_byte
 }
 
 #[tokio::test]
+async fn managed_snapshot_build_does_not_reopen_removed_revision() {
+    let fixture = VerifiedFixture::new().await;
+    let runtime = fixture
+        .active_package(
+            "com.example.verified-removed",
+            write_runtime_package("com.example.verified-removed").await,
+        )
+        .await;
+    let packages = fixture.source.discover().await.unwrap();
+    make_writable(&runtime.path).await;
+    tokio::fs::remove_dir_all(&runtime.path).await.unwrap();
+
+    let snapshot = SkillSnapshot::build(1, active_set(packages)).await.unwrap();
+
+    assert_eq!(snapshot.registry().tools()[0].name, "verified_tool");
+}
+
+#[tokio::test]
 async fn managed_execution_rehashes_tree_and_does_not_start_changed_command() {
     let fixture = VerifiedFixture::new().await;
     let managed = fixture
@@ -149,6 +167,31 @@ async fn managed_execution_rehashes_tree_and_does_not_start_changed_command() {
 }
 
 #[tokio::test]
+async fn managed_execution_rejects_missing_entry_resource_in_private_snapshot() {
+    let fixture = VerifiedFixture::new().await;
+    let package = write_runtime_package("com.example.execution-missing-entry").await;
+    tokio::fs::remove_file(package.path().join("run.sh"))
+        .await
+        .unwrap();
+    fixture
+        .active_package("com.example.execution-missing-entry", package)
+        .await;
+    let packages = fixture.source.discover().await.unwrap();
+    let snapshot = SkillSnapshot::build(1, active_set(packages)).await.unwrap();
+
+    let error = snapshot
+        .registry()
+        .execute("verified_tool", json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("private execution entry resource does not exist"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
 async fn managed_execution_uses_private_snapshot_after_hash_to_spawn_mutation() {
     let fixture = VerifiedFixture::new().await;
     let managed = fixture
@@ -179,6 +222,104 @@ async fn managed_execution_uses_private_snapshot_after_hash_to_spawn_mutation() 
     let value = execution.await.unwrap().unwrap();
     assert_eq!(value, json!({"ok": true}));
     assert!(!managed.path.join("original-marker").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_execution_reaps_child_after_stdin_write_failure() {
+    crate::skill::reset_explicit_child_reap_count();
+    let fixture = VerifiedFixture::new().await;
+    let package = write_runtime_package("com.example.execution-reap").await;
+    let pid_path = fixture._app.path().join("execution.pid");
+    tokio::fs::write(
+        package.path().join("run.sh"),
+        format!("printf '%s' \"$$\" > '{}'; exit 0\n", pid_path.display()),
+    )
+    .await
+    .unwrap();
+    fixture
+        .active_package("com.example.execution-reap", package)
+        .await;
+    let packages = fixture.source.discover().await.unwrap();
+    let snapshot = SkillSnapshot::build(1, active_set(packages)).await.unwrap();
+    let input = json!({"payload": "x".repeat(8 * 1024 * 1024)});
+
+    snapshot
+        .registry()
+        .execute("verified_tool", input)
+        .await
+        .unwrap_err();
+
+    assert_eq!(crate::skill::explicit_child_reap_count(), 1);
+
+    let pid = tokio::fs::read_to_string(&pid_path).await.unwrap();
+    let process = std::process::Command::new("ps")
+        .args(["-p", pid.trim(), "-o", "stat="])
+        .output()
+        .unwrap();
+    assert!(
+        process.stdout.is_empty(),
+        "child {pid} was not reaped: {}",
+        String::from_utf8_lossy(&process.stdout)
+    );
+}
+
+#[tokio::test]
+async fn running_private_snapshot_does_not_hold_revision_mutation_lock() {
+    let fixture = VerifiedFixture::new().await;
+    let package = write_runtime_package("com.example.execution-unlocked").await;
+    let marker = fixture._app.path().join("execution.started");
+    let release = fixture._app.path().join("execution.release");
+    let root_record = fixture._app.path().join("execution.root");
+    tokio::fs::write(
+        package.path().join("run.sh"),
+        format!(
+            "pwd > '{}'; printf started > '{}'; while [ ! -f '{}' ]; do sleep 0.01; done; printf '{{\"ok\":true}}'\n",
+            root_record.display(),
+            marker.display(),
+            release.display()
+        ),
+    )
+    .await
+    .unwrap();
+    let managed = fixture
+        .active_package("com.example.execution-unlocked", package)
+        .await;
+    let packages = fixture.source.discover().await.unwrap();
+    let snapshot = SkillSnapshot::build(1, active_set(packages)).await.unwrap();
+    let registry = snapshot.registry().clone();
+    let execution = tokio::spawn(async move { registry.execute("verified_tool", json!({})).await });
+    wait_for_path(&marker).await;
+    let private_root = Path::new(
+        tokio::fs::read_to_string(&root_record)
+            .await
+            .unwrap()
+            .trim(),
+    )
+    .to_path_buf();
+    assert!(private_root.is_dir());
+
+    let store = fixture.store.clone();
+    let revision_id = managed.revision_id.clone();
+    let quarantine = tokio::spawn(async move {
+        store
+            .quarantine_revision(&revision_id, "disabled during execution")
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let completed_without_child_exit = quarantine.is_finished();
+    tokio::fs::write(&release, b"release").await.unwrap();
+    assert_eq!(execution.await.unwrap().unwrap(), json!({"ok": true}));
+    quarantine.await.unwrap().unwrap();
+
+    assert!(
+        completed_without_child_exit,
+        "quarantine waited for child exit"
+    );
+    assert!(
+        !private_root.exists(),
+        "private snapshot outlived child reap"
+    );
 }
 
 #[tokio::test]
@@ -313,4 +454,14 @@ async fn make_writable(root: &Path) {
             }
         }
     }
+}
+
+async fn wait_for_path(path: &Path) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
 }

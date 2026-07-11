@@ -1,10 +1,12 @@
+use crate::skill::{SkillManifest, manifest_entry_resources};
 use crate::skill_package::SkillPackageId;
 use crate::skill_state::{SkillInstallStatus, SkillLayerRecord, SkillRevisionStatus};
 use crate::skill_store::SkillRevisionStore;
 use crate::skill_store_faults::StoreFaultPoint;
+use crate::skill_store_fs::open_regular_file_nofollow;
 use crate::skill_store_fs::{PackageLimits, copy_prepared_package_tree_into_reserved};
-use crate::skill_store_locks::{RevisionOperationGuard, acquire_revision_lock};
-use crate::skill_store_operations::ensure_exact_path;
+use crate::skill_store_locks::acquire_revision_lock;
+use crate::skill_store_operations::{ensure_exact_path, error_is_not_found};
 use crate::skill_store_secure_fs::secure_package_hash;
 use crate::skill_store_secure_roots::open_prepared_directory;
 use anyhow::Context;
@@ -13,7 +15,6 @@ use std::path::{Path, PathBuf};
 pub(crate) struct PreparedSkillExecution {
     root: PathBuf,
     _temporary: tempfile::TempDir,
-    _guard: RevisionOperationGuard,
 }
 
 impl PreparedSkillExecution {
@@ -30,6 +31,7 @@ impl SkillRevisionStore {
         expected_path: &Path,
         expected_hash: &str,
         limits: PackageLimits,
+        manifest: &SkillManifest,
     ) -> anyhow::Result<PreparedSkillExecution> {
         let guard = acquire_revision_lock(&self.paths.identity, revision_id, &self.faults).await?;
         self.paths.verify_identity()?;
@@ -83,6 +85,24 @@ impl SkillRevisionStore {
         if actual != expected_hash {
             anyhow::bail!("managed execution snapshot hash mismatch: {revision_id}");
         }
+        for resource in manifest_entry_resources(manifest) {
+            match open_regular_file_nofollow(temporary.path(), resource).await {
+                Ok(_) => {}
+                Err(error) if error_is_not_found(&error) => anyhow::bail!(
+                    "private execution entry resource does not exist: {}",
+                    resource.display()
+                ),
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "private execution entry resource is not a contained regular file: {}",
+                            resource.display()
+                        )
+                    });
+                }
+            }
+        }
+        drop(guard);
         self.faults
             .checkpoint(StoreFaultPoint::ExecutionAfterSnapshot)
             .await;
@@ -90,7 +110,6 @@ impl SkillRevisionStore {
         Ok(PreparedSkillExecution {
             root,
             _temporary: temporary,
-            _guard: guard,
         })
     }
 }

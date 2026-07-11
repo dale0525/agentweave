@@ -1,6 +1,9 @@
 use crate::skill_store_windows::{
-    MOVEFILE_REPLACE_EXISTING_FLAG, MOVEFILE_WRITE_THROUGH_FLAG, atomic_replace_flags,
-    normalized_path_is_within,
+    FILE_ATTRIBUTE_REPARSE_POINT_FLAG, FILE_FLAG_BACKUP_SEMANTICS_FLAG,
+    FILE_FLAG_OPEN_REPARSE_POINT_FLAG, FILE_SHARE_DELETE_FLAG, FILE_SHARE_READ_FLAG,
+    FILE_SHARE_WRITE_FLAG, MOVEFILE_REPLACE_EXISTING_FLAG, MOVEFILE_WRITE_THROUGH_FLAG,
+    atomic_replace_flags, attributes_are_reparse, component_open_flags, directory_share_mode,
+    lock_file_share_mode, normalized_path_is_within,
 };
 
 #[test]
@@ -8,6 +11,33 @@ fn windows_atomic_replace_contract_replaces_and_flushes() {
     let flags = atomic_replace_flags();
     assert_ne!(flags & MOVEFILE_REPLACE_EXISTING_FLAG, 0);
     assert_ne!(flags & MOVEFILE_WRITE_THROUGH_FLAG, 0);
+}
+
+#[test]
+fn windows_component_contract_opens_reparse_points_without_traversing_them() {
+    assert_ne!(
+        component_open_flags(false) & FILE_FLAG_OPEN_REPARSE_POINT_FLAG,
+        0
+    );
+    assert_ne!(
+        component_open_flags(true) & FILE_FLAG_OPEN_REPARSE_POINT_FLAG,
+        0
+    );
+    assert_ne!(
+        component_open_flags(true) & FILE_FLAG_BACKUP_SEMANTICS_FLAG,
+        0
+    );
+    assert!(attributes_are_reparse(FILE_ATTRIBUTE_REPARSE_POINT_FLAG));
+    assert!(!attributes_are_reparse(0));
+}
+
+#[test]
+fn windows_critical_namespace_handles_deny_share_delete() {
+    for share_mode in [directory_share_mode(), lock_file_share_mode()] {
+        assert_ne!(share_mode & FILE_SHARE_READ_FLAG, 0);
+        assert_ne!(share_mode & FILE_SHARE_WRITE_FLAG, 0);
+        assert_eq!(share_mode & FILE_SHARE_DELETE_FLAG, 0);
+    }
 }
 
 #[test]

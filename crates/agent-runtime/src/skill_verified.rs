@@ -1,6 +1,6 @@
 use crate::skill::{
-    InstalledSkill, InstalledSkillVerification, SkillManifest, SkillRegistry, canonical_skill_root,
-    validate_manifest,
+    InstalledSkill, InstalledSkillVerification, SkillManifest, SkillRegistry,
+    validate_manifest_semantics,
 };
 use crate::skill_store_execution::PreparedSkillExecution;
 use crate::skill_store_fs::PackageLimits;
@@ -15,12 +15,11 @@ impl SkillRegistry {
         limits: PackageLimits,
         execution_binding: Option<crate::skill_source::ManagedExecutionBinding>,
     ) -> anyhow::Result<InstalledSkill> {
-        let root = canonical_skill_root(&root).await?;
         let manifest: SkillManifest =
             serde_json::from_slice(manifest_bytes).with_context(|| {
                 format!("failed to parse verified skill manifest {}", root.display())
             })?;
-        validate_manifest(&root, &manifest).await?;
+        validate_manifest_semantics(&manifest)?;
         Ok(InstalledSkill {
             root,
             manifest,
@@ -51,6 +50,7 @@ pub(crate) async fn prepare_before_execution(
             &binding.storage_path,
             &verification.expected_content_hash,
             verification.limits,
+            &skill.manifest,
         )
         .await
         .map(Some)

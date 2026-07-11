@@ -226,7 +226,12 @@ fn ensure_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> 
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn ensure_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
+    crate::skill_store_windows::prepare_directory_path_nofollow(&root.join(relative))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn ensure_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(root.join(relative))?;
     let canonical_root = std::fs::canonicalize(root)?;
@@ -237,7 +242,12 @@ fn ensure_directory_beneath(root: &Path, relative: &Path) -> anyhow::Result<()> 
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn prepare_directory_path_platform(path: &Path) -> anyhow::Result<()> {
+    crate::skill_store_windows::prepare_directory_path_nofollow(path)
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn prepare_directory_path_platform(path: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(path)?;
     Ok(())
@@ -585,17 +595,38 @@ fn checked_bytes(current: u64, bytes: u64, maximum: u64) -> anyhow::Result<u64> 
     Ok(total)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn snapshot_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<SecurePackageSnapshot> {
+    let (directory, _, _) = crate::skill_store_windows::open_directory_nofollow(root)?;
+    snapshot_windows_opened(root, directory, limits)
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn snapshot_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<SecurePackageSnapshot> {
     snapshot_fallback(root, limits)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn hash_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<String> {
+    let (directory, _, _) = crate::skill_store_windows::open_directory_nofollow(root)?;
+    Ok(scan_windows_opened(directory, limits)?.content_hash)
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn hash_direct(root: &Path, limits: PackageLimits) -> anyhow::Result<String> {
     Ok(scan_fallback(root, limits)?.content_hash)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn tree_direct(
+    root: &Path,
+    limits: PackageLimits,
+) -> anyhow::Result<SecureTreeSnapshot> {
+    let (directory, _, _) = crate::skill_store_windows::open_directory_nofollow(root)?;
+    scan_windows_opened(directory, limits)
+}
+
+#[cfg(all(not(unix), not(windows)))]
 pub(crate) fn tree_direct(
     root: &Path,
     limits: PackageLimits,
@@ -603,7 +634,19 @@ pub(crate) fn tree_direct(
     scan_fallback(root, limits)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn snapshot_beneath(
+    trusted_root: &Path,
+    relative: &Path,
+    limits: PackageLimits,
+) -> anyhow::Result<SecurePackageSnapshot> {
+    let (root, identity, _) = crate::skill_store_windows::open_directory_nofollow(trusted_root)?;
+    let (directory, _, final_path) =
+        crate::skill_store_windows::open_directory_beneath(&root, identity, relative)?;
+    snapshot_windows_opened(&final_path, directory, limits)
+}
+
+#[cfg(all(not(unix), not(windows)))]
 pub(crate) fn snapshot_beneath(
     trusted_root: &Path,
     relative: &Path,
@@ -621,7 +664,136 @@ pub(crate) fn snapshot_beneath(
     snapshot_fallback(&canonical_root, limits)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn snapshot_windows_opened(
+    root: &Path,
+    directory: std::fs::File,
+    limits: PackageLimits,
+) -> anyhow::Result<SecurePackageSnapshot> {
+    let scanned = scan_windows_opened(directory, limits)?;
+    let descriptor = SkillPackageDescriptor::load_from_file_bytes(
+        root,
+        scanned.descriptor_bytes.clone(),
+        scanned.runtime_manifest.clone(),
+        scanned.instructions_file.clone(),
+    )?;
+    Ok(SecurePackageSnapshot {
+        descriptor,
+        content_hash: scanned.content_hash,
+        runtime_manifest: scanned.runtime_manifest,
+        instructions_file: scanned.instructions_file,
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn tree_windows_opened(
+    directory: std::fs::File,
+    limits: PackageLimits,
+) -> anyhow::Result<SecureTreeSnapshot> {
+    scan_windows_opened(directory, limits)
+}
+
+#[cfg(windows)]
+fn scan_windows_opened(
+    directory: std::fs::File,
+    limits: PackageLimits,
+) -> anyhow::Result<SecureTreeSnapshot> {
+    use std::io::Read;
+
+    struct OpenedFile {
+        canonical: Vec<u8>,
+        bytes: Vec<u8>,
+    }
+
+    let mut stack = vec![(PathBuf::new(), directory)];
+    let mut files = Vec::new();
+    let mut portable_paths = BTreeMap::new();
+    let mut entries = 0_u64;
+    let mut file_count = 0_u64;
+    let mut directory_count = 0_u64;
+    let mut package_bytes = 0_u64;
+    while let Some((relative_directory, directory)) = stack.pop() {
+        let directory_path = crate::skill_store_windows::final_path_for_file(&directory)?;
+        let names = std::fs::read_dir(&directory_path)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        for name in names {
+            let relative = relative_directory.join(&name);
+            let canonical = canonical_relative_path(&relative)?;
+            if u64::try_from(canonical.len())? > limits.max_relative_path_bytes {
+                anyhow::bail!(
+                    "skill package relative path exceeds {} byte limit",
+                    limits.max_relative_path_bytes
+                );
+            }
+            if u64::try_from(relative.components().count())? > limits.max_depth {
+                anyhow::bail!(
+                    "skill package path depth exceeds {} component limit",
+                    limits.max_depth
+                );
+            }
+            entries = checked_count(entries, limits.max_entries, "entry")?;
+            let collision = portable_collision_key(&relative)?;
+            register_portable_path(&mut portable_paths, &relative, &collision)?;
+            let opened = crate::skill_store_windows::open_child_entry(&directory, &name)?;
+            if opened.is_directory {
+                directory_count =
+                    checked_count(directory_count, limits.max_directories, "directory")?;
+                stack.push((relative, opened.file));
+                continue;
+            }
+            if opened.length > limits.max_file_bytes {
+                anyhow::bail!(
+                    "skill package file exceeds {} byte limit: {}",
+                    limits.max_file_bytes,
+                    relative.display()
+                );
+            }
+            package_bytes = checked_bytes(package_bytes, opened.length, limits.max_package_bytes)?;
+            file_count = checked_count(file_count, limits.max_files, "file")?;
+            let capacity = usize::try_from(opened.length)
+                .context("Windows package file is too large to buffer")?;
+            let mut bytes = Vec::with_capacity(capacity);
+            let mut file = opened.file;
+            file.read_to_end(&mut bytes)?;
+            if u64::try_from(bytes.len())? != opened.length {
+                anyhow::bail!(
+                    "package file changed while hashing: {}",
+                    opened.final_path.display()
+                );
+            }
+            files.push(OpenedFile { canonical, bytes });
+        }
+    }
+    files.sort_by(|left, right| left.canonical.cmp(&right.canonical));
+    let mut hasher = Sha256::new();
+    hasher.update(TREE_HASH_DOMAIN);
+    hasher.update(TREE_HASH_VERSION.to_be_bytes());
+    let mut descriptor_bytes = None;
+    let mut runtime_manifest = None;
+    let mut instructions_file = None;
+    for file in files {
+        hasher.update([TREE_HASH_FILE_ENTRY]);
+        hasher.update(u64::try_from(file.canonical.len())?.to_be_bytes());
+        hasher.update(&file.canonical);
+        hasher.update(u64::try_from(file.bytes.len())?.to_be_bytes());
+        hasher.update(&file.bytes);
+        match file.canonical.as_slice() {
+            b"general-agent.json" => descriptor_bytes = Some(file.bytes),
+            b"skill.json" => runtime_manifest = Some(file.bytes),
+            b"SKILL.md" => instructions_file = Some(file.bytes),
+            _ => {}
+        }
+    }
+    Ok(SecureTreeSnapshot {
+        content_hash: hex::encode(hasher.finalize()),
+        descriptor_bytes,
+        runtime_manifest,
+        instructions_file,
+    })
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn snapshot_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<SecurePackageSnapshot> {
     let scanned = scan_fallback(root, limits)?;
     let descriptor = SkillPackageDescriptor::load_from_file_bytes(
@@ -638,7 +810,7 @@ fn snapshot_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<Secur
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 fn scan_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureTreeSnapshot> {
     use std::fs::File;
     use std::io::Read;

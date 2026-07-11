@@ -14,6 +14,18 @@ impl SkillStateStore {
         expected: SkillRevisionExpectation,
         metadata: SkillRevisionMetadata,
     ) -> anyhow::Result<SkillRevisionRecord> {
+        let storage_path = expected.storage_path.clone();
+        self.replace_staging_revision_cas(revision_id, expected, &storage_path, metadata)
+            .await
+    }
+
+    pub async fn replace_staging_revision_cas(
+        &self,
+        revision_id: &str,
+        expected: SkillRevisionExpectation,
+        replacement_storage_path: &str,
+        metadata: SkillRevisionMetadata,
+    ) -> anyhow::Result<SkillRevisionRecord> {
         validate_uuid_v4("revision_id", revision_id)?;
         if expected.status != crate::skill_state::SkillRevisionStatus::Staging {
             anyhow::bail!(
@@ -22,6 +34,7 @@ impl SkillStateStore {
             );
         }
         validate_storage_path(&expected.storage_path)?;
+        validate_storage_path(replacement_storage_path)?;
         let expected_descriptor_json = serde_json::to_string(&expected.descriptor_json)?;
         let expected_validation_json = serde_json::to_string(&expected.validation_json)?;
         let descriptor_json = serde_json::to_string(&metadata.descriptor_json)?;
@@ -30,7 +43,7 @@ impl SkillStateStore {
         let result = async {
             let query = format!(
                 r#"UPDATE skill_revisions
-                   SET version = ?, content_hash = ?, descriptor_json = ?, validation_json = ?
+                   SET version = ?, content_hash = ?, storage_path = ?, descriptor_json = ?, validation_json = ?
                    WHERE revision_id = ? AND lifecycle_status = ?
                      AND version = ? AND content_hash = ? AND storage_path = ?
                      AND descriptor_json = ? AND validation_json = ?
@@ -39,6 +52,7 @@ impl SkillStateStore {
             let updated = sqlx::query(&query)
                 .bind(&metadata.version)
                 .bind(&metadata.content_hash)
+                .bind(replacement_storage_path)
                 .bind(&descriptor_json)
                 .bind(&validation_json)
                 .bind(revision_id)

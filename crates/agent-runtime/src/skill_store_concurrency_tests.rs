@@ -348,11 +348,12 @@ async fn independent_store_double_write_is_serialized_and_final_hash_matches_tre
         .await
         .unwrap()
         .unwrap();
-    assert!(staged.path.join("first.txt").is_file());
-    assert!(staged.path.join("second.txt").is_file());
+    let authoritative = Path::new(&record.storage_path);
+    assert!(authoritative.join("first.txt").is_file());
+    assert!(authoritative.join("second.txt").is_file());
     assert_eq!(
         record.content_hash,
-        hash_package_tree(&staged.path).await.unwrap()
+        hash_package_tree(authoritative).await.unwrap()
     );
 }
 

@@ -2,10 +2,47 @@
 pub(crate) const MOVEFILE_REPLACE_EXISTING_FLAG: u32 = 0x1;
 #[cfg(any(test, windows))]
 pub(crate) const MOVEFILE_WRITE_THROUGH_FLAG: u32 = 0x8;
+#[cfg(any(test, windows))]
+pub(crate) const FILE_SHARE_READ_FLAG: u32 = 0x1;
+#[cfg(any(test, windows))]
+pub(crate) const FILE_SHARE_WRITE_FLAG: u32 = 0x2;
+#[cfg(any(test, windows))]
+pub(crate) const FILE_SHARE_DELETE_FLAG: u32 = 0x4;
+#[cfg(any(test, windows))]
+pub(crate) const FILE_ATTRIBUTE_REPARSE_POINT_FLAG: u32 = 0x400;
+#[cfg(any(test, windows))]
+pub(crate) const FILE_FLAG_BACKUP_SEMANTICS_FLAG: u32 = 0x02000000;
+#[cfg(any(test, windows))]
+pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT_FLAG: u32 = 0x00200000;
 
 #[cfg(any(test, windows))]
 pub(crate) const fn atomic_replace_flags() -> u32 {
     MOVEFILE_REPLACE_EXISTING_FLAG | MOVEFILE_WRITE_THROUGH_FLAG
+}
+
+#[cfg(any(test, windows))]
+pub(crate) const fn directory_share_mode() -> u32 {
+    FILE_SHARE_READ_FLAG | FILE_SHARE_WRITE_FLAG
+}
+
+#[cfg(any(test, windows))]
+pub(crate) const fn lock_file_share_mode() -> u32 {
+    FILE_SHARE_READ_FLAG | FILE_SHARE_WRITE_FLAG
+}
+
+#[cfg(any(test, windows))]
+pub(crate) const fn component_open_flags(directory: bool) -> u32 {
+    FILE_FLAG_OPEN_REPARSE_POINT_FLAG
+        | if directory {
+            FILE_FLAG_BACKUP_SEMANTICS_FLAG
+        } else {
+            0
+        }
+}
+
+#[cfg(any(test, windows))]
+pub(crate) const fn attributes_are_reparse(attributes: u32) -> bool {
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT_FLAG != 0
 }
 
 #[cfg(any(test, windows))]
@@ -26,9 +63,12 @@ pub(crate) fn normalized_path_is_within(path: &str, root: &str) -> bool {
 
 #[cfg(windows)]
 mod platform {
-    use super::{atomic_replace_flags, normalized_path_is_within};
+    use super::{
+        atomic_replace_flags, attributes_are_reparse, component_open_flags, directory_share_mode,
+        lock_file_share_mode, normalized_path_is_within,
+    };
     use anyhow::Context;
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     use std::fs::File;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
@@ -37,11 +77,11 @@ mod platform {
         GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, GetFileInformationByHandle, GetFinalPathNameByHandleW, MoveFileExW,
-        OPEN_ALWAYS, OPEN_EXISTING,
+        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO, FILE_DISPOSITION_INFO,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES, FileBasicInfo,
+        FileDispositionInfo, GetFileInformationByHandle, GetFinalPathNameByHandleW, MoveFileExW,
+        OPEN_ALWAYS, OPEN_EXISTING, SetFileInformationByHandle,
     };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -67,7 +107,8 @@ mod platform {
                 &current,
                 FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
                 OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                component_open_flags(true),
+                directory_share_mode(),
             )?;
             let information = file_information(&file)?;
             reject_reparse_or_wrong_kind(&information, true, &current)?;
@@ -82,6 +123,49 @@ mod platform {
         let identity = file_identity(&file)?;
         let final_path = final_path(&file)?;
         Ok((file, identity, final_path))
+    }
+
+    pub(crate) fn prepare_directory_path_nofollow(path: &Path) -> anyhow::Result<()> {
+        if !path.is_absolute() {
+            anyhow::bail!("Windows store root must be absolute: {}", path.display());
+        }
+        let mut ancestor = path;
+        let mut missing = Vec::new();
+        let (mut directory, _, mut directory_final) = loop {
+            match open_directory_nofollow(ancestor) {
+                Ok(opened) => break opened,
+                Err(error) if error_is_not_found(&error) => {
+                    missing.push(
+                        ancestor
+                            .file_name()
+                            .context("Windows store path has no existing ancestor")?
+                            .to_os_string(),
+                    );
+                    ancestor = ancestor
+                        .parent()
+                        .context("Windows store path has no existing ancestor")?;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        for name in missing.into_iter().rev() {
+            let parent = WindowsStableParent {
+                identity: file_identity(&directory)?,
+                final_path: directory_final,
+                handle: directory,
+            };
+            let child_path = parent.final_path.join(&name);
+            std::fs::create_dir(&child_path)?;
+            directory = open_direct_child(
+                &parent,
+                &name,
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                OPEN_EXISTING,
+                true,
+            )?;
+            directory_final = final_path(&directory)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn verify_directory_path(
@@ -116,7 +200,8 @@ mod platform {
                 &current,
                 FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
                 OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                component_open_flags(true),
+                directory_share_mode(),
             )?;
             let information = file_information(&candidate)?;
             reject_reparse_or_wrong_kind(&information, true, &current)?;
@@ -134,6 +219,46 @@ mod platform {
         Ok((opened, identity, opened_final))
     }
 
+    pub(crate) fn open_mutable_directory_beneath(
+        root: &File,
+        root_identity: WindowsFileIdentity,
+        relative: &Path,
+    ) -> anyhow::Result<(File, WindowsFileIdentity, PathBuf)> {
+        if file_identity(root)? != root_identity {
+            anyhow::bail!("captured Windows store root handle identity changed");
+        }
+        let (parent, name) = open_stable_parent(root, relative)?;
+        let directory = open_direct_child(
+            &parent,
+            &name,
+            DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+            OPEN_EXISTING,
+            true,
+        )?;
+        let identity = file_identity(&directory)?;
+        let final_path = final_path(&directory)?;
+        Ok((directory, identity, final_path))
+    }
+
+    pub(crate) fn open_verification_directory_beneath(
+        root: &File,
+        root_identity: WindowsFileIdentity,
+        relative: &Path,
+    ) -> anyhow::Result<File> {
+        if file_identity(root)? != root_identity {
+            anyhow::bail!("captured Windows store root handle identity changed");
+        }
+        let (parent, name) = open_stable_parent(root, relative)?;
+        open_direct_child_with_share(
+            &parent,
+            &name,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+            OPEN_EXISTING,
+            true,
+            directory_share_mode() | super::FILE_SHARE_DELETE_FLAG,
+        )
+    }
+
     pub(crate) fn open_lock_file_beneath(
         locks: &File,
         locks_identity: WindowsFileIdentity,
@@ -149,7 +274,8 @@ mod platform {
             &path,
             GENERIC_READ | GENERIC_WRITE | FILE_READ_ATTRIBUTES,
             OPEN_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_ATTRIBUTE_NORMAL | component_open_flags(false),
+            lock_file_share_mode(),
         )?;
         let information = file_information(&file)?;
         reject_reparse_or_wrong_kind(&information, false, &path)?;
@@ -166,6 +292,360 @@ mod platform {
             anyhow::bail!("Windows revision lock escaped the captured locks directory");
         }
         Ok(file)
+    }
+
+    pub(crate) struct WindowsStableParent {
+        handle: File,
+        final_path: PathBuf,
+        identity: WindowsFileIdentity,
+    }
+
+    impl WindowsStableParent {
+        pub(crate) fn child_path(&self, name: &OsStr) -> PathBuf {
+            self.final_path.join(name)
+        }
+
+        pub(crate) fn create_new_regular(&self, name: &OsStr) -> anyhow::Result<File> {
+            open_direct_child(
+                self,
+                name,
+                GENERIC_WRITE | FILE_READ_ATTRIBUTES,
+                CREATE_NEW,
+                false,
+            )
+        }
+
+        pub(crate) fn atomic_replace(
+            &self,
+            source_name: &OsStr,
+            destination_name: &OsStr,
+        ) -> anyhow::Result<()> {
+            atomic_replace(
+                &self.final_path.join(source_name),
+                &self.final_path.join(destination_name),
+            )?;
+            let destination = open_direct_child(
+                self,
+                destination_name,
+                FILE_READ_ATTRIBUTES,
+                OPEN_EXISTING,
+                false,
+            )?;
+            drop(destination);
+            Ok(())
+        }
+
+        pub(crate) fn remove_regular(&self, name: &OsStr) -> anyhow::Result<()> {
+            let file = open_direct_child(
+                self,
+                name,
+                DELETE | FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES,
+                OPEN_EXISTING,
+                false,
+            )?;
+            set_file_readonly_handle(&file, false)?;
+            set_delete_disposition(&file)
+        }
+    }
+
+    pub(crate) fn open_stable_parent(
+        root: &File,
+        relative: &Path,
+    ) -> anyhow::Result<(WindowsStableParent, OsString)> {
+        let name = relative
+            .file_name()
+            .context("Windows relative file path has no name")?
+            .to_os_string();
+        let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+        let root_identity = file_identity(root)?;
+        let (handle, identity, final_path) = open_directory_beneath(root, root_identity, parent)?;
+        Ok((
+            WindowsStableParent {
+                handle,
+                final_path,
+                identity,
+            },
+            name,
+        ))
+    }
+
+    pub(crate) fn open_regular_file_beneath(
+        root: &File,
+        relative: &Path,
+        writable: bool,
+        create_new: bool,
+    ) -> anyhow::Result<(File, u64)> {
+        let (parent, name) = open_stable_parent(root, relative)?;
+        let access = if writable {
+            GENERIC_WRITE | FILE_READ_ATTRIBUTES
+        } else {
+            GENERIC_READ | FILE_READ_ATTRIBUTES
+        };
+        let disposition = if create_new {
+            CREATE_NEW
+        } else {
+            OPEN_EXISTING
+        };
+        let file = open_direct_child(&parent, &name, access, disposition, false)?;
+        let information = file_information(&file)?;
+        let length =
+            (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
+        Ok((file, length))
+    }
+
+    pub(crate) struct WindowsOpenedEntry {
+        pub(crate) file: File,
+        pub(crate) is_directory: bool,
+        pub(crate) length: u64,
+        pub(crate) final_path: PathBuf,
+    }
+
+    pub(crate) fn open_child_entry(
+        parent: &File,
+        name: &OsStr,
+    ) -> anyhow::Result<WindowsOpenedEntry> {
+        let parent_identity = file_identity(parent)?;
+        let parent_final = final_path(parent)?;
+        let path = parent_final.join(name);
+        let file = open_path(
+            &path,
+            GENERIC_READ | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+            OPEN_EXISTING,
+            component_open_flags(true),
+            directory_share_mode(),
+        )?;
+        let information = file_information(&file)?;
+        if attributes_are_reparse(information.dwFileAttributes) {
+            anyhow::bail!(
+                "Windows store path contains a reparse point: {}",
+                path.display()
+            );
+        }
+        let identity = identity_from_information(&information);
+        if identity.volume_serial != parent_identity.volume_serial {
+            anyhow::bail!("Windows child crossed its opened parent volume");
+        }
+        let opened = final_path(&file)?;
+        if !paths_equal(
+            opened
+                .parent()
+                .context("opened Windows child has no parent")?,
+            &parent_final,
+        ) {
+            anyhow::bail!("opened Windows child escaped its stable parent");
+        }
+        Ok(WindowsOpenedEntry {
+            file,
+            is_directory: information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            length: (u64::from(information.nFileSizeHigh) << 32)
+                | u64::from(information.nFileSizeLow),
+            final_path: opened,
+        })
+    }
+
+    pub(crate) fn validate_target_beneath(
+        root: &File,
+        relative: Option<&Path>,
+        directory: bool,
+    ) -> anyhow::Result<()> {
+        match relative {
+            None => {
+                let information = file_information(root)?;
+                reject_reparse_or_wrong_kind(&information, directory, Path::new("<opened-root>"))
+            }
+            Some(relative) if directory => {
+                let identity = file_identity(root)?;
+                open_directory_beneath(root, identity, relative).map(|_| ())
+            }
+            Some(relative) => open_regular_file_beneath(root, relative, false, false).map(|_| ()),
+        }
+    }
+
+    pub(crate) fn set_readonly_beneath(
+        root: &File,
+        relative: Option<&Path>,
+        directory: bool,
+        readonly: bool,
+    ) -> anyhow::Result<()> {
+        let file = match relative {
+            None => root.try_clone()?,
+            Some(relative) if directory => {
+                let (parent, name) = open_stable_parent(root, relative)?;
+                open_direct_child(
+                    &parent,
+                    &name,
+                    FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                    OPEN_EXISTING,
+                    true,
+                )?
+            }
+            Some(relative) => {
+                let (parent, name) = open_stable_parent(root, relative)?;
+                open_direct_child(
+                    &parent,
+                    &name,
+                    FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                    OPEN_EXISTING,
+                    false,
+                )?
+            }
+        };
+        set_file_readonly_handle(&file, readonly)
+    }
+
+    pub(crate) fn delete_opened_tree(directory: &File) -> anyhow::Result<()> {
+        delete_opened_directory(directory)
+    }
+
+    fn delete_opened_directory(directory: &File) -> anyhow::Result<()> {
+        let path = final_path(&directory)?;
+        let names = std::fs::read_dir(&path)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let parent = WindowsStableParent {
+            identity: file_identity(&directory)?,
+            final_path: path,
+            handle: directory.try_clone()?,
+        };
+        for name in names {
+            let entry = open_direct_child(
+                &parent,
+                &name,
+                DELETE
+                    | GENERIC_READ
+                    | FILE_LIST_DIRECTORY
+                    | FILE_READ_ATTRIBUTES
+                    | FILE_WRITE_ATTRIBUTES,
+                OPEN_EXISTING,
+                true,
+            )
+            .or_else(|directory_error| {
+                open_direct_child(
+                    &parent,
+                    &name,
+                    DELETE | GENERIC_READ | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                    OPEN_EXISTING,
+                    false,
+                )
+                .map_err(|file_error| {
+                    anyhow::anyhow!(
+                        "failed to open Windows delete entry as directory ({directory_error:#}) or file ({file_error:#})"
+                    )
+                })
+            })?;
+            let information = file_information(&entry)?;
+            if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                delete_opened_directory(&entry)?;
+            } else {
+                set_file_readonly_handle(&entry, false)?;
+                set_delete_disposition(&entry)?;
+            }
+        }
+        drop(parent);
+        set_file_readonly_handle(&directory, false)?;
+        set_delete_disposition(&directory)
+    }
+
+    fn open_direct_child(
+        parent: &WindowsStableParent,
+        name: &OsStr,
+        access: u32,
+        disposition: u32,
+        directory: bool,
+    ) -> anyhow::Result<File> {
+        open_direct_child_with_share(
+            parent,
+            name,
+            access,
+            disposition,
+            directory,
+            directory_share_mode(),
+        )
+    }
+
+    fn open_direct_child_with_share(
+        parent: &WindowsStableParent,
+        name: &OsStr,
+        access: u32,
+        disposition: u32,
+        directory: bool,
+        share_mode: u32,
+    ) -> anyhow::Result<File> {
+        if file_identity(&parent.handle)? != parent.identity {
+            anyhow::bail!("opened Windows parent identity changed");
+        }
+        let path = parent.final_path.join(name);
+        let flags = if directory {
+            component_open_flags(true)
+        } else {
+            FILE_ATTRIBUTE_NORMAL | component_open_flags(false)
+        };
+        let file = open_path(&path, access, disposition, flags, share_mode)?;
+        let information = file_information(&file)?;
+        reject_reparse_or_wrong_kind(&information, directory, &path)?;
+        let identity = identity_from_information(&information);
+        if identity.volume_serial != parent.identity.volume_serial {
+            anyhow::bail!("Windows child crossed its opened parent volume");
+        }
+        let opened = final_path(&file)?;
+        let opened_parent = opened
+            .parent()
+            .context("opened Windows child has no parent")?;
+        if !paths_equal(opened_parent, &parent.final_path) {
+            anyhow::bail!("opened Windows child escaped its stable parent");
+        }
+        Ok(file)
+    }
+
+    fn set_file_readonly_handle(file: &File, readonly: bool) -> anyhow::Result<()> {
+        let current = file_information(file)?;
+        let attributes = if readonly {
+            current.dwFileAttributes | FILE_ATTRIBUTE_READONLY
+        } else {
+            current.dwFileAttributes & !FILE_ATTRIBUTE_READONLY
+        };
+        let information = FILE_BASIC_INFO {
+            FileAttributes: attributes,
+            ..FILE_BASIC_INFO::default()
+        };
+        let result = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                FileBasicInfo,
+                std::ptr::from_ref(&information).cast(),
+                u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>())?,
+            )
+        };
+        if result == 0 {
+            Err(std::io::Error::last_os_error().into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn set_delete_disposition(file: &File) -> anyhow::Result<()> {
+        let information = FILE_DISPOSITION_INFO { DeleteFile: true };
+        let result = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                FileDispositionInfo,
+                std::ptr::from_ref(&information).cast(),
+                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())?,
+            )
+        };
+        if result == 0 {
+            Err(std::io::Error::last_os_error().into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn error_is_not_found(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        })
     }
 
     pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -185,42 +665,19 @@ mod platform {
         }
     }
 
-    pub(crate) fn validate_tree_no_reparse(root: &Path) -> anyhow::Result<()> {
-        let (_, root_identity, root_final) = open_directory_nofollow(root)?;
-        let mut stack = vec![root_final.clone()];
-        while let Some(directory) = stack.pop() {
-            for entry in std::fs::read_dir(&directory)? {
-                let path = entry?.path();
-                let metadata = std::fs::symlink_metadata(&path)?;
-                let flags = if metadata.is_dir() {
-                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
-                } else {
-                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT
-                };
-                let file = open_path(&path, FILE_READ_ATTRIBUTES, OPEN_EXISTING, flags)?;
-                let information = file_information(&file)?;
-                reject_reparse_or_wrong_kind(&information, metadata.is_dir(), &path)?;
-                let opened_final = final_path(&file)?;
-                ensure_contained(&opened_final, &root_final)?;
-                let identity = identity_from_information(&information);
-                if identity.volume_serial != root_identity.volume_serial {
-                    anyhow::bail!("Windows package tree crossed a volume boundary");
-                }
-                if metadata.is_dir() {
-                    stack.push(opened_final);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn open_path(path: &Path, access: u32, disposition: u32, flags: u32) -> anyhow::Result<File> {
+    fn open_path(
+        path: &Path,
+        access: u32,
+        disposition: u32,
+        flags: u32,
+        share_mode: u32,
+    ) -> anyhow::Result<File> {
         let wide = wide_null(path.as_os_str());
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
                 access,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                share_mode,
                 std::ptr::null(),
                 disposition,
                 flags,
@@ -263,7 +720,7 @@ mod platform {
         directory: bool,
         path: &Path,
     ) -> anyhow::Result<()> {
-        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        if attributes_are_reparse(information.dwFileAttributes) {
             anyhow::bail!(
                 "Windows store path contains a reparse point: {}",
                 path.display()

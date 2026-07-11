@@ -1,5 +1,7 @@
 use crate::skill_state::SkillStateStore;
 use crate::skill_store::{SkillRevisionStore, SkillStorePaths};
+#[cfg(unix)]
+use crate::skill_store_locks::acquire_os_revision_lock_with_opened_gate;
 use crate::skill_store_locks::{acquire_os_revision_lock, acquire_os_revision_lock_with_attempt};
 use crate::storage::Storage;
 use std::time::Duration;
@@ -67,6 +69,68 @@ async fn revision_lock_rejects_replaced_managed_or_locks_root() {
         };
         assert!(format!("{error:#}").contains("identity"));
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn revision_lock_rejects_entry_replaced_after_open() {
+    let app = tempdir().unwrap();
+    let cache = tempdir().unwrap();
+    let paths = SkillStorePaths::prepare(app.path(), cache.path())
+        .await
+        .unwrap();
+    let revision_id = SkillStateStore::allocate_revision_id();
+    let lock_path = paths
+        .managed
+        .join(".locks")
+        .join(format!("{revision_id}.lock"));
+    let moved_path = lock_path.with_extension("moved");
+    let identity = paths.identity.clone();
+    let task_revision = revision_id.clone();
+    let (opened, opened_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let lock = tokio::spawn(async move {
+        acquire_os_revision_lock_with_opened_gate(&identity, &task_revision, opened, release_rx)
+            .await
+    });
+    opened_rx.await.unwrap();
+    tokio::fs::rename(&lock_path, &moved_path).await.unwrap();
+    tokio::fs::write(&lock_path, b"replacement").await.unwrap();
+    release.send(()).unwrap();
+
+    let error = match lock.await.unwrap() {
+        Ok(_) => panic!("replaced lock entry must be rejected"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("lock directory entry changed"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn revision_lock_rejects_hard_linked_lock_file() {
+    let app = tempdir().unwrap();
+    let cache = tempdir().unwrap();
+    let paths = SkillStorePaths::prepare(app.path(), cache.path())
+        .await
+        .unwrap();
+    let revision_id = SkillStateStore::allocate_revision_id();
+    drop(
+        acquire_os_revision_lock(&paths.identity, &revision_id)
+            .await
+            .unwrap(),
+    );
+    let lock_path = paths
+        .managed
+        .join(".locks")
+        .join(format!("{revision_id}.lock"));
+    std::fs::hard_link(&lock_path, lock_path.with_extension("alias")).unwrap();
+
+    let error = match acquire_os_revision_lock(&paths.identity, &revision_id).await {
+        Ok(_) => panic!("hard-linked lock file must be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(format!("{error:#}").contains("exactly one link"));
 }
 
 #[test]

@@ -54,7 +54,22 @@ pub(crate) async fn open_regular_file(
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) async fn open_regular_file(
+    root: &PreparedStoreDirectory,
+    relative: &Path,
+) -> anyhow::Result<(tokio::fs::File, u64, u32)> {
+    canonical_relative_path(relative)?;
+    let (file, length) = crate::skill_store_windows::open_regular_file_beneath(
+        root.windows_descriptor(),
+        relative,
+        false,
+        false,
+    )?;
+    Ok((tokio::fs::File::from_std(file), length, 0o644))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 pub(crate) async fn open_regular_file(
     root: &PreparedStoreDirectory,
     relative: &Path,
@@ -93,7 +108,23 @@ pub(crate) async fn create_regular_file(
     Ok(tokio::fs::File::from_std(File::from(descriptor)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) async fn create_regular_file(
+    root: &PreparedStoreDirectory,
+    relative: &Path,
+    _mode: u32,
+) -> anyhow::Result<tokio::fs::File> {
+    canonical_relative_path(relative)?;
+    let (file, _) = crate::skill_store_windows::open_regular_file_beneath(
+        root.windows_descriptor(),
+        relative,
+        true,
+        true,
+    )?;
+    Ok(tokio::fs::File::from_std(file))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 pub(crate) async fn create_regular_file(
     root: &PreparedStoreDirectory,
     relative: &Path,
@@ -150,7 +181,21 @@ pub(crate) async fn set_mode(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) async fn set_mode(
+    root: &PreparedStoreDirectory,
+    relative: Option<&Path>,
+    _mode: u32,
+    directory: bool,
+) -> anyhow::Result<()> {
+    crate::skill_store_windows::validate_target_beneath(
+        root.windows_descriptor(),
+        relative,
+        directory,
+    )
+}
+
+#[cfg(all(not(unix), not(windows)))]
 pub(crate) async fn set_mode(
     root: &PreparedStoreDirectory,
     _relative: Option<&Path>,
@@ -173,7 +218,12 @@ pub(crate) async fn set_readonly(
         fchmod(descriptor, Mode::from_raw_mode(RawMode::try_from(mode)?))?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let (descriptor, target) = windows_attribute_target(root, relative);
+        crate::skill_store_windows::set_readonly_beneath(descriptor, target, directory, true)
+    }
+    #[cfg(all(not(unix), not(windows)))]
     {
         root.verify()?;
         let path =
@@ -199,7 +249,12 @@ pub(crate) async fn set_writable(
         fchmod(descriptor, Mode::from_raw_mode(RawMode::try_from(mode)?))?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let (descriptor, target) = windows_attribute_target(root, relative);
+        crate::skill_store_windows::set_readonly_beneath(descriptor, target, directory, false)
+    }
+    #[cfg(all(not(unix), not(windows)))]
     {
         root.verify()?;
         let path =
@@ -208,5 +263,16 @@ pub(crate) async fn set_writable(
         permissions.set_readonly(false);
         tokio::fs::set_permissions(path, permissions).await?;
         root.verify()
+    }
+}
+
+#[cfg(windows)]
+fn windows_attribute_target<'a>(
+    root: &'a PreparedStoreDirectory,
+    relative: Option<&'a Path>,
+) -> (&'a std::fs::File, Option<&'a Path>) {
+    match relative {
+        Some(relative) => (root.windows_descriptor(), Some(relative)),
+        None => (root.windows_descriptor(), None),
     }
 }

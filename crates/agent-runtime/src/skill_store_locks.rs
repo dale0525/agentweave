@@ -228,7 +228,7 @@ pub(crate) async fn acquire_os_revision_lock(
     store: &SkillStoreIdentity,
     revision_id: &str,
 ) -> anyhow::Result<OsRevisionLock> {
-    acquire_os_revision_lock_inner(store, revision_id, None).await
+    acquire_os_revision_lock_inner(store, revision_id, None, None).await
 }
 
 #[cfg(test)]
@@ -237,13 +237,27 @@ pub(crate) async fn acquire_os_revision_lock_with_attempt(
     revision_id: &str,
     attempt: tokio::sync::oneshot::Sender<()>,
 ) -> anyhow::Result<OsRevisionLock> {
-    acquire_os_revision_lock_inner(store, revision_id, Some(attempt)).await
+    acquire_os_revision_lock_inner(store, revision_id, Some(attempt), None).await
+}
+
+#[cfg(test)]
+pub(crate) async fn acquire_os_revision_lock_with_opened_gate(
+    store: &SkillStoreIdentity,
+    revision_id: &str,
+    opened: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+) -> anyhow::Result<OsRevisionLock> {
+    acquire_os_revision_lock_inner(store, revision_id, None, Some((opened, release))).await
 }
 
 async fn acquire_os_revision_lock_inner(
     store: &SkillStoreIdentity,
     revision_id: &str,
     attempt: Option<tokio::sync::oneshot::Sender<()>>,
+    opened_gate: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
 ) -> anyhow::Result<OsRevisionLock> {
     store.verify()?;
     let store = store.clone();
@@ -252,12 +266,19 @@ async fn acquire_os_revision_lock_inner(
         use fs2::FileExt;
         store.verify()?;
         let descriptor = open_revision_lock_file(&store, &revision_id)?;
+        if let Some((opened, release)) = opened_gate {
+            let _ = opened.send(());
+            release
+                .recv()
+                .context("revision lock replacement gate was dropped")?;
+        }
         if let Some(attempt) = attempt {
             let _ = attempt.send(());
         }
         descriptor
             .lock_exclusive()
             .with_context(|| format!("failed to lock revision operation: {revision_id}"))?;
+        validate_locked_revision_entry(&store, &revision_id, &descriptor)?;
         store.verify()?;
         Ok(OsRevisionLock {
             _descriptor: descriptor,
@@ -265,6 +286,44 @@ async fn acquire_os_revision_lock_inner(
     })
     .await
     .context("revision lock worker failed")?
+}
+
+#[cfg(unix)]
+fn validate_locked_revision_entry(
+    store: &SkillStoreIdentity,
+    revision_id: &str,
+    descriptor: &File,
+) -> anyhow::Result<()> {
+    use rustix::fs::{AtFlags, FileType, fstat, statat};
+    let locked = fstat(descriptor)?;
+    if FileType::from_raw_mode(locked.st_mode) != FileType::RegularFile {
+        anyhow::bail!("revision lock path is not a regular file: {revision_id}");
+    }
+    if locked.st_nlink != 1 {
+        anyhow::bail!("revision lock file must have exactly one link: {revision_id}");
+    }
+    let entry = statat(
+        store.locks().descriptor(),
+        format!("{revision_id}.lock"),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?;
+    if FileType::from_raw_mode(entry.st_mode) != FileType::RegularFile
+        || entry.st_nlink != 1
+        || entry.st_dev != locked.st_dev
+        || entry.st_ino != locked.st_ino
+    {
+        anyhow::bail!("revision lock directory entry changed after open: {revision_id}");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_locked_revision_entry(
+    _store: &SkillStoreIdentity,
+    _revision_id: &str,
+    _descriptor: &File,
+) -> anyhow::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]

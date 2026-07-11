@@ -21,7 +21,7 @@ pub(crate) struct PreparedStoreDirectory {
 
 impl PreparedStoreDirectory {
     fn open(root: &StoreRootIdentity, relative: &Path) -> anyhow::Result<Self> {
-        let descriptor = open_directory_platform(root, relative)?;
+        let descriptor = open_prepared_directory_platform(root, relative)?;
         let identity = same_file::Handle::from_file(descriptor.try_clone()?)?;
         Ok(Self {
             root: root.clone(),
@@ -34,7 +34,7 @@ impl PreparedStoreDirectory {
     }
 
     pub(crate) fn verify(&self) -> anyhow::Result<()> {
-        let descriptor = open_directory_platform(&self.root, &self.relative)?;
+        let descriptor = open_verification_directory_platform(&self.root, &self.relative)?;
         let current = same_file::Handle::from_file(descriptor)?;
         if current != *self.identity {
             anyhow::bail!(
@@ -181,6 +181,22 @@ fn open_directory_platform(root: &StoreRootIdentity, relative: &Path) -> anyhow:
     Ok(File::from(open_directory(root, relative)?))
 }
 
+#[cfg(unix)]
+fn open_prepared_directory_platform(
+    root: &StoreRootIdentity,
+    relative: &Path,
+) -> anyhow::Result<File> {
+    open_directory_platform(root, relative)
+}
+
+#[cfg(unix)]
+fn open_verification_directory_platform(
+    root: &StoreRootIdentity,
+    relative: &Path,
+) -> anyhow::Result<File> {
+    open_directory_platform(root, relative)
+}
+
 #[cfg(windows)]
 fn open_directory_platform(root: &StoreRootIdentity, relative: &Path) -> anyhow::Result<File> {
     let (file, _, _) = crate::skill_store_windows::open_directory_beneath(
@@ -191,10 +207,51 @@ fn open_directory_platform(root: &StoreRootIdentity, relative: &Path) -> anyhow:
     Ok(file)
 }
 
+#[cfg(windows)]
+fn open_prepared_directory_platform(
+    root: &StoreRootIdentity,
+    relative: &Path,
+) -> anyhow::Result<File> {
+    let (file, _, _) = crate::skill_store_windows::open_mutable_directory_beneath(
+        root.windows_descriptor(),
+        root.windows_identity(),
+        relative,
+    )?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_verification_directory_platform(
+    root: &StoreRootIdentity,
+    relative: &Path,
+) -> anyhow::Result<File> {
+    crate::skill_store_windows::open_verification_directory_beneath(
+        root.windows_descriptor(),
+        root.windows_identity(),
+        relative,
+    )
+}
+
 #[cfg(all(not(unix), not(windows)))]
 fn open_directory_platform(root: &StoreRootIdentity, relative: &Path) -> anyhow::Result<File> {
     root.verify("store")?;
     Ok(File::open(root.path().join(relative))?)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn open_prepared_directory_platform(
+    root: &StoreRootIdentity,
+    relative: &Path,
+) -> anyhow::Result<File> {
+    open_directory_platform(root, relative)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn open_verification_directory_platform(
+    root: &StoreRootIdentity,
+    relative: &Path,
+) -> anyhow::Result<File> {
+    open_directory_platform(root, relative)
 }
 
 #[cfg(unix)]
@@ -332,12 +389,7 @@ fn ensure_opened_child_directory_platform(
 #[cfg(windows)]
 fn remove_opened_tree_platform(directory: &PreparedStoreDirectory) -> anyhow::Result<()> {
     directory.verify()?;
-    let final_path =
-        crate::skill_store_windows::final_path_for_file(directory.windows_descriptor())?;
-    crate::skill_store_windows::validate_tree_no_reparse(&final_path)?;
-    directory.verify()?;
-    std::fs::remove_dir_all(final_path)?;
-    Ok(())
+    crate::skill_store_windows::delete_opened_tree(directory.windows_descriptor())
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -412,10 +464,8 @@ fn opened_package_snapshot_platform(
     limits: PackageLimits,
 ) -> anyhow::Result<SecurePackageSnapshot> {
     let path = crate::skill_store_windows::final_path_for_file(directory.windows_descriptor())?;
-    directory.verify()?;
-    let snapshot = crate::skill_store_secure_fs::snapshot_beneath(&path, Path::new(""), limits)?;
-    directory.verify()?;
-    Ok(snapshot)
+    let descriptor = directory.windows_descriptor().try_clone()?;
+    crate::skill_store_secure_fs::snapshot_windows_opened(&path, descriptor, limits)
 }
 
 #[cfg(windows)]
@@ -423,11 +473,8 @@ fn opened_tree_snapshot_platform(
     directory: &PreparedStoreDirectory,
     limits: PackageLimits,
 ) -> anyhow::Result<SecureTreeSnapshot> {
-    let path = crate::skill_store_windows::final_path_for_file(directory.windows_descriptor())?;
-    directory.verify()?;
-    let snapshot = crate::skill_store_secure_fs::tree_direct(&path, limits)?;
-    directory.verify()?;
-    Ok(snapshot)
+    let descriptor = directory.windows_descriptor().try_clone()?;
+    crate::skill_store_secure_fs::tree_windows_opened(descriptor, limits)
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -513,12 +560,7 @@ fn snapshot_platform(
         root.windows_identity(),
         relative,
     )?;
-    crate::skill_store_windows::validate_tree_no_reparse(&final_path)?;
-    let snapshot =
-        crate::skill_store_secure_fs::snapshot_beneath(&final_path, Path::new(""), limits)?;
-    drop(directory);
-    root.verify("store")?;
-    Ok(snapshot)
+    crate::skill_store_secure_fs::snapshot_windows_opened(&final_path, directory, limits)
 }
 
 #[cfg(windows)]

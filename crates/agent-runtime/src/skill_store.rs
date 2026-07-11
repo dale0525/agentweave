@@ -8,21 +8,20 @@ use crate::skill_store_atomic_write::atomic_replace_file;
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 use crate::skill_store_fs::{
     PackageLimits, copy_package_tree_into_prepared, copy_prepared_package_tree_into_prepared,
-    ensure_directory_contained, ensure_safe_write_parent, make_tree_readonly, make_tree_writable,
-    measure_package_tree, read_optional_regular_file, remove_created_directories,
-    remove_regular_file_nofollow,
+    ensure_directory_contained, make_tree_readonly, make_tree_writable, measure_package_tree,
 };
-use crate::skill_store_fs_types::AtomicReplaceCommitState;
 use crate::skill_store_locks::{SkillStoreIdentity, acquire_revision_lock};
 use crate::skill_store_operations::{
-    TransitionPhase, TransitionState, cleanup_created_directories_error, combine_operation_errors,
-    ensure_exact_path, storage_path, stored_revision, with_compensation,
+    TransitionPhase, TransitionState, combine_operation_errors, ensure_exact_path,
+    error_is_not_found, storage_path, stored_revision, with_compensation,
 };
 use crate::skill_store_path_prepare::prepare_canonical_directory;
+use crate::skill_store_prepared_fs::open_regular_file as open_prepared_regular_file;
 use crate::skill_store_secure_fs::ensure_store_directory;
 use crate::skill_store_secure_roots::{
-    ensure_directory as ensure_prepared_directory, open_prepared_directory,
-    opened_package_snapshot, remove_opened_tree as remove_opened_prepared_tree,
+    ensure_directory as ensure_prepared_directory, ensure_opened_child_directory,
+    open_prepared_directory, opened_package_snapshot,
+    remove_opened_tree as remove_opened_prepared_tree,
     reserve_opened_directory as reserve_opened_prepared_directory,
 };
 use anyhow::Context;
@@ -325,12 +324,10 @@ impl SkillRevisionStore {
             .checkpoint(StoreFaultPoint::WriteAfterLock)
             .await;
         self.paths.verify_identity()?;
-        let root = PathBuf::from(&record.storage_path);
-        let expected = self.paths.staging.join(revision_id);
-        ensure_exact_path(&root, &expected, "staging")?;
+        let (root, source_relative) = self.staging_revision_path(&record)?;
         ensure_directory_contained(&self.paths.staging, &root, "staging").await?;
         let prepared_root =
-            open_prepared_directory(self.paths.staging_identity(), Path::new(revision_id)).await?;
+            open_prepared_directory(self.paths.staging_identity(), &source_relative).await?;
         let byte_count = u64::try_from(bytes.len())?;
         if byte_count > self.limits.max_file_bytes {
             anyhow::bail!(
@@ -338,35 +335,52 @@ impl SkillRevisionStore {
                 self.limits.max_file_bytes
             );
         }
-        let existing_bytes =
-            measure_package_tree(&root, self.limits.package_limits(), Some(relative_path)).await?;
-        let final_bytes = existing_bytes
-            .checked_add(byte_count)
-            .context("skill package byte count overflow")?;
-        if final_bytes > self.limits.max_package_bytes {
-            anyhow::bail!(
-                "skill package exceeds {} byte limit",
-                self.limits.max_package_bytes
-            );
-        }
-        let created_directories = ensure_safe_write_parent(&root, relative_path).await?;
-        let previous = match read_optional_regular_file(
-            &root,
-            relative_path,
-            self.limits.max_file_bytes,
+        let candidate_name = format!("{revision_id}.candidate.{}", uuid::Uuid::new_v4());
+        let candidate_relative = PathBuf::from(&candidate_name);
+        let candidate = self.paths.staging.join(&candidate_relative);
+        let candidate_directory =
+            reserve_opened_prepared_directory(self.paths.staging_identity(), &candidate_relative)
+                .await?;
+        if let Err(error) = copy_prepared_package_tree_into_prepared(
+            &prepared_root,
+            &candidate_directory,
+            self.limits.package_limits(),
+            &self.faults,
+            StoreFaultPoint::StagingCopyFile,
         )
         .await
         {
-            Ok(previous) => previous,
+            return self
+                .cleanup_staging_candidate_error(error, &candidate_directory)
+                .await;
+        }
+        make_tree_writable(&candidate_directory, self.limits.package_limits()).await?;
+        if let Some(parent) = relative_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            ensure_opened_child_directory(&candidate_directory, parent).await?;
+        }
+        let mode = match open_prepared_regular_file(&candidate_directory, relative_path).await {
+            Ok((file, _, mode)) => {
+                drop(file);
+                mode
+            }
+            Err(error) if error_is_not_found(&error) => 0o644,
             Err(error) => {
-                return cleanup_created_directories_error(error, &created_directories).await;
+                return self
+                    .cleanup_staging_candidate_error(error, &candidate_directory)
+                    .await;
             }
         };
-        let mode = previous.as_ref().map_or(0o644, |file| file.mode);
-        if let Err(failure) =
-            atomic_replace_file(&prepared_root, relative_path, bytes, mode, &self.faults).await
+        if let Err(failure) = atomic_replace_file(
+            &candidate_directory,
+            relative_path,
+            bytes,
+            mode,
+            &self.faults,
+        )
+        .await
         {
-            let state = failure.state;
             if let Some(temp_path) = &failure.temp_path {
                 self.record_maintenance_issue(
                     revision_id,
@@ -376,97 +390,42 @@ impl SkillRevisionStore {
                 );
             }
             let error = failure.into_error();
-            if state == AtomicReplaceCommitState::NotCommitted {
-                let directory_cleanup = remove_created_directories(&created_directories).await;
-                return Err(combine_operation_errors(
-                    error,
-                    [("parent cleanup", directory_cleanup)],
-                ));
-            }
-            let restore: anyhow::Result<()> = match &previous {
-                Some(previous) => atomic_replace_file(
-                    &prepared_root,
-                    relative_path,
-                    &previous.bytes,
-                    previous.mode,
-                    &self.faults,
-                )
-                .await
-                .map_err(|failure| failure.into_error()),
-                None => remove_regular_file_nofollow(&root, relative_path).await,
-            };
-            if let Err(restore_error) = restore {
-                let directory_cleanup = remove_created_directories(&created_directories).await;
-                let primary = combine_operation_errors(
-                    error,
-                    [
-                        ("file restore", Err(restore_error)),
-                        ("parent cleanup", directory_cleanup),
-                    ],
-                );
-                return Err(self
-                    .isolate_failed_staging_write(
-                        &record,
-                        &root,
-                        &prepared_root,
-                        relative_path,
-                        previous.as_ref(),
-                        primary,
-                    )
-                    .await);
-            }
-            let directory_cleanup = remove_created_directories(&created_directories).await;
-            return Err(combine_operation_errors(
-                error,
-                [("parent cleanup", directory_cleanup)],
-            ));
+            return self
+                .cleanup_staging_candidate_error(error, &candidate_directory)
+                .await;
         }
+        let metadata = match self.final_metadata(&record, &candidate_directory).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return self
+                    .cleanup_staging_candidate_error(error, &candidate_directory)
+                    .await;
+            }
+        };
         self.faults
             .checkpoint(StoreFaultPoint::WriteBeforeMetadataCommit)
             .await;
-        let update = self.refresh_staging_metadata(&record, &prepared_root).await;
-        if let Err(error) = update {
-            let restore = async {
-                self.faults.check(StoreFaultPoint::WriteRestore)?;
-                match &previous {
-                    Some(previous) => atomic_replace_file(
-                        &prepared_root,
-                        relative_path,
-                        &previous.bytes,
-                        previous.mode,
-                        &self.faults,
-                    )
-                    .await
-                    .map_err(|failure| failure.into_error()),
-                    None => remove_regular_file_nofollow(&root, relative_path).await,
-                }
-            }
+        let update = self
+            .state
+            .replace_staging_revision_cas(
+                revision_id,
+                SkillRevisionExpectation::from(&record),
+                &storage_path(&candidate)?,
+                metadata,
+            )
             .await;
-            if let Err(restore_error) = restore {
-                let directory_cleanup = remove_created_directories(&created_directories).await;
-                let primary = combine_operation_errors(
-                    error,
-                    [
-                        ("file restore", Err(restore_error)),
-                        ("parent cleanup", directory_cleanup),
-                    ],
-                );
-                return Err(self
-                    .isolate_failed_staging_write(
-                        &record,
-                        &root,
-                        &prepared_root,
-                        relative_path,
-                        previous.as_ref(),
-                        primary,
-                    )
-                    .await);
-            }
-            let directory_cleanup = remove_created_directories(&created_directories).await;
-            return Err(combine_operation_errors(
-                error,
-                [("parent cleanup", directory_cleanup)],
-            ));
+        if let Err(error) = update {
+            return self
+                .cleanup_staging_candidate_error(error, &candidate_directory)
+                .await;
+        }
+        if let Err(error) = remove_opened_prepared_tree(&prepared_root).await {
+            self.record_maintenance_issue(
+                revision_id,
+                "staging_write_previous_cleanup",
+                &root,
+                &error,
+            );
         }
         Ok(())
     }
@@ -481,11 +440,10 @@ impl SkillRevisionStore {
             .await;
         self.paths.verify_identity()?;
         let mut transition = TransitionState::new("promotion");
-        let staged = PathBuf::from(&record.storage_path);
-        ensure_exact_path(&staged, &self.paths.staging.join(revision_id), "staging")?;
+        let (staged, staged_relative) = self.staging_revision_path(&record)?;
         ensure_directory_contained(&self.paths.staging, &staged, "staging").await?;
         let staged_directory =
-            open_prepared_directory(self.paths.staging_identity(), Path::new(revision_id)).await?;
+            open_prepared_directory(self.paths.staging_identity(), &staged_relative).await?;
         let final_metadata = self.final_metadata(&record, &staged_directory).await?;
         let package_root = self
             .paths
@@ -725,11 +683,10 @@ impl SkillRevisionStore {
         let mut transition = TransitionState::new("quarantine");
         let source = self.expected_revision_path(&record)?;
         let (source_root, source_identity, source_relative) = match record.status {
-            SkillRevisionStatus::Staging => (
-                &self.paths.staging,
-                self.paths.staging_identity(),
-                PathBuf::from(revision_id),
-            ),
+            SkillRevisionStatus::Staging => {
+                let (_, relative) = self.staging_revision_path(&record)?;
+                (&self.paths.staging, self.paths.staging_identity(), relative)
+            }
             SkillRevisionStatus::Managed => (
                 &self.paths.managed,
                 self.paths.managed_identity(),
@@ -915,28 +872,13 @@ impl SkillRevisionStore {
             .get_revision(&observed.revision_id)
             .await?
             .with_context(|| format!("skill revision not found: {}", observed.revision_id))?;
-        if current.status != observed.status || current.storage_path != observed.storage_path {
+        if current.status != observed.status {
             anyhow::bail!(
                 "skill revision changed while waiting for revision lock: {}",
                 observed.revision_id
             );
         }
         Ok(current)
-    }
-
-    async fn refresh_staging_metadata(
-        &self,
-        record: &SkillRevisionRecord,
-        root: &crate::skill_store_secure_roots::PreparedStoreDirectory,
-    ) -> anyhow::Result<SkillRevisionRecord> {
-        let metadata = self.final_metadata(record, root).await?;
-        self.state
-            .refresh_staging_revision_metadata_cas(
-                &record.revision_id,
-                SkillRevisionExpectation::from(record),
-                metadata,
-            )
-            .await
     }
 
     async fn final_metadata(
@@ -964,7 +906,9 @@ impl SkillRevisionStore {
 
     fn expected_revision_path(&self, record: &SkillRevisionRecord) -> anyhow::Result<PathBuf> {
         let expected = match record.status {
-            SkillRevisionStatus::Staging => self.paths.staging.join(&record.revision_id),
+            SkillRevisionStatus::Staging => {
+                return self.staging_revision_path(record).map(|value| value.0);
+            }
             SkillRevisionStatus::Managed => self
                 .paths
                 .managed
@@ -977,5 +921,71 @@ impl SkillRevisionStore {
         };
         ensure_exact_path(Path::new(&record.storage_path), &expected, "revision")?;
         Ok(expected)
+    }
+
+    fn staging_revision_path(
+        &self,
+        record: &SkillRevisionRecord,
+    ) -> anyhow::Result<(PathBuf, PathBuf)> {
+        if record.status != SkillRevisionStatus::Staging {
+            anyhow::bail!(
+                "revision is not an editable staging revision: {}",
+                record.revision_id
+            );
+        }
+        let actual = PathBuf::from(&record.storage_path);
+        let relative = actual
+            .strip_prefix(&self.paths.staging)
+            .with_context(|| {
+                format!(
+                    "staging revision path escapes staging root: {}",
+                    actual.display()
+                )
+            })?
+            .to_path_buf();
+        canonical_relative_path(&relative)?;
+        if relative.components().count() != 1 {
+            anyhow::bail!(
+                "staging revision path must be a direct child: {}",
+                actual.display()
+            );
+        }
+        let name = relative
+            .to_str()
+            .context("staging revision directory name must be UTF-8")?;
+        let candidate_prefix = format!("{}.candidate.", record.revision_id);
+        let owned = name == record.revision_id
+            || name
+                .strip_prefix(&candidate_prefix)
+                .is_some_and(|nonce| uuid::Uuid::parse_str(nonce).is_ok());
+        if !owned {
+            anyhow::bail!(
+                "staging revision path is not owned by revision {}: {}",
+                record.revision_id,
+                actual.display()
+            );
+        }
+        ensure_exact_path(
+            &actual,
+            &self.paths.staging.join(&relative),
+            "staging revision",
+        )?;
+        Ok((actual, relative))
+    }
+
+    async fn cleanup_staging_candidate_error(
+        &self,
+        error: anyhow::Error,
+        candidate: &crate::skill_store_secure_roots::PreparedStoreDirectory,
+    ) -> anyhow::Result<()> {
+        let writable = make_tree_writable(candidate, self.limits.package_limits()).await;
+        let cleanup = remove_opened_prepared_tree(candidate).await;
+        Err(combine_operation_errors(
+            error,
+            [
+                ("candidate writable preparation", writable),
+                ("candidate cleanup", cleanup),
+            ],
+        ))
     }
 }

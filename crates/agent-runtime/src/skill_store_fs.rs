@@ -3,9 +3,7 @@ use crate::skill_source::{
 };
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 pub(crate) use crate::skill_store_fs_types::PackageLimits;
-use crate::skill_store_fs_types::{
-    PackageDirectory, PackageEntries, PackageFile, StoredFileContents,
-};
+use crate::skill_store_fs_types::{PackageDirectory, PackageEntries, PackageFile};
 use crate::skill_store_prepared_fs::{
     create_regular_file as create_regular_file_prepared,
     open_regular_file as open_regular_file_prepared, set_mode as set_mode_prepared,
@@ -165,76 +163,28 @@ async fn copy_collected_entries(
     let mut directories = entries.directories;
     directories.sort_by_key(|directory| std::cmp::Reverse(directory.relative.components().count()));
     for directory in directories {
-        if let Some(destination) = roots.prepared_destination {
-            set_mode_prepared(destination, Some(&directory.relative), directory.mode, true).await?;
+        let mode = if roots.prepared_source.is_some() && roots.prepared_destination.is_none() {
+            directory.mode | 0o700
         } else {
-            set_mode_nofollow(
-                roots.destination,
-                Some(&directory.relative),
-                directory.mode,
-                true,
-            )
-            .await?;
+            directory.mode
+        };
+        if let Some(destination) = roots.prepared_destination {
+            set_mode_prepared(destination, Some(&directory.relative), mode, true).await?;
+        } else {
+            set_mode_nofollow(roots.destination, Some(&directory.relative), mode, true).await?;
         }
     }
-    if let Some(destination) = roots.prepared_destination {
-        set_mode_prepared(destination, None, entries.root_mode, true).await?;
+    let root_mode = if roots.prepared_source.is_some() && roots.prepared_destination.is_none() {
+        entries.root_mode | 0o700
     } else {
-        set_mode_nofollow(roots.destination, None, entries.root_mode, true).await?;
+        entries.root_mode
+    };
+    if let Some(destination) = roots.prepared_destination {
+        set_mode_prepared(destination, None, root_mode, true).await?;
+    } else {
+        set_mode_nofollow(roots.destination, None, root_mode, true).await?;
     }
     Ok(())
-}
-
-pub(crate) async fn ensure_safe_write_parent(
-    root: &Path,
-    relative: &Path,
-) -> anyhow::Result<Vec<PathBuf>> {
-    canonical_relative_path(relative)?;
-    let root_metadata = tokio::fs::symlink_metadata(root)
-        .await
-        .with_context(|| format!("failed to inspect staging root {}", root.display()))?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        anyhow::bail!(
-            "staging revision root must be a real directory: {}",
-            root.display()
-        );
-    }
-    let mut current = root.to_path_buf();
-    let mut created = Vec::new();
-    if let Some(parent) = relative.parent() {
-        for component in parent.components() {
-            current.push(component.as_os_str());
-            match tokio::fs::symlink_metadata(&current).await {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    anyhow::bail!(
-                        "staging path cannot traverse a symlink: {}",
-                        current.display()
-                    )
-                }
-                Ok(metadata) if !metadata.is_dir() => {
-                    anyhow::bail!("staging parent must be a directory: {}", current.display())
-                }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tokio::fs::create_dir(&current).await.with_context(|| {
-                        format!("failed to create staging directory {}", current.display())
-                    })?;
-                    created.push(current.clone());
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-    }
-    let destination = root.join(relative);
-    if let Ok(metadata) = tokio::fs::symlink_metadata(&destination).await
-        && (metadata.file_type().is_symlink() || !metadata.is_file())
-    {
-        anyhow::bail!(
-            "staging destination must be a regular file: {}",
-            destination.display()
-        );
-    }
-    Ok(created)
 }
 
 pub(crate) async fn ensure_directory_contained(
@@ -298,93 +248,6 @@ pub(crate) async fn ensure_directory_contained(
         );
     }
     Ok(())
-}
-
-pub(crate) async fn read_optional_regular_file(
-    root: &Path,
-    relative: &Path,
-    max_file_bytes: u64,
-) -> anyhow::Result<Option<StoredFileContents>> {
-    let path = root.join(relative);
-    match tokio::fs::symlink_metadata(&path).await {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            anyhow::bail!(
-                "staging destination must be a regular file: {}",
-                path.display()
-            )
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    }
-    let (mut file, opened_bytes, mode) = open_regular_file_nofollow(root, relative).await?;
-    if opened_bytes > max_file_bytes {
-        anyhow::bail!("staging file exceeds {max_file_bytes} byte limit");
-    }
-    let capacity = usize::try_from(opened_bytes).context("staging file is too large to buffer")?;
-    let mut bytes = Vec::with_capacity(capacity);
-    file.read_to_end(&mut bytes).await?;
-    if u64::try_from(bytes.len())? != opened_bytes {
-        anyhow::bail!("staging file changed while reading: {}", path.display());
-    }
-    Ok(Some(StoredFileContents { bytes, mode }))
-}
-
-pub(crate) async fn remove_created_directories(created: &[PathBuf]) -> anyhow::Result<()> {
-    let mut errors = Vec::new();
-    for path in created.iter().rev() {
-        match tokio::fs::remove_dir(path).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
-            Err(error) => errors.push(format!("{}: {error}", path.display())),
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "failed to remove created staging directories: {}",
-            errors.join("; ")
-        )
-    }
-}
-
-#[cfg(unix)]
-pub(crate) async fn remove_regular_file_nofollow(
-    root: &Path,
-    relative: &Path,
-) -> anyhow::Result<()> {
-    use rustix::fs::{AtFlags, unlinkat};
-
-    let (parent, name) = open_parent_nofollow(root, relative)?;
-    match unlinkat(&parent, name, AtFlags::empty()) {
-        Ok(()) => Ok(()),
-        Err(rustix::io::Errno::NOENT) => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) async fn remove_regular_file_nofollow(
-    root: &Path,
-    relative: &Path,
-) -> anyhow::Result<()> {
-    let path = root.join(relative);
-    let canonical_root = tokio::fs::canonicalize(root).await?;
-    let canonical_parent =
-        tokio::fs::canonicalize(path.parent().context("staging file has no parent")?).await?;
-    if !canonical_parent.starts_with(&canonical_root) {
-        anyhow::bail!(
-            "staging file parent escapes revision root: {}",
-            path.display()
-        );
-    }
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
 }
 
 pub(crate) async fn make_tree_readonly(
@@ -642,7 +505,7 @@ fn safe_mode(metadata: &std::fs::Metadata, _directory: bool) -> u32 {
 }
 
 #[cfg(unix)]
-async fn open_regular_file_nofollow(
+pub(crate) async fn open_regular_file_nofollow(
     root: &Path,
     relative: &Path,
 ) -> anyhow::Result<(tokio::fs::File, u64, u32)> {
@@ -678,8 +541,20 @@ async fn open_regular_file_nofollow(
     ))
 }
 
-#[cfg(not(unix))]
-async fn open_regular_file_nofollow(
+#[cfg(windows)]
+pub(crate) async fn open_regular_file_nofollow(
+    root: &Path,
+    relative: &Path,
+) -> anyhow::Result<(tokio::fs::File, u64, u32)> {
+    canonical_relative_path(relative)?;
+    let (directory, _, _) = crate::skill_store_windows::open_directory_nofollow(root)?;
+    let (file, length) =
+        crate::skill_store_windows::open_regular_file_beneath(&directory, relative, false, false)?;
+    Ok((tokio::fs::File::from_std(file), length, 0o644))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(crate) async fn open_regular_file_nofollow(
     root: &Path,
     relative: &Path,
 ) -> anyhow::Result<(tokio::fs::File, u64, u32)> {
@@ -740,7 +615,20 @@ async fn create_regular_file_nofollow(
     Ok(tokio::fs::File::from_std(File::from(descriptor)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+async fn create_regular_file_nofollow(
+    root: &Path,
+    relative: &Path,
+    _mode: u32,
+) -> anyhow::Result<tokio::fs::File> {
+    canonical_relative_path(relative)?;
+    let (directory, _, _) = crate::skill_store_windows::open_directory_nofollow(root)?;
+    let (file, _) =
+        crate::skill_store_windows::open_regular_file_beneath(&directory, relative, true, true)?;
+    Ok(tokio::fs::File::from_std(file))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 async fn create_regular_file_nofollow(
     root: &Path,
     relative: &Path,
@@ -857,7 +745,18 @@ async fn set_mode_nofollow(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+async fn set_mode_nofollow(
+    root: &Path,
+    relative: Option<&Path>,
+    _mode: u32,
+    directory: bool,
+) -> anyhow::Result<()> {
+    let (root, _, _) = crate::skill_store_windows::open_directory_nofollow(root)?;
+    crate::skill_store_windows::validate_target_beneath(&root, relative, directory)
+}
+
+#[cfg(all(not(unix), not(windows)))]
 async fn set_mode_nofollow(
     root: &Path,
     relative: Option<&Path>,
@@ -867,7 +766,7 @@ async fn set_mode_nofollow(
     revalidate_mode_path(root, relative).await.map(|_| ())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 async fn revalidate_mode_path(root: &Path, relative: Option<&Path>) -> anyhow::Result<PathBuf> {
     let path = relative.map_or_else(|| root.to_path_buf(), |relative| root.join(relative));
     let canonical_root = tokio::fs::canonicalize(root).await?;
