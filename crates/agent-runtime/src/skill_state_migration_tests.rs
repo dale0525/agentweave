@@ -103,10 +103,25 @@ async fn failed_legacy_schema_upgrade_rolls_back_all_skill_ddl() {
     )
     .await;
     insert_legacy_installation(&pool, "com.example.calendar", None, 1, "active").await;
+    create_core_storage_tables(&pool).await;
+    let schema_before = user_schema(&pool).await;
     pool.close().await;
 
     assert!(Storage::connect(&url).await.is_err());
+    let pool = raw_pool(&url).await;
+    assert_eq!(user_schema(&pool).await, schema_before);
+    pool.close().await;
     assert_legacy_tables_intact(&url, 1, 1).await;
+}
+
+#[tokio::test]
+async fn legacy_migration_rejects_empty_revision_storage_path_and_rolls_back() {
+    assert_legacy_storage_path_rejected("").await;
+}
+
+#[tokio::test]
+async fn legacy_migration_rejects_whitespace_revision_storage_path_and_rolls_back() {
+    assert_legacy_storage_path_rejected("   ").await;
 }
 
 #[tokio::test]
@@ -227,6 +242,44 @@ async fn storage_connect_error(url: &str) -> String {
     }
 }
 
+async fn assert_legacy_storage_path_rejected(storage_path: &str) {
+    let (_directory, url) = file_database();
+    let pool = raw_pool(&url).await;
+    create_legacy_task6_tables(&pool).await;
+    let revision_id = Uuid::new_v4().to_string();
+    insert_legacy_revision_with_path(
+        &pool,
+        &revision_id,
+        "com.example.calendar",
+        storage_path,
+        "{}",
+        "{}",
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    pool.close().await;
+
+    let error = storage_connect_error(&url).await;
+    assert!(
+        error.contains(&format!("skill_revisions row {revision_id}")),
+        "{error}"
+    );
+    assert!(error.contains("storage path"), "{error}");
+    assert_legacy_tables_intact(&url, 1, 0).await;
+}
+
+async fn user_schema(pool: &SqlitePool) -> Vec<(String, String, String, Option<String>)> {
+    sqlx::query_as(
+        r#"SELECT type, name, tbl_name, sql
+           FROM sqlite_master
+           WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'
+           ORDER BY type, name"#,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
 async fn assert_legacy_tables_intact(url: &str, revisions: i64, installations: i64) {
     let pool = raw_pool(url).await;
     let lifecycle_column: i64 = sqlx::query_scalar(
@@ -301,6 +354,31 @@ async fn create_legacy_task6_tables(pool: &SqlitePool) {
     .unwrap();
 }
 
+async fn create_core_storage_tables(pool: &SqlitePool) {
+    for statement in [
+        r#"CREATE TABLE sessions (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )"#,
+        r#"CREATE TABLE runtime_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )"#,
+        r#"CREATE TABLE messages (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )"#,
+    ] {
+        sqlx::query(statement).execute(pool).await.unwrap();
+    }
+}
+
 async fn insert_legacy_revision(
     pool: &SqlitePool,
     revision_id: &str,
@@ -309,14 +387,36 @@ async fn insert_legacy_revision(
     validation_json: &str,
     created_at: &str,
 ) {
+    insert_legacy_revision_with_path(
+        pool,
+        revision_id,
+        package_id,
+        "managed/revision",
+        descriptor_json,
+        validation_json,
+        created_at,
+    )
+    .await;
+}
+
+async fn insert_legacy_revision_with_path(
+    pool: &SqlitePool,
+    revision_id: &str,
+    package_id: &str,
+    storage_path: &str,
+    descriptor_json: &str,
+    validation_json: &str,
+    created_at: &str,
+) {
     sqlx::query(
         r#"INSERT INTO skill_revisions
            (revision_id, package_id, version, content_hash, storage_path, descriptor_json,
             validation_json, created_by, created_at)
-           VALUES (?, ?, '1.0.0', 'hash', 'managed/revision', ?, ?, 'owner-1', ?)"#,
+           VALUES (?, ?, '1.0.0', 'hash', ?, ?, ?, 'owner-1', ?)"#,
     )
     .bind(revision_id)
     .bind(package_id)
+    .bind(storage_path)
     .bind(descriptor_json)
     .bind(validation_json)
     .bind(created_at)

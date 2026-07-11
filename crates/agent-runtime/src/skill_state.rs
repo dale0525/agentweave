@@ -2,7 +2,7 @@ use crate::skill_package::SkillPackageId;
 use crate::skill_state_rows::{
     APPROVAL_COLUMNS, AUDIT_COLUMNS, CIRCUIT_COLUMNS, INSTALLATION_COLUMNS, REVISION_COLUMNS,
     SNAPSHOT_COLUMNS, approval_from_row, audit_from_row, circuit_from_row, installation_from_row,
-    parse_json, revision_from_row, snapshot_from_row, validate_uuid_v4,
+    parse_json, revision_from_row, snapshot_from_row, validate_storage_path, validate_uuid_v4,
 };
 use crate::storage::Storage;
 use anyhow::Context;
@@ -552,79 +552,85 @@ impl SkillStateStore {
 
     pub async fn record_snapshot_activation(&self, generation: u64) -> anyhow::Result<()> {
         let generation = sqlite_generation(generation)?;
-        let mut tx = self.storage.pool().begin().await?;
-        let query = format!("SELECT {SNAPSHOT_COLUMNS} FROM skill_snapshots WHERE generation = ?");
-        let row = sqlx::query(&query)
+        let mut tx = crate::skill_state_transactions::begin_immediate(self.storage.pool()).await?;
+        let result = async {
+            let query =
+                format!("SELECT {SNAPSHOT_COLUMNS} FROM skill_snapshots WHERE generation = ?");
+            let row = sqlx::query(&query)
+                .bind(generation)
+                .fetch_optional(&mut *tx)
+                .await?
+                .with_context(|| format!("skill snapshot not found: {generation}"))?;
+            let target = snapshot_from_row(&row)?;
+            if matches!(
+                target.status,
+                SkillSnapshotStatus::Active | SkillSnapshotStatus::LastKnownGood
+            ) {
+                return Ok(());
+            }
+            sqlx::query(
+                "UPDATE skill_snapshots SET status = 'candidate' WHERE status = 'active' AND generation != ?",
+            )
             .bind(generation)
-            .fetch_optional(&mut *tx)
-            .await?
-            .with_context(|| format!("skill snapshot not found: {generation}"))?;
-        let target = snapshot_from_row(&row)?;
-        if matches!(
-            target.status,
-            SkillSnapshotStatus::Active | SkillSnapshotStatus::LastKnownGood
-        ) {
-            tx.commit().await?;
-            return Ok(());
+            .execute(&mut *tx)
+            .await?;
+            let updated = sqlx::query(
+                "UPDATE skill_snapshots SET status = 'active', activated_at = ? WHERE generation = ?",
+            )
+            .bind(Utc::now().to_rfc3339())
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
+            ensure_changed(
+                updated.rows_affected(),
+                "skill snapshot",
+                &generation.to_string(),
+            )?;
+            Ok(())
         }
-        sqlx::query(
-            "UPDATE skill_snapshots SET status = 'candidate' WHERE status = 'active' AND generation != ?",
-        )
-        .bind(generation)
-        .execute(&mut *tx)
-        .await?;
-        let result = sqlx::query(
-            "UPDATE skill_snapshots SET status = 'active', activated_at = ? WHERE generation = ?",
-        )
-        .bind(Utc::now().to_rfc3339())
-        .bind(generation)
-        .execute(&mut *tx)
-        .await?;
-        ensure_changed(
-            result.rows_affected(),
-            "skill snapshot",
-            &generation.to_string(),
-        )?;
-        tx.commit().await?;
-        Ok(())
+        .await;
+        crate::skill_state_transactions::finish(tx, result).await
     }
 
     pub async fn mark_snapshot_last_known_good(&self, generation: u64) -> anyhow::Result<()> {
         let generation = sqlite_generation(generation)?;
-        let mut tx = self.storage.pool().begin().await?;
-        let query = format!("SELECT {SNAPSHOT_COLUMNS} FROM skill_snapshots WHERE generation = ?");
-        let row = sqlx::query(&query)
-            .bind(generation)
-            .fetch_optional(&mut *tx)
-            .await?
-            .with_context(|| format!("skill snapshot not found: {generation}"))?;
-        let target = snapshot_from_row(&row)?;
-        if target.status == SkillSnapshotStatus::LastKnownGood {
-            tx.commit().await?;
-            return Ok(());
-        }
-        sqlx::query("UPDATE skill_snapshots SET status = 'candidate' WHERE generation = ?")
+        let mut tx = crate::skill_state_transactions::begin_immediate(self.storage.pool()).await?;
+        let result = async {
+            let query =
+                format!("SELECT {SNAPSHOT_COLUMNS} FROM skill_snapshots WHERE generation = ?");
+            let row = sqlx::query(&query)
+                .bind(generation)
+                .fetch_optional(&mut *tx)
+                .await?
+                .with_context(|| format!("skill snapshot not found: {generation}"))?;
+            let target = snapshot_from_row(&row)?;
+            match target.status {
+                SkillSnapshotStatus::LastKnownGood => return Ok(()),
+                SkillSnapshotStatus::Candidate => anyhow::bail!(
+                    "skill snapshot must be active before becoming last known good: {generation}"
+                ),
+                SkillSnapshotStatus::Active => {}
+            }
+            sqlx::query(
+                "UPDATE skill_snapshots SET status = 'candidate' WHERE status = 'last_known_good'",
+            )
+            .execute(&mut *tx)
+            .await?;
+            let updated = sqlx::query(
+                "UPDATE skill_snapshots SET status = 'last_known_good' WHERE generation = ? AND status = 'active'",
+            )
             .bind(generation)
             .execute(&mut *tx)
             .await?;
-        sqlx::query(
-            "UPDATE skill_snapshots SET status = 'candidate' WHERE status = 'last_known_good'",
-        )
-        .execute(&mut *tx)
-        .await?;
-        let result = sqlx::query(
-            "UPDATE skill_snapshots SET status = 'last_known_good' WHERE generation = ?",
-        )
-        .bind(generation)
-        .execute(&mut *tx)
-        .await?;
-        ensure_changed(
-            result.rows_affected(),
-            "skill snapshot",
-            &generation.to_string(),
-        )?;
-        tx.commit().await?;
-        Ok(())
+            ensure_changed(
+                updated.rows_affected(),
+                "active skill snapshot",
+                &generation.to_string(),
+            )?;
+            Ok(())
+        }
+        .await;
+        crate::skill_state_transactions::finish(tx, result).await
     }
 
     pub async fn get_circuit_state(
@@ -714,13 +720,6 @@ fn sqlite_generation(generation: u64) -> anyhow::Result<i64> {
 fn ensure_changed(rows: u64, entity: &str, id: &str) -> anyhow::Result<()> {
     if rows == 0 {
         anyhow::bail!("{entity} not found: {id}");
-    }
-    Ok(())
-}
-
-fn validate_storage_path(path: &str) -> anyhow::Result<()> {
-    if path.trim().is_empty() {
-        anyhow::bail!("revision storage path cannot be empty");
     }
     Ok(())
 }

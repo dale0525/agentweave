@@ -2,10 +2,22 @@ use crate::skill_package::SkillPackageId;
 use crate::skill_state::{SkillSnapshotStatus, SkillStateStore};
 use crate::storage::Storage;
 use serde_json::json;
+use std::sync::Arc;
+use std::time::Duration;
+use tempfile::TempDir;
+use tokio::sync::Barrier;
+use tokio::time::sleep;
 use uuid::Uuid;
 
 fn package_id(value: &str) -> SkillPackageId {
     SkillPackageId::parse(value).unwrap()
+}
+
+fn file_database() -> (TempDir, String) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("skill-state.db");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    (directory, url)
 }
 
 #[tokio::test]
@@ -53,6 +65,103 @@ async fn snapshot_active_and_last_known_good_sequence_is_stable_and_idempotent()
 }
 
 #[tokio::test]
+async fn candidate_snapshot_cannot_be_marked_last_known_good() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let state = SkillStateStore::new(storage);
+    state
+        .record_snapshot_candidate(1, json!(["one"]))
+        .await
+        .unwrap();
+    let before = state.get_snapshot(1).await.unwrap().unwrap();
+
+    let error = state.mark_snapshot_last_known_good(1).await.unwrap_err();
+
+    assert!(error.to_string().contains("must be active"), "{error:#}");
+    assert_eq!(state.get_snapshot(1).await.unwrap().unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_snapshot_activation_and_lkg_resolution_do_not_leak_sqlite_busy() {
+    let (_directory, url) = file_database();
+    let first_storage = Storage::connect(&url).await.unwrap();
+    let second_storage = Storage::connect(&url).await.unwrap();
+    let first = SkillStateStore::new(first_storage.clone());
+    let second = SkillStateStore::new(second_storage);
+    first
+        .record_snapshot_candidate(1, json!(["one"]))
+        .await
+        .unwrap();
+    first.record_snapshot_activation(1).await.unwrap();
+    first
+        .record_snapshot_candidate(2, json!(["two"]))
+        .await
+        .unwrap();
+
+    let mut lock = first_storage.pool().acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let activation_barrier = barrier.clone();
+    let activation = tokio::spawn(async move {
+        activation_barrier.wait().await;
+        first.record_snapshot_activation(2).await
+    });
+    let lkg_barrier = barrier.clone();
+    let lkg = tokio::spawn(async move {
+        lkg_barrier.wait().await;
+        second.mark_snapshot_last_known_good(1).await
+    });
+    barrier.wait().await;
+    sleep(Duration::from_millis(100)).await;
+    assert!(!activation.is_finished());
+    assert!(!lkg.is_finished());
+    sqlx::query("COMMIT").execute(&mut *lock).await.unwrap();
+    drop(lock);
+
+    let activation_result = activation.await.unwrap();
+    let lkg_result = lkg.await.unwrap();
+    assert!(activation_result.is_ok(), "{activation_result:?}");
+    if let Err(error) = &lkg_result {
+        let message = format!("{error:#}");
+        assert!(message.contains("must be active"), "{message}");
+        assert!(!message.contains("database is locked"));
+        assert!(!message.contains("SQLITE_BUSY"));
+    }
+
+    let verification_storage = first_storage.clone();
+    let state = SkillStateStore::new(first_storage);
+    let first_snapshot = state.get_snapshot(1).await.unwrap().unwrap();
+    let second_snapshot = state.get_snapshot(2).await.unwrap().unwrap();
+    assert_eq!(second_snapshot.status, SkillSnapshotStatus::Active);
+    assert_eq!(
+        first_snapshot.status,
+        if lkg_result.is_ok() {
+            SkillSnapshotStatus::LastKnownGood
+        } else {
+            SkillSnapshotStatus::Candidate
+        }
+    );
+    let statuses: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM skill_snapshots ORDER BY generation")
+            .fetch_all(verification_storage.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        statuses.iter().filter(|status| *status == "active").count(),
+        1
+    );
+    assert!(
+        statuses
+            .iter()
+            .filter(|status| *status == "last_known_good")
+            .count()
+            <= 1
+    );
+}
+
+#[tokio::test]
 async fn snapshot_activation_failure_rolls_back_all_status_changes() {
     let storage = Storage::connect("sqlite::memory:").await.unwrap();
     let state = SkillStateStore::new(storage.clone());
@@ -95,6 +204,7 @@ async fn public_reads_reject_corrupt_ids_packages_bools_json_and_timestamps() {
     let now = "2026-01-01T00:00:00Z";
     let valid_revision = Uuid::new_v4().to_string();
     let bad_package_revision = Uuid::new_v4().to_string();
+    let bad_path_revision = Uuid::new_v4().to_string();
     sqlx::query(
         r#"INSERT INTO skill_revisions
            (revision_id, package_id, version, content_hash, storage_path, descriptor_json,
@@ -116,8 +226,20 @@ async fn public_reads_reject_corrupt_ids_packages_bools_json_and_timestamps() {
     .execute(storage.pool())
     .await
     .unwrap();
+    sqlx::query(
+        r#"INSERT INTO skill_revisions
+           (revision_id, package_id, version, content_hash, storage_path, descriptor_json,
+            validation_json, created_by, created_at, lifecycle_status)
+           VALUES (?, 'com.example.calendar', '1.0.0', 'h3', '   ', '{}', '{}', 'o', ?, 'managed')"#,
+    )
+    .bind(&bad_path_revision)
+    .bind(now)
+    .execute(storage.pool())
+    .await
+    .unwrap();
     assert!(state.get_revision("bad-revision").await.is_err());
     assert!(state.get_revision(&bad_package_revision).await.is_err());
+    assert!(state.get_revision(&bad_path_revision).await.is_err());
 
     let mut connection = storage.pool().acquire().await.unwrap();
     sqlx::query("PRAGMA foreign_keys = OFF")

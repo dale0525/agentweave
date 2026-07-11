@@ -244,12 +244,14 @@ pub(crate) fn revision_from_row(row: &SqliteRow) -> anyhow::Result<SkillRevision
     let revision_id: String = row.try_get("revision_id")?;
     validate_uuid_v4("revision_id", &revision_id)?;
     let status: String = row.try_get("lifecycle_status")?;
+    let storage_path: String = row.try_get("storage_path")?;
+    validate_storage_path(&storage_path)?;
     Ok(SkillRevisionRecord {
         revision_id,
         package_id: parse_package_id(row, "package_id")?,
         version: row.try_get("version")?,
         content_hash: row.try_get("content_hash")?,
-        storage_path: row.try_get("storage_path")?,
+        storage_path,
         descriptor_json: parse_row_json(row, "descriptor_json")?,
         validation_json: parse_row_json(row, "validation_json")?,
         created_by: row.try_get("created_by")?,
@@ -340,6 +342,13 @@ pub(crate) fn validate_uuid_v4(field: &str, value: &str) -> anyhow::Result<()> {
     let parsed = Uuid::parse_str(value).with_context(|| format!("invalid UUID v4 in {field}"))?;
     if parsed.get_version() != Some(Version::Random) {
         anyhow::bail!("invalid UUID v4 in {field}: {value}");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_storage_path(path: &str) -> anyhow::Result<()> {
+    if path.trim().is_empty() {
+        anyhow::bail!("revision storage path cannot be empty");
     }
     Ok(())
 }
