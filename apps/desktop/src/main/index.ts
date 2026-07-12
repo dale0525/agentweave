@@ -5,6 +5,10 @@ export type DesktopWindowConfig = {
   preload: string;
   title: string;
   width: number;
+  webPreferences: {
+    contextIsolation: true;
+    nodeIntegration: false;
+  };
 };
 
 export const desktopWindowConfig: DesktopWindowConfig = {
@@ -14,7 +18,11 @@ export const desktopWindowConfig: DesktopWindowConfig = {
   // Electron hosts should point BrowserWindow at the compiled preload bundle.
   preload: "dist/preload/index.js",
   title: "GeneralAgent",
-  width: 1280
+  width: 1280,
+  webPreferences: {
+    contextIsolation: true,
+    nodeIntegration: false
+  }
 };
 
 export function getDesktopWindowConfig(): DesktopWindowConfig {

@@ -38,6 +38,98 @@ export type ModelConnectionTestResponse = {
   message: string;
 };
 
+export type OwnerSkillValidation = {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  requiredTools?: string[];
+  requiredConnectors?: string[];
+  dependencies?: string[];
+  requiredCapabilities?: string[];
+  permissionDiff?: unknown;
+  revisionId?: string;
+  snapshotGeneration?: number;
+};
+
+export type OwnerSkillRequirements = {
+  runtime_tools: string[];
+  capabilities: string[];
+  connectors: string[];
+  packages: string[];
+};
+
+export type OwnerSkillRevision = {
+  revision_id: string;
+  version: string;
+  status: string;
+  created_by: string;
+  created_at: string;
+  kind: string;
+  instructions: string;
+  validation: OwnerSkillValidation;
+  required_tools: string[];
+  required_capabilities: string[];
+  required_connectors?: string[];
+  dependencies?: string[];
+  permission_diff?: unknown;
+};
+
+export type OwnerSkillPackage = {
+  package_id: string;
+  display_name?: string;
+  version: string;
+  source_layer: string;
+  status: string;
+  reason: string;
+  active_revision_id: string | null;
+  kind?: string;
+  instructions?: string;
+  validation?: OwnerSkillValidation;
+  requirements?: OwnerSkillRequirements;
+  revisions?: OwnerSkillRevision[];
+};
+
+export type OwnerSkillInventory = {
+  effective: OwnerSkillPackage[];
+  managed: OwnerSkillPackage[];
+};
+
+export type OwnerSkillDraftSummary = {
+  package_id: string;
+  revision_id: string;
+  version: string;
+  kind: string;
+  validation: unknown;
+  status: string;
+};
+
+export type OwnerSkillApproval = {
+  approval_id: string;
+  package_id: string;
+  permission_diff: unknown;
+  requested_by: string;
+  revision_id: string;
+  status: string;
+};
+
+export type OwnerSkillMutationReport = {
+  status?: string;
+  active_generation?: number;
+  active_revision_id?: string;
+  generation?: number;
+};
+
+export type OwnerSkillAuditRecord = {
+  id: string;
+  actor_id: string;
+  operation: string;
+  package_id: string;
+  revision_id: string | null;
+  result: string;
+  metadata_json: Record<string, unknown>;
+  created_at: string;
+};
+
 export type DevSkillPackageKind =
   | "runtime"
   | "instruction"
