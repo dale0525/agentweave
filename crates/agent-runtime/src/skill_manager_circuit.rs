@@ -29,8 +29,13 @@ impl SkillManager {
                     .circuit_is_open(&revision_id, chrono::Utc::now())
                     .await?
                 {
-                    self.publish_circuit_snapshot_owned(&package_id, "open_skill_revision_circuit")
-                        .await?;
+                    self.publish_circuit_snapshot_owned(
+                        &package_id,
+                        &revision_id,
+                        "open_skill_revision_circuit",
+                        crate::skill_state_lifecycle::CircuitSnapshotTransition::Open,
+                    )
+                    .await?;
                     return Ok(());
                 }
             }
@@ -62,8 +67,13 @@ impl SkillManager {
             .circuit_is_open(&revision_id, chrono::Utc::now())
             .await?
         {
-            self.publish_circuit_snapshot_owned(&package_id, "expire_skill_revision_circuit")
-                .await?;
+            self.publish_circuit_snapshot_owned(
+                &package_id,
+                &revision_id,
+                "expire_skill_revision_circuit",
+                crate::skill_state_lifecycle::CircuitSnapshotTransition::Consume,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -106,13 +116,34 @@ impl SkillManager {
             .state
             .record_managed_execution_result(&package_id, &revision_id, success, chrono::Utc::now())
             .await?;
-        if update.is_some_and(|(_, opened)| opened) {
-            backend
-                .revisions
-                .checkpoint(crate::skill_store_faults::StoreFaultPoint::CircuitAfterStateTransition)
-                .await;
-            self.publish_circuit_snapshot(&package_id, "open_skill_revision_circuit")
-                .await?;
+        if let Some((_, transition)) = update {
+            match transition {
+                crate::skill_state_recovery::CircuitStateTransition::Opened => {
+                    backend
+                        .revisions
+                        .checkpoint(
+                            crate::skill_store_faults::StoreFaultPoint::CircuitAfterStateTransition,
+                        )
+                        .await;
+                    self.publish_circuit_snapshot(
+                        &package_id,
+                        &revision_id,
+                        "open_skill_revision_circuit",
+                        crate::skill_state_lifecycle::CircuitSnapshotTransition::Open,
+                    )
+                    .await?;
+                }
+                crate::skill_state_recovery::CircuitStateTransition::Closed => {
+                    self.publish_circuit_snapshot(
+                        &package_id,
+                        &revision_id,
+                        "close_skill_revision_circuit",
+                        crate::skill_state_lifecycle::CircuitSnapshotTransition::Consume,
+                    )
+                    .await?;
+                }
+                crate::skill_state_recovery::CircuitStateTransition::None => {}
+            }
         }
         Ok(())
     }
@@ -120,13 +151,16 @@ impl SkillManager {
     async fn publish_circuit_snapshot_owned(
         &self,
         package_id: &SkillPackageId,
+        revision_id: &str,
         operation: &'static str,
+        transition: crate::skill_state_lifecycle::CircuitSnapshotTransition,
     ) -> anyhow::Result<()> {
         let manager = self.clone();
         let package_id = package_id.clone();
+        let revision_id = revision_id.to_string();
         tokio::spawn(async move {
             manager
-                .publish_circuit_snapshot(&package_id, operation)
+                .publish_circuit_snapshot(&package_id, &revision_id, operation, transition)
                 .await
         })
         .await
@@ -136,7 +170,9 @@ impl SkillManager {
     async fn publish_circuit_snapshot(
         &self,
         package_id: &SkillPackageId,
+        revision_id: &str,
         operation: &'static str,
+        transition: crate::skill_state_lifecycle::CircuitSnapshotTransition,
     ) -> anyhow::Result<()> {
         let publication = self.begin_publication().await?;
         let backend = self.managed_runtime()?;
@@ -162,6 +198,8 @@ impl SkillManager {
                     ),
                     generation,
                     members: crate::skill_recovery::snapshot_members(&candidate),
+                    revision_id,
+                    circuit_transition: transition,
                 },
             )
             .await;
@@ -200,47 +238,75 @@ impl SkillManager {
     }
 }
 
-pub(super) async fn expired_circuit_recovery_candidate(
+pub(super) struct CircuitRecoveryCandidate {
+    pub(super) snapshot: Arc<SkillSnapshot>,
+    pub(super) package_id: SkillPackageId,
+    pub(super) revision_id: String,
+    pub(super) transition: crate::skill_state_lifecycle::CircuitSnapshotTransition,
+}
+
+pub(super) async fn circuit_recovery_candidate(
     config: &SkillManagerConfig,
     active: &crate::skill_state::SkillSnapshotRecord,
     backend: &ManagedRuntimeBackend,
-) -> anyhow::Result<Option<Arc<SkillSnapshot>>> {
+) -> anyhow::Result<Option<CircuitRecoveryCandidate>> {
     let persisted = crate::skill_recovery::parse_snapshot_members(active.members_json.clone())?;
     let now = chrono::Utc::now();
-    let mut has_expired_omission = false;
+    let mut recovery = None;
     for installation in backend.state.list_active_installations().await? {
-        if installation.source_layer != crate::skill_state::SkillLayerRecord::Managed
-            || persisted
-                .iter()
-                .any(|member| member.package_id == installation.package_id.as_str())
-        {
+        if installation.source_layer != crate::skill_state::SkillLayerRecord::Managed {
             continue;
         }
         let Some(revision_id) = installation.active_revision_id.as_deref() else {
             continue;
         };
-        if backend
-            .state
-            .get_circuit_state(revision_id)
-            .await?
-            .and_then(|state| state.open_until)
-            .is_some_and(|deadline| deadline <= now)
+        let persisted_member = persisted.iter().any(|member| {
+            member.package_id == installation.package_id.as_str()
+                && member.revision_id.as_deref() == Some(revision_id)
+        });
+        let open = backend.state.circuit_is_open(revision_id, now).await?;
+        let omission = backend.state.circuit_omission(revision_id).await?;
+        if persisted_member && open {
+            recovery = Some((
+                installation.package_id,
+                revision_id.to_string(),
+                crate::skill_state_lifecycle::CircuitSnapshotTransition::Open,
+            ));
+            break;
+        }
+        if !persisted_member
+            && !open
+            && omission.as_ref().is_some_and(|record| {
+                !record.consumed
+                    && record.package_id == installation.package_id
+                    && record.revision_id == revision_id
+            })
         {
-            has_expired_omission = true;
+            recovery = Some((
+                installation.package_id,
+                revision_id.to_string(),
+                crate::skill_state_lifecycle::CircuitSnapshotTransition::Consume,
+            ));
             break;
         }
     }
-    if !has_expired_omission {
+    let Some((package_id, revision_id, transition)) = recovery else {
         return Ok(None);
-    }
+    };
     let packages = discover_packages_read_only(config).await?;
     let generation = active
         .generation
         .checked_add(1)
         .context("skill snapshot generation overflow")?;
-    Ok(Some(Arc::new(
-        build_snapshot_from_packages_with_circuits(config, generation, packages, backend).await?,
-    )))
+    Ok(Some(CircuitRecoveryCandidate {
+        snapshot: Arc::new(
+            build_snapshot_from_packages_with_circuits(config, generation, packages, backend)
+                .await?,
+        ),
+        package_id,
+        revision_id,
+        transition,
+    }))
 }
 
 pub(super) async fn rebuild_persisted_snapshot_with_circuits(
@@ -265,10 +331,7 @@ pub(super) async fn rebuild_persisted_snapshot_with_circuits(
             .and_then(|content| content.execution_binding.as_ref())
             .map(|binding| binding.revision_id.as_str());
         if let Some(revision_id) = open
-            && backend
-                .state
-                .circuit_is_open(revision_id, chrono::Utc::now())
-                .await?
+            && backend.state.circuit_omission(revision_id).await?.is_some()
         {
             packages.push(package);
         }

@@ -111,6 +111,19 @@ async fn create_supporting_tables(tx: &mut Transaction<'_, Sqlite>) -> anyhow::R
           open_until TEXT,
           updated_at TEXT NOT NULL
         )"#,
+        r#"CREATE TABLE IF NOT EXISTS skill_circuit_omissions (
+          revision_id TEXT PRIMARY KEY,
+          package_id TEXT NOT NULL,
+          omitted_generation INTEGER NOT NULL CHECK(omitted_generation >= 0),
+          consumed_generation INTEGER CHECK(consumed_generation >= omitted_generation),
+          created_at TEXT NOT NULL,
+          consumed_at TEXT,
+          CHECK(
+            (consumed_generation IS NULL AND consumed_at IS NULL)
+            OR (consumed_generation IS NOT NULL AND consumed_at IS NOT NULL)
+          ),
+          FOREIGN KEY(revision_id) REFERENCES skill_revisions(revision_id) ON DELETE CASCADE
+        )"#,
         r#"CREATE TABLE IF NOT EXISTS skill_revision_retention (
           revision_id TEXT PRIMARY KEY,
           package_id TEXT NOT NULL,

@@ -229,6 +229,7 @@ where
                     SkillGrant::Inspect,
                     SkillGrant::Activate,
                     SkillGrant::Rollback,
+                    SkillGrant::DeleteManaged,
                 ],
             )),
         )
@@ -548,6 +549,7 @@ mod tests {
                 SkillGrant::Inspect,
                 SkillGrant::Activate,
                 SkillGrant::Rollback,
+                SkillGrant::DeleteManaged,
             ]
             .into_iter()
             .collect()

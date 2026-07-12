@@ -80,6 +80,8 @@ mod skill_recovery_review_lifecycle_tests;
 #[cfg(test)]
 mod skill_recovery_review_runtime_tests;
 #[cfg(test)]
+mod skill_recovery_terminal_authority_tests;
+#[cfg(test)]
 mod skill_recovery_terminal_tests;
 #[cfg(test)]
 mod skill_recovery_tests;

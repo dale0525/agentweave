@@ -527,6 +527,7 @@ async fn skill_state_migration_is_idempotent_with_foreign_keys_enabled() {
             "skill_approvals",
             "skill_audit_log",
             "skill_circuit_state",
+            "skill_circuit_omissions",
             "skill_installations",
             "skill_maintenance_diagnostics",
             "skill_revision_cleanup",

@@ -9,6 +9,27 @@ use crate::skill_state_rows::{
 };
 use chrono::{DateTime, Duration, Utc};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InitialSnapshotPersistence {
+    Inserted,
+    ExistingExact,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CircuitStateTransition {
+    None,
+    Opened,
+    Closed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CircuitOmissionRecord {
+    pub revision_id: String,
+    pub package_id: SkillPackageId,
+    pub omitted_generation: u64,
+    pub consumed: bool,
+}
+
 impl SkillStateStore {
     pub(crate) async fn snapshot_with_status(
         &self,
@@ -29,37 +50,45 @@ impl SkillStateStore {
         &self,
         generation: u64,
         members: &serde_json::Value,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<InitialSnapshotPersistence> {
         let generation = i64::try_from(generation)?;
+        let members_json = serde_json::to_string(members)?;
         let now = Utc::now().to_rfc3339();
         let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
         let result = async {
-            let active: Option<i64> = sqlx::query_scalar(
-                "SELECT generation FROM skill_snapshots WHERE status = 'active'",
+            let active: Option<(i64, String)> = sqlx::query_as(
+                "SELECT generation, members_json FROM skill_snapshots WHERE status = 'active'",
             )
             .fetch_optional(&mut *tx)
             .await?;
-            if let Some(active) = active {
-                if active == generation {
-                    return Ok(());
+            if let Some((active_generation, active_members)) = active {
+                if active_generation == generation
+                    && serde_json::from_str::<serde_json::Value>(&active_members)? == *members
+                {
+                    return Ok(InitialSnapshotPersistence::ExistingExact);
                 }
                 return Err(state_conflict("an active skill snapshot already exists"));
+            }
+            let existing: Option<String> =
+                sqlx::query_scalar("SELECT status FROM skill_snapshots WHERE generation = ?")
+                    .bind(generation)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if existing.is_some() {
+                return Err(state_conflict("initial snapshot generation already exists"));
             }
             sqlx::query(
                 r#"INSERT INTO skill_snapshots
                    (generation, status, members_json, created_at, activated_at)
-                   VALUES (?, 'active', ?, ?, ?)
-                   ON CONFLICT(generation) DO UPDATE SET
-                     status = 'active', members_json = excluded.members_json,
-                     activated_at = excluded.activated_at"#,
+                   VALUES (?, 'active', ?, ?, ?)"#,
             )
             .bind(generation)
-            .bind(serde_json::to_string(members)?)
+            .bind(&members_json)
             .bind(&now)
             .bind(&now)
             .execute(&mut *tx)
             .await?;
-            Ok(())
+            Ok(InitialSnapshotPersistence::Inserted)
         }
         .await;
         crate::skill_state_transactions::finish(tx, result).await
@@ -238,7 +267,7 @@ impl SkillStateStore {
         revision_id: &str,
         success: bool,
         now: DateTime<Utc>,
-    ) -> anyhow::Result<Option<(SkillCircuitStateRecord, bool)>> {
+    ) -> anyhow::Result<Option<(SkillCircuitStateRecord, CircuitStateTransition)>> {
         let Some(revision) = self.get_revision(revision_id).await? else {
             return Ok(None);
         };
@@ -260,6 +289,9 @@ impl SkillStateStore {
                 .as_ref()
                 .and_then(|state| state.open_until)
                 .is_some_and(|deadline| deadline > now);
+            let had_open_transition = existing
+                .as_ref()
+                .is_some_and(|state| state.open_until.is_some());
             let (failures, open_until) = if success {
                 (0_u64, None)
             } else if let Some(existing) = &existing {
@@ -300,7 +332,14 @@ impl SkillStateStore {
                 .await?;
             let state = circuit_from_row(&row)?;
             let opened = !was_open && state.open_until.is_some_and(|deadline| deadline > now);
-            Ok(Some((state, opened)))
+            let transition = if opened {
+                CircuitStateTransition::Opened
+            } else if success && had_open_transition {
+                CircuitStateTransition::Closed
+            } else {
+                CircuitStateTransition::None
+            };
+            Ok(Some((state, transition)))
         }
         .await;
         crate::skill_state_transactions::finish(tx, result).await
@@ -322,6 +361,31 @@ impl SkillStateStore {
             .map(|value| Ok(DateTime::parse_from_rfc3339(&value)?.with_timezone(&Utc) > now))
             .transpose()
             .map(|value| value.unwrap_or(false))
+    }
+
+    pub(crate) async fn circuit_omission(
+        &self,
+        revision_id: &str,
+    ) -> anyhow::Result<Option<CircuitOmissionRecord>> {
+        crate::skill_state::validate_revision_id(revision_id)?;
+        let row: Option<(String, String, i64, Option<i64>)> = sqlx::query_as(
+            r#"SELECT revision_id, package_id, omitted_generation, consumed_generation
+               FROM skill_circuit_omissions WHERE revision_id = ?"#,
+        )
+        .bind(revision_id)
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(
+            |(revision_id, package_id, omitted_generation, consumed_generation)| {
+                Ok(CircuitOmissionRecord {
+                    revision_id,
+                    package_id: SkillPackageId::parse(&package_id)?,
+                    omitted_generation: u64::try_from(omitted_generation)?,
+                    consumed: consumed_generation.is_some(),
+                })
+            },
+        )
+        .transpose()
     }
 }
 

@@ -237,72 +237,132 @@ impl SkillManager {
     ) -> anyhow::Result<crate::skill_recovery::SkillRecoveryReport> {
         let _guard = self.inner.reload_lock.lock().await;
         let backend = self.managed_runtime()?;
-        let mut maintenance_diagnostics = crate::skill_recovery::reconcile_startup_residue(
-            &backend,
-            self.current_snapshot().generation(),
-        )
-        .await?;
         let last_good_record = backend
             .state
             .snapshot_with_status(crate::skill_state::SkillSnapshotStatus::LastKnownGood)
             .await?;
         let last_good = if let Some(record) = &last_good_record {
-            match self.rebuild_persisted_snapshot(&backend, record).await {
-                Ok(snapshot) => Some(snapshot),
-                Err(_) => {
-                    let key = format!("invalid-lkg:{}:rebuild", record.generation);
-                    backend
-                        .state
-                        .record_maintenance_diagnostic_once(
-                            &key,
-                            None,
-                            "snapshot",
-                            "invalid_last_known_good_snapshot",
-                            serde_json::json!({
-                                "generation": record.generation,
-                                "phase": "rebuild"
-                            }),
-                        )
-                        .await?;
-                    maintenance_diagnostics += 1;
-                    None
-                }
-            }
+            self.verify_persisted_snapshot(&backend, record).await.ok()
         } else {
             None
         };
-
         let active_record = backend
             .state
             .snapshot_with_status(crate::skill_state::SkillSnapshotStatus::Active)
             .await?;
+        let active_verified = if let Some(record) = &active_record {
+            self.verify_persisted_snapshot(&backend, record).await.ok()
+        } else {
+            None
+        };
+        let initial_candidate = if active_record.is_none() && last_good_record.is_none() {
+            let SkillManagerMode::Dynamic(config) = &self.inner.mode else {
+                unreachable!("managed runtime cannot be bound to a static manager")
+            };
+            Some(Arc::new(
+                build_snapshot_with_runtime(
+                    config,
+                    self.current_snapshot().generation(),
+                    Some(&backend),
+                )
+                .await?,
+            ))
+        } else {
+            None
+        };
+        if last_good.is_none() && active_verified.is_none() && initial_candidate.is_none() {
+            return Err(
+                crate::skill_state::SkillStateBoundaryError::Conflict(anyhow::anyhow!(
+                    "managed startup has no verified snapshot authority"
+                ))
+                .into(),
+            );
+        }
+        if let Some(snapshot) = &last_good {
+            *self
+                .inner
+                .current
+                .write()
+                .expect("skill snapshot lock poisoned") = snapshot.clone();
+        }
+        backend
+            .revisions
+            .checkpoint(
+                crate::skill_store_faults::StoreFaultPoint::RecoveryBeforeFirstManagedMutation,
+            )
+            .await;
+        let mut maintenance_diagnostics = 0;
+        if let Some(record) = &last_good_record
+            && last_good.is_none()
+        {
+            let key = format!("invalid-lkg:{}:rebuild", record.generation);
+            backend
+                .state
+                .record_maintenance_diagnostic_once(
+                    &key,
+                    None,
+                    "snapshot",
+                    "invalid_last_known_good_snapshot",
+                    serde_json::json!({
+                        "generation": record.generation,
+                        "phase": "rebuild"
+                    }),
+                )
+                .await?;
+            maintenance_diagnostics += 1;
+        }
+        let authority_generation = active_verified
+            .as_ref()
+            .or(last_good.as_ref())
+            .or(initial_candidate.as_ref())
+            .expect("verified startup authority checked above")
+            .generation();
+        maintenance_diagnostics +=
+            crate::skill_recovery::reconcile_startup_residue(&backend, authority_generation)
+                .await?;
+
         if let Some(record) = &active_record {
-            if let Some(candidate) =
-                circuit::expired_circuit_recovery_candidate(config_for(self)?, record, &backend)
-                    .await?
+            if let Some(recovery) =
+                circuit::circuit_recovery_candidate(config_for(self)?, record, &backend).await?
             {
+                let operation = match recovery.transition {
+                    crate::skill_state_lifecycle::CircuitSnapshotTransition::Open => {
+                        "recover_open_skill_revision_circuit"
+                    }
+                    crate::skill_state_lifecycle::CircuitSnapshotTransition::Consume => {
+                        "recover_closed_skill_revision_circuit"
+                    }
+                };
                 backend
                     .state
-                    .persist_recovery_candidate(
-                        record,
-                        candidate.generation(),
-                        &crate::skill_recovery::snapshot_members(&candidate),
+                    .commit_exact_snapshot_publication(
+                        crate::skill_state_lifecycle::ExactSnapshotPublication {
+                            actor_id: "system-recovery",
+                            operation,
+                            package_id: &recovery.package_id,
+                            previous_generation: record.generation,
+                            previous_members: record.members_json.clone(),
+                            generation: recovery.snapshot.generation(),
+                            members: crate::skill_recovery::snapshot_members(&recovery.snapshot),
+                            revision_id: &recovery.revision_id,
+                            circuit_transition: recovery.transition,
+                        },
                     )
                     .await?;
                 *self
                     .inner
                     .current
                     .write()
-                    .expect("skill snapshot lock poisoned") = candidate.clone();
+                    .expect("skill snapshot lock poisoned") = recovery.snapshot.clone();
                 let _ = backend
                     .events
                     .send(crate::events::RuntimeEvent::SkillRecoveryCompleted {
                         status: crate::skill_recovery::RecoveryStatus::NewSnapshotPublished,
-                        generation: candidate.generation(),
+                        generation: recovery.snapshot.generation(),
                     });
                 return Ok(crate::skill_recovery::SkillRecoveryReport {
                     status: crate::skill_recovery::RecoveryStatus::NewSnapshotPublished,
-                    generation: candidate.generation(),
+                    generation: recovery.snapshot.generation(),
                     quarantined_revisions: Vec::new(),
                     maintenance_diagnostics,
                 });
@@ -414,19 +474,60 @@ impl SkillManager {
             }
         }
 
-        let SkillManagerMode::Dynamic(config) = &self.inner.mode else {
-            unreachable!("managed runtime cannot be bound to a static manager")
-        };
-        let generation = self.current_snapshot().generation();
-        let candidate =
-            Arc::new(build_snapshot_with_runtime(config, generation, Some(&backend)).await?);
+        let candidate = initial_candidate.context("initial snapshot authority is unavailable")?;
         backend
+            .revisions
+            .checkpoint(
+                crate::skill_store_faults::StoreFaultPoint::RecoveryBeforeInitialPublication,
+            )
+            .await;
+        let persistence = backend
             .state
             .persist_initial_active_snapshot(
                 candidate.generation(),
                 &crate::skill_recovery::snapshot_members(&candidate),
             )
-            .await?;
+            .await;
+        let inserted = match persistence {
+            Ok(crate::skill_state_recovery::InitialSnapshotPersistence::Inserted) => true,
+            Ok(crate::skill_state_recovery::InitialSnapshotPersistence::ExistingExact) => false,
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<crate::skill_state::SkillStateBoundaryError>(),
+                    Some(crate::skill_state::SkillStateBoundaryError::Conflict(_))
+                ) =>
+            {
+                false
+            }
+            Err(error) => return Err(error),
+        };
+        if !inserted {
+            let authoritative = backend
+                .state
+                .snapshot_with_status(crate::skill_state::SkillSnapshotStatus::Active)
+                .await?
+                .context("authoritative initial snapshot is missing")?;
+            let snapshot = self
+                .rebuild_persisted_snapshot(&backend, &authoritative)
+                .await?;
+            *self
+                .inner
+                .current
+                .write()
+                .expect("skill snapshot lock poisoned") = snapshot.clone();
+            let _ = backend
+                .events
+                .send(crate::events::RuntimeEvent::SkillRecoveryCompleted {
+                    status: crate::skill_recovery::RecoveryStatus::CurrentSnapshotValid,
+                    generation: snapshot.generation(),
+                });
+            return Ok(crate::skill_recovery::SkillRecoveryReport {
+                status: crate::skill_recovery::RecoveryStatus::CurrentSnapshotValid,
+                generation: snapshot.generation(),
+                quarantined_revisions: Vec::new(),
+                maintenance_diagnostics,
+            });
+        }
         *self
             .inner
             .current
@@ -444,71 +545,6 @@ impl SkillManager {
             quarantined_revisions: Vec::new(),
             maintenance_diagnostics,
         })
-    }
-
-    async fn rebuild_persisted_snapshot(
-        &self,
-        backend: &ManagedRuntimeBackend,
-        record: &crate::skill_state::SkillSnapshotRecord,
-    ) -> anyhow::Result<Arc<SkillSnapshot>> {
-        let SkillManagerMode::Dynamic(config) = &self.inner.mode else {
-            anyhow::bail!("static skill manager cannot rebuild managed snapshots");
-        };
-        let members = crate::skill_recovery::parse_snapshot_members(record.members_json.clone())?;
-        let mut non_managed = discover_non_managed_packages_read_only(config).await?;
-        let managed_source =
-            crate::skill_source::ManagedSkillSource::from_store(backend.revisions.clone());
-        let mut packages = Vec::with_capacity(members.len());
-        for member in &members {
-            let package_id = SkillPackageId::parse(&member.package_id)?;
-            let package = if member.layer == "managed" {
-                let revision_id = member
-                    .revision_id
-                    .as_deref()
-                    .context("managed snapshot member has no revision id")?;
-                managed_source
-                    .load_managed_revision(&package_id, revision_id)
-                    .await?
-            } else {
-                let layer = match member.layer.as_str() {
-                    "builtin" => SkillLayer::Builtin,
-                    "session" => SkillLayer::Session,
-                    _ => anyhow::bail!("invalid persisted snapshot layer"),
-                };
-                let index = non_managed
-                    .iter()
-                    .position(|package| {
-                        package.layer == layer && package.descriptor.id == package_id
-                    })
-                    .context("persisted non-managed snapshot member is unavailable")?;
-                non_managed.swap_remove(index)
-            };
-            if package.descriptor.version.to_string() != member.version
-                || package.content_hash != member.content_hash
-                || package.descriptor.id != package_id
-            {
-                anyhow::bail!("persisted snapshot member verification failed");
-            }
-            packages.push(package);
-        }
-        let verified =
-            build_snapshot_from_packages(config, record.generation, packages.clone()).await?;
-        if crate::skill_recovery::snapshot_members(&verified) != record.members_json {
-            anyhow::bail!("persisted snapshot resolution does not match its members");
-        }
-        let snapshot = Arc::new(
-            circuit::rebuild_persisted_snapshot_with_circuits(
-                config,
-                record.generation,
-                packages,
-                backend,
-            )
-            .await?,
-        );
-        if crate::skill_recovery::snapshot_members(&snapshot) != record.members_json {
-            anyhow::bail!("persisted snapshot resolution does not match its members");
-        }
-        Ok(snapshot)
     }
 
     pub fn runtime_context(&self) -> Option<&SkillRuntimeContext> {

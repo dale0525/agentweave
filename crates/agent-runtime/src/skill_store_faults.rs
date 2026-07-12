@@ -57,6 +57,8 @@ pub(crate) enum StoreFaultPoint {
     LifecycleAfterDurableCommit,
     CircuitAfterDurableCommit,
     CircuitAfterStateTransition,
+    RecoveryBeforeFirstManagedMutation,
+    RecoveryBeforeInitialPublication,
     RecoveryBeforeQuarantine,
     ActivationRequestAfterCommit,
     ActivationRequestBeforeCommit,

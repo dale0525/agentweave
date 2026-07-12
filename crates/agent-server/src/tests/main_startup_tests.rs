@@ -89,7 +89,7 @@ fn test_owner_host() -> OwnerHostConfig {
 }
 
 #[tokio::test]
-async fn environment_owner_mounts_all_task11_lifecycle_routes() {
+async fn production_owner_requests_removal_and_distinct_approver_resolves_it() {
     let root = unique_test_dir("owner-lifecycle-routes-skills");
     tokio::fs::create_dir_all(&root).await.unwrap();
     let app_root = unique_test_dir("owner-lifecycle-routes-app");
@@ -105,6 +105,23 @@ async fn environment_owner_mounts_all_task11_lifecycle_routes() {
     )
     .await
     .unwrap();
+    let store = loaded.managed_store.clone().unwrap();
+    let source = unique_test_dir("owner-removal-source");
+    write_instruction_package(&source, "com.example.production-removal").await;
+    let revision = store
+        .create_staging_revision(&source, "local-owner")
+        .await
+        .unwrap();
+    let revision = store.promote_revision(&revision.revision_id).await.unwrap();
+    SkillStateStore::new(storage.clone())
+        .activate_revision(
+            &SkillPackageId::parse("com.example.production-removal").unwrap(),
+            &revision.revision_id,
+            SkillLayerRecord::Managed,
+            "local-owner",
+        )
+        .await
+        .unwrap();
     let owner = build_owner_api_config(
         Some(test_owner_host()),
         &loaded,
@@ -115,7 +132,7 @@ async fn environment_owner_mounts_all_task11_lifecycle_routes() {
     .unwrap()
     .unwrap();
     let state = Arc::new(api::AppState::new_with_model_skill_manager_and_owner(
-        storage,
+        storage.clone(),
         CapturingModel {
             tool_names: Arc::new(Mutex::new(Vec::new())),
         },
@@ -124,28 +141,50 @@ async fn environment_owner_mounts_all_task11_lifecycle_routes() {
         owner,
     ));
     let app = api::router(state);
-    for uri in [
-        "/owner/skills/com.example.missing/rollback",
-        "/owner/skills/com.example.missing/disable",
-        "/owner/skills/com.example.missing",
-    ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(uri)
-                    .header("authorization", "Bearer owner-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+    let requested = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/owner/skills/com.example.production-removal")
+                .header("authorization", "Bearer owner-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(requested.status(), StatusCode::ACCEPTED);
+    let body = axum::body::to_bytes(requested.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let approval: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let approval_id = approval["approval_id"].as_str().unwrap();
+    let approved = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/owner/skills/approvals/{approval_id}"))
+                .header("authorization", "Bearer approver-token")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"decision":"approve"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+    assert_eq!(
+        SkillStateStore::new(storage)
+            .get_installation(&SkillPackageId::parse("com.example.production-removal").unwrap())
             .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{uri}");
-    }
+            .unwrap()
+            .unwrap()
+            .status,
+        agent_runtime::skill_state::SkillInstallStatus::Removed
+    );
     remove_test_dir(root).await;
     remove_test_dir(app_root).await;
     remove_test_dir(cache_root).await;
+    remove_test_dir(source).await;
 }
 
 #[tokio::test]

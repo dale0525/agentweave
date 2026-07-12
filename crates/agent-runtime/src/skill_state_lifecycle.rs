@@ -42,6 +42,14 @@ pub(crate) struct ExactSnapshotPublication<'a> {
     pub previous_members: serde_json::Value,
     pub generation: u64,
     pub members: serde_json::Value,
+    pub revision_id: &'a str,
+    pub circuit_transition: CircuitSnapshotTransition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CircuitSnapshotTransition {
+    Open,
+    Consume,
 }
 
 impl SkillStateStore {
@@ -63,12 +71,21 @@ impl SkillStateStore {
                 &now,
             )
             .await?;
+            persist_circuit_omission_transition(
+                &mut tx,
+                input.package_id,
+                input.revision_id,
+                generation,
+                input.circuit_transition,
+                &now,
+            )
+            .await?;
             crate::skill_state::insert_audit(
                 &mut *tx,
                 input.actor_id,
                 input.operation,
                 input.package_id,
-                None,
+                Some(input.revision_id),
                 "ok",
                 serde_json::json!({"generation": generation}),
             )
@@ -337,6 +354,75 @@ impl SkillStateStore {
         .await;
         crate::skill_state_transactions::finish(tx, result).await
     }
+}
+
+async fn persist_circuit_omission_transition(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    package_id: &SkillPackageId,
+    revision_id: &str,
+    generation: i64,
+    transition: CircuitSnapshotTransition,
+    now: &str,
+) -> anyhow::Result<()> {
+    let revision: Option<(String, String)> = sqlx::query_as(
+        "SELECT package_id, lifecycle_status FROM skill_revisions WHERE revision_id = ?",
+    )
+    .bind(revision_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if revision.as_ref() != Some(&(package_id.as_str().to_string(), "managed".into())) {
+        return Err(state_conflict("circuit omission revision identity changed"));
+    }
+    match transition {
+        CircuitSnapshotTransition::Open => {
+            let existing: Option<Option<i64>> = sqlx::query_scalar(
+                "SELECT consumed_generation FROM skill_circuit_omissions WHERE revision_id = ?",
+            )
+            .bind(revision_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            if matches!(existing, Some(None)) {
+                return Err(state_conflict("circuit omission is already pending"));
+            }
+            sqlx::query(
+                r#"INSERT INTO skill_circuit_omissions
+                   (revision_id, package_id, omitted_generation, consumed_generation,
+                    created_at, consumed_at)
+                   VALUES (?, ?, ?, NULL, ?, NULL)
+                   ON CONFLICT(revision_id) DO UPDATE SET
+                     package_id = excluded.package_id,
+                     omitted_generation = excluded.omitted_generation,
+                     consumed_generation = NULL,
+                     created_at = excluded.created_at,
+                     consumed_at = NULL"#,
+            )
+            .bind(revision_id)
+            .bind(package_id.as_str())
+            .bind(generation)
+            .bind(now)
+            .execute(&mut **tx)
+            .await?;
+        }
+        CircuitSnapshotTransition::Consume => {
+            let consumed = sqlx::query(
+                r#"UPDATE skill_circuit_omissions
+                   SET consumed_generation = ?, consumed_at = ?
+                   WHERE revision_id = ? AND package_id = ?
+                     AND consumed_generation IS NULL AND omitted_generation < ?"#,
+            )
+            .bind(generation)
+            .bind(now)
+            .bind(revision_id)
+            .bind(package_id.as_str())
+            .bind(generation)
+            .execute(&mut **tx)
+            .await?;
+            if consumed.rows_affected() != 1 {
+                return Err(state_conflict("circuit omission is not pending"));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn persist_snapshot_transition(

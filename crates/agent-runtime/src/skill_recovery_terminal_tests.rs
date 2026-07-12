@@ -1,9 +1,9 @@
 use crate::platform::{CapabilitySet, PlatformId};
-use crate::skill_authoring_tests::AuthoringFixture;
+use crate::skill_authoring_tests::{AuthoringFixture, update, write_package};
 use crate::skill_management::OwnerSkillManagementService;
 use crate::skill_manager::{SkillManager, SkillManagerConfig};
-use crate::skill_policy::SkillManagementPolicy;
-use crate::skill_recovery::{parse_snapshot_members, snapshot_members};
+use crate::skill_policy::{ActorContext, SkillGrant, SkillManagementPolicy};
+use crate::skill_recovery::{RecoveryStatus, parse_snapshot_members, snapshot_members};
 use crate::skill_recovery_tests::activate_new_revision;
 use crate::skill_source::{ManagedSkillSource, SkillSource};
 use crate::skill_state::{SkillSnapshotStatus, SkillStateBoundaryError};
@@ -11,6 +11,122 @@ use crate::skill_store::{SkillStoreFaultPoint, SkillStoreTestFaults};
 use crate::tools::ToolSource;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
+
+#[tokio::test]
+async fn initial_active_snapshot_rejects_different_same_generation_members() {
+    let fixture = AuthoringFixture::with_faults(SkillStoreTestFaults::default()).await;
+    let second = fixture.second_state_connection().await;
+    let first_members = serde_json::json!([{"packageId": "com.example.first"}]);
+    let second_members = serde_json::json!([{"packageId": "com.example.second"}]);
+    fixture
+        .state
+        .persist_initial_active_snapshot(1, &first_members)
+        .await
+        .unwrap();
+
+    let error = second
+        .persist_initial_active_snapshot(1, &second_members)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error.downcast_ref::<SkillStateBoundaryError>(),
+        Some(SkillStateBoundaryError::Conflict(_))
+    ));
+    assert_eq!(
+        fixture
+            .state
+            .get_snapshot(1)
+            .await
+            .unwrap()
+            .unwrap()
+            .members_json,
+        first_members
+    );
+}
+
+#[tokio::test]
+async fn initial_publication_loser_rebuilds_the_durable_winner() {
+    let faults = SkillStoreTestFaults::default();
+    let gate = faults.gate_once(SkillStoreFaultPoint::RecoveryBeforeInitialPublication);
+    let fixture = AuthoringFixture::with_faults(faults).await;
+    let source = tempfile::tempdir().unwrap();
+    write_package(
+        source.path(),
+        "com.example.initial-race",
+        crate::skill_package::SkillPackageKind::InstructionOnly,
+    )
+    .await;
+    let descriptor_path = source.path().join("general-agent.json");
+    let mut descriptor: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
+    descriptor["compatibility"]["platforms"] = serde_json::json!(["server"]);
+    tokio::fs::write(
+        &descriptor_path,
+        format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
+    )
+    .await
+    .unwrap();
+    let staged = fixture
+        .store
+        .create_staging_revision(source.path(), "owner")
+        .await
+        .unwrap();
+    let managed = fixture
+        .store
+        .promote_revision(&staged.revision_id)
+        .await
+        .unwrap();
+    let package_id =
+        crate::skill_package::SkillPackageId::parse("com.example.initial-race").unwrap();
+    fixture
+        .state
+        .activate_revision(
+            &package_id,
+            &managed.revision_id,
+            crate::skill_state::SkillLayerRecord::Managed,
+            "owner",
+        )
+        .await
+        .unwrap();
+    let loser = manager_for_store_on_platform(&fixture, PlatformId::Server).await;
+    let winner = manager_for_store_on_platform(&fixture, PlatformId::Android).await;
+    let _loser_service = OwnerSkillManagementService::new(
+        loser.clone(),
+        fixture.store.clone(),
+        fixture.state.clone(),
+        SkillManagementPolicy::owner_only(),
+    );
+    let _winner_service = OwnerSkillManagementService::new(
+        winner.clone(),
+        fixture.store.clone(),
+        fixture.state.clone(),
+        SkillManagementPolicy::owner_only(),
+    );
+    let loser_manager = loser.clone();
+    let loser_task = tokio::spawn(async move { loser_manager.startup_reconcile().await });
+    gate.wait_entered().await;
+
+    let winner_report = winner.startup_reconcile().await.unwrap();
+    assert_eq!(winner_report.status, RecoveryStatus::NewSnapshotPublished);
+    assert!(winner.current_snapshot().packages().is_empty());
+    gate.release().await;
+    let loser_report = loser_task.await.unwrap().unwrap();
+
+    assert_eq!(loser_report.status, RecoveryStatus::CurrentSnapshotValid);
+    assert!(loser.current_snapshot().packages().is_empty());
+    assert_eq!(loser.current_snapshot().generation(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .snapshot_with_status(SkillSnapshotStatus::Active)
+            .await
+            .unwrap()
+            .unwrap()
+            .members_json,
+        serde_json::json!([])
+    );
+}
 
 #[tokio::test]
 async fn restart_after_circuit_expiry_publishes_the_still_active_installation() {
@@ -59,6 +175,100 @@ async fn restart_after_circuit_expiry_publishes_the_still_active_installation() 
             .collect::<Vec<_>>(),
         vec![revision]
     );
+}
+
+#[tokio::test]
+async fn expired_circuit_omission_is_consumed_once_when_resolver_stays_inactive() {
+    let fixture = AuthoringFixture::new().await;
+    let revision = activate_server_only_revision(&fixture).await;
+    let source = managed_source(&revision);
+    for _ in 0..3 {
+        fixture
+            .manager
+            .record_execution_result(&source, false)
+            .await
+            .unwrap();
+    }
+    let open_generation = fixture.manager.current_snapshot().generation();
+    sqlx::query("UPDATE skill_circuit_state SET open_until = ? WHERE revision_id = ?")
+        .bind((Utc::now() - Duration::seconds(1)).to_rfc3339())
+        .bind(&revision)
+        .execute(fixture.state.pool())
+        .await
+        .unwrap();
+
+    let first = manager_for_store_on_platform(&fixture, PlatformId::Android).await;
+    let _first_service = OwnerSkillManagementService::new(
+        first.clone(),
+        fixture.store.clone(),
+        fixture.state.clone(),
+        SkillManagementPolicy::owner_only(),
+    );
+    first.startup_reconcile().await.unwrap();
+    assert_eq!(first.current_snapshot().generation(), open_generation + 1);
+    assert!(first.current_snapshot().packages().is_empty());
+    assert_eq!(first.current_snapshot().inactive().len(), 1);
+    assert_ne!(
+        first.current_snapshot().inactive()[0].status,
+        crate::skill_resolver::SkillResolutionStatus::CircuitOpen
+    );
+
+    let second = manager_for_store_on_platform(&fixture, PlatformId::Android).await;
+    let _second_service = OwnerSkillManagementService::new(
+        second.clone(),
+        fixture.store.clone(),
+        fixture.state.clone(),
+        SkillManagementPolicy::owner_only(),
+    );
+    let report = second.startup_reconcile().await.unwrap();
+
+    assert_eq!(report.status, RecoveryStatus::CurrentSnapshotValid);
+    assert_eq!(second.current_snapshot().generation(), open_generation + 1);
+    assert!(second.current_snapshot().packages().is_empty());
+    assert_eq!(second.current_snapshot().inactive().len(), 1);
+}
+
+#[tokio::test]
+async fn pre_open_lease_success_restores_revision_before_restart() {
+    let fixture = AuthoringFixture::new().await;
+    let revision = activate_new_revision(&fixture, "1.0.0").await;
+    let old_lease = fixture.manager.lease_snapshot();
+    let source = managed_source(&revision);
+    for _ in 0..3 {
+        fixture
+            .manager
+            .record_execution_result(&source, false)
+            .await
+            .unwrap();
+    }
+    let open_generation = fixture.manager.current_snapshot().generation();
+    assert_eq!(old_lease.snapshot().packages().len(), 1);
+
+    fixture
+        .manager
+        .record_execution_result(&source, true)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fixture.manager.current_snapshot().generation(),
+        open_generation + 1
+    );
+    assert_eq!(fixture.manager.current_snapshot().packages().len(), 1);
+    let restarted = manager_for_store(&fixture).await;
+    let _service = OwnerSkillManagementService::new(
+        restarted.clone(),
+        fixture.store.clone(),
+        fixture.state.clone(),
+        SkillManagementPolicy::owner_only(),
+    );
+    let report = restarted.startup_reconcile().await.unwrap();
+    assert_eq!(report.status, RecoveryStatus::CurrentSnapshotValid);
+    assert_eq!(
+        restarted.current_snapshot().generation(),
+        open_generation + 1
+    );
+    assert_eq!(restarted.current_snapshot().packages().len(), 1);
 }
 
 #[tokio::test]
@@ -138,11 +348,18 @@ async fn stale_recovery_candidate_cannot_overwrite_a_newer_generation() {
 }
 
 async fn manager_for_store(fixture: &AuthoringFixture) -> SkillManager {
-    SkillManager::new(SkillManagerConfig {
+    manager_for_store_on_platform(fixture, PlatformId::Server).await
+}
+
+async fn manager_for_store_on_platform(
+    fixture: &AuthoringFixture,
+    platform: PlatformId,
+) -> SkillManager {
+    SkillManager::new_deferred_managed(SkillManagerConfig {
         sources: vec![
             Arc::new(ManagedSkillSource::from_store(fixture.store.clone())) as Arc<dyn SkillSource>,
         ],
-        platform: PlatformId::Server,
+        platform,
         capabilities: CapabilitySet::from_names(Vec::<String>::new()),
         protected_packages: Vec::new(),
         allowed_overrides: Vec::new(),
@@ -150,6 +367,50 @@ async fn manager_for_store(fixture: &AuthoringFixture) -> SkillManager {
     })
     .await
     .unwrap()
+}
+
+async fn activate_server_only_revision(fixture: &AuthoringFixture) -> String {
+    let draft = fixture.draft().await;
+    let record = fixture
+        .state
+        .get_revision(&draft.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut descriptor = record.descriptor_json;
+    descriptor["version"] = serde_json::json!("1.0.0");
+    descriptor["compatibility"]["platforms"] = serde_json::json!(["server"]);
+    fixture
+        .service
+        .update_draft(
+            &fixture.actor([SkillGrant::EditDraft]),
+            &draft.revision_id,
+            vec![update(
+                "general-agent.json",
+                format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
+            )],
+        )
+        .await
+        .unwrap();
+    fixture
+        .service
+        .validate_draft(&fixture.actor([SkillGrant::Validate]), &draft.revision_id)
+        .await
+        .unwrap();
+    let approval = fixture
+        .service
+        .request_activation(&fixture.actor([SkillGrant::Activate]), &draft.revision_id)
+        .await
+        .unwrap();
+    fixture
+        .service
+        .approve_activation(
+            &approval.approval_id,
+            &ActorContext::owner("approver-2", [SkillGrant::Activate]),
+        )
+        .await
+        .unwrap();
+    draft.revision_id
 }
 
 fn managed_source(revision_id: &str) -> ToolSource {
@@ -175,6 +436,7 @@ async fn cancelled_circuit_waiter_finishes_the_exact_publication_once() {
             .await
             .unwrap();
     }
+    let mut events = fixture.service.subscribe_events();
     let manager = fixture.manager.clone();
     let waiter = tokio::spawn(async move { manager.record_execution_result(&source, false).await });
 
@@ -209,6 +471,19 @@ async fn cancelled_circuit_waiter_finishes_the_exact_publication_once() {
             .await
             .unwrap();
     assert_eq!(active_count, 1);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("authoritative publication event must arrive")
+            .unwrap(),
+        crate::events::RuntimeEvent::SkillSnapshotPublished {
+            generation: generation + 1,
+        }
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]
