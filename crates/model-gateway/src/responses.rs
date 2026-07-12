@@ -4,20 +4,71 @@ use crate::{
     tool_identity::ToolNameMap,
 };
 use futures::{Stream, stream};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 use std::pin::Pin;
 
 pub type GatewayEventStream = Pin<Box<dyn Stream<Item = anyhow::Result<GatewayEvent>> + Send>>;
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GatewayTool {
-    #[serde(rename = "name", alias = "id")]
     pub id: String,
-    #[serde(skip)]
     advertised_name: Option<String>,
     pub description: String,
     pub input_schema: Value,
+}
+
+#[derive(Serialize)]
+struct SerializedGatewayTool<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a str>,
+    description: &'a str,
+    input_schema: &'a Value,
+}
+
+#[derive(Deserialize)]
+struct DeserializedGatewayTool {
+    name: Option<String>,
+    id: Option<String>,
+    description: String,
+    input_schema: Value,
+}
+
+impl Serialize for GatewayTool {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SerializedGatewayTool {
+            name: self.advertised_name(),
+            id: self.advertised_name.as_ref().map(|_| self.id.as_str()),
+            description: &self.description,
+            input_schema: &self.input_schema,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for GatewayTool {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let tool = DeserializedGatewayTool::deserialize(deserializer)?;
+        let (id, advertised_name) = match (tool.name, tool.id) {
+            (Some(name), Some(id)) => (id, Some(name)),
+            (Some(name), None) => (name, None),
+            (None, Some(id)) => (id, None),
+            (None, None) => return Err(serde::de::Error::missing_field("name or id")),
+        };
+        Ok(Self {
+            id,
+            advertised_name,
+            description: tool.description,
+            input_schema: tool.input_schema,
+        })
+    }
 }
 
 impl GatewayTool {

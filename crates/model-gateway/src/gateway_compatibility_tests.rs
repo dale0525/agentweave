@@ -1,5 +1,6 @@
 use crate::provider::{EndpointType, ProviderProfile};
 use crate::responses::{GatewayHttpClient, GatewayRequest, GatewayTool, gateway_request_body};
+use crate::tool_identity::ToolNameMap;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -28,6 +29,56 @@ fn gateway_tool_serializes_legacy_name_and_round_trips_name_or_id_input() {
     let serialized = serde_json::to_value(tool_from_id).unwrap();
     assert_eq!(serialized["name"], "com.example.tasks/create_task");
     assert_eq!(serialized["id"], Value::Null);
+}
+
+#[test]
+fn gateway_request_round_trip_preserves_canonical_and_alias_tool_wires() {
+    let canonical = "com.example.calendar/create_event";
+    let request = GatewayRequest {
+        input: vec![json!({ "role": "user", "content": "create it" })],
+        tools: vec![
+            GatewayTool::new(canonical, "Create an event.", json!({ "type": "object" })),
+            GatewayTool::advertised_alias(
+                canonical,
+                "create_event",
+                "Legacy create event alias.",
+                json!({ "type": "object" }),
+            ),
+        ],
+    };
+
+    let serialized = serde_json::to_value(&request).unwrap();
+    assert_eq!(serialized["tools"][0]["name"], canonical);
+    assert_eq!(serialized["tools"][0]["id"], Value::Null);
+    assert_eq!(serialized["tools"][1]["name"], "create_event");
+    assert_eq!(serialized["tools"][1]["id"], canonical);
+
+    let round_tripped: GatewayRequest = serde_json::from_value(serialized).unwrap();
+    assert_eq!(round_tripped, request);
+    let map = ToolNameMap::from_tools(&round_tripped.tools).unwrap();
+    let canonical_wire = map.wire_name_for_tool(&round_tripped.tools[0]).unwrap();
+    let alias_wire = map.wire_name_for_tool(&round_tripped.tools[1]).unwrap();
+
+    assert_ne!(canonical_wire, alias_wire);
+    assert_eq!(map.canonical_name(canonical_wire), Some(canonical));
+    assert_eq!(map.canonical_name(alias_wire), Some(canonical));
+}
+
+#[test]
+fn gateway_tool_alias_only_round_trip_does_not_become_canonical() {
+    let alias = GatewayTool::advertised_alias(
+        "com.example.calendar/create_event",
+        "create_event",
+        "Legacy create event alias.",
+        json!({ "type": "object" }),
+    );
+
+    let round_tripped: GatewayTool =
+        serde_json::from_value(serde_json::to_value(&alias).unwrap()).unwrap();
+
+    assert_eq!(round_tripped, alias);
+    assert_eq!(round_tripped.id, "com.example.calendar/create_event");
+    assert_eq!(round_tripped.advertised_name(), "create_event");
 }
 
 #[test]
