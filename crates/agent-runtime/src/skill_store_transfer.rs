@@ -44,7 +44,10 @@ impl SkillRevisionStore {
         validation_json: serde_json::Value,
     ) -> anyhow::Result<SkillRevisionRecord> {
         if record.status != SkillRevisionStatus::Quarantined {
-            anyhow::bail!("only quarantined revisions can be released to staging");
+            return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                "quarantine release lifecycle conflicts with current state"
+            ))
+            .into());
         }
         let _guard = crate::skill_store_locks::acquire_revision_lock(
             &self.paths.identity,
@@ -56,9 +59,14 @@ impl SkillRevisionStore {
             .state
             .get_revision(&record.revision_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("skill revision not found"))?;
-        if current != record {
-            anyhow::bail!("skill revision changed before quarantine release");
+            .ok_or_else(|| {
+                SkillStoreBoundaryError::NotFound(anyhow::anyhow!("skill revision not found"))
+            })?;
+        if current.status != SkillRevisionStatus::Quarantined || current != record {
+            return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                "quarantine release expectation conflicts with current state"
+            ))
+            .into());
         }
         let source = open_prepared_directory(
             self.paths.quarantine_identity(),

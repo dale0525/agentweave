@@ -227,7 +227,7 @@ impl SkillStateStore {
             )
             .fetch_optional(&mut *tx)
             .await?;
-            if active_generation.is_some_and(|generation| generation != expected_generation) {
+            if active_generation.is_some_and(|generation| generation > expected_generation) {
                 return Err(state_conflict(
                     "skill snapshot generation changed before approval request",
                 ));

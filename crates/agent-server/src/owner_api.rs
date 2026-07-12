@@ -479,3 +479,32 @@ impl IntoResponse for OwnerApiError {
             .into_response()
     }
 }
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn typed_concurrent_validation_conflict_maps_to_safe_http_409() {
+        let response = OwnerApiError::from_service(
+            SkillManagementError::Conflict {
+                resource: "private-revision-and-path",
+            }
+            .into(),
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(body, r#"{"error":"resource conflict"}"#);
+        for secret in [
+            "private-revision-and-path",
+            "skill_revisions",
+            "secret-token",
+        ] {
+            assert!(!body.contains(secret));
+        }
+    }
+}
