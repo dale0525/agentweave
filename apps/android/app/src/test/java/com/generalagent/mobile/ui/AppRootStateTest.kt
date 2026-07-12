@@ -27,6 +27,14 @@ class AppRootStateTest {
   }
 
   @Test
+  fun diagnosticsPolicyKeepsSkillsInStableNavigationOrder() {
+    assertEquals(
+      listOf(AppTab.Chat, AppTab.Settings, AppTab.Skills, AppTab.Diagnostics),
+      visibleTabs(skillManagementMode = "diagnostics_only"),
+    )
+  }
+
+  @Test
   fun skillRowsPreserveCapabilityReasons() {
     val skills = listOf(
       RuntimeSkill("web", "Web browser", "Browse", false, "Missing required capability: browser.headless"),

@@ -15,6 +15,9 @@ enum RuntimeRequest {
     Diagnostics,
     ListSkills,
     ListManagedSkills,
+    GetSkillDetail {
+        package_id: String,
+    },
     CreateSkillDraft {
         request: CreateSkillDraftRequest,
     },
@@ -93,6 +96,9 @@ pub fn invoke_runtime_json(handle: i64, request_json: &str) -> String {
             RuntimeRequest::ListSkills => serde_json::to_value(runtime.list_skills()?),
             RuntimeRequest::ListManagedSkills => {
                 serde_json::to_value(runtime.list_managed_skills()?)
+            }
+            RuntimeRequest::GetSkillDetail { package_id } => {
+                serde_json::to_value(runtime.get_skill_detail(&package_id)?)
             }
             RuntimeRequest::CreateSkillDraft { request } => {
                 serde_json::to_value(runtime.create_skill_draft(request)?)

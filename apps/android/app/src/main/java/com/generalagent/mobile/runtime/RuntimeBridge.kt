@@ -42,7 +42,7 @@ class RuntimeBridge(
       check(data.keys().asSequence().toSet() == setOf("handle")) {
         "Runtime initialization data contains unexpected fields"
       }
-      return RuntimeClient(allocatedHandle, native)
+      return RuntimeClient(allocatedHandle, native, configuredActorContext.grants.toSet())
     } catch (error: Exception) {
       allocatedHandle?.let { handle -> runCatching { responseEnvelope(native.close(handle)) } }
       if (error is RuntimeBridgeException) throw error
@@ -54,6 +54,7 @@ class RuntimeBridge(
 class RuntimeClient internal constructor(
   val handle: Long,
   private val native: NativeRuntimeApi,
+  val skillGrants: Set<String> = emptySet(),
 ) : AutoCloseable {
   private val closed = AtomicBoolean(false)
   fun diagnostics(): RuntimeDiagnostics {
@@ -79,6 +80,80 @@ class RuntimeClient internal constructor(
 
   fun listSkills(): List<RuntimeSkill> =
     invokeArray(JSONObject().put("operation", "list_skills")).objects().map { it.toSkill() }
+
+  fun listManagedSkills(): List<RuntimeSkillPackageSummary> =
+    invokeArray(JSONObject().put("operation", "list_managed_skills"))
+      .objects()
+      .map { it.toSkillPackageSummary() }
+
+  fun getSkillDetail(packageId: String): RuntimeSkillDetail =
+    invoke(
+      JSONObject()
+        .put("operation", "get_skill_detail")
+        .put("package_id", packageId),
+    ).toSkillDetail()
+
+  fun createSkillDraft(request: RuntimeSkillDraftRequest): RuntimeSkillDraftSummary =
+    invoke(
+      JSONObject()
+        .put("operation", "create_skill_draft")
+        .put("request", request.toJson()),
+    ).toSkillDraftSummary()
+
+  fun updateSkillDraft(
+    revisionId: String,
+    files: List<RuntimeSkillDraftFile>,
+  ): RuntimeSkillDraftSummary =
+    invoke(
+      JSONObject()
+        .put("operation", "update_skill_draft")
+        .put("revision_id", revisionId)
+        .put("files", JSONArray(files.map { it.toJson() })),
+    ).toSkillDraftSummary()
+
+  fun validateSkillDraft(revisionId: String): RuntimeSkillValidation =
+    invoke(
+      JSONObject()
+        .put("operation", "validate_skill_draft")
+        .put("revision_id", revisionId),
+    ).toSkillValidation()
+
+  fun requestSkillActivation(revisionId: String): RuntimeSkillApproval =
+    invoke(
+      JSONObject()
+        .put("operation", "request_skill_activation")
+        .put("revision_id", revisionId),
+    ).toSkillApproval()
+
+  fun resolveSkillApproval(approvalId: String, approve: Boolean): RuntimeSkillMutation =
+    invoke(
+      JSONObject()
+        .put("operation", "resolve_skill_approval")
+        .put("approval_id", approvalId)
+        .put("approve", approve),
+    ).toSkillMutation()
+
+  fun disableManagedSkill(packageId: String): RuntimeSkillMutation =
+    invoke(
+      JSONObject()
+        .put("operation", "disable_managed_skill")
+        .put("package_id", packageId),
+    ).toSkillMutation()
+
+  fun rollbackManagedSkill(packageId: String, revisionId: String): RuntimeSkillMutation =
+    invoke(
+      JSONObject()
+        .put("operation", "rollback_managed_skill")
+        .put("package_id", packageId)
+        .put("revision_id", revisionId),
+    ).toSkillMutation()
+
+  fun requestSkillRemoval(packageId: String): RuntimeSkillApproval =
+    invoke(
+      JSONObject()
+        .put("operation", "request_skill_removal")
+        .put("package_id", packageId),
+    ).toSkillApproval()
 
   fun getMessages(sessionId: String): List<RuntimeMessage> =
     invokeArray(
@@ -168,6 +243,19 @@ private fun RuntimeModelConfig.toJson(): JSONObject =
     .put("secret_id", secretId)
     .put("headers", JSONObject(headers))
 
+private fun RuntimeSkillDraftRequest.toJson(): JSONObject =
+  JSONObject()
+    .put("package_id", packageId)
+    .put("display_name", displayName)
+    .put("description", description)
+    .put("kind", kind)
+    .put("required_tools", JSONArray(requiredTools))
+
+private fun RuntimeSkillDraftFile.toJson(): JSONObject =
+  JSONObject()
+    .put("path", path)
+    .put("content", content)
+
 private fun responseEnvelope(response: String): JSONObject {
   val envelope = JSONObject(response)
   if (!envelope.optBoolean("ok")) {
@@ -212,6 +300,112 @@ private fun JSONObject.toSkill(): RuntimeSkill =
     manageable = getBoolean("manageable"),
     description = optString("description"),
   )
+
+private fun JSONObject.toSkillPackageSummary(): RuntimeSkillPackageSummary =
+  RuntimeSkillPackageSummary(
+    packageId = getString("package_id"),
+    displayName = getString("display_name"),
+    version = getString("version"),
+    sourceLayer = getString("source_layer"),
+    status = getString("status"),
+    reason = getString("reason"),
+    activeRevisionId = nullableString("active_revision_id"),
+  )
+
+private fun JSONObject.toSkillDetail(): RuntimeSkillDetail =
+  RuntimeSkillDetail(
+    packageId = getString("package_id"),
+    displayName = getString("display_name"),
+    version = getString("version"),
+    sourceLayer = getString("source_layer"),
+    status = getString("status"),
+    reason = getString("reason"),
+    activeRevisionId = nullableString("active_revision_id"),
+    revisions = getJSONArray("revisions").objects().map { it.toSkillRevision() },
+    editableDraft = optJSONObject("editable_draft")?.toSkillRevision(),
+  )
+
+private fun JSONObject.toSkillRevision(): RuntimeSkillRevision {
+  val validation = getJSONObject("validation")
+  val requirements = getJSONObject("requirements")
+  return RuntimeSkillRevision(
+    revisionId = getString("revision_id"),
+    version = getString("version"),
+    status = getString("status"),
+    editable = getBoolean("editable"),
+    createdBy = getString("created_by"),
+    createdAt = getString("created_at"),
+    kind = getString("kind"),
+    instructions = getString("instructions"),
+    validation = RuntimeSkillValidationSummary(
+      ok = validation.optBoolean("ok"),
+      errors = validation.stringList("errors"),
+      warnings = validation.stringList("warnings"),
+    ),
+    requirements = RuntimeSkillRequirements(
+      runtimeTools = requirements.stringList("runtime_tools"),
+      capabilities = requirements.stringList("capabilities"),
+      connectors = requirements.stringList("connectors"),
+      packages = requirements.stringList("packages"),
+    ),
+    permissionDiffJson = optJSONObject("permission_diff")?.toString() ?: "{}",
+  )
+}
+
+private fun JSONObject.toSkillDraftSummary(): RuntimeSkillDraftSummary =
+  RuntimeSkillDraftSummary(
+    packageId = getString("package_id"),
+    revisionId = getString("revision_id"),
+    version = getString("version"),
+    kind = getString("kind"),
+    status = getString("status"),
+  )
+
+private fun JSONObject.toSkillValidation(): RuntimeSkillValidation =
+  RuntimeSkillValidation(
+    ok = getBoolean("ok"),
+    errors = stringList("errors"),
+    warnings = stringList("warnings"),
+    requiredTools = stringList("requiredTools"),
+    requiredConnectors = stringList("requiredConnectors"),
+    dependencies = stringList("dependencies"),
+    requiredCapabilities = stringList("requiredCapabilities"),
+    resolverStatus = getString("resolverStatus"),
+    resolverErrors = stringList("resolverErrors"),
+    permissionDiffJson = optJSONObject("permissionDiff")?.toString() ?: "{}",
+    revisionId = getString("revisionId"),
+    contentHash = getString("contentHash"),
+    snapshotGeneration = getLong("snapshotGeneration"),
+  )
+
+private fun JSONObject.toSkillApproval(): RuntimeSkillApproval =
+  RuntimeSkillApproval(
+    approvalId = getString("approval_id"),
+    packageId = getString("package_id"),
+    permissionDiffJson = optJSONObject("permission_diff")?.toString() ?: "{}",
+    requestedBy = getString("requested_by"),
+    revisionId = getString("revision_id"),
+    status = getString("status"),
+  )
+
+private fun JSONObject.toSkillMutation(): RuntimeSkillMutation =
+  RuntimeSkillMutation(
+    approvalId = nullableString("approval_id"),
+    packageId = nullableString("package_id"),
+    revisionId = nullableString("revision_id") ?: nullableString("active_revision_id"),
+    status = optString("status", "published"),
+    activeGeneration = when {
+      has("active_generation") -> getLong("active_generation")
+      has("generation") -> getLong("generation")
+      else -> 0L
+    },
+  )
+
+private fun JSONObject.stringList(key: String): List<String> =
+  optJSONArray(key)?.strings() ?: emptyList()
+
+private fun JSONObject.nullableString(key: String): String? =
+  if (!has(key) || isNull(key)) null else getString(key)
 
 private fun JSONObject.toModelConfig(): RuntimeModelConfig =
   RuntimeModelConfig(

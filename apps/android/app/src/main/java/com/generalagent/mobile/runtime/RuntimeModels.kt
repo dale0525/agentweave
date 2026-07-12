@@ -95,6 +95,111 @@ data class RuntimeSkill(
   )
 }
 
+data class RuntimeSkillPackageSummary(
+  val packageId: String,
+  val displayName: String,
+  val version: String,
+  val sourceLayer: String,
+  val status: String,
+  val reason: String,
+  val activeRevisionId: String?,
+)
+
+data class RuntimeSkillRequirements(
+  val runtimeTools: List<String>,
+  val capabilities: List<String>,
+  val connectors: List<String>,
+  val packages: List<String>,
+)
+
+data class RuntimeSkillValidationSummary(
+  val ok: Boolean,
+  val errors: List<String>,
+  val warnings: List<String>,
+)
+
+data class RuntimeSkillRevision(
+  val revisionId: String,
+  val version: String,
+  val status: String,
+  val editable: Boolean,
+  val createdBy: String,
+  val createdAt: String,
+  val kind: String,
+  val instructions: String,
+  val validation: RuntimeSkillValidationSummary,
+  val requirements: RuntimeSkillRequirements,
+  val permissionDiffJson: String,
+)
+
+data class RuntimeSkillDetail(
+  val packageId: String,
+  val displayName: String,
+  val version: String,
+  val sourceLayer: String,
+  val status: String,
+  val reason: String,
+  val activeRevisionId: String?,
+  val revisions: List<RuntimeSkillRevision>,
+  val editableDraft: RuntimeSkillRevision?,
+)
+
+data class RuntimeSkillDraftRequest(
+  val packageId: String,
+  val displayName: String,
+  val description: String,
+  val kind: String,
+  val requiredTools: List<String>,
+)
+
+data class RuntimeSkillDraftFile(
+  val path: String,
+  val content: String,
+)
+
+data class RuntimeSkillDraftSummary(
+  val packageId: String,
+  val revisionId: String,
+  val version: String,
+  val kind: String,
+  val status: String,
+)
+
+data class RuntimeSkillValidation(
+  val ok: Boolean,
+  val errors: List<String>,
+  val warnings: List<String>,
+  val requiredTools: List<String>,
+  val requiredConnectors: List<String>,
+  val dependencies: List<String>,
+  val requiredCapabilities: List<String>,
+  val resolverStatus: String,
+  val resolverErrors: List<String>,
+  val permissionDiffJson: String,
+  val revisionId: String,
+  val contentHash: String,
+  val snapshotGeneration: Long,
+)
+
+data class RuntimeSkillApproval(
+  val approvalId: String,
+  val packageId: String,
+  val permissionDiffJson: String,
+  val requestedBy: String,
+  val revisionId: String,
+  val status: String,
+)
+
+data class RuntimeSkillMutation(
+  val approvalId: String? = null,
+  val packageId: String? = null,
+  val revisionId: String? = null,
+  val status: String = "published",
+  val activeGeneration: Long = 0,
+) {
+  val approvalRequired: Boolean get() = approvalId != null && status == "pending"
+}
+
 data class RuntimeModelConfig(
   val providerId: String,
   val providerName: String,

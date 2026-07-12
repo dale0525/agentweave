@@ -330,6 +330,17 @@ impl MobileRuntime {
         )
     }
 
+    pub fn get_skill_detail(
+        &self,
+        package_id: &str,
+    ) -> Result<agent_runtime::skill_management::SkillPackageDetail> {
+        let package_id = SkillPackageId::parse(package_id)?;
+        self.tokio.block_on(
+            self.skill_management
+                .get_skill_detail(&self.actor_context, &package_id),
+        )
+    }
+
     pub fn create_skill_draft(
         &self,
         request: CreateSkillDraftRequest,

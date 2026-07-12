@@ -125,6 +125,61 @@ class RuntimeBridgeTest {
   }
 
   @Test
+  fun ownerOperationsUseStoredActorAndMapRuntimeDtos() {
+    val native = OwnerNativeRuntime()
+    val client = RuntimeClient(9L, native, skillGrants = setOf("inspect", "activate"))
+
+    val managed = client.listManagedSkills().single()
+    val detail = client.getSkillDetail("com.example.owner")
+    val draft = client.createSkillDraft(
+      RuntimeSkillDraftRequest(
+        packageId = "com.example.new-skill",
+        displayName = "New skill",
+        description = "Owner authored instructions",
+        kind = "instruction_only",
+        requiredTools = listOf("host/search"),
+      ),
+    )
+    client.updateSkillDraft(
+      revisionId = draft.revisionId,
+      files = listOf(RuntimeSkillDraftFile("instructions.md", "Updated instructions")),
+    )
+    val validation = client.validateSkillDraft(draft.revisionId)
+    val approval = client.requestSkillActivation(draft.revisionId)
+    val reload = client.resolveSkillApproval(approval.approvalId, approve = true)
+    client.disableManagedSkill(managed.packageId)
+    client.rollbackManagedSkill(managed.packageId, detail.revisions.last().revisionId)
+    client.requestSkillRemoval(managed.packageId)
+
+    assertEquals(setOf("inspect", "activate"), client.skillGrants)
+    assertEquals("managed", managed.sourceLayer)
+    assertEquals("host_tools_only", detail.revisions.first().kind)
+    assertEquals("Draft instructions", detail.editableDraft?.instructions)
+    assertTrue(validation.ok)
+    assertEquals(listOf("host/search"), validation.requiredTools)
+    assertEquals("approval-1", approval.approvalId)
+    assertEquals(8L, reload.activeGeneration)
+    assertTrue(native.requests.none { request ->
+      request.has("actor") || request.has("actor_context") || request.has("principal")
+    })
+    assertEquals(
+      listOf(
+        "list_managed_skills",
+        "get_skill_detail",
+        "create_skill_draft",
+        "update_skill_draft",
+        "validate_skill_draft",
+        "request_skill_activation",
+        "resolve_skill_approval",
+        "disable_managed_skill",
+        "rollback_managed_skill",
+        "request_skill_removal",
+      ),
+      native.requests.map { it.getString("operation") },
+    )
+  }
+
+  @Test
   fun saveModelConfigAcceptsNullUnitPayload() {
     val native = object : NativeRuntimeApi {
       override fun initialize(requestJson: String): String = error("not used")
@@ -228,4 +283,32 @@ private class RecordingNativeRuntime(
     closedHandles += handle
     return """{"ok":true,"data":null}"""
   }
+}
+
+private class OwnerNativeRuntime : NativeRuntimeApi {
+  val requests = mutableListOf<JSONObject>()
+
+  override fun initialize(requestJson: String): String = error("not used")
+
+  override fun invoke(handle: Long, requestJson: String): String {
+    val request = JSONObject(requestJson)
+    requests += request
+    val data = when (request.getString("operation")) {
+      "list_managed_skills" -> """[{"package_id":"com.example.owner","display_name":"Owner skill","version":"1.0.0","source_layer":"managed","status":"active","reason":"","active_revision_id":"revision-active"}]"""
+      "get_skill_detail" -> """{"package_id":"com.example.owner","display_name":"Owner skill","version":"1.0.0","source_layer":"managed","status":"active","reason":"","active_revision_id":"revision-active","revisions":[{"revision_id":"revision-draft","version":"1.1.0","status":"staging","editable":true,"created_by":"owner","created_at":"2026-07-13T00:00:00Z","kind":"host_tools_only","instructions":"Draft instructions","validation":{"ok":true,"errors":[],"warnings":[]},"requirements":{"runtime_tools":["host/search"],"capabilities":["network.http"],"connectors":[],"packages":[]},"permission_diff":{"capabilities":{"added":["network.http"]}}},{"revision_id":"revision-active","version":"1.0.0","status":"managed","editable":false,"created_by":"owner","created_at":"2026-07-12T00:00:00Z","kind":"host_tools_only","instructions":"Active instructions","validation":{"ok":true,"errors":[],"warnings":[]},"requirements":{"runtime_tools":["host/search"],"capabilities":[],"connectors":[],"packages":[]},"permission_diff":{}}],"editable_draft":{"revision_id":"revision-draft","version":"1.1.0","status":"staging","editable":true,"created_by":"owner","created_at":"2026-07-13T00:00:00Z","kind":"host_tools_only","instructions":"Draft instructions","validation":{"ok":true,"errors":[],"warnings":[]},"requirements":{"runtime_tools":["host/search"],"capabilities":["network.http"],"connectors":[],"packages":[]},"permission_diff":{}}}"""
+      "create_skill_draft", "update_skill_draft" -> """{"package_id":"com.example.new-skill","revision_id":"revision-draft","version":"0.1.0","kind":"instruction_only","validation":{"status":"pending"},"status":"draft"}"""
+      "validate_skill_draft" -> """{"ok":true,"errors":[],"warnings":[],"requiredTools":["host/search"],"requiredConnectors":[],"dependencies":[],"requiredCapabilities":["network.http"],"resolverStatus":"active","resolverErrors":[],"permissionDiff":{"capabilities":{"added":["network.http"]}},"revisionId":"revision-draft","contentHash":"hash","snapshotGeneration":7}"""
+      "request_skill_activation", "request_skill_removal" -> """{"approval_id":"approval-1","package_id":"com.example.owner","permission_diff":{},"requested_by":"owner","revision_id":"revision-draft","status":"pending"}"""
+      "resolve_skill_approval" -> """{"previous_generation":7,"active_generation":8,"active_packages":1,"inactive_packages":0,"status":"approved"}"""
+      "disable_managed_skill" -> """{"previous_generation":8,"active_generation":9,"active_packages":0,"inactive_packages":1}"""
+      "rollback_managed_skill" -> """{"package_id":"com.example.owner","active_revision_id":"revision-active","replaced_revision_id":"revision-new","generation":10}"""
+      else -> error("unexpected operation")
+    }
+    return """{"ok":true,"data":$data}"""
+  }
+
+  override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String =
+    error("not used")
+
+  override fun close(handle: Long): String = """{"ok":true,"data":null}"""
 }

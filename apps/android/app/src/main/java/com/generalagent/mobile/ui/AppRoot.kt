@@ -45,6 +45,7 @@ import androidx.compose.ui.zIndex
 import com.generalagent.mobile.runtime.RuntimeClient
 import com.generalagent.mobile.runtime.RuntimeDiagnostics
 import com.generalagent.mobile.runtime.RuntimeSkill
+import com.generalagent.mobile.runtime.RuntimeSkillPackageSummary
 import com.generalagent.mobile.secrets.ModelSecretStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -57,6 +58,57 @@ enum class AppTab(val label: String) {
   Skills("Skills"),
   Diagnostics("Diagnostics"),
 }
+
+enum class SkillScreenMode { Hidden, DiagnosticsOnly, OwnerManage }
+
+enum class SkillAction { Create, Edit, Validate, Activate, Disable, Rollback, Delete }
+
+data class SkillAccessState(
+  val mode: SkillScreenMode,
+  val visibleTabs: List<AppTab>,
+  val actions: Set<SkillAction>,
+)
+
+fun skillScreenMode(mode: String, grants: Set<String>): SkillScreenMode =
+  when {
+    mode == "disabled" -> SkillScreenMode.Hidden
+    mode == "diagnostics_only" -> SkillScreenMode.DiagnosticsOnly
+    mode == "owner_only" && "inspect" in grants -> SkillScreenMode.OwnerManage
+    else -> SkillScreenMode.Hidden
+  }
+
+fun visibleTabs(skillManagementMode: String): List<AppTab> =
+  AppTab.entries.filter { tab ->
+    tab != AppTab.Skills || skillManagementMode != "disabled"
+  }
+
+fun skillActions(mode: SkillScreenMode, grants: Set<String>): Set<SkillAction> {
+  if (mode != SkillScreenMode.OwnerManage) return emptySet()
+  return buildSet {
+    if ("create_draft" in grants) add(SkillAction.Create)
+    if ("edit_draft" in grants) add(SkillAction.Edit)
+    if ("validate" in grants) add(SkillAction.Validate)
+    if ("activate" in grants) add(SkillAction.Activate)
+    if ("disable" in grants) add(SkillAction.Disable)
+    if ("rollback" in grants) add(SkillAction.Rollback)
+    if ("delete_managed" in grants) add(SkillAction.Delete)
+  }
+}
+
+fun skillAccessState(mode: String, grants: Set<String>): SkillAccessState {
+  val screenMode = skillScreenMode(mode, grants)
+  val tabs = visibleTabs(mode).filter { tab ->
+    tab != AppTab.Skills || screenMode != SkillScreenMode.Hidden
+  }
+  return SkillAccessState(screenMode, tabs, skillActions(screenMode, grants))
+}
+
+fun admittedPolicyTab(current: AppTab, requested: AppTab, visibleTabs: List<AppTab>): AppTab =
+  when {
+    requested in visibleTabs -> requested
+    current in visibleTabs -> current
+    else -> AppTab.Chat
+  }
 
 data class NavigationSize(val width: Int, val height: Int)
 
@@ -86,6 +138,27 @@ fun androidSkillRows(skills: List<RuntimeSkill>): List<SkillRow> =
     )
   }
 
+fun ownerSkillInventory(
+  effective: List<RuntimeSkill>,
+  managed: List<RuntimeSkillPackageSummary>,
+): List<RuntimeSkill> {
+  val inventory = effective.associateByTo(linkedMapOf(), RuntimeSkill::packageId)
+  managed.forEach { summary ->
+    inventory[summary.packageId] = RuntimeSkill(
+      packageId = summary.packageId,
+      displayName = summary.displayName,
+      version = summary.version,
+      sourceLayer = summary.sourceLayer,
+      status = summary.status,
+      available = summary.status == "active",
+      reason = summary.reason,
+      activeRevisionId = summary.activeRevisionId,
+      manageable = true,
+    )
+  }
+  return inventory.values.sortedBy(RuntimeSkill::packageId)
+}
+
 fun androidDiagnosticCapabilityIds(): List<String> =
   listOf(
     "network.http",
@@ -105,31 +178,45 @@ fun AppRoot(
 ) {
   var selectedTab by remember { mutableStateOf(AppTab.Chat) }
   var diagnostics by remember(initialDiagnostics) { mutableStateOf(initialDiagnostics) }
-  var skillRows by remember { mutableStateOf<List<SkillRow>>(emptyList()) }
+  var skills by remember { mutableStateOf<List<RuntimeSkill>>(emptyList()) }
+  var skillImmersive by remember { mutableStateOf(false) }
   val chatSending by turnGate.inFlight.collectAsState()
   val settingsSaving by settingsGate.inFlight.collectAsState()
   val settingsCompletionVersion by settingsGate.completionVersion.collectAsState()
   val scope = rememberCoroutineScope()
+  val skillAccess = skillAccessState(diagnostics.skillManagementMode, runtimeClient.skillGrants)
 
   LaunchedEffect(runtimeClient) {
     try {
-      skillRows = withContext(Dispatchers.IO) {
-        androidSkillRows(runtimeClient.listSkills())
+      skills = withContext(Dispatchers.IO) {
+        runtimeClient.loadSkillInventory(skillAccess.mode)
       }
     } catch (cancelled: CancellationException) {
       throw cancelled
     }
   }
-  val refreshDiagnostics = {
+  LaunchedEffect(skillAccess.visibleTabs) {
+    if (selectedTab !in skillAccess.visibleTabs) {
+      selectedTab = AppTab.Chat
+      skillImmersive = false
+    }
+  }
+  val refreshSkillsAndDiagnostics = {
     scope.launch {
-      runCatching { withContext(Dispatchers.IO) { runtimeClient.diagnostics() } }
-        .onSuccess { diagnostics = it }
+      runCatching {
+        withContext(Dispatchers.IO) {
+          runtimeClient.loadSkillInventory(skillAccess.mode) to runtimeClient.diagnostics()
+        }
+      }.onSuccess { refreshed ->
+        skills = refreshed.first
+        diagnostics = refreshed.second
+      }
     }
     Unit
   }
 
   LaunchedEffect(settingsCompletionVersion) {
-    if (settingsCompletionVersion > 0) refreshDiagnostics()
+    if (settingsCompletionVersion > 0) refreshSkillsAndDiagnostics()
   }
 
   Column(
@@ -143,7 +230,7 @@ fun AppRoot(
         turnGate = turnGate,
         diagnostics = diagnostics,
         secretStore = secretStore,
-        onRefreshDiagnostics = refreshDiagnostics,
+        onRefreshDiagnostics = refreshSkillsAndDiagnostics,
         interactionAllowed = { selectedTab == AppTab.Chat && !settingsSaving },
         modifier = if (selectedTab == AppTab.Chat) {
           Modifier.fillMaxSize().zIndex(1f)
@@ -167,32 +254,55 @@ fun AppRoot(
               onBack = {
                 selectedTab = admittedAppTab(selectedTab, AppTab.Chat, settingsSaving)
               },
-              onSaved = refreshDiagnostics,
+              onSaved = refreshSkillsAndDiagnostics,
             )
             AppTab.Skills -> SkillsScreen(
-              rows = skillRows,
+              mode = skillAccess.mode,
+              actions = skillAccess.actions,
+              inventory = skills,
+              diagnostics = diagnostics,
+              runtimeClient = runtimeClient,
+              onSnapshotChanged = { refreshedSkills, refreshedDiagnostics ->
+                skills = refreshedSkills
+                diagnostics = refreshedDiagnostics
+              },
+              onImmersiveChanged = { skillImmersive = it },
               onBack = { selectedTab = AppTab.Chat },
             )
             AppTab.Diagnostics -> DiagnosticsScreen(
               diagnostics = diagnostics,
-              skillRows = skillRows,
-              onRefresh = refreshDiagnostics,
+              skillRows = androidSkillRows(skills),
+              onRefresh = refreshSkillsAndDiagnostics,
             )
           }
         }
       }
     }
-    AppBottomNavigation(
-      selected = selectedTab,
-      onSelect = {
-        selectedTab = admittedAppTab(selectedTab, it, settingsSaving)
-      },
-    )
+    if (!(selectedTab == AppTab.Skills && skillImmersive)) {
+      AppBottomNavigation(
+        tabs = skillAccess.visibleTabs,
+        selected = selectedTab,
+        onSelect = { requested ->
+          val admitted = admittedPolicyTab(selectedTab, requested, skillAccess.visibleTabs)
+          selectedTab = admittedAppTab(selectedTab, admitted, settingsSaving)
+        },
+      )
+    }
+  }
+}
+
+private fun RuntimeClient.loadSkillInventory(mode: SkillScreenMode): List<RuntimeSkill> {
+  val effective = listSkills()
+  return if (mode == SkillScreenMode.OwnerManage) {
+    ownerSkillInventory(effective, listManagedSkills())
+  } else {
+    effective
   }
 }
 
 @Composable
 private fun AppBottomNavigation(
+  tabs: List<AppTab>,
   selected: AppTab,
   onSelect: (AppTab) -> Unit,
 ) {
@@ -208,7 +318,7 @@ private fun AppBottomNavigation(
       horizontalArrangement = Arrangement.SpaceEvenly,
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      AppTab.entries.forEach { tab ->
+      tabs.forEach { tab ->
         val active = tab == selected
         val activeSize = tab.activeNavigationSize()
         Box(

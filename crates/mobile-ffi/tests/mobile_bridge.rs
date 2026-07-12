@@ -88,6 +88,44 @@ fn owner_operations_use_stored_actor_and_reject_json_actor_injection() {
 }
 
 #[test]
+fn mobile_owner_bridge_exposes_real_revision_detail() {
+    let dir = tempdir().unwrap();
+    let mut config = init_config(dir.path());
+    config.skill_policy = SkillManagementPolicy::owner_only();
+    config.actor_context = ActorContext::owner(
+        "mobile-owner",
+        [SkillGrant::Inspect, SkillGrant::CreateDraft],
+    );
+    let handle = initialize_handle(&config);
+    invoke_value(
+        handle,
+        json!({
+            "operation": "create_skill_draft",
+            "request": {
+                "package_id": "com.example.mobile-detail",
+                "display_name": "Mobile Detail",
+                "description": "Revision detail contract.",
+                "kind": "instruction_only",
+                "required_tools": []
+            }
+        }),
+    );
+
+    let detail = invoke_value(
+        handle,
+        json!({
+            "operation": "get_skill_detail",
+            "package_id": "com.example.mobile-detail"
+        }),
+    );
+
+    assert_eq!(detail["package_id"], "com.example.mobile-detail");
+    assert_eq!(detail["revisions"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["editable_draft"]["editable"], true);
+    close_runtime(handle);
+}
+
+#[test]
 fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
     let dir = tempdir().unwrap();
     let mut requester_config = init_config(dir.path());
