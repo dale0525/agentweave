@@ -215,8 +215,43 @@ pub(crate) async fn reconcile_startup_residue(
         .await?;
 
     let rows = backend.state.list_all_revisions().await?;
-    let trees = backend.revisions.enumerate_recovery_trees().await?;
-    for tree in trees {
+    let enumeration = backend.revisions.enumerate_recovery_trees().await?;
+    if enumeration.limit_exceeded {
+        backend
+            .state
+            .record_maintenance_diagnostic_once(
+                "startup-enumeration-limit",
+                None,
+                "store",
+                "startup_enumeration_limit_exceeded",
+                serde_json::json!({"outcome": "evidence_preserved"}),
+            )
+            .await?;
+    }
+    for entry in enumeration.unknown {
+        let key = format!(
+            "startup-unknown:{}:{}:{}",
+            entry.area, entry.kind, entry.name
+        );
+        backend
+            .state
+            .record_maintenance_diagnostic_once(
+                &key,
+                None,
+                entry.area,
+                "unknown_startup_entry",
+                serde_json::json!({
+                    "identity": entry.name,
+                    "entry_type": entry.kind,
+                    "ownership": "unproven"
+                }),
+            )
+            .await?;
+    }
+    if enumeration.limit_exceeded {
+        return backend.state.maintenance_diagnostic_count().await;
+    }
+    for tree in enumeration.trees {
         let bound = rows
             .iter()
             .find(|record| std::path::Path::new(&record.storage_path) == tree.directory.path());

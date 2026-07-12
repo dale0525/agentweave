@@ -285,6 +285,7 @@ fn skill_management_policy_serializes_deterministically_and_round_trips() {
         allowed_overrides: [protected_runtime].into_iter().collect(),
         activation_approval_required: false,
         permission_escalation_approval_required: true,
+        rollback_approval_required: false,
     };
     let expected = serde_json::json!({
         "mode": "owner_only",
@@ -293,7 +294,8 @@ fn skill_management_policy_serializes_deterministically_and_round_trips() {
         "protected_packages": ["generalagent.core.alpha", "generalagent.core.runtime"],
         "allowed_overrides": ["generalagent.core.runtime"],
         "activation_approval_required": false,
-        "permission_escalation_approval_required": true
+        "permission_escalation_approval_required": true,
+        "rollback_approval_required": false
     });
 
     let serialized = serde_json::to_value(&policy).unwrap();

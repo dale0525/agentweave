@@ -25,6 +25,26 @@ pub(crate) struct PreparedStoreChild {
     pub(crate) directory: PreparedStoreDirectory,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparedStoreUnknownKind {
+    Symlink,
+    RegularFile,
+    Other,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedStoreUnknown {
+    pub(crate) name: String,
+    pub(crate) kind: PreparedStoreUnknownKind,
+}
+
+pub(crate) struct PreparedStoreListing {
+    pub(crate) children: Vec<PreparedStoreChild>,
+    pub(crate) unknown: Vec<PreparedStoreUnknown>,
+    pub(crate) observed: usize,
+    pub(crate) exceeded: bool,
+}
+
 impl PreparedStoreDirectory {
     fn open(root: &StoreRootIdentity, relative: &Path) -> anyhow::Result<Self> {
         let descriptor = open_prepared_directory_platform(root, relative)?;
@@ -115,20 +135,41 @@ pub(crate) async fn remove_opened_tree(directory: &PreparedStoreDirectory) -> an
 pub(crate) async fn list_opened_root_directories(
     root: &StoreRootIdentity,
     max_entries: usize,
-) -> anyhow::Result<Vec<PreparedStoreChild>> {
+) -> anyhow::Result<PreparedStoreListing> {
     root.verify("store enumeration root")?;
     let mut entries = tokio::fs::read_dir(root.path()).await?;
     let mut children = Vec::new();
+    let mut unknown = Vec::new();
     let mut observed = 0usize;
     while let Some(entry) = entries.next_entry().await? {
+        if observed == max_entries {
+            root.verify("store enumeration root")?;
+            return Ok(PreparedStoreListing {
+                children,
+                unknown,
+                observed,
+                exceeded: true,
+            });
+        }
         observed = observed
             .checked_add(1)
             .context("store enumeration entry count overflow")?;
-        if observed > max_entries {
-            anyhow::bail!("store enumeration exceeded its bounded entry limit");
-        }
         let file_type = entry.file_type().await?;
         if file_type.is_symlink() || !file_type.is_dir() {
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("store entry name is not UTF-8"))?;
+            unknown.push(PreparedStoreUnknown {
+                name,
+                kind: if file_type.is_symlink() {
+                    PreparedStoreUnknownKind::Symlink
+                } else if file_type.is_file() {
+                    PreparedStoreUnknownKind::RegularFile
+                } else {
+                    PreparedStoreUnknownKind::Other
+                },
+            });
             continue;
         }
         let name = entry
@@ -142,26 +183,52 @@ pub(crate) async fn list_opened_root_directories(
     }
     root.verify("store enumeration root")?;
     children.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(children)
+    Ok(PreparedStoreListing {
+        children,
+        unknown,
+        observed,
+        exceeded: false,
+    })
 }
 
 pub(crate) async fn list_opened_child_directories(
     parent: &PreparedStoreDirectory,
     max_entries: usize,
-) -> anyhow::Result<Vec<PreparedStoreChild>> {
+) -> anyhow::Result<PreparedStoreListing> {
     parent.verify()?;
     let mut entries = tokio::fs::read_dir(parent.path()).await?;
     let mut children = Vec::new();
+    let mut unknown = Vec::new();
     let mut observed = 0usize;
     while let Some(entry) = entries.next_entry().await? {
+        if observed == max_entries {
+            parent.verify()?;
+            return Ok(PreparedStoreListing {
+                children,
+                unknown,
+                observed,
+                exceeded: true,
+            });
+        }
         observed = observed
             .checked_add(1)
             .context("store enumeration entry count overflow")?;
-        if observed > max_entries {
-            anyhow::bail!("store enumeration exceeded its bounded entry limit");
-        }
         let file_type = entry.file_type().await?;
         if file_type.is_symlink() || !file_type.is_dir() {
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("store entry name is not UTF-8"))?;
+            unknown.push(PreparedStoreUnknown {
+                name,
+                kind: if file_type.is_symlink() {
+                    PreparedStoreUnknownKind::Symlink
+                } else if file_type.is_file() {
+                    PreparedStoreUnknownKind::RegularFile
+                } else {
+                    PreparedStoreUnknownKind::Other
+                },
+            });
             continue;
         }
         let name = entry
@@ -176,7 +243,12 @@ pub(crate) async fn list_opened_child_directories(
     }
     parent.verify()?;
     children.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(children)
+    Ok(PreparedStoreListing {
+        children,
+        unknown,
+        observed,
+        exceeded: false,
+    })
 }
 
 pub(crate) async fn ensure_opened_child_directory(

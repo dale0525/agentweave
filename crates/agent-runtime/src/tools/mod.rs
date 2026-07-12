@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_MAX_TOOL_CALLS_PER_TURN: usize = 16;
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+const TOOL_OBSERVER_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum CommandMode {
@@ -141,6 +142,25 @@ pub trait ToolExecutionObserver: Send + Sync {
 pub struct ToolObserverDiagnostic {
     pub operation: &'static str,
     pub message: String,
+}
+
+struct ToolExecutionAttribution {
+    source: ToolSource,
+    success: bool,
+}
+
+struct ToolDispatchOutcome {
+    result: ToolResult,
+    attribution: Option<ToolExecutionAttribution>,
+}
+
+impl ToolDispatchOutcome {
+    fn unobserved(result: ToolResult) -> Self {
+        Self {
+            result,
+            attribution: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -260,6 +280,14 @@ impl ToolRegistry {
             .expect("tool observer diagnostic lock poisoned")
             .iter()
             .cloned()
+            .collect()
+    }
+
+    pub fn take_observer_diagnostics(&self) -> Vec<ToolObserverDiagnostic> {
+        self.observer_diagnostics
+            .lock()
+            .expect("tool observer diagnostic lock poisoned")
+            .drain(..)
             .collect()
     }
 
@@ -402,25 +430,32 @@ impl ToolRegistry {
                 registry_metadata(started),
             );
         }
+        let timeout_attribution = self.runtime_timeout_attribution(name);
         let execution = tokio::time::timeout(
             self.tool_timeout,
             self.execute_without_timeout(name, call_id, arguments, started),
         );
 
-        match execution.await {
-            Ok(result) => self.apply_output_limit(result),
-            Err(_) => {
-                self.observe_runtime_timeout(name).await;
-                registry_failure(
+        let outcome = match execution.await {
+            Ok(outcome) => outcome,
+            Err(_) => ToolDispatchOutcome {
+                result: registry_failure(
                     name,
                     call_id,
                     "timeout",
                     "tool execution timed out",
                     true,
                     registry_metadata(started),
-                )
-            }
+                ),
+                attribution: timeout_attribution,
+            },
+        };
+        let result = self.apply_output_limit(outcome.result);
+        if let Some(attribution) = outcome.attribution {
+            self.observe_execution(&attribution.source, attribution.success)
+                .await;
         }
+        result
     }
 
     async fn execute_without_timeout(
@@ -429,36 +464,40 @@ impl ToolRegistry {
         call_id: &str,
         arguments: Value,
         started: Instant,
-    ) -> ToolResult {
+    ) -> ToolDispatchOutcome {
         if self.built_in_tools_enabled && BuiltInTools::handles(name) {
-            return self.builtins.execute(name, call_id, arguments).await;
+            return ToolDispatchOutcome::unobserved(
+                self.builtins.execute(name, call_id, arguments).await,
+            );
         }
 
         if let Some(tool) = self.external_tool(name) {
-            return self.execute_external_tool(tool, name, call_id, started);
+            return ToolDispatchOutcome::unobserved(
+                self.execute_external_tool(tool, name, call_id, started),
+            );
         }
 
         let skill_tools = self.skills.tools();
         let Some(skill_tool) = skill_tools.iter().find(|tool| tool.name.as_str() == name) else {
-            return registry_failure(
+            return ToolDispatchOutcome::unobserved(registry_failure(
                 name,
                 call_id,
                 "unknown_tool",
                 format!("unknown tool: {name}"),
                 false,
                 ToolResultMetadata::default(),
-            );
+            ));
         };
 
         if !permission_allowed(self.mode, self.command_mode, skill_tool.permission) {
-            return registry_failure(
+            return ToolDispatchOutcome::unobserved(registry_failure(
                 name,
                 call_id,
                 "permission_denied",
                 "tool is not allowed in the current runtime mode",
                 false,
                 registry_metadata(started),
-            );
+            ));
         }
 
         let source = self.runtime_tool_source(name);
@@ -493,10 +532,13 @@ impl ToolRegistry {
                         .message
                         .contains("tool output exceeded runtime output limit")
             });
-        if attributable {
-            self.observe_execution(&source, result.ok).await;
+        ToolDispatchOutcome {
+            attribution: attributable.then_some(ToolExecutionAttribution {
+                source,
+                success: result.ok,
+            }),
+            result,
         }
-        result
     }
 
     fn runtime_tool_source(&self, name: &str) -> ToolSource {
@@ -517,28 +559,33 @@ impl ToolRegistry {
             })
     }
 
-    async fn observe_runtime_timeout(&self, name: &str) {
+    fn runtime_timeout_attribution(&self, name: &str) -> Option<ToolExecutionAttribution> {
         if (self.built_in_tools_enabled && BuiltInTools::handles(name))
             || self.external_tool(name).is_some()
         {
-            return;
+            return None;
         }
         let allowed = self.skills.tools().iter().any(|tool| {
             tool.name == name && permission_allowed(self.mode, self.command_mode, tool.permission)
         });
         if !allowed {
-            return;
+            return None;
         }
-        if let Some(source) = self.find_runtime_tool_source(name) {
-            self.observe_execution(&source, false).await;
-        }
+        self.find_runtime_tool_source(name)
+            .map(|source| ToolExecutionAttribution {
+                source,
+                success: false,
+            })
     }
 
     async fn observe_execution(&self, source: &ToolSource, success: bool) {
         let Some(observer) = &self.execution_observer else {
             return;
         };
-        if observer.finished(source, success).await.is_ok() {
+        if matches!(
+            tokio::time::timeout(TOOL_OBSERVER_TIMEOUT, observer.finished(source, success)).await,
+            Ok(Ok(()))
+        ) {
             return;
         }
         let mut diagnostics = self

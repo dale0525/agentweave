@@ -76,7 +76,13 @@ mod skill_recovery_cleanup_tests;
 #[cfg(test)]
 mod skill_recovery_residue_tests;
 #[cfg(test)]
+mod skill_recovery_review_lifecycle_tests;
+#[cfg(test)]
+mod skill_recovery_review_runtime_tests;
+#[cfg(test)]
 mod skill_recovery_tests;
+#[cfg(test)]
+mod turn_observer_tests;
 
 #[cfg(test)]
 mod skill_authoring_activation_tests;

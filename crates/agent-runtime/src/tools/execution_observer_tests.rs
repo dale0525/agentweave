@@ -6,6 +6,22 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+struct GatedObserver {
+    calls: AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ToolExecutionObserver for GatedObserver {
+    async fn finished(&self, _source: &ToolSource, _success: bool) -> anyhow::Result<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_waiters();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
 struct FailingObserver;
 
 #[async_trait]
@@ -99,6 +115,37 @@ async fn runtime_timeout_is_reported_once_as_an_execution_failure() {
     assert!(!result.ok);
     assert_eq!(result.error.unwrap().code, "timeout");
     assert_eq!(observer.0.load(Ordering::SeqCst), 1);
+    remove_test_dir(root).await;
+}
+
+#[tokio::test]
+async fn committed_observer_runs_once_outside_the_tool_timeout() {
+    let root = unique_test_dir("observer-outside-timeout");
+    write_skill(&root, "observed", "observed_echo", "read_workspace").await;
+    let skills = SkillRegistry::load_development(&root).await.unwrap();
+    let observer = Arc::new(GatedObserver {
+        calls: AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut config = RuntimeConfig::workspace_write(root.clone(), root.clone());
+    config.tool_timeout_ms = 200;
+    let registry =
+        Arc::new(ToolRegistry::new(skills, &config).with_execution_observer(observer.clone()));
+    let worker = registry.clone();
+    let execution = tokio::spawn(async move {
+        worker
+            .execute("observed_echo", "call-1", serde_json::json!({"value": 7}))
+            .await
+    });
+
+    observer.entered.notified().await;
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    observer.release.notify_waiters();
+    let result = execution.await.unwrap();
+
+    assert!(result.ok, "observer latency must not rewrite tool success");
+    assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
     remove_test_dir(root).await;
 }
 

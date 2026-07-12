@@ -91,6 +91,8 @@ pub struct SkillManagementPolicy {
     pub allowed_overrides: BTreeSet<SkillPackageId>,
     pub activation_approval_required: bool,
     pub permission_escalation_approval_required: bool,
+    #[serde(default)]
+    pub rollback_approval_required: bool,
 }
 
 impl Default for SkillManagementPolicy {
@@ -103,6 +105,7 @@ impl Default for SkillManagementPolicy {
             allowed_overrides: BTreeSet::new(),
             activation_approval_required: true,
             permission_escalation_approval_required: true,
+            rollback_approval_required: false,
         }
     }
 }

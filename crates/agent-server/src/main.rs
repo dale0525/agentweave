@@ -55,6 +55,9 @@ async fn main() -> anyhow::Result<()> {
     let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
     let loaded = load_skill_manager(&skills_root, storage.clone(), managed_skills).await?;
     let owner_host = owner_host_config_from_lookup(|name| std::env::var_os(name))?;
+    if owner_host.is_none() {
+        reconcile_managed_startup(&loaded, storage.clone()).await?;
+    }
     let runtime_config = runtime_config_from_env();
     let connector_catalog = runtime_config
         .connectors
@@ -261,12 +264,42 @@ async fn build_owner_api_config(
             .with_prepared_transfer_roots(import_root, export_root)
             .await?
             .with_connector_catalog(connector_catalog)?;
+    loaded
+        .manager
+        .startup_reconcile()
+        .await
+        .map_err(|error| anyhow::anyhow!("managed skill startup reconciliation failed: {error}"))?;
     let mut principals = vec![(host.token, host.actor)];
     if let (Some(token), Some(actor)) = (host.approver_token, host.approver_actor) {
         principals.push((token, actor));
     }
     let auth = OwnerAuth::from_principals(principals)?;
     Ok(Some(OwnerApiConfig::new(service, auth)))
+}
+
+async fn reconcile_managed_startup(
+    loaded: &LoadedSkillManager,
+    storage: Storage,
+) -> anyhow::Result<()> {
+    let Some(revisions) = loaded.managed_store.clone() else {
+        return Ok(());
+    };
+    let service = OwnerSkillManagementService::new(
+        loaded.manager.clone(),
+        revisions,
+        SkillStateStore::new(storage),
+        SkillManagementPolicy {
+            mode: SkillManagementMode::DiagnosticsOnly,
+            ..SkillManagementPolicy::default()
+        },
+    );
+    loaded
+        .manager
+        .startup_reconcile()
+        .await
+        .map_err(|error| anyhow::anyhow!("managed skill startup reconciliation failed: {error}"))?;
+    drop(service);
+    Ok(())
 }
 
 async fn load_skill_manager(
@@ -371,6 +404,9 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
     use tower::ServiceExt;
+
+    #[path = "main_startup_tests.rs"]
+    mod startup_tests;
 
     struct CapturingModel {
         tool_names: Arc<Mutex<Vec<String>>>,

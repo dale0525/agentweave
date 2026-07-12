@@ -35,6 +35,7 @@ pub struct TurnRunner<C> {
     config: RuntimeConfig,
     max_steps: usize,
     management: Option<OwnerSkillManagementService>,
+    execution_observer: Option<Arc<dyn crate::tools::ToolExecutionObserver>>,
 }
 
 impl<C> TurnRunner<C>
@@ -73,6 +74,7 @@ where
             config,
             max_steps,
             management: None,
+            execution_observer: None,
         }
     }
 
@@ -81,12 +83,21 @@ where
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_execution_observer_for_test(
+        mut self,
+        observer: Arc<dyn crate::tools::ToolExecutionObserver>,
+    ) -> Self {
+        self.execution_observer = Some(observer);
+        self
+    }
+
     pub async fn run(&self, user_text: &str) -> anyhow::Result<Vec<RuntimeEvent>> {
         self.run_request(TurnRequest::new(user_text)).await
     }
 
     pub async fn run_request(&self, request: TurnRequest) -> anyhow::Result<Vec<RuntimeEvent>> {
-        let lease = self.skill_manager.lease_snapshot();
+        let lease = self.skill_manager.lease_snapshot_for_turn().await?;
         self.run_with_snapshot(request, lease).await
     }
 
@@ -103,12 +114,16 @@ where
                 service: service.clone(),
                 actor: request.actor_context.clone(),
             });
+        let observer = self
+            .execution_observer
+            .clone()
+            .unwrap_or_else(|| Arc::new(self.skill_manager.clone()));
         let tools = ToolRegistry::try_new_with_management(
             snapshot.registry().clone(),
             &self.config,
             management,
         )?
-        .with_execution_observer(Arc::new(self.skill_manager.clone()));
+        .with_execution_observer(observer);
         let skill_catalog = snapshot.catalog();
         let turn_id = Uuid::new_v4().to_string();
         let mut events = vec![RuntimeEvent::TurnStarted {
@@ -257,6 +272,12 @@ where
                             ]
                         }));
                         let result = tools.execute(&name, &call_id, arguments).await.into_value();
+                        events.extend(tools.take_observer_diagnostics().into_iter().map(
+                            |diagnostic| RuntimeEvent::ToolObserverDiagnostic {
+                                operation: diagnostic.operation.into(),
+                                message: diagnostic.message,
+                            },
+                        ));
                         events.push(RuntimeEvent::ToolCallFinished {
                             call_id: call_id.clone(),
                             result: result.clone(),

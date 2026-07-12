@@ -1,5 +1,5 @@
 use super::{
-    OwnerSkillManagementService, SkillManagementError, SkillRollbackReport,
+    OwnerSkillManagementService, SkillManagementError, SkillRollbackOutcome, SkillRollbackReport,
     is_exact_managed_candidate,
 };
 use crate::events::RuntimeEvent;
@@ -21,6 +21,26 @@ struct RemovalApprovalBinding {
     revision_id: String,
     content_hash: String,
     snapshot_generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RollbackApprovalBinding {
+    package_id: SkillPackageId,
+    target_revision_id: String,
+    current_revision_id: String,
+    content_hash: String,
+    version: String,
+    storage_path: String,
+    descriptor_document: Value,
+    validation_document: Value,
+    snapshot_generation: u64,
+}
+
+struct RollbackResolution {
+    approval_id: String,
+    approver_id: String,
+    expected_binding: Value,
 }
 
 struct UnavailablePublication<'a> {
@@ -53,6 +73,7 @@ impl OwnerSkillManagementService {
         match approval.operation.as_str() {
             "activate" => self.approve_activation(approval_id, actor).await,
             "remove" => self.approve_removal(approval_id, actor).await,
+            "rollback" => self.approve_rollback(approval_id, actor).await,
             _ => Err(SkillManagementError::Conflict {
                 resource: "skill approval",
             }
@@ -78,6 +99,7 @@ impl OwnerSkillManagementService {
         match approval.operation.as_str() {
             "activate" => self.reject_activation(approval_id, actor).await,
             "remove" => self.reject_removal(approval_id, actor).await,
+            "rollback" => self.reject_rollback(approval_id, actor).await,
             _ => Err(SkillManagementError::Conflict {
                 resource: "skill approval",
             }
@@ -90,7 +112,37 @@ impl OwnerSkillManagementService {
         actor: &ActorContext,
         package_id: &SkillPackageId,
         revision_id: &str,
-    ) -> anyhow::Result<SkillRollbackReport> {
+    ) -> anyhow::Result<SkillRollbackOutcome> {
+        let service = self.clone();
+        let actor = actor.clone();
+        let package_id = package_id.clone();
+        let revision_id = revision_id.to_string();
+        tokio::spawn(async move {
+            service
+                .rollback_managed_skill_inner(&actor, &package_id, &revision_id)
+                .await
+        })
+        .await
+        .map_err(|error| SkillManagementError::internal("rollback", anyhow::Error::new(error)))?
+    }
+
+    async fn rollback_managed_skill_inner(
+        &self,
+        actor: &ActorContext,
+        package_id: &SkillPackageId,
+        revision_id: &str,
+    ) -> anyhow::Result<SkillRollbackOutcome> {
+        self.rollback_managed_skill_resolved(actor, package_id, revision_id, None)
+            .await
+    }
+
+    async fn rollback_managed_skill_resolved(
+        &self,
+        actor: &ActorContext,
+        package_id: &SkillPackageId,
+        revision_id: &str,
+        resolution: Option<RollbackResolution>,
+    ) -> anyhow::Result<SkillRollbackOutcome> {
         let publication = self
             .manager
             .begin_publication()
@@ -118,6 +170,57 @@ impl OwnerSkillManagementService {
             serde_json::from_value(target.descriptor_json.clone())?;
         self.authorize(actor, SkillOperation::Rollback, descriptor.kind)?;
         ensure_validated_revision(&target.validation_json, &target.content_hash)?;
+        let binding = RollbackApprovalBinding {
+            package_id: package_id.clone(),
+            target_revision_id: revision_id.into(),
+            current_revision_id: replaced_revision_id.clone(),
+            content_hash: target.content_hash.clone(),
+            version: target.version.clone(),
+            storage_path: target.storage_path.clone(),
+            descriptor_document: target.descriptor_json.clone(),
+            validation_document: target.validation_json.clone(),
+            snapshot_generation: publication.base_generation(),
+        };
+        if let Some(resolution) = &resolution {
+            let expected: RollbackApprovalBinding =
+                serde_json::from_value(resolution.expected_binding.clone()).map_err(|_| {
+                    SkillManagementError::Conflict {
+                        resource: "rollback approval",
+                    }
+                })?;
+            if expected != binding {
+                return Err(SkillManagementError::Conflict {
+                    resource: "rollback approval",
+                }
+                .into());
+            }
+        } else if self.policy.rollback_approval_required {
+            let approval = self
+                .state
+                .create_lifecycle_approval_unique(
+                    NewSkillApproval {
+                        package_id: package_id.clone(),
+                        revision_id: revision_id.into(),
+                        operation: "rollback".into(),
+                        requested_by: actor.actor_id.clone(),
+                        permission_diff: json!({}),
+                        binding: Some(serde_json::to_value(&binding)?),
+                    },
+                    "rollback",
+                )
+                .await
+                .map_err(|error| {
+                    SkillManagementError::from_state("rollback", "rollback approval", error)
+                })?;
+            let _ = self.events.send(RuntimeEvent::SkillApprovalRequired {
+                approval_id: approval.approval_id.clone(),
+                operation: SkillOperation::Rollback,
+                package_id: package_id.as_str().into(),
+                revision_id: revision_id.into(),
+                permission_diff: json!({}),
+            });
+            return Ok(SkillRollbackOutcome::ApprovalRequired(approval));
+        }
 
         let source_view = publication
             .inspect_sources()
@@ -154,7 +257,12 @@ impl OwnerSkillManagementService {
                 package_id,
                 expected_installation: &installation,
                 target: LifecycleTarget::Rollback { revision_id },
-                approval: None,
+                approval: resolution.as_ref().map(|approval| LifecycleApproval {
+                    approval_id: &approval.approval_id,
+                    approver_id: &approval.approver_id,
+                    operation: "rollback",
+                    expected_binding: &approval.expected_binding,
+                }),
                 previous_generation: publication.base_generation(),
                 previous_members: crate::skill_recovery::snapshot_members(
                     &publication.base_snapshot(),
@@ -166,6 +274,9 @@ impl OwnerSkillManagementService {
             .map_err(|error| {
                 SkillManagementError::from_state("rollback", "rollback publication", error)
             })?;
+        self.revisions
+            .checkpoint(crate::skill_store_faults::StoreFaultPoint::LifecycleAfterDurableCommit)
+            .await;
         let report = publication.publish(candidate);
         let _ = self.events.send(RuntimeEvent::SkillRevisionRolledBack {
             package_id: package_id.as_str().into(),
@@ -175,15 +286,141 @@ impl OwnerSkillManagementService {
         let _ = self.events.send(RuntimeEvent::SkillSnapshotPublished {
             generation: report.active_generation,
         });
-        Ok(SkillRollbackReport {
+        Ok(SkillRollbackOutcome::Published(SkillRollbackReport {
             package_id: package_id.clone(),
             active_revision_id: revision_id.into(),
             replaced_revision_id,
             generation: report.active_generation,
+        }))
+    }
+
+    async fn approve_rollback(
+        &self,
+        approval_id: &str,
+        approver: &ActorContext,
+    ) -> anyhow::Result<crate::skill_manager::SkillReloadReport> {
+        let service = self.clone();
+        let approval_id = approval_id.to_string();
+        let approver = approver.clone();
+        tokio::spawn(async move {
+            service
+                .approve_rollback_inner(&approval_id, &approver)
+                .await
+        })
+        .await
+        .map_err(|error| {
+            SkillManagementError::internal("approve_rollback", anyhow::Error::new(error))
+        })?
+    }
+
+    async fn approve_rollback_inner(
+        &self,
+        approval_id: &str,
+        approver: &ActorContext,
+    ) -> anyhow::Result<crate::skill_manager::SkillReloadReport> {
+        let approval = self
+            .state
+            .get_approval(approval_id)
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_state("approve_rollback", "rollback approval", error)
+            })?
+            .ok_or(SkillManagementError::NotFound {
+                resource: "rollback approval",
+            })?;
+        if approval.operation != "rollback"
+            || approval.status != crate::skill_state::SkillApprovalStatus::Pending
+            || approval.requested_by == approver.actor_id
+        {
+            return Err(SkillManagementError::Conflict {
+                resource: "rollback approval",
+            }
+            .into());
+        }
+        self.deny_builtin(&approval.package_id, SkillOperation::Rollback)?;
+        self.deny_protected(&approval.package_id, SkillOperation::Rollback)?;
+        let binding = self
+            .state
+            .approval_binding_value(approval_id)
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_state("approve_rollback", "rollback approval", error)
+            })?;
+        let outcome = self
+            .rollback_managed_skill_resolved(
+                approver,
+                &approval.package_id,
+                &approval.revision_id,
+                Some(RollbackResolution {
+                    approval_id: approval_id.into(),
+                    approver_id: approver.actor_id.clone(),
+                    expected_binding: binding,
+                }),
+            )
+            .await?;
+        let SkillRollbackOutcome::Published(report) = outcome else {
+            return Err(SkillManagementError::Conflict {
+                resource: "rollback approval",
+            }
+            .into());
+        };
+        let snapshot = self.manager.current_snapshot();
+        Ok(crate::skill_manager::SkillReloadReport {
+            previous_generation: report.generation.saturating_sub(1),
+            active_generation: report.generation,
+            active_packages: snapshot.packages().len(),
+            inactive_packages: snapshot.inactive().len(),
         })
     }
 
+    async fn reject_rollback(
+        &self,
+        approval_id: &str,
+        actor: &ActorContext,
+    ) -> anyhow::Result<SkillApprovalRecord> {
+        let approval =
+            self.state
+                .get_approval(approval_id)
+                .await?
+                .ok_or(SkillManagementError::NotFound {
+                    resource: "rollback approval",
+                })?;
+        if approval.operation != "rollback" {
+            return Err(SkillManagementError::Conflict {
+                resource: "rollback approval",
+            }
+            .into());
+        }
+        self.deny_builtin(&approval.package_id, SkillOperation::Rollback)?;
+        self.deny_protected(&approval.package_id, SkillOperation::Rollback)?;
+        self.authorize_any_kind(actor, SkillOperation::Rollback)?;
+        self.state
+            .reject(approval_id, &actor.actor_id)
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_state("reject_rollback", "rollback approval", error)
+            })
+            .map_err(Into::into)
+    }
+
     pub async fn disable_managed_skill(
+        &self,
+        actor: &ActorContext,
+        package_id: &SkillPackageId,
+    ) -> anyhow::Result<crate::skill_manager::SkillReloadReport> {
+        let service = self.clone();
+        let actor = actor.clone();
+        let package_id = package_id.clone();
+        tokio::spawn(async move {
+            service
+                .disable_managed_skill_inner(&actor, &package_id)
+                .await
+        })
+        .await
+        .map_err(|error| SkillManagementError::internal("disable", anyhow::Error::new(error)))?
+    }
+
+    async fn disable_managed_skill_inner(
         &self,
         actor: &ActorContext,
         package_id: &SkillPackageId,
@@ -238,6 +475,21 @@ impl OwnerSkillManagementService {
     }
 
     pub async fn request_removal(
+        &self,
+        actor: &ActorContext,
+        package_id: &SkillPackageId,
+    ) -> anyhow::Result<SkillApprovalRecord> {
+        let service = self.clone();
+        let actor = actor.clone();
+        let package_id = package_id.clone();
+        tokio::spawn(async move { service.request_removal_inner(&actor, &package_id).await })
+            .await
+            .map_err(|error| {
+                SkillManagementError::internal("request_removal", anyhow::Error::new(error))
+            })?
+    }
+
+    async fn request_removal_inner(
         &self,
         actor: &ActorContext,
         package_id: &SkillPackageId,
@@ -297,6 +549,21 @@ impl OwnerSkillManagementService {
         approval_id: &str,
         approver: &ActorContext,
     ) -> anyhow::Result<crate::skill_manager::SkillReloadReport> {
+        let service = self.clone();
+        let approval_id = approval_id.to_string();
+        let approver = approver.clone();
+        tokio::spawn(async move { service.approve_removal_inner(&approval_id, &approver).await })
+            .await
+            .map_err(|error| {
+                SkillManagementError::internal("approve_removal", anyhow::Error::new(error))
+            })?
+    }
+
+    async fn approve_removal_inner(
+        &self,
+        approval_id: &str,
+        approver: &ActorContext,
+    ) -> anyhow::Result<crate::skill_manager::SkillReloadReport> {
         let publication = self
             .manager
             .begin_publication()
@@ -318,6 +585,8 @@ impl OwnerSkillManagementService {
             }
             .into());
         }
+        self.deny_builtin(&approval.package_id, SkillOperation::DeleteManaged)?;
+        self.deny_protected(&approval.package_id, SkillOperation::DeleteManaged)?;
         let binding_value = self
             .state
             .approval_binding_value(approval_id)
@@ -335,7 +604,6 @@ impl OwnerSkillManagementService {
         let descriptor: SkillPackageDescriptor =
             serde_json::from_value(revision.descriptor_json.clone())?;
         self.authorize(approver, SkillOperation::DeleteManaged, descriptor.kind)?;
-        self.deny_protected(&binding.package_id, SkillOperation::DeleteManaged)?;
         if publication.base_generation() != binding.snapshot_generation
             || revision.content_hash != binding.content_hash
             || installation.active_revision_id.as_deref() != Some(&binding.revision_id)
@@ -366,6 +634,7 @@ impl OwnerSkillManagementService {
             approval: Some(LifecycleApproval {
                 approval_id,
                 approver_id: &approver.actor_id,
+                operation: "remove",
                 expected_binding: &binding_value,
             }),
             publication: &publication,
@@ -437,8 +706,11 @@ impl OwnerSkillManagementService {
             .await
             .map_err(|error| {
                 SkillManagementError::from_state(input.operation, "lifecycle publication", error)
-            })
-            .map_err(Into::into)
+            })?;
+        self.revisions
+            .checkpoint(crate::skill_store_faults::StoreFaultPoint::LifecycleAfterDurableCommit)
+            .await;
+        Ok(())
     }
 
     async fn active_managed_installation(

@@ -206,7 +206,7 @@ impl SkillStateStore {
         revision_id: &str,
         success: bool,
         now: DateTime<Utc>,
-    ) -> anyhow::Result<Option<SkillCircuitStateRecord>> {
+    ) -> anyhow::Result<Option<(SkillCircuitStateRecord, bool)>> {
         let Some(revision) = self.get_revision(revision_id).await? else {
             return Ok(None);
         };
@@ -224,6 +224,10 @@ impl SkillStateStore {
                 .await?
                 .map(|row| circuit_from_row(&row))
                 .transpose()?;
+            let was_open = existing
+                .as_ref()
+                .and_then(|state| state.open_until)
+                .is_some_and(|deadline| deadline > now);
             let (failures, open_until) = if success {
                 (0_u64, None)
             } else if let Some(existing) = &existing {
@@ -262,7 +266,9 @@ impl SkillStateStore {
                 .bind(revision_id)
                 .fetch_one(&mut *tx)
                 .await?;
-            circuit_from_row(&row).map(Some)
+            let state = circuit_from_row(&row)?;
+            let opened = !was_open && state.open_until.is_some_and(|deadline| deadline > now);
+            Ok(Some((state, opened)))
         }
         .await;
         crate::skill_state_transactions::finish(tx, result).await

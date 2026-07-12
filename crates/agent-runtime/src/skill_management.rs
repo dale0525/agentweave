@@ -130,6 +130,12 @@ pub struct SkillRollbackReport {
     pub generation: u64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum SkillRollbackOutcome {
+    Published(SkillRollbackReport),
+    ApprovalRequired(crate::skill_state::SkillApprovalRecord),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SkillManagementError {
     #[error("skills.{operation} denied")]

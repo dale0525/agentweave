@@ -180,6 +180,7 @@ pub(crate) fn router(state: &Arc<AppState>) -> Option<Router<Arc<AppState>>> {
     }
     if allows_route(owner, SkillOperation::Activate)
         || allows_route(owner, SkillOperation::DeleteManaged)
+        || allows_route(owner, SkillOperation::Rollback)
     {
         router = router.route(
             "/owner/skills/approvals/{approval_id}",
@@ -372,18 +373,24 @@ async fn rollback_skill(
     Extension(actor): Extension<ActorContext>,
     Path(package_id): Path<String>,
     payload: Result<Json<RollbackBody>, JsonRejection>,
-) -> Result<Json<agent_runtime::skill_management::SkillRollbackReport>, OwnerApiError> {
+) -> Result<Response, OwnerApiError> {
     let package_id = agent_runtime::skill_package::SkillPackageId::parse(&package_id)
         .map_err(|_| OwnerApiError::BadRequest)?;
     let Json(body) = payload.map_err(|_| OwnerApiError::BadRequest)?;
     validate_uuid(&body.revision_id)?;
-    Ok(Json(
-        owner_config(&state)?
-            .service
-            .rollback_managed_skill(&actor, &package_id, &body.revision_id)
-            .await
-            .map_err(OwnerApiError::from_service)?,
-    ))
+    let outcome = owner_config(&state)?
+        .service
+        .rollback_managed_skill(&actor, &package_id, &body.revision_id)
+        .await
+        .map_err(OwnerApiError::from_service)?;
+    Ok(match outcome {
+        agent_runtime::skill_management::SkillRollbackOutcome::Published(report) => {
+            (StatusCode::OK, Json(report)).into_response()
+        }
+        agent_runtime::skill_management::SkillRollbackOutcome::ApprovalRequired(approval) => {
+            (StatusCode::ACCEPTED, Json(approval_json(&approval))).into_response()
+        }
+    })
 }
 
 async fn disable_skill(

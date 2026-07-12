@@ -78,6 +78,50 @@ impl AuthoringFixture {
         }
     }
 
+    pub(crate) async fn with_limits(limits: crate::skill_store::SkillStoreLimits) -> Self {
+        let app = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let imports = tempdir().unwrap();
+        let exports = tempdir().unwrap();
+        let paths = SkillStorePaths::prepare(app.path(), cache.path())
+            .await
+            .unwrap();
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let state = SkillStateStore::new(storage);
+        let store = SkillRevisionStore::with_test_faults(
+            paths,
+            state.clone(),
+            limits,
+            crate::skill_store::SkillStoreTestFaults::default(),
+        );
+        let policy = SkillManagementPolicy::owner_only();
+        let manager = SkillManager::new(SkillManagerConfig {
+            sources: vec![Arc::new(ManagedSkillSource::from_store(store.clone()))],
+            platform: PlatformId::Server,
+            capabilities: CapabilitySet::from_names(Vec::<String>::new()),
+            protected_packages: Vec::new(),
+            allowed_overrides: Vec::new(),
+            runtime_version: "0.1.0".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+        let service =
+            OwnerSkillManagementService::new(manager.clone(), store.clone(), state.clone(), policy)
+                .with_transfer_roots(imports.path(), exports.path())
+                .unwrap();
+        Self {
+            _app: app,
+            _cache: cache,
+            _builtin: None,
+            imports,
+            exports,
+            state,
+            store,
+            manager,
+            service,
+        }
+    }
+
     pub(crate) async fn with_connectors(
         connectors: impl IntoIterator<Item = &'static str>,
     ) -> Self {

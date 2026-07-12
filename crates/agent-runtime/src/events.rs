@@ -50,6 +50,10 @@ pub enum RuntimeEvent {
         call_id: String,
         result: Value,
     },
+    ToolObserverDiagnostic {
+        operation: String,
+        message: String,
+    },
     UsageReported {
         input_tokens: u64,
         output_tokens: u64,

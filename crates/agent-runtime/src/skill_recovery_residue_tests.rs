@@ -174,7 +174,255 @@ async fn durable_snapshot_failure_keeps_the_previous_memory_snapshot() {
     assert!(Arc::ptr_eq(&previous, &fixture.manager.current_snapshot()));
 }
 
-async fn activate_package(fixture: &AuthoringFixture, package: &str, version: &str) -> String {
+#[tokio::test]
+async fn forged_cross_package_snapshot_member_preserves_the_owned_revision() {
+    let fixture = AuthoringFixture::new().await;
+    activate_package(&fixture, "com.example.alpha", "1.0.0").await;
+    let beta = activate_package(&fixture, "com.example.beta", "1.0.0").await;
+    activate_package(&fixture, "com.example.alpha", "2.0.0").await;
+    let mut members: serde_json::Value =
+        sqlx::query_scalar("SELECT members_json FROM skill_snapshots WHERE status = 'active'")
+            .fetch_one(fixture.state.pool())
+            .await
+            .map(|value: String| serde_json::from_str(&value).unwrap())
+            .unwrap();
+    let member = members
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|member| member["packageId"] == "com.example.alpha")
+        .unwrap();
+    member["revisionId"] = json!(beta);
+    sqlx::query("UPDATE skill_snapshots SET members_json = ? WHERE status = 'active'")
+        .bind(serde_json::to_string(&members).unwrap())
+        .execute(fixture.state.pool())
+        .await
+        .unwrap();
+
+    fixture.manager.startup_reconcile().await.unwrap();
+    fixture.manager.startup_reconcile().await.unwrap();
+
+    let beta_record = fixture.state.get_revision(&beta).await.unwrap().unwrap();
+    assert_eq!(beta_record.status, SkillRevisionStatus::Managed);
+    assert!(std::path::Path::new(&beta_record.storage_path).is_dir());
+    assert_eq!(
+        fixture
+            .state
+            .get_installation(&SkillPackageId::parse("com.example.beta").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .active_revision_id
+            .as_deref(),
+        Some(beta.as_str())
+    );
+    let diagnostics: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM skill_maintenance_diagnostics WHERE operation = 'snapshot_member_ownership_mismatch'",
+    )
+    .fetch_one(fixture.state.pool())
+    .await
+    .unwrap();
+    assert_eq!(diagnostics, 1);
+}
+
+#[tokio::test]
+async fn startup_enumeration_uses_one_global_budget_across_packages() {
+    let fixture = AuthoringFixture::with_limits(crate::skill_store::SkillStoreLimits {
+        max_directories: 4,
+        ..crate::skill_store::SkillStoreLimits::default()
+    })
+    .await;
+    for package in ["com.example.alpha", "com.example.beta"] {
+        let revisions = fixture
+            .store
+            .paths()
+            .managed
+            .join(package)
+            .join("revisions");
+        tokio::fs::create_dir_all(&revisions).await.unwrap();
+        for suffix in ["one", "two"] {
+            tokio::fs::create_dir(revisions.join(suffix)).await.unwrap();
+        }
+    }
+
+    fixture.manager.startup_reconcile().await.unwrap();
+
+    let diagnostics: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM skill_maintenance_diagnostics WHERE operation = 'startup_enumeration_limit_exceeded'",
+    )
+    .fetch_one(fixture.state.pool())
+    .await
+    .unwrap();
+    assert_eq!(diagnostics, 1);
+    assert!(
+        fixture
+            .store
+            .paths()
+            .managed
+            .join("com.example.alpha")
+            .is_dir()
+    );
+    assert!(
+        fixture
+            .store
+            .paths()
+            .managed
+            .join("com.example.beta")
+            .is_dir()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unknown_startup_entry_kinds_are_preserved_and_diagnosed_idempotently() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = AuthoringFixture::new().await;
+    let symlink_path = fixture.store.paths().staging.join("unknown-link");
+    symlink(fixture.store.paths().managed.clone(), &symlink_path).unwrap();
+    let regular_path = fixture.store.paths().quarantine.join("unknown-file");
+    tokio::fs::write(&regular_path, b"evidence").await.unwrap();
+    let orphan_package = fixture.store.paths().managed.join("com.example.orphan");
+    tokio::fs::create_dir(&orphan_package).await.unwrap();
+
+    fixture.manager.startup_reconcile().await.unwrap();
+    fixture.manager.startup_reconcile().await.unwrap();
+
+    assert!(tokio::fs::symlink_metadata(&symlink_path).await.is_ok());
+    assert!(regular_path.is_file());
+    assert!(orphan_package.is_dir());
+    let diagnostics: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM skill_maintenance_diagnostics WHERE operation = 'unknown_startup_entry'",
+    )
+    .fetch_one(fixture.state.pool())
+    .await
+    .unwrap();
+    assert_eq!(diagnostics, 3);
+    let leaked_paths: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM skill_maintenance_diagnostics WHERE operation = 'unknown_startup_entry' AND metadata_json LIKE ?",
+    )
+    .bind(format!("%{}%", fixture.store.paths().managed.display()))
+    .fetch_one(fixture.state.pool())
+    .await
+    .unwrap();
+    assert_eq!(leaked_paths, 0);
+}
+
+#[tokio::test]
+async fn invalid_last_known_good_records_one_generation_phase_diagnostic() {
+    let fixture = AuthoringFixture::new().await;
+    activate_package(&fixture, "com.example.alpha", "1.0.0").await;
+    activate_package(&fixture, "com.example.alpha", "2.0.0").await;
+    let generation: i64 = sqlx::query_scalar(
+        "SELECT generation FROM skill_snapshots WHERE status = 'last_known_good'",
+    )
+    .fetch_one(fixture.state.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE skill_snapshots SET members_json = '{\"invalid\":true}' WHERE status = 'last_known_good'",
+    )
+    .execute(fixture.state.pool())
+    .await
+    .unwrap();
+
+    fixture.manager.startup_reconcile().await.unwrap();
+    fixture.manager.startup_reconcile().await.unwrap();
+
+    let diagnostics: Vec<(String, String)> = sqlx::query_as(
+        "SELECT idempotency_key, metadata_json FROM skill_maintenance_diagnostics WHERE operation = 'invalid_last_known_good_snapshot'",
+    )
+    .fetch_all(fixture.state.pool())
+    .await
+    .unwrap();
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].0.contains(&generation.to_string()));
+    let metadata: serde_json::Value = serde_json::from_str(&diagnostics[0].1).unwrap();
+    assert_eq!(metadata["generation"], generation);
+    assert_eq!(metadata["phase"], "rebuild");
+    assert!(!diagnostics[0].1.contains("/"));
+}
+
+#[tokio::test]
+async fn row_only_managed_and_quarantined_records_are_preserved_and_diagnosed() {
+    let fixture = AuthoringFixture::new().await;
+    let managed = activate_package(&fixture, "com.example.managed-row", "1.0.0").await;
+    let managed_record = fixture.state.get_revision(&managed).await.unwrap().unwrap();
+    make_tree_writable_for_test(std::path::Path::new(&managed_record.storage_path));
+    tokio::fs::remove_dir_all(&managed_record.storage_path)
+        .await
+        .unwrap();
+    let draft = fixture.draft().await;
+    let quarantined = fixture
+        .store
+        .quarantine_revision(&draft.revision_id, "test quarantine")
+        .await
+        .unwrap();
+    make_tree_writable_for_test(&quarantined.path);
+    tokio::fs::remove_dir_all(&quarantined.path).await.unwrap();
+
+    fixture.manager.startup_reconcile().await.unwrap();
+
+    assert_eq!(
+        fixture
+            .state
+            .get_revision(&managed)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillRevisionStatus::Managed
+    );
+    assert_eq!(
+        fixture
+            .state
+            .get_revision(&draft.revision_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillRevisionStatus::Quarantined
+    );
+    let operations: Vec<String> = sqlx::query_scalar(
+        "SELECT operation FROM skill_maintenance_diagnostics WHERE operation IN ('row_only_managed', 'row_only_quarantine') ORDER BY operation",
+    )
+    .fetch_all(fixture.state.pool())
+    .await
+    .unwrap();
+    assert_eq!(operations, ["row_only_managed", "row_only_quarantine"]);
+}
+
+#[tokio::test]
+async fn process_local_store_issue_is_carried_into_durable_startup_diagnostics() {
+    let faults = crate::skill_store::SkillStoreTestFaults::default();
+    let fixture = AuthoringFixture::with_faults(faults.clone()).await;
+    let draft = fixture.draft().await;
+    faults.fail_once(crate::skill_store::SkillStoreFaultPoint::PromoteSourceCleanupAfter);
+    fixture
+        .store
+        .promote_revision(&draft.revision_id)
+        .await
+        .unwrap();
+    assert_eq!(fixture.store.maintenance_issues().len(), 1);
+
+    fixture.manager.startup_reconcile().await.unwrap();
+    fixture.manager.startup_reconcile().await.unwrap();
+
+    let diagnostics: Vec<String> = sqlx::query_scalar(
+        "SELECT metadata_json FROM skill_maintenance_diagnostics WHERE area = 'store' AND metadata_json LIKE '%process_local_carryover%'",
+    )
+    .fetch_all(fixture.state.pool())
+    .await
+    .unwrap();
+    assert_eq!(diagnostics.len(), 1);
+    assert!(!diagnostics[0].contains(fixture.store.paths().staging.to_string_lossy().as_ref()));
+}
+
+pub(crate) async fn activate_package(
+    fixture: &AuthoringFixture,
+    package: &str,
+    version: &str,
+) -> String {
     let draft = fixture
         .service
         .create_draft(
@@ -252,4 +500,27 @@ async fn make_file_writable(path: &std::path::Path) {
     #[cfg(not(unix))]
     permissions.set_readonly(false);
     tokio::fs::set_permissions(path, permissions).await.unwrap();
+}
+
+fn make_tree_writable_for_test(root: &std::path::Path) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let mut permissions = metadata.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(if metadata.is_dir() { 0o700 } else { 0o600 });
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        if metadata.is_dir() {
+            stack.extend(
+                std::fs::read_dir(&path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path()),
+            );
+        }
+    }
 }

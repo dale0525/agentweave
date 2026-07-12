@@ -158,3 +158,112 @@ async fn removal_route_uses_bound_different_actor_approval() {
     assert_eq!(approved.status(), StatusCode::OK);
     assert!(test.manager.current_snapshot().packages().is_empty());
 }
+
+#[tokio::test]
+async fn rollback_policy_returns_accepted_then_resolves_through_bound_approval_route() {
+    let owner = lifecycle_actor("owner-1");
+    let approver = lifecycle_actor("approver-2");
+    let auth = OwnerAuth::from_principals([
+        ("owner-token", owner.clone()),
+        ("approver-token", approver.clone()),
+    ])
+    .unwrap();
+    let mut policy = SkillManagementPolicy::owner_only();
+    policy.rollback_approval_required = true;
+    let test = owner_test_app_with_auth(policy, auth, SkillStoreLimits::default()).await;
+    let first = activate(
+        &test.service,
+        "com.example.rollback-approval",
+        &owner,
+        &approver,
+    )
+    .await;
+    activate(
+        &test.service,
+        "com.example.rollback-approval",
+        &owner,
+        &approver,
+    )
+    .await;
+
+    let requested = test
+        .app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/owner/skills/com.example.rollback-approval/rollback",
+            Some("Bearer owner-token"),
+            Some(json!({"revision_id": first})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(requested.status(), StatusCode::ACCEPTED);
+    let approval_id = response_json(requested).await["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let approved = test
+        .app
+        .oneshot(request(
+            "POST",
+            &format!("/owner/skills/approvals/{approval_id}"),
+            Some("Bearer approver-token"),
+            Some(json!({"decision": "approve"})),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(approved.status(), StatusCode::OK);
+    assert_eq!(
+        test.state
+            .get_installation(&SkillPackageId::parse("com.example.rollback-approval").unwrap(),)
+            .await
+            .unwrap()
+            .unwrap()
+            .active_revision_id
+            .as_deref(),
+        Some(first.as_str())
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_auth_precedes_malformed_and_oversized_request_bodies() {
+    let auth = OwnerAuth::new("owner-token", lifecycle_actor("owner-1")).unwrap();
+    let test = owner_test_app_with_auth(
+        SkillManagementPolicy::owner_only(),
+        auth,
+        SkillStoreLimits::default(),
+    )
+    .await;
+    let malformed = "{".to_string();
+    let oversized = format!("{{\"padding\":\"{}\"}}", "x".repeat(2 * 1024 * 1024));
+
+    for uri in [
+        "/owner/skills/com.example.lifecycle/rollback",
+        "/owner/skills/com.example.lifecycle/disable",
+    ] {
+        for body in [&malformed, &oversized] {
+            let response = test
+                .app
+                .clone()
+                .oneshot(lifecycle_raw_request(uri, body.clone()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response_json(response).await,
+                json!({"error": "authentication required"})
+            );
+        }
+    }
+}
+
+fn lifecycle_raw_request(uri: &str, body: String) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}

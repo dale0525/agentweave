@@ -82,7 +82,7 @@ async fn rollback_publishes_previous_revision_for_later_leases_only() {
     let old_turn = fixture.manager.lease_snapshot();
     let second = activate_new_revision(&fixture, "2.0.0").await;
 
-    let report = fixture
+    let outcome = fixture
         .service
         .rollback_managed_skill(
             &fixture.actor([SkillGrant::Rollback]),
@@ -91,6 +91,9 @@ async fn rollback_publishes_previous_revision_for_later_leases_only() {
         )
         .await
         .unwrap();
+    let crate::skill_management::SkillRollbackOutcome::Published(report) = outcome else {
+        panic!("default rollback policy must publish immediately")
+    };
 
     assert_eq!(report.active_revision_id, first);
     assert_eq!(report.replaced_revision_id, second);
@@ -292,12 +295,31 @@ async fn corrupted_active_revision_restores_verified_last_known_good_idempotentl
     tokio::fs::write(&descriptor, b"corrupt").await.unwrap();
 
     let restored = fixture.manager.startup_reconcile().await.unwrap();
+    let quarantine_entries_after_restore =
+        directory_entry_count(fixture.store.paths().quarantine.clone()).await;
+    let quarantine_rows_after_restore: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM skill_revisions WHERE lifecycle_status = 'quarantined'",
+    )
+    .fetch_one(fixture.state.pool())
+    .await
+    .unwrap();
     let repeated = fixture.manager.startup_reconcile().await.unwrap();
 
     assert_eq!(restored.status, RecoveryStatus::LastKnownGoodRestored);
     assert_eq!(restored.generation, 2);
     assert_eq!(repeated.status, RecoveryStatus::CurrentSnapshotValid);
     assert_eq!(repeated.generation, 2);
+    assert_eq!(
+        directory_entry_count(fixture.store.paths().quarantine.clone()).await,
+        quarantine_entries_after_restore
+    );
+    let quarantine_rows_after_repeat: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM skill_revisions WHERE lifecycle_status = 'quarantined'",
+    )
+    .fetch_one(fixture.state.pool())
+    .await
+    .unwrap();
+    assert_eq!(quarantine_rows_after_repeat, quarantine_rows_after_restore);
     let installation = fixture
         .state
         .get_installation(
@@ -474,4 +496,13 @@ async fn make_file_writable(path: &std::path::Path) {
     #[cfg(not(unix))]
     permissions.set_readonly(false);
     tokio::fs::set_permissions(path, permissions).await.unwrap();
+}
+
+async fn directory_entry_count(path: std::path::PathBuf) -> usize {
+    let mut entries = tokio::fs::read_dir(path).await.unwrap();
+    let mut count = 0;
+    while entries.next_entry().await.unwrap().is_some() {
+        count += 1;
+    }
+    count
 }

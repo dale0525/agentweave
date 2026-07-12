@@ -12,6 +12,11 @@ use std::future::Future;
 use std::sync::{Arc, RwLock, Weak};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+#[path = "skill_manager_circuit.rs"]
+mod circuit;
+#[path = "skill_manager_startup.rs"]
+mod startup;
+
 #[derive(Clone)]
 pub struct SkillManager {
     inner: Arc<SkillManagerInner>,
@@ -215,30 +220,6 @@ impl SkillManager {
             .context("managed skill runtime is not bound")
     }
 
-    pub async fn record_execution_result(
-        &self,
-        source: &crate::tools::ToolSource,
-        success: bool,
-    ) -> anyhow::Result<()> {
-        let crate::tools::ToolSource::RuntimeSkill {
-            package_id,
-            revision_id: Some(revision_id),
-            ..
-        } = source
-        else {
-            return Ok(());
-        };
-        let Ok(package_id) = SkillPackageId::parse(package_id) else {
-            return Ok(());
-        };
-        let backend = self.managed_runtime()?;
-        backend
-            .state
-            .record_managed_execution_result(&package_id, revision_id, success, chrono::Utc::now())
-            .await?;
-        Ok(())
-    }
-
     pub async fn startup_reconcile(
         &self,
     ) -> anyhow::Result<crate::skill_recovery::SkillRecoveryReport> {
@@ -257,6 +238,20 @@ impl SkillManager {
             match self.rebuild_persisted_snapshot(&backend, record).await {
                 Ok(snapshot) => Some(snapshot),
                 Err(_) => {
+                    let key = format!("invalid-lkg:{}:rebuild", record.generation);
+                    backend
+                        .state
+                        .record_maintenance_diagnostic_once(
+                            &key,
+                            None,
+                            "snapshot",
+                            "invalid_last_known_good_snapshot",
+                            serde_json::json!({
+                                "generation": record.generation,
+                                "phase": "rebuild"
+                            }),
+                        )
+                        .await?;
                     maintenance_diagnostics += 1;
                     None
                 }
@@ -292,9 +287,8 @@ impl SkillManager {
                     });
                 }
                 Err(_) if last_good.is_some() => {
-                    let quarantined = self
-                        .quarantine_invalid_snapshot_members(&backend, record)
-                        .await;
+                    let quarantined =
+                        startup::quarantine_invalid_snapshot_members(&backend, record).await;
                     maintenance_diagnostics += quarantined.failures;
                     let restored = last_good.expect("last-known-good checked above");
                     let members = crate::skill_recovery::parse_snapshot_members(
@@ -334,9 +328,8 @@ impl SkillManager {
                     });
                 }
                 Err(_) => {
-                    let quarantined = self
-                        .quarantine_invalid_snapshot_members(&backend, record)
-                        .await;
+                    let quarantined =
+                        startup::quarantine_invalid_snapshot_members(&backend, record).await;
                     maintenance_diagnostics += quarantined.failures;
                     let SkillManagerMode::Dynamic(config) = &self.inner.mode else {
                         unreachable!("managed runtime cannot be bound to a static manager")
@@ -454,58 +447,24 @@ impl SkillManager {
             }
             packages.push(package);
         }
-        let snapshot =
-            Arc::new(build_snapshot_from_packages(config, record.generation, packages).await?);
+        let verified =
+            build_snapshot_from_packages(config, record.generation, packages.clone()).await?;
+        if crate::skill_recovery::snapshot_members(&verified) != record.members_json {
+            anyhow::bail!("persisted snapshot resolution does not match its members");
+        }
+        let snapshot = Arc::new(
+            circuit::rebuild_persisted_snapshot_with_circuits(
+                config,
+                record.generation,
+                packages,
+                backend,
+            )
+            .await?,
+        );
         if crate::skill_recovery::snapshot_members(&snapshot) != record.members_json {
             anyhow::bail!("persisted snapshot resolution does not match its members");
         }
         Ok(snapshot)
-    }
-
-    async fn quarantine_invalid_snapshot_members(
-        &self,
-        backend: &ManagedRuntimeBackend,
-        record: &crate::skill_state::SkillSnapshotRecord,
-    ) -> SnapshotQuarantineResult {
-        let Ok(members) =
-            crate::skill_recovery::parse_snapshot_members(record.members_json.clone())
-        else {
-            return SnapshotQuarantineResult {
-                revisions: Vec::new(),
-                failures: 1,
-            };
-        };
-        let source = crate::skill_source::ManagedSkillSource::from_store(backend.revisions.clone());
-        let mut result = SnapshotQuarantineResult::default();
-        for member in members
-            .into_iter()
-            .filter(|member| member.layer == "managed")
-        {
-            let (Ok(package_id), Some(revision_id)) = (
-                SkillPackageId::parse(&member.package_id),
-                member.revision_id.as_deref(),
-            ) else {
-                result.failures += 1;
-                continue;
-            };
-            if source
-                .load_managed_revision(&package_id, revision_id)
-                .await
-                .is_ok()
-            {
-                continue;
-            }
-            match backend
-                .revisions
-                .quarantine_revision(revision_id, "startup active snapshot verification failed")
-                .await
-            {
-                Ok(_) => result.revisions.push(revision_id.to_string()),
-                Err(_) => result.failures += 1,
-            }
-        }
-        result.revisions.sort();
-        result
     }
 
     pub fn runtime_context(&self) -> Option<&SkillRuntimeContext> {
@@ -757,47 +716,7 @@ async fn build_snapshot_with_runtime(
     let Some(backend) = backend else {
         return build_snapshot_from_packages(config, generation, packages).await;
     };
-    let mut eligible = Vec::with_capacity(packages.len());
-    let mut circuit_open = Vec::new();
-    for package in packages {
-        let revision_id = package
-            .verified_content
-            .as_ref()
-            .and_then(|content| content.execution_binding.as_ref())
-            .map(|binding| binding.revision_id.as_str());
-        if let Some(revision_id) = revision_id
-            && backend
-                .state
-                .circuit_is_open(revision_id, chrono::Utc::now())
-                .await?
-        {
-            circuit_open.push(package);
-        } else {
-            eligible.push(package);
-        }
-    }
-    let mut resolved = SkillResolver::resolve(SkillResolutionInput {
-        packages: eligible,
-        platform: config.platform,
-        capabilities: config.capabilities.clone(),
-        protected_packages: config.protected_packages.clone(),
-        allowed_overrides: config.allowed_overrides.clone(),
-        runtime_version: config.runtime_version.clone(),
-    })?;
-    resolved
-        .inactive
-        .extend(circuit_open.into_iter().map(|package| {
-            crate::skill_resolver::ResolvedSkillPackage {
-                package,
-                status: crate::skill_resolver::SkillResolutionStatus::CircuitOpen,
-                reason: "managed revision circuit open".into(),
-            }
-        }));
-    SkillSnapshot::build(generation, resolved)
-        .await
-        .map(|snapshot| {
-            snapshot.with_platform_capabilities(config.platform, config.capabilities.clone())
-        })
+    circuit::build_snapshot_from_packages_with_circuits(config, generation, packages, backend).await
 }
 
 async fn build_snapshot_with_candidate(
