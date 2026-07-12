@@ -89,7 +89,7 @@ impl SkillRevisionStore {
 }
 
 fn recovery_tree_matches_record(
-    tree: &crate::skill_store_secure_fs::SecureTreeSnapshot,
+    tree: &crate::skill_store_secure_snapshot::SecureTreeSnapshot,
     directory: &PreparedStoreDirectory,
     record: &SkillRevisionRecord,
 ) -> anyhow::Result<bool> {

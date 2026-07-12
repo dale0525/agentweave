@@ -9,6 +9,7 @@ pub mod session;
 pub mod skill;
 pub mod skill_authoring;
 pub mod skill_availability;
+pub mod skill_bundle;
 pub mod skill_catalog;
 mod skill_entry_resource;
 pub mod skill_management;
@@ -52,6 +53,7 @@ mod skill_store_revision_cleanup;
 mod skill_store_secure_fs;
 mod skill_store_secure_fs_faults;
 mod skill_store_secure_roots;
+mod skill_store_secure_snapshot;
 mod skill_store_startup;
 mod skill_store_transfer;
 mod skill_store_windows;
@@ -65,6 +67,9 @@ pub mod vfs;
 
 #[cfg(test)]
 mod skill_package_tests;
+
+#[cfg(test)]
+mod skill_bundle_tests;
 
 #[cfg(test)]
 mod skill_policy_tests;

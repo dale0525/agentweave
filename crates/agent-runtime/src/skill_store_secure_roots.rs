@@ -1,7 +1,7 @@
 use crate::skill_source::canonical_relative_path;
 use crate::skill_store_fs_types::PackageLimits;
 use crate::skill_store_locks::StoreRootIdentity;
-use crate::skill_store_secure_fs::{SecurePackageSnapshot, SecureTreeSnapshot};
+use crate::skill_store_secure_snapshot::{SecurePackageSnapshot, SecureTreeSnapshot};
 use anyhow::Context;
 use std::fs::File;
 use std::path::Path;
@@ -46,7 +46,7 @@ pub(crate) struct PreparedStoreListing {
 }
 
 impl PreparedStoreDirectory {
-    fn open(root: &StoreRootIdentity, relative: &Path) -> anyhow::Result<Self> {
+    pub(crate) fn open(root: &StoreRootIdentity, relative: &Path) -> anyhow::Result<Self> {
         let descriptor = open_prepared_directory_platform(root, relative)?;
         let identity = same_file::Handle::from_file(descriptor.try_clone()?)?;
         Ok(Self {

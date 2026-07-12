@@ -1,83 +1,79 @@
-use agent_server::dev_skills::{DevSkillPackage, SkillPackageReleaseError, check_skill_packages};
+use agent_server::skill_release::{SkillReleaseDiagnostic, validate_skill_roots};
 use std::path::PathBuf;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let root = skills_root_from_args()?;
-
-    match check_skill_packages(&root).await {
-        Ok(inventory) => {
-            println!(
-                "Skill release check passed: {} package(s) ready under {}",
-                inventory.packages.len(),
-                inventory.root
-            );
-            Ok(())
-        }
+async fn main() {
+    let roots = match roots_from_args(std::env::args().skip(1)) {
+        Ok(Some(roots)) => roots,
+        Ok(None) => return,
         Err(error) => {
-            print_release_error(&error);
-            std::process::exit(1);
+            eprintln!("check-skills: {error}");
+            std::process::exit(2);
         }
+    };
+    let report = validate_skill_roots(&roots).await;
+    for warning in &report.warnings {
+        eprintln!(
+            "warning: {}: {}",
+            warning.message,
+            diagnostic_location(warning)
+        );
     }
+    if report.is_ready() {
+        println!(
+            "Skill release check passed: {} package(s) across {} root(s)",
+            report.package_count,
+            report.roots.len()
+        );
+        return;
+    }
+    eprintln!("skill release check failed");
+    for error in &report.errors {
+        eprintln!("- {}", format_diagnostic(error));
+    }
+    std::process::exit(1);
 }
 
-fn skills_root_from_args() -> anyhow::Result<PathBuf> {
-    let mut args = std::env::args().skip(1);
-    let mut root = PathBuf::from("skills");
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
+fn roots_from_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Option<Vec<PathBuf>>> {
+    let mut args = args.into_iter();
+    let mut roots = Vec::new();
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
             "--root" => {
-                let Some(value) = args.next() else {
-                    anyhow::bail!("--root requires a path");
-                };
-                root = PathBuf::from(value);
+                let value = args
+                    .next()
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or_else(|| anyhow::anyhow!("--root requires a path"))?;
+                roots.push(PathBuf::from(value));
             }
             "--help" | "-h" => {
-                println!("Usage: check-skills [--root <skills-root>]");
-                std::process::exit(0);
+                println!("Usage: check-skills [--root <skills-root> ...]");
+                return Ok(None);
             }
             other => anyhow::bail!("unknown argument: {other}"),
         }
     }
-
-    Ok(root)
+    if roots.is_empty() {
+        roots.push(PathBuf::from("skills"));
+    }
+    Ok(Some(roots))
 }
 
-fn print_release_error(error: &SkillPackageReleaseError) {
-    eprintln!("{error}");
-    for package in error
-        .inventory
-        .packages
-        .iter()
-        .filter(|package| !package.release_ready)
-    {
-        print_package_issues(package);
+fn format_diagnostic(diagnostic: &SkillReleaseDiagnostic) -> String {
+    match &diagnostic.package_id {
+        Some(package) => format!(
+            "{} at {}: {}",
+            package,
+            diagnostic.path.display(),
+            diagnostic.message
+        ),
+        None => format!("{}: {}", diagnostic.path.display(), diagnostic.message),
     }
 }
 
-fn print_package_issues(package: &DevSkillPackage) {
-    eprintln!("- {} ({})", package.id, package.package_kind_label());
-    for error in &package.validation.errors {
-        eprintln!("  validation: {error}");
-    }
-    for issue in &package.readiness_issues {
-        eprintln!("  readiness: {issue}");
-    }
-}
-
-trait PackageKindLabel {
-    fn package_kind_label(&self) -> &'static str;
-}
-
-impl PackageKindLabel for DevSkillPackage {
-    fn package_kind_label(&self) -> &'static str {
-        match self.package_kind {
-            agent_server::dev_skills::DevSkillPackageKind::Runtime => "runtime",
-            agent_server::dev_skills::DevSkillPackageKind::Instruction => "instruction",
-            agent_server::dev_skills::DevSkillPackageKind::Combined => "combined",
-            agent_server::dev_skills::DevSkillPackageKind::Empty => "empty",
-            agent_server::dev_skills::DevSkillPackageKind::Invalid => "invalid",
-        }
+fn diagnostic_location(diagnostic: &SkillReleaseDiagnostic) -> String {
+    match &diagnostic.package_id {
+        Some(package) => format!("{} at {}", package, diagnostic.path.display()),
+        None => diagnostic.path.display().to_string(),
     }
 }

@@ -1,13 +1,7 @@
 use agent_runtime::{
-    platform::{CapabilitySet, PlatformId},
-    skill::SkillRegistry,
-    skill_catalog::SkillCatalog,
     skill_management::OwnerSkillManagementService,
-    skill_manager::{SkillManager, SkillManagerConfig},
     skill_policy::{ActorContext, SkillGrant, SkillManagementMode, SkillManagementPolicy},
-    skill_source::{DirectorySkillSource, ManagedSkillSource, SkillLayer, SkillSource},
     skill_state::SkillStateStore,
-    skill_store::{SkillRevisionStore, SkillStorePaths},
     storage::Storage,
     tools::{CommandMode, RuntimeConfig},
 };
@@ -17,30 +11,20 @@ use model_gateway::{
     provider::{EndpointType, ProviderProfile},
     responses::GatewayHttpClient,
 };
-use std::{
-    collections::BTreeMap,
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
 
 const DEFAULT_DATABASE_URL: &str = "sqlite://general-agent.db?mode=rwc";
 const DEFAULT_SKILLS_ROOT: &str = "skills";
 const DEFAULT_MODEL_BASE_URL: &str = "http://127.0.0.1:11434/v1";
 const DEFAULT_MODEL_NAME: &str = "local-agent-model";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ManagedSkillsConfig {
-    app_data_root: PathBuf,
-    cache_root: PathBuf,
-}
-
-struct LoadedSkillManager {
-    manager: SkillManager,
-    managed_store: Option<SkillRevisionStore>,
-    #[cfg(test)]
-    managed_source: Option<ManagedSkillSource>,
-}
+#[path = "server_skill_startup.rs"]
+mod server_skill_startup;
+#[cfg(test)]
+use server_skill_startup::ManagedSkillsConfig;
+use server_skill_startup::{
+    LoadedSkillManager, load_skill_manager, managed_skills_config_from_lookup,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -113,28 +97,6 @@ fn skills_root_from_env() -> PathBuf {
     std::env::var("GENERAL_AGENT_SKILLS_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_SKILLS_ROOT))
-}
-
-fn managed_skills_config_from_lookup<F>(lookup: F) -> anyhow::Result<Option<ManagedSkillsConfig>>
-where
-    F: Fn(&str) -> Option<std::ffi::OsString>,
-{
-    if lookup("GENERAL_AGENT_MANAGED_SKILLS").as_deref() != Some(std::ffi::OsStr::new("1")) {
-        return Ok(None);
-    }
-    let required_root = |name: &str| -> anyhow::Result<PathBuf> {
-        let value = lookup(name).ok_or_else(|| {
-            anyhow::anyhow!("{name} is required when GENERAL_AGENT_MANAGED_SKILLS=1")
-        })?;
-        if value.is_empty() {
-            anyhow::bail!("{name} cannot be empty when GENERAL_AGENT_MANAGED_SKILLS=1");
-        }
-        Ok(PathBuf::from(value))
-    };
-    Ok(Some(ManagedSkillsConfig {
-        app_data_root: required_root("GENERAL_AGENT_APP_DATA_ROOT")?,
-        cache_root: required_root("GENERAL_AGENT_CACHE_ROOT")?,
-    }))
 }
 
 #[derive(Clone)]
@@ -310,74 +272,6 @@ async fn reconcile_managed_startup(
     Ok(())
 }
 
-async fn load_skill_manager(
-    root: &Path,
-    storage: Storage,
-    managed_config: Option<ManagedSkillsConfig>,
-) -> anyhow::Result<LoadedSkillManager> {
-    if root.join("skill-bundle.json").is_file() {
-        if managed_config.is_some() {
-            anyhow::bail!("managed skills cannot be composed with a legacy packaged skill bundle");
-        }
-        let registry = SkillRegistry::load_packaged(root).await?;
-        let catalog = load_packaged_instruction_skills(root).await;
-        return Ok(LoadedSkillManager {
-            manager: SkillManager::from_registry_and_catalog(registry, catalog),
-            managed_store: None,
-            #[cfg(test)]
-            managed_source: None,
-        });
-    }
-
-    let deferred_managed_startup = managed_config.is_some();
-    let mut sources: Vec<Arc<dyn SkillSource>> = vec![Arc::new(DirectorySkillSource::new(
-        SkillLayer::Builtin,
-        root,
-    ))];
-    let mut managed_store = None;
-    #[cfg(test)]
-    let mut managed_source = None;
-    if let Some(config) = managed_config {
-        let paths = SkillStorePaths::prepare(&config.app_data_root, &config.cache_root).await?;
-        let store = SkillRevisionStore::new(paths, SkillStateStore::new(storage));
-        let source = ManagedSkillSource::from_store(store.clone());
-        sources.push(Arc::new(source.clone()));
-        managed_store = Some(store);
-        #[cfg(test)]
-        {
-            managed_source = Some(source);
-        }
-    }
-    let manager_config = SkillManagerConfig {
-        sources,
-        platform: PlatformId::Desktop,
-        capabilities: CapabilitySet::desktop_runtime(),
-        protected_packages: Vec::new(),
-        allowed_overrides: Vec::new(),
-        runtime_version: env!("CARGO_PKG_VERSION").parse()?,
-    };
-    let manager = if deferred_managed_startup {
-        SkillManager::new_deferred_managed(manager_config).await?
-    } else {
-        SkillManager::new(manager_config).await?
-    };
-    Ok(LoadedSkillManager {
-        manager,
-        managed_store,
-        #[cfg(test)]
-        managed_source,
-    })
-}
-
-async fn load_packaged_instruction_skills(root: &Path) -> SkillCatalog {
-    let result = SkillCatalog::load_packaged(root).await;
-
-    result.unwrap_or_else(|error| {
-        tracing::warn!(?error, "failed to load instruction skill catalog");
-        SkillCatalog::empty()
-    })
-}
-
 fn model_profile_from_env() -> ProviderProfile {
     ProviderProfile {
         id: "default".into(),
@@ -406,6 +300,8 @@ fn model_endpoint_type_from_env() -> EndpointType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_runtime::platform::PlatformId;
+    use agent_runtime::skill_store::{SkillRevisionStore, SkillStorePaths};
     use agent_runtime::turn::{ModelClient, ModelEventStream};
     use agent_runtime::{skill_package::SkillPackageId, skill_state::SkillLayerRecord};
     use axum::{
@@ -628,19 +524,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_bundle_selection_uses_a_static_skill_manager() {
+    async fn verified_bundle_selection_uses_dynamic_source_and_composes_managed() {
+        let source_root = unique_test_dir("bundle-source");
         let root = unique_test_dir("bundle-manager");
-        let package_root = root.join("runtime");
+        let package_root = source_root.join("runtime");
         write_runtime_package(&package_root, "bundle_tool").await;
         tokio::fs::write(
-            root.join("skill-bundle.json"),
+            package_root.join("general-agent.json"),
             serde_json::json!({
-                "skills": [{
-                    "path": "runtime",
-                    "includeInstructions": false
-                }]
+                "schemaVersion": 1,
+                "id": "com.example.bundle",
+                "version": "0.1.0",
+                "displayName": "Bundle",
+                "kind": "native_runtime",
+                "package": { "includeInstructions": false, "includeRuntime": true },
+                "compatibility": { "platforms": ["desktop"] },
+                "requires": {
+                    "packages": [],
+                    "capabilities": ["shell.process"],
+                    "runtimeTools": [],
+                    "connectors": []
+                }
             })
             .to_string(),
+        )
+        .await
+        .unwrap();
+        agent_runtime::skill_bundle::build_skill_bundle(
+            agent_runtime::skill_bundle::BuildSkillBundleRequest {
+                source_roots: vec![source_root.clone()],
+                output_root: root.clone(),
+                platform: PlatformId::Desktop,
+                runtime_version: env!("CARGO_PKG_VERSION").parse().unwrap(),
+                generated_at: "2026-01-02T03:04:05Z".into(),
+            },
         )
         .await
         .unwrap();
@@ -655,7 +572,51 @@ mod tests {
             manager.current_snapshot().registry().tools()[0].name,
             "bundle_tool"
         );
-        assert!(manager.reload().await.is_err());
+        manager.reload().await.unwrap();
+
+        let app_root = unique_test_dir("bundle-managed-app");
+        let cache_root = unique_test_dir("bundle-managed-cache");
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let managed = load_skill_manager(
+            &root,
+            storage,
+            Some(ManagedSkillsConfig {
+                app_data_root: app_root.clone(),
+                cache_root: cache_root.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(managed.managed_store.is_some());
+        assert_eq!(
+            managed.manager.current_snapshot().registry().tools()[0].name,
+            "bundle_tool"
+        );
+        remove_test_dir(source_root).await;
+        remove_test_dir(root).await;
+        remove_test_dir(app_root).await;
+        remove_test_dir(cache_root).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dangling_bundle_manifest_never_falls_back_to_directory_discovery() {
+        use std::os::unix::fs as unix_fs;
+
+        let root = unique_test_dir("dangling-bundle-manifest");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        unix_fs::symlink("missing-manifest", root.join("skill-bundle.json")).unwrap();
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+
+        let error = load_skill_manager(&root, storage, None)
+            .await
+            .err()
+            .unwrap();
+
+        assert!(format!("{error:#}").contains("bundle metadata"));
+        tokio::fs::remove_file(root.join("skill-bundle.json"))
+            .await
+            .unwrap();
         remove_test_dir(root).await;
     }
 

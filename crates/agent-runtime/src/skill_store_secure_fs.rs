@@ -1,8 +1,9 @@
-use crate::skill_package::{LoadedPackageDescriptor, SkillPackageDescriptor};
+use crate::skill_package::SkillPackageDescriptor;
 use crate::skill_source::{
     canonical_relative_path, portable_collision_key, register_portable_path,
 };
 use crate::skill_store_fs::PackageLimits;
+use crate::skill_store_secure_snapshot::{SecurePackageSnapshot, SecureTreeSnapshot};
 use anyhow::Context;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -67,33 +68,8 @@ fn checkpoint_secure_hash_after_open() {
 #[cfg(not(test))]
 fn checkpoint_secure_hash_after_open() {}
 
-pub(crate) struct SecurePackageSnapshot {
-    pub descriptor: LoadedPackageDescriptor,
-    pub content_hash: String,
-    pub runtime_manifest: Option<Vec<u8>>,
-    pub instructions_file: Option<Vec<u8>>,
-}
-
 #[cfg(test)]
 pub(crate) use crate::skill_store_secure_fs_faults::inject_transient_directory_open_once;
-
-pub(crate) struct SecureTreeSnapshot {
-    pub content_hash: String,
-    descriptor_bytes: Option<Vec<u8>>,
-    runtime_manifest: Option<Vec<u8>>,
-    instructions_file: Option<Vec<u8>>,
-}
-
-impl SecureTreeSnapshot {
-    pub(crate) fn load_descriptor(&self, root: &Path) -> anyhow::Result<LoadedPackageDescriptor> {
-        SkillPackageDescriptor::load_from_file_bytes(
-            root,
-            self.descriptor_bytes.clone(),
-            self.runtime_manifest.clone(),
-            self.instructions_file.clone(),
-        )
-    }
-}
 
 pub(crate) fn unbounded_package_limits() -> PackageLimits {
     PackageLimits {

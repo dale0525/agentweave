@@ -9,7 +9,9 @@ agent-runtime = { path = "../agent-runtime" }
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
+chrono.workspace = true
 model-gateway = { path = "../model-gateway" }
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

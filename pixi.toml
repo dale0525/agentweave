@@ -13,6 +13,7 @@ mobile-mvp-check = "node scripts/mobile-mvp-check.mjs"
 server = "cargo run -p agent-server --bin agent-server"
 dev = "node scripts/dev.mjs"
 check-skills = "cargo run -p agent-server --bin check-skills -- --root skills"
+bundle-skills = "cargo run -p agent-server --bin bundle-skills -- --source skills --output dist/skills --platform desktop"
 install-hooks = "node scripts/install-hooks.mjs"
 test-dev-script = "node --test scripts/*.test.mjs"
 

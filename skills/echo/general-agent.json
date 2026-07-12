@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "generalagent.core.filesystem",
+  "id": "generalagent.example.echo",
   "version": "0.1.0",
-  "displayName": "Filesystem",
+  "displayName": "Echo",
   "kind": "native_runtime",
   "package": {
-    "includeInstructions": true,
+    "includeInstructions": false,
     "includeRuntime": true
   },
   "compatibility": {
