@@ -1,7 +1,9 @@
 package com.generalagent.mobile.ui
 
 import com.generalagent.mobile.runtime.RuntimeDiagnostics
+import com.generalagent.mobile.runtime.RuntimeActorContext
 import com.generalagent.mobile.runtime.RuntimeSkill
+import com.generalagent.mobile.runtime.RuntimeSkillPolicy
 import com.generalagent.mobile.runtime.RuntimeSkillDetail
 import com.generalagent.mobile.runtime.RuntimeSkillRequirements
 import com.generalagent.mobile.runtime.RuntimeSkillRevision
@@ -49,6 +51,51 @@ class SkillManagementStateTest {
     assertEquals(
       SkillScreenMode.Hidden,
       skillScreenMode("owner_only", grants = setOf("activate")),
+    )
+  }
+
+  @Test
+  fun ownerPolicyRequiresOwnerRoleAndAuthoringPolicy() {
+    val policy = RuntimeSkillPolicy(
+      mode = "owner_only",
+      agentAuthoring = false,
+      allowedKinds = listOf("instruction_only"),
+    )
+
+    assertEquals(
+      SkillScreenMode.Hidden,
+      skillAccessState(policy, RuntimeActorContext(role = "user", grants = listOf("inspect"))).mode,
+    )
+    val owner = skillAccessState(
+      policy,
+      RuntimeActorContext(actorId = "owner", role = "owner", grants = listOf("inspect", "create_draft")),
+    )
+    assertEquals(SkillScreenMode.OwnerManage, owner.mode)
+    assertFalse(SkillAction.Create in owner.actions)
+  }
+
+  @Test
+  fun createActionRequiresAnAllowedAuthoringKind() {
+    val actor = RuntimeActorContext(
+      actorId = "owner",
+      role = "owner",
+      grants = listOf("inspect", "create_draft"),
+    )
+    assertFalse(
+      SkillAction.Create in skillAccessState(
+        RuntimeSkillPolicy(mode = "owner_only", agentAuthoring = true, allowedKinds = emptyList()),
+        actor,
+      ).actions,
+    )
+    assertTrue(
+      SkillAction.Create in skillAccessState(
+        RuntimeSkillPolicy(
+          mode = "owner_only",
+          agentAuthoring = true,
+          allowedKinds = listOf("instruction_only"),
+        ),
+        actor,
+      ).actions,
     )
   }
 
@@ -180,6 +227,121 @@ class SkillManagementStateTest {
     assertEquals(listOf("host/search", "host/read"), merged.requirements.runtimeTools)
     assertEquals(listOf("network.http", "filesystem.app_data"), merged.requirements.capabilities)
     assertEquals(validation.permissionDiffJson, merged.permissionDiffJson)
+  }
+
+  @Test
+  fun targetActionsRespectManageabilityKindAndLifecycle() {
+    val access = SkillAccessState(
+      mode = SkillScreenMode.OwnerManage,
+      visibleTabs = AppTab.entries,
+      actions = setOf(
+        SkillAction.Edit,
+        SkillAction.Validate,
+        SkillAction.Activate,
+        SkillAction.Disable,
+        SkillAction.Rollback,
+        SkillAction.Delete,
+      ),
+      allowedKinds = setOf("instruction_only"),
+    )
+    val unmanaged = skillDetail(activeRevisionId = "revision-active").copy(sourceLayer = "builtin")
+    assertTrue(skillTargetActions(access, unmanaged).isEmpty())
+
+    val removed = skillDetail(activeRevisionId = "revision-active").copy(status = "removed")
+    assertTrue(skillTargetActions(access, removed).isEmpty())
+
+    val managed = skillDetail(activeRevisionId = "revision-active")
+    val actions = skillTargetActions(access, managed)
+    assertTrue(SkillAction.Edit in actions)
+    assertTrue(SkillAction.Validate in actions)
+    assertTrue(SkillAction.Disable in actions)
+    assertTrue(SkillAction.Delete in actions)
+  }
+
+  @Test
+  fun dirtyDraftImmediatelyInvalidatesValidation() {
+    val revision = skillDetail(activeRevisionId = "revision-active").editableDraft!!
+    val validated = SkillDraftContentState(
+      revision = revision,
+      instructions = revision.instructions,
+      requiredTools = revision.requirements.runtimeTools,
+      validation = validValidation(revision.revisionId, "hash-one"),
+    )
+
+    val dirty = draftInstructionsChanged(validated, "Changed after validation")
+
+    assertEquals(null, dirty.validation)
+    assertTrue(dirty.dirty)
+    assertFalse(dirty.canActivate)
+  }
+
+  @Test
+  fun saveAndRouteReentryCannotReuseStaleValidation() {
+    val revision = skillDetail(activeRevisionId = "revision-active").editableDraft!!
+    val state = SkillDraftContentState(
+      revision = revision,
+      instructions = revision.instructions,
+      requiredTools = revision.requirements.runtimeTools,
+      validation = validValidation(revision.revisionId, "old-hash"),
+    )
+
+    assertEquals(null, draftSaveStarted(state).validation)
+    assertEquals(null, draftContentState(revision).validation)
+  }
+
+  @Test
+  fun validationPlanPersistsCurrentBytesBeforeValidation() {
+    val detail = skillDetail(activeRevisionId = "revision-active")
+    val revision = detail.editableDraft!!
+    val state = SkillDraftContentState(
+      revision = revision,
+      instructions = "Current visible bytes",
+      requiredTools = listOf("host/search", "host/read"),
+    )
+
+    val plan = draftValidationPlan(detail, state)
+
+    assertEquals(revision.revisionId, plan.revisionId)
+    assertEquals(listOf("SKILL.md", "general-agent.json"), plan.files.map { it.path })
+    assertEquals("Current visible bytes", plan.files.first().content)
+  }
+
+  @Test
+  fun rollbackSelectionRejectsStagingAndTracksExplicitHistoryTarget() {
+    val detail = skillDetailWithHistory()
+    val staging = detail.revisions.first { it.status == "staging" }
+    val old = detail.revisions.first { it.revisionId == "revision-old" }
+
+    assertEquals(null, selectRollbackTarget(detail, staging))
+    assertEquals(old, selectRollbackTarget(detail, old))
+  }
+
+  private fun validValidation(revisionId: String, hash: String) = RuntimeSkillValidation(
+    ok = true,
+    errors = emptyList(),
+    warnings = emptyList(),
+    requiredTools = listOf("host/search"),
+    requiredConnectors = emptyList(),
+    dependencies = emptyList(),
+    requiredCapabilities = listOf("network.http"),
+    resolverStatus = "active",
+    resolverErrors = emptyList(),
+    permissionDiffJson = "{}",
+    revisionId = revisionId,
+    contentHash = hash,
+    snapshotGeneration = 7,
+  )
+
+  private fun skillDetailWithHistory(): RuntimeSkillDetail {
+    val base = skillDetail(activeRevisionId = "revision-active")
+    val active = base.editableDraft!!.copy(
+      revisionId = "revision-active",
+      status = "managed",
+      editable = false,
+      validation = RuntimeSkillValidationSummary(true, emptyList(), emptyList()),
+    )
+    val old = active.copy(revisionId = "revision-old", version = "0.9.0")
+    return base.copy(revisions = listOf(base.editableDraft!!, active, old))
   }
 
   private fun allSkillGrants(): Set<String> =

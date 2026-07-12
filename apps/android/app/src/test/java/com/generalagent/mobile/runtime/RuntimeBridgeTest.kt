@@ -82,6 +82,92 @@ class RuntimeBridgeTest {
   }
 
   @Test
+  fun bridgeCreatesDistinctRequesterAndApproverClients() {
+    val context = RuntimeEnvironment.getApplication() as Context
+    val native = MultiHandleNativeRuntime()
+    val policy = RuntimeSkillPolicy(
+      mode = "owner_only",
+      agentAuthoring = true,
+      allowedKinds = listOf("instruction_only"),
+    )
+    val requester = RuntimeActorContext(
+      actorId = "android-requester",
+      role = "owner",
+      grants = listOf("inspect", "activate"),
+    )
+    val approver = RuntimeActorContext(
+      actorId = "android-approver",
+      role = "owner",
+      grants = listOf("inspect", "activate"),
+    )
+
+    val client = RuntimeBridge(
+      context = context,
+      native = native,
+      skillAssets = BridgeSkillAssets(),
+      configuredSkillPolicy = policy,
+      configuredActorContext = requester,
+      configuredApproverContext = approver,
+      publicationFileSystem = JvmSkillPublicationFileSystem(),
+    ).load()
+    client.resolveSkillApproval("approval-1", approve = true)
+
+    assertEquals(listOf("android-requester", "android-approver"), native.initializeActors)
+    assertEquals(listOf(102L, 101L), native.invokeHandles)
+    assertEquals("android-approver", client.approverActorId)
+    assertTrue(client.approvalAvailable)
+  }
+
+  @Test
+  fun missingDistinctApproverDisablesApprovalResolution() {
+    val client = RuntimeClient(
+      handle = 9L,
+      native = OwnerNativeRuntime(),
+      actorContext = RuntimeActorContext(actorId = "same-owner", role = "owner"),
+      approverClient = RuntimeApprovalClient(
+        handle = 10L,
+        native = OwnerNativeRuntime(),
+        actorId = "same-owner",
+      ),
+    )
+
+    assertFalse(client.approvalAvailable)
+    assertEquals("A distinct approving actor is unavailable", client.approvalUnavailableReason)
+    assertThrows(RuntimeBridgeException::class.java) {
+      client.resolveSkillApproval("approval-1", approve = true)
+    }
+  }
+
+  @Test
+  fun createDraftCarriesInitialFilesWithoutEditOperation() {
+    val native = OwnerNativeRuntime()
+    val client = RuntimeClient(9L, native)
+    val request = RuntimeSkillDraftRequest(
+      packageId = "com.example.created",
+      displayName = "Created",
+      description = "Description",
+      kind = "instruction_only",
+      requiredTools = emptyList(),
+      initialFiles = listOf(RuntimeSkillDraftFile("SKILL.md", "Initial instructions")),
+    )
+
+    client.createSkillDraft(request)
+
+    assertEquals(listOf("create_skill_draft"), native.requests.map { it.getString("operation") })
+    assertEquals("Initial instructions", native.requests.single().getJSONArray("files").getJSONObject(0).getString("content"))
+  }
+
+  @Test
+  fun rollbackOutcomePreservesAuthoritativeApprovalFacts() {
+    val native = OwnerNativeRuntime(rollbackApproval = true)
+    val outcome = RuntimeClient(9L, native).rollbackManagedSkill("com.example.owner", "revision-old")
+
+    val approval = (outcome as RuntimeSkillRollbackOutcome.ApprovalRequired).approval
+    assertEquals("mobile-requester", approval.requestedBy)
+    assertTrue(approval.permissionDiffJson.contains("secure_storage"))
+  }
+
+  @Test
   fun loadModelConfigPreservesNullSecretReference() {
     val native = object : NativeRuntimeApi {
       override fun initialize(requestJson: String): String = error("not used")
@@ -127,7 +213,13 @@ class RuntimeBridgeTest {
   @Test
   fun ownerOperationsUseStoredActorAndMapRuntimeDtos() {
     val native = OwnerNativeRuntime()
-    val client = RuntimeClient(9L, native, skillGrants = setOf("inspect", "activate"))
+    val client = RuntimeClient(
+      handle = 9L,
+      native = native,
+      skillGrants = setOf("inspect", "activate"),
+      actorContext = RuntimeActorContext(actorId = "owner", role = "owner"),
+      approverClient = RuntimeApprovalClient(10L, native, "approver"),
+    )
 
     val managed = client.listManagedSkills().single()
     val detail = client.getSkillDetail("com.example.owner")
@@ -171,6 +263,7 @@ class RuntimeBridgeTest {
         "validate_skill_draft",
         "request_skill_activation",
         "resolve_skill_approval",
+        "synchronize_skills",
         "disable_managed_skill",
         "rollback_managed_skill",
         "request_skill_removal",
@@ -286,6 +379,11 @@ private class RecordingNativeRuntime(
 }
 
 private class OwnerNativeRuntime : NativeRuntimeApi {
+  constructor(rollbackApproval: Boolean = false) {
+    this.rollbackApproval = rollbackApproval
+  }
+
+  private var rollbackApproval: Boolean = false
   val requests = mutableListOf<JSONObject>()
 
   override fun initialize(requestJson: String): String = error("not used")
@@ -300,8 +398,13 @@ private class OwnerNativeRuntime : NativeRuntimeApi {
       "validate_skill_draft" -> """{"ok":true,"errors":[],"warnings":[],"requiredTools":["host/search"],"requiredConnectors":[],"dependencies":[],"requiredCapabilities":["network.http"],"resolverStatus":"active","resolverErrors":[],"permissionDiff":{"capabilities":{"added":["network.http"]}},"revisionId":"revision-draft","contentHash":"hash","snapshotGeneration":7}"""
       "request_skill_activation", "request_skill_removal" -> """{"approval_id":"approval-1","package_id":"com.example.owner","permission_diff":{},"requested_by":"owner","revision_id":"revision-draft","status":"pending"}"""
       "resolve_skill_approval" -> """{"previous_generation":7,"active_generation":8,"active_packages":1,"inactive_packages":0,"status":"approved"}"""
+      "synchronize_skills" -> """{"platform":"android","capabilities":[],"database_ready":true,"skills_ready":true,"model_configured":false,"skill_management_mode":"owner_only","active_snapshot_generation":8,"quarantined_count":0,"last_reload_status":"generation:8"}"""
       "disable_managed_skill" -> """{"previous_generation":8,"active_generation":9,"active_packages":0,"inactive_packages":1}"""
-      "rollback_managed_skill" -> """{"package_id":"com.example.owner","active_revision_id":"revision-active","replaced_revision_id":"revision-new","generation":10}"""
+      "rollback_managed_skill" -> if (rollbackApproval) {
+        """{"approval_id":"approval-rollback","package_id":"com.example.owner","permission_diff":{"capabilities":{"added":["secure_storage"]}},"requested_by":"mobile-requester","revision_id":"revision-old","status":"pending"}"""
+      } else {
+        """{"package_id":"com.example.owner","active_revision_id":"revision-active","replaced_revision_id":"revision-new","generation":10}"""
+      }
       else -> error("unexpected operation")
     }
     return """{"ok":true,"data":$data}"""
@@ -309,6 +412,27 @@ private class OwnerNativeRuntime : NativeRuntimeApi {
 
   override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String =
     error("not used")
+
+  override fun close(handle: Long): String = """{"ok":true,"data":null}"""
+}
+
+private class MultiHandleNativeRuntime : NativeRuntimeApi {
+  val initializeActors = mutableListOf<String>()
+  val invokeHandles = mutableListOf<Long>()
+  private var nextHandle = 100L
+
+  override fun initialize(requestJson: String): String {
+    initializeActors += JSONObject(requestJson).getJSONObject("actor_context").getString("actor_id")
+    nextHandle += 1
+    return """{"ok":true,"data":{"handle":$nextHandle}}"""
+  }
+
+  override fun invoke(handle: Long, requestJson: String): String {
+    invokeHandles += handle
+    return """{"ok":true,"data":{"previous_generation":7,"active_generation":8,"active_packages":1,"inactive_packages":0,"status":"approved"}}"""
+  }
+
+  override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String = error("not used")
 
   override fun close(handle: Long): String = """{"ok":true,"data":null}"""
 }

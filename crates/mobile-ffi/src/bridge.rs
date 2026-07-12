@@ -20,6 +20,8 @@ enum RuntimeRequest {
     },
     CreateSkillDraft {
         request: CreateSkillDraftRequest,
+        #[serde(default)]
+        files: Vec<DraftFileUpdate>,
     },
     UpdateSkillDraft {
         revision_id: String,
@@ -45,6 +47,7 @@ enum RuntimeRequest {
     RequestSkillRemoval {
         package_id: String,
     },
+    SynchronizeSkills,
     CreateSession {
         title: String,
     },
@@ -100,8 +103,8 @@ pub fn invoke_runtime_json(handle: i64, request_json: &str) -> String {
             RuntimeRequest::GetSkillDetail { package_id } => {
                 serde_json::to_value(runtime.get_skill_detail(&package_id)?)
             }
-            RuntimeRequest::CreateSkillDraft { request } => {
-                serde_json::to_value(runtime.create_skill_draft(request)?)
+            RuntimeRequest::CreateSkillDraft { request, files } => {
+                serde_json::to_value(runtime.create_skill_draft_with_files(request, files)?)
             }
             RuntimeRequest::UpdateSkillDraft { revision_id, files } => {
                 serde_json::to_value(runtime.update_skill_draft(&revision_id, files)?)
@@ -125,6 +128,9 @@ pub fn invoke_runtime_json(handle: i64, request_json: &str) -> String {
             } => Ok(runtime.rollback_managed_skill(&package_id, &revision_id)?),
             RuntimeRequest::RequestSkillRemoval { package_id } => {
                 serde_json::to_value(runtime.request_skill_removal(&package_id)?)
+            }
+            RuntimeRequest::SynchronizeSkills => {
+                serde_json::to_value(runtime.synchronize_skills()?)
             }
             RuntimeRequest::CreateSession { title } => {
                 serde_json::to_value(runtime.create_session(&title)?)

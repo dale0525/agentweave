@@ -126,10 +126,68 @@ fn mobile_owner_bridge_exposes_real_revision_detail() {
 }
 
 #[test]
+fn create_only_mobile_owner_can_create_complete_initial_draft() {
+    let dir = tempdir().unwrap();
+    let mut config = init_config(dir.path());
+    config.skill_policy = SkillManagementPolicy::owner_only();
+    config.actor_context = ActorContext::owner(
+        "create-only-owner",
+        [SkillGrant::Inspect, SkillGrant::CreateDraft],
+    );
+    let handle = initialize_handle(&config);
+
+    let created = invoke_value(
+        handle,
+        json!({
+            "operation": "create_skill_draft",
+            "request": {
+                "package_id": "com.example.create-only",
+                "display_name": "Create Only",
+                "description": "Created without edit permission.",
+                "kind": "instruction_only",
+                "required_tools": []
+            },
+            "files": initial_draft_files(
+                "com.example.create-only",
+                "Create Only",
+                "Initial instructions from the create request."
+            )
+        }),
+    );
+    let detail = invoke_value(
+        handle,
+        json!({"operation": "get_skill_detail", "package_id": "com.example.create-only"}),
+    );
+
+    assert_eq!(created["status"], "draft");
+    assert_eq!(
+        detail["editable_draft"]["instructions"],
+        "Initial instructions from the create request."
+    );
+    let denied: Value = serde_json::from_str(&invoke_runtime_json(
+        handle,
+        &json!({
+            "operation": "update_skill_draft",
+            "revision_id": created["revision_id"],
+            "files": initial_draft_files(
+                "com.example.create-only",
+                "Create Only",
+                "An edit that must be denied."
+            )
+        })
+        .to_string(),
+    ))
+    .unwrap();
+    assert_eq!(denied["ok"], false);
+    close_runtime(handle);
+}
+
+#[test]
 fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
     let dir = tempdir().unwrap();
     let mut requester_config = init_config(dir.path());
     requester_config.skill_policy = SkillManagementPolicy::owner_only();
+    requester_config.skill_policy.rollback_approval_required = true;
     requester_config.actor_context = ActorContext::owner(
         "mobile-requester",
         [
@@ -137,13 +195,20 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
             SkillGrant::CreateDraft,
             SkillGrant::Validate,
             SkillGrant::Activate,
+            SkillGrant::Rollback,
+            SkillGrant::DeleteManaged,
         ],
     );
     let requester = initialize_handle(&requester_config);
     let mut approver_config = requester_config.clone();
     approver_config.actor_context = ActorContext::owner(
         "mobile-approver",
-        [SkillGrant::Inspect, SkillGrant::Activate],
+        [
+            SkillGrant::Inspect,
+            SkillGrant::Activate,
+            SkillGrant::Rollback,
+            SkillGrant::DeleteManaged,
+        ],
     );
     let approver = initialize_handle(&approver_config);
 
@@ -180,6 +245,77 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
         }),
     );
     assert_eq!(resolved["status"], "approved");
+    invoke_value(requester, json!({"operation": "synchronize_skills"}));
+
+    let second = invoke_value(
+        requester,
+        json!({
+            "operation": "create_skill_draft",
+            "request": {
+                "package_id": "com.example.mobile-authored",
+                "display_name": "Mobile Authored",
+                "description": "Second mobile revision.",
+                "kind": "instruction_only",
+                "required_tools": []
+            }
+        }),
+    );
+    let second_revision = second["revision_id"].as_str().unwrap();
+    invoke_value(
+        requester,
+        json!({"operation": "validate_skill_draft", "revision_id": second_revision}),
+    );
+    let second_approval = invoke_value(
+        requester,
+        json!({"operation": "request_skill_activation", "revision_id": second_revision}),
+    );
+    invoke_value(
+        approver,
+        json!({
+            "operation": "resolve_skill_approval",
+            "approval_id": second_approval["approval_id"],
+            "approve": true
+        }),
+    );
+    invoke_value(requester, json!({"operation": "synchronize_skills"}));
+
+    let rollback = invoke_value(
+        requester,
+        json!({
+            "operation": "rollback_managed_skill",
+            "package_id": "com.example.mobile-authored",
+            "revision_id": revision_id
+        }),
+    );
+    assert_eq!(rollback["requested_by"], "mobile-requester");
+    assert!(rollback["permission_diff"].is_object());
+    invoke_value(
+        approver,
+        json!({
+            "operation": "resolve_skill_approval",
+            "approval_id": rollback["approval_id"],
+            "approve": true
+        }),
+    );
+    invoke_value(requester, json!({"operation": "synchronize_skills"}));
+
+    let removal = invoke_value(
+        requester,
+        json!({
+            "operation": "request_skill_removal",
+            "package_id": "com.example.mobile-authored"
+        }),
+    );
+    assert_eq!(removal["requested_by"], "mobile-requester");
+    let removed = invoke_value(
+        approver,
+        json!({
+            "operation": "resolve_skill_approval",
+            "approval_id": removal["approval_id"],
+            "approve": true
+        }),
+    );
+    assert_eq!(removed["status"], "approved");
 
     let audit_rows: Vec<(String, String, Option<String>)> =
         tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -218,6 +354,59 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
     close_runtime(approver);
 }
 
+#[test]
+fn mobile_runtime_rejects_self_approval() {
+    let dir = tempdir().unwrap();
+    let mut config = init_config(dir.path());
+    config.skill_policy = SkillManagementPolicy::owner_only();
+    config.actor_context = ActorContext::owner(
+        "mobile-requester",
+        [
+            SkillGrant::Inspect,
+            SkillGrant::CreateDraft,
+            SkillGrant::Validate,
+            SkillGrant::Activate,
+        ],
+    );
+    let requester = initialize_handle(&config);
+    let draft = invoke_value(
+        requester,
+        json!({
+            "operation": "create_skill_draft",
+            "request": {
+                "package_id": "com.example.self-approval",
+                "display_name": "Self approval",
+                "description": "Self approval must be rejected.",
+                "kind": "instruction_only",
+                "required_tools": []
+            }
+        }),
+    );
+    let revision_id = draft["revision_id"].as_str().unwrap();
+    invoke_value(
+        requester,
+        json!({"operation": "validate_skill_draft", "revision_id": revision_id}),
+    );
+    let approval = invoke_value(
+        requester,
+        json!({"operation": "request_skill_activation", "revision_id": revision_id}),
+    );
+
+    let self_approval: Value = serde_json::from_str(&invoke_runtime_json(
+        requester,
+        &json!({
+            "operation": "resolve_skill_approval",
+            "approval_id": approval["approval_id"],
+            "approve": true
+        })
+        .to_string(),
+    ))
+    .unwrap();
+
+    assert_eq!(self_approval["ok"], false);
+    close_runtime(requester);
+}
+
 fn initialize_handle(config: &MobileInitConfig) -> i64 {
     let response: Value = serde_json::from_str(&initialize_runtime_json(
         &serde_json::to_string(config).unwrap(),
@@ -225,6 +414,34 @@ fn initialize_handle(config: &MobileInitConfig) -> i64 {
     .unwrap();
     assert_eq!(response["ok"], true, "{response}");
     response["data"]["handle"].as_i64().unwrap()
+}
+
+fn initial_draft_files(package_id: &str, display_name: &str, instructions: &str) -> Value {
+    json!([
+        {
+            "path": "SKILL.md",
+            "content": instructions
+        },
+        {
+            "path": "general-agent.json",
+            "content": serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": package_id,
+                "version": "0.1.0",
+                "displayName": display_name,
+                "kind": "instruction_only",
+                "package": {"includeInstructions": true, "includeRuntime": false},
+                "compatibility": {"minimumRuntimeVersion": null, "platforms": []},
+                "requires": {
+                    "packages": [],
+                    "capabilities": [],
+                    "runtimeTools": [],
+                    "connectors": []
+                }
+            }))
+            .unwrap()
+        }
+    ])
 }
 
 fn invoke_value(handle: i64, request: Value) -> Value {

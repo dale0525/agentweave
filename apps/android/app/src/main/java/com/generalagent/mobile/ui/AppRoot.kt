@@ -23,6 +23,8 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -67,6 +69,7 @@ data class SkillAccessState(
   val mode: SkillScreenMode,
   val visibleTabs: List<AppTab>,
   val actions: Set<SkillAction>,
+  val allowedKinds: Set<String> = emptySet(),
 )
 
 fun skillScreenMode(mode: String, grants: Set<String>): SkillScreenMode =
@@ -179,20 +182,24 @@ fun AppRoot(
   var selectedTab by remember { mutableStateOf(AppTab.Chat) }
   var diagnostics by remember(initialDiagnostics) { mutableStateOf(initialDiagnostics) }
   var skills by remember { mutableStateOf<List<RuntimeSkill>>(emptyList()) }
+  var skillLoadError by remember { mutableStateOf<String?>(null) }
   var skillImmersive by remember { mutableStateOf(false) }
   val chatSending by turnGate.inFlight.collectAsState()
   val settingsSaving by settingsGate.inFlight.collectAsState()
   val settingsCompletionVersion by settingsGate.completionVersion.collectAsState()
   val scope = rememberCoroutineScope()
-  val skillAccess = skillAccessState(diagnostics.skillManagementMode, runtimeClient.skillGrants)
+  val skillAccess = skillAccessState(runtimeClient.skillPolicy, runtimeClient.actorContext)
 
   LaunchedEffect(runtimeClient) {
     try {
       skills = withContext(Dispatchers.IO) {
         runtimeClient.loadSkillInventory(skillAccess.mode)
       }
+      skillLoadError = null
     } catch (cancelled: CancellationException) {
       throw cancelled
+    } catch (error: Throwable) {
+      skillLoadError = error.message ?: "Managed inventory unavailable"
     }
   }
   LaunchedEffect(skillAccess.visibleTabs) {
@@ -210,6 +217,10 @@ fun AppRoot(
       }.onSuccess { refreshed ->
         skills = refreshed.first
         diagnostics = refreshed.second
+        skillLoadError = null
+      }.onFailure { error ->
+        if (error is CancellationException) throw error
+        skillLoadError = error.message ?: "Unable to refresh skills"
       }
     }
     Unit
@@ -259,12 +270,15 @@ fun AppRoot(
             AppTab.Skills -> SkillsScreen(
               mode = skillAccess.mode,
               actions = skillAccess.actions,
+              allowedKinds = skillAccess.allowedKinds,
               inventory = skills,
               diagnostics = diagnostics,
+              initialError = skillLoadError,
               runtimeClient = runtimeClient,
               onSnapshotChanged = { refreshedSkills, refreshedDiagnostics ->
                 skills = refreshedSkills
                 diagnostics = refreshedDiagnostics
+                skillLoadError = null
               },
               onImmersiveChanged = { skillImmersive = it },
               onBack = { selectedTab = AppTab.Chat },
@@ -306,57 +320,34 @@ private fun AppBottomNavigation(
   selected: AppTab,
   onSelect: (AppTab) -> Unit,
 ) {
-  Column(
-    modifier = Modifier
-      .fillMaxWidth()
-      .height(80.dp)
-      .background(Color.White),
+  NavigationBar(
+    modifier = Modifier.fillMaxWidth().height(80.dp),
+    containerColor = Color.White,
+    tonalElevation = 0.dp,
   ) {
-    HorizontalDivider(color = GaBorder)
-    Row(
-      modifier = Modifier.fillMaxSize(),
-      horizontalArrangement = Arrangement.SpaceEvenly,
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      tabs.forEach { tab ->
-        val active = tab == selected
-        val activeSize = tab.activeNavigationSize()
-        Box(
-          modifier = Modifier
-            .weight(1f)
-            .fillMaxHeight()
-            .clickable { onSelect(tab) },
-          contentAlignment = Alignment.Center,
-        ) {
-          Column(
-            modifier = Modifier
-              .size(width = activeSize.width.dp, height = activeSize.height.dp)
-              .background(
-                color = if (active) GaPrimaryActive else Color.Transparent,
-                shape = GaLargeShape,
-              ),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-          ) {
-            Icon(
-              imageVector = tab.icon(active),
-              contentDescription = tab.label,
-              tint = if (active) Color.White else GaTextSecondary,
-              modifier = Modifier.size(24.dp),
-            )
-            Text(
-              text = tab.label,
-              color = if (active) Color.White else GaTextSecondary,
-              style = MaterialTheme.typography.labelSmall.copy(
-                fontSize = 11.sp,
-                lineHeight = 16.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 0.sp,
-              ),
-            )
-          }
-        }
-      }
+    tabs.forEach { tab ->
+      val active = tab == selected
+      NavigationBarItem(
+        selected = active,
+        onClick = { onSelect(tab) },
+        icon = {
+          Icon(
+            imageVector = tab.icon(active),
+            contentDescription = null,
+            modifier = Modifier.size(24.dp),
+          )
+        },
+        label = {
+          Text(
+            text = tab.label,
+            style = MaterialTheme.typography.labelSmall.copy(
+              fontSize = 11.sp,
+              lineHeight = 16.sp,
+              letterSpacing = 0.sp,
+            ),
+          )
+        },
+      )
     }
   }
 }

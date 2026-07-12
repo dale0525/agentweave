@@ -6,8 +6,12 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.ui.Modifier
 import com.generalagent.mobile.runtime.NativeRuntimeApi
+import com.generalagent.mobile.runtime.RuntimeActorContext
+import com.generalagent.mobile.runtime.RuntimeApprovalClient
 import com.generalagent.mobile.runtime.RuntimeClient
 import com.generalagent.mobile.runtime.RuntimeDiagnostics
+import com.generalagent.mobile.runtime.RuntimeSkillPolicy
+import com.generalagent.mobile.runtime.RuntimeSkillRollbackOutcome
 import com.generalagent.mobile.secrets.InMemoryModelSecretStore
 import com.generalagent.mobile.ui.AppTab
 import com.generalagent.mobile.ui.AppRoot
@@ -20,6 +24,7 @@ import com.generalagent.mobile.ui.skillAccessState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.json.JSONObject
 
@@ -71,7 +76,22 @@ class MainActivityInstrumentedTest {
       emptySet()
     }
     val diagnostics = visualDiagnostics(mode)
-    val client = RuntimeClient(77L, VisualNativeRuntime(mode), grants)
+    val native = VisualNativeRuntime(
+      mode = mode,
+      failInitialLoad = arguments.getString("skill_initial_error") == "true",
+    )
+    val client = RuntimeClient(
+      handle = 77L,
+      native = native,
+      skillGrants = grants,
+      actorContext = RuntimeActorContext("android-requester", "owner", grants = grants.toList()),
+      skillPolicy = RuntimeSkillPolicy(
+        mode = mode,
+        agentAuthoring = mode == "owner_only",
+        allowedKinds = listOf("instruction_only", "host_tools_only"),
+      ),
+      approverClient = RuntimeApprovalClient(78L, native, "android-approver"),
+    )
     val turnGate = RuntimeTurnGate()
     val settingsGate = RuntimeSettingsGate()
 
@@ -96,6 +116,35 @@ class MainActivityInstrumentedTest {
     settingsGate.close()
     client.close()
   }
+
+  @Test
+  fun distinctActorsApproveActivationRollbackAndRemoval() {
+    val native = VisualNativeRuntime("owner_only")
+    val actor = RuntimeActorContext("android-requester", "owner", grants = listOf("inspect", "activate"))
+    val client = RuntimeClient(
+      handle = 77L,
+      native = native,
+      actorContext = actor,
+      skillPolicy = RuntimeSkillPolicy(mode = "owner_only"),
+      approverClient = RuntimeApprovalClient(78L, native, "android-approver"),
+    )
+
+    val activation = client.requestSkillActivation("revision-draft")
+    client.resolveSkillApproval(activation.approvalId, true)
+    val rollback = client.rollbackManagedSkill("com.generalagent.research", "revision-old")
+      as RuntimeSkillRollbackOutcome.ApprovalRequired
+    client.resolveSkillApproval(rollback.approval.approvalId, true)
+    val removal = client.requestSkillRemoval("com.generalagent.research")
+    client.resolveSkillApproval(removal.approvalId, true)
+
+    assertEquals(listOf(78L, 78L, 78L), native.calls.filter { it.second == "resolve_skill_approval" }.map { it.first })
+    val selfResponse = native.invoke(
+      77L,
+      """{"operation":"resolve_skill_approval","approval_id":"self","approve":true}""",
+    )
+    assertTrue(selfResponse.contains("self-approval is forbidden"))
+    client.close()
+  }
 }
 
 private fun visualDiagnostics(mode: String) = RuntimeDiagnostics(
@@ -115,22 +164,39 @@ private fun visualDiagnostics(mode: String) = RuntimeDiagnostics(
   lastReloadStatus = "generation:7",
 )
 
-private class VisualNativeRuntime(private val mode: String) : NativeRuntimeApi {
+private class VisualNativeRuntime(
+  private val mode: String,
+  private val failInitialLoad: Boolean = false,
+) : NativeRuntimeApi {
   private var validationCount = 0
+  private var initialLoadFailed = false
+  private var activated = false
+  private var pendingOperation: String? = null
+  val calls = mutableListOf<Pair<Long, String>>()
 
   override fun initialize(requestJson: String): String = error("not used")
 
   override fun invoke(handle: Long, requestJson: String): String {
     val request = JSONObject(requestJson)
-    val data = when (request.getString("operation")) {
+    val operation = request.getString("operation")
+    calls += handle to operation
+    if (operation == "resolve_skill_approval" && handle == 77L) {
+      return """{"ok":false,"error":{"code":"runtime_error","message":"self-approval is forbidden"}}"""
+    }
+    if (operation == "list_skills" && failInitialLoad && !initialLoadFailed) {
+      initialLoadFailed = true
+      return """{"ok":false,"error":{"code":"runtime_error","message":"Managed inventory unavailable"}}"""
+    }
+    val data = when (operation) {
       "diagnostics" -> diagnosticsJson()
       "list_skills" -> skillInventoryJson()
       "list_managed_skills" -> if (mode == "owner_only") managedInventoryJson() else "[]"
       "get_skill_detail" -> detailJson(request.getString("package_id"))
       "create_skill_draft", "update_skill_draft" -> draftSummaryJson()
       "validate_skill_draft" -> validationJson(++validationCount > 1)
-      "request_skill_activation", "request_skill_removal" -> approvalJson(request)
-      "resolve_skill_approval" -> reloadJson()
+      "request_skill_activation", "request_skill_removal" -> approvalJson(operation, request)
+      "resolve_skill_approval" -> resolveApproval()
+      "synchronize_skills" -> diagnosticsJson()
       "disable_managed_skill" -> reloadJson()
       "rollback_managed_skill" -> rollbackApprovalJson(request)
       "list_sessions" -> "[]"
@@ -152,13 +218,13 @@ private class VisualNativeRuntime(private val mode: String) : NativeRuntimeApi {
     """{"platform":"android","capabilities":["network.http","filesystem.app_data","secure_storage","model.http_provider"],"database_ready":true,"skills_ready":true,"model_configured":false,"skill_management_mode":"$mode","active_snapshot_generation":7,"quarantined_count":0,"last_reload_status":"generation:7"}"""
 
   private fun skillInventoryJson(): String = """[
-    {"package_id":"com.generalagent.research","display_name":"Research assistant","version":"1.4.0","source_layer":"managed","status":"active","available":true,"reason":"","active_revision_id":"8a41912f-a83c-4fd8-a3b4-123456789abc","manageable":true},
+    {"package_id":"com.generalagent.research","display_name":"Research assistant","version":"${if (activated) "1.5.0" else "1.4.0"}","source_layer":"managed","status":"active","available":true,"reason":"","active_revision_id":"${if (activated) "b71c6c72-8893-49f4-b593-111111111111" else "8a41912f-a83c-4fd8-a3b4-123456789abc"}","manageable":true},
     {"package_id":"com.generalagent.calendar","display_name":"Calendar briefing","version":"1.0.0","source_layer":"builtin","status":"capability_missing","available":false,"reason":"Missing required capability: calendar.read","active_revision_id":null,"manageable":false},
     {"package_id":"com.generalagent.notes","display_name":"Meeting notes","version":"2.1.0","source_layer":"builtin","status":"active","available":true,"reason":"","active_revision_id":null,"manageable":false}
   ]"""
 
   private fun managedInventoryJson(): String = """[
-    {"package_id":"com.generalagent.research","display_name":"Research assistant","version":"1.4.0","source_layer":"managed","status":"active","reason":"","active_revision_id":"8a41912f-a83c-4fd8-a3b4-123456789abc"}
+    {"package_id":"com.generalagent.research","display_name":"Research assistant","version":"${if (activated) "1.5.0" else "1.4.0"}","source_layer":"managed","status":"active","reason":"","active_revision_id":"${if (activated) "b71c6c72-8893-49f4-b593-111111111111" else "8a41912f-a83c-4fd8-a3b4-123456789abc"}"}
   ]"""
 
   private fun detailJson(packageId: String): String {
@@ -168,10 +234,10 @@ private class VisualNativeRuntime(private val mode: String) : NativeRuntimeApi {
     val draft = revisionJson(
       id = "b71c6c72-8893-49f4-b593-111111111111",
       version = "1.5.0",
-      status = "staging",
-      editable = true,
+      status = if (activated) "managed" else "staging",
+      editable = !activated,
       instructions = "Summarize trusted sources and cite every factual claim.",
-      valid = false,
+      valid = activated,
     )
     val active = revisionJson(
       id = "8a41912f-a83c-4fd8-a3b4-123456789abc",
@@ -189,7 +255,7 @@ private class VisualNativeRuntime(private val mode: String) : NativeRuntimeApi {
       instructions = "Research and summarize.",
       valid = true,
     )
-    return """{"package_id":"com.generalagent.research","display_name":"Research assistant","version":"1.4.0","source_layer":"managed","status":"active","reason":"","active_revision_id":"8a41912f-a83c-4fd8-a3b4-123456789abc","revisions":[$draft,$active,$old],"editable_draft":$draft}"""
+    return """{"package_id":"com.generalagent.research","display_name":"Research assistant","version":"${if (activated) "1.5.0" else "1.4.0"}","source_layer":"managed","status":"active","reason":"","active_revision_id":"${if (activated) "b71c6c72-8893-49f4-b593-111111111111" else "8a41912f-a83c-4fd8-a3b4-123456789abc"}","revisions":[$draft,$active,$old],"editable_draft":${if (activated) "null" else draft}}"""
   }
 
   private fun revisionJson(
@@ -207,13 +273,22 @@ private class VisualNativeRuntime(private val mode: String) : NativeRuntimeApi {
   private fun validationJson(valid: Boolean): String =
     """{"ok":$valid,"errors":${if (valid) "[]" else "[\"Tool host/search is unavailable in this snapshot\"]"},"warnings":[],"requiredTools":["host/search","host/read"],"requiredConnectors":[],"dependencies":[],"requiredCapabilities":["network.http","filesystem.app_data"],"resolverStatus":"${if (valid) "active" else "capability_missing"}","resolverErrors":[],"permissionDiff":{"capabilities":{"added":["network.http"]}},"revisionId":"b71c6c72-8893-49f4-b593-111111111111","contentHash":"visual-hash","snapshotGeneration":7}"""
 
-  private fun approvalJson(request: JSONObject): String {
+  private fun approvalJson(operation: String, request: JSONObject): String {
+    pendingOperation = operation
     val revision = request.optString("revision_id", "8a41912f-a83c-4fd8-a3b4-123456789abc")
-    return """{"approval_id":"a9cb37b2-40d0-46d5-8fb2-333333333333","package_id":"com.generalagent.research","permission_diff":{"capabilities":{"added":["network.http"]}},"requested_by":"android-owner","revision_id":"$revision","status":"pending"}"""
+    return """{"approval_id":"a9cb37b2-40d0-46d5-8fb2-333333333333","package_id":"com.generalagent.research","permission_diff":{"capabilities":{"added":["network.http"]}},"requested_by":"android-requester","revision_id":"$revision","status":"pending"}"""
   }
 
-  private fun rollbackApprovalJson(request: JSONObject): String =
-    """{"approval_id":"d83a3886-dffd-48f8-bd52-444444444444","package_id":"${request.getString("package_id")}","revision_id":"${request.getString("revision_id")}","status":"pending"}"""
+  private fun rollbackApprovalJson(request: JSONObject): String {
+    pendingOperation = "rollback_managed_skill"
+    return """{"approval_id":"d83a3886-dffd-48f8-bd52-444444444444","package_id":"${request.getString("package_id")}","permission_diff":{"capabilities":{"added":["secure_storage"]}},"requested_by":"android-requester","revision_id":"${request.getString("revision_id")}","status":"pending"}"""
+  }
+
+  private fun resolveApproval(): String {
+    if (pendingOperation == "request_skill_activation") activated = true
+    pendingOperation = null
+    return reloadJson()
+  }
 
   private fun reloadJson(): String =
     """{"previous_generation":7,"active_generation":8,"active_packages":2,"inactive_packages":1,"status":"approved"}"""

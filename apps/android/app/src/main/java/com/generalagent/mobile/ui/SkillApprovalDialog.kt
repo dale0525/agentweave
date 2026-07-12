@@ -28,6 +28,9 @@ import androidx.compose.ui.unit.dp
 internal fun SkillApprovalDialog(
   state: SkillApprovalUiState,
   busy: Boolean,
+  approvingActor: String?,
+  approvalAvailable: Boolean,
+  approvalUnavailableReason: String?,
   onDismiss: () -> Unit,
   onConfirm: () -> Unit,
 ) {
@@ -80,6 +83,18 @@ internal fun SkillApprovalDialog(
           style = MaterialTheme.typography.labelMedium,
           color = GaTextSecondary,
         )
+        Text(
+          "Approving as ${approvingActor ?: "Unavailable"}",
+          style = MaterialTheme.typography.labelMedium,
+          color = GaTextSecondary,
+        )
+        if (!approvalAvailable) {
+          Text(
+            approvalUnavailableReason ?: "A distinct approving actor is required",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+          )
+        }
       }
     },
     dismissButton = {
@@ -88,7 +103,8 @@ internal fun SkillApprovalDialog(
     confirmButton = {
       Button(
         onClick = onConfirm,
-        enabled = !busy && revision.validation.ok,
+        enabled = !busy && approvalAvailable &&
+          (state.operation == SkillApprovalOperation.Removal || revision.validation.ok),
       ) {
         if (busy) {
           CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)

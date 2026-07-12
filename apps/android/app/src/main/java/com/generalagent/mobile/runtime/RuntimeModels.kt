@@ -150,6 +150,7 @@ data class RuntimeSkillDraftRequest(
   val description: String,
   val kind: String,
   val requiredTools: List<String>,
+  val initialFiles: List<RuntimeSkillDraftFile> = emptyList(),
 )
 
 data class RuntimeSkillDraftFile(
@@ -198,6 +199,11 @@ data class RuntimeSkillMutation(
   val activeGeneration: Long = 0,
 ) {
   val approvalRequired: Boolean get() = approvalId != null && status == "pending"
+}
+
+sealed interface RuntimeSkillRollbackOutcome {
+  data class Published(val mutation: RuntimeSkillMutation) : RuntimeSkillRollbackOutcome
+  data class ApprovalRequired(val approval: RuntimeSkillApproval) : RuntimeSkillRollbackOutcome
 }
 
 data class RuntimeModelConfig(

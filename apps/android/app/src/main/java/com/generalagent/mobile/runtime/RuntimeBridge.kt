@@ -12,8 +12,9 @@ class RuntimeBridge(
   private val configuredSkillPolicy: RuntimeSkillPolicy = RuntimeSkillPolicy(),
   private val configuredActorContext: RuntimeActorContext = RuntimeActorContext(),
   private val publicationFileSystem: SkillPublicationFileSystem = AndroidSkillPublicationFileSystem(),
+  private val configuredApproverContext: RuntimeActorContext? = null,
 ) {
-  fun initRequest(): RuntimeInitRequest {
+  fun initRequest(actorContext: RuntimeActorContext = configuredActorContext): RuntimeInitRequest {
     val filesDir = context.filesDir
     val installedBundle = SkillAssetInstaller(filesDir, skillAssets, publicationFileSystem).installVerifiedBundle()
     return RuntimeInitRequest(
@@ -25,13 +26,14 @@ class RuntimeBridge(
       stagingSkillsDir = context.cacheDir.resolve("skill-staging").absolutePath,
       quarantineSkillsDir = filesDir.resolve("skill-quarantine").absolutePath,
       skillPolicy = configuredSkillPolicy,
-      actorContext = configuredActorContext,
+      actorContext = actorContext,
     )
   }
 
   fun load(): RuntimeClient {
     val response = native.initialize(initRequest().toJson().toString())
     var allocatedHandle: Long? = null
+    var approverHandle: Long? = null
     try {
       val envelope = responseEnvelope(response)
       val data = envelope.getJSONObject("data")
@@ -42,8 +44,21 @@ class RuntimeBridge(
       check(data.keys().asSequence().toSet() == setOf("handle")) {
         "Runtime initialization data contains unexpected fields"
       }
-      return RuntimeClient(allocatedHandle, native, configuredActorContext.grants.toSet())
+      val approverClient = configuredApproverContext?.let { approver ->
+        val approverEnvelope = responseEnvelope(native.initialize(initRequest(approver).toJson().toString()))
+        approverHandle = approverEnvelope.getJSONObject("data").getLong("handle")
+        RuntimeApprovalClient(checkNotNull(approverHandle), native, approver.actorId)
+      }
+      return RuntimeClient(
+        handle = allocatedHandle,
+        native = native,
+        skillGrants = configuredActorContext.grants.toSet(),
+        actorContext = configuredActorContext,
+        skillPolicy = configuredSkillPolicy,
+        approverClient = approverClient,
+      )
     } catch (error: Exception) {
+      approverHandle?.let { handle -> runCatching { responseEnvelope(native.close(handle)) } }
       allocatedHandle?.let { handle -> runCatching { responseEnvelope(native.close(handle)) } }
       if (error is RuntimeBridgeException) throw error
       throw RuntimeBridgeException(error.message ?: "Runtime initialization response is invalid")
@@ -55,8 +70,17 @@ class RuntimeClient internal constructor(
   val handle: Long,
   private val native: NativeRuntimeApi,
   val skillGrants: Set<String> = emptySet(),
+  val actorContext: RuntimeActorContext = RuntimeActorContext(),
+  val skillPolicy: RuntimeSkillPolicy = RuntimeSkillPolicy(),
+  private val approverClient: RuntimeApprovalClient? = null,
 ) : AutoCloseable {
   private val closed = AtomicBoolean(false)
+  val approverActorId: String? get() = approverClient?.actorId
+  val approvalAvailable: Boolean
+    get() = approverClient != null && approverClient.actorId != actorContext.actorId
+  val approvalUnavailableReason: String?
+    get() = if (approvalAvailable) null else "A distinct approving actor is unavailable"
+
   fun diagnostics(): RuntimeDiagnostics {
     val data = invoke(JSONObject().put("operation", "diagnostics"))
     return RuntimeDiagnostics(
@@ -97,7 +121,8 @@ class RuntimeClient internal constructor(
     invoke(
       JSONObject()
         .put("operation", "create_skill_draft")
-        .put("request", request.toJson()),
+        .put("request", request.toJson())
+        .put("files", JSONArray(request.initialFiles.map { it.toJson() })),
     ).toSkillDraftSummary()
 
   fun updateSkillDraft(
@@ -125,13 +150,20 @@ class RuntimeClient internal constructor(
         .put("revision_id", revisionId),
     ).toSkillApproval()
 
-  fun resolveSkillApproval(approvalId: String, approve: Boolean): RuntimeSkillMutation =
-    invoke(
+  fun resolveSkillApproval(approvalId: String, approve: Boolean): RuntimeSkillMutation {
+    val approval = if (approvalAvailable) approverClient else null
+    if (approval == null) {
+      throw RuntimeBridgeException(approvalUnavailableReason ?: "Approval resolution is unavailable")
+    }
+    val mutation = approval.resolve(
       JSONObject()
         .put("operation", "resolve_skill_approval")
         .put("approval_id", approvalId)
         .put("approve", approve),
     ).toSkillMutation()
+    invoke(JSONObject().put("operation", "synchronize_skills"))
+    return mutation
+  }
 
   fun disableManagedSkill(packageId: String): RuntimeSkillMutation =
     invoke(
@@ -140,13 +172,19 @@ class RuntimeClient internal constructor(
         .put("package_id", packageId),
     ).toSkillMutation()
 
-  fun rollbackManagedSkill(packageId: String, revisionId: String): RuntimeSkillMutation =
-    invoke(
+  fun rollbackManagedSkill(packageId: String, revisionId: String): RuntimeSkillRollbackOutcome {
+    val data = invoke(
       JSONObject()
         .put("operation", "rollback_managed_skill")
         .put("package_id", packageId)
         .put("revision_id", revisionId),
-    ).toSkillMutation()
+    )
+    return if (data.has("approval_id")) {
+      RuntimeSkillRollbackOutcome.ApprovalRequired(data.toSkillApproval())
+    } else {
+      RuntimeSkillRollbackOutcome.Published(data.toSkillMutation())
+    }
+  }
 
   fun requestSkillRemoval(packageId: String): RuntimeSkillApproval =
     invoke(
@@ -184,6 +222,7 @@ class RuntimeClient internal constructor(
 
   override fun close() {
     if (closed.compareAndSet(false, true)) {
+      approverClient?.close()
       responseEnvelope(native.close(handle))
     }
   }
@@ -196,6 +235,21 @@ class RuntimeClient internal constructor(
 
   private fun invokeArray(request: JSONObject): JSONArray =
     responseEnvelope(native.invoke(handle, request.toString())).getJSONArray("data")
+}
+
+class RuntimeApprovalClient internal constructor(
+  val handle: Long,
+  private val native: NativeRuntimeApi,
+  val actorId: String,
+) : AutoCloseable {
+  private val closed = AtomicBoolean(false)
+
+  internal fun resolve(request: JSONObject): JSONObject =
+    responseData(native.invoke(handle, request.toString()))
+
+  override fun close() {
+    if (closed.compareAndSet(false, true)) responseEnvelope(native.close(handle))
+  }
 }
 
 class RuntimeBridgeException(message: String) : IllegalStateException(message)

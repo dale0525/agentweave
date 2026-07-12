@@ -289,18 +289,35 @@ impl OwnerSkillManagementService {
         actor: &ActorContext,
         request: CreateSkillDraftRequest,
     ) -> anyhow::Result<SkillDraftSummary> {
+        self.create_draft_with_files(actor, request, Vec::new())
+            .await
+    }
+
+    pub async fn create_draft_with_files(
+        &self,
+        actor: &ActorContext,
+        request: CreateSkillDraftRequest,
+        files: Vec<DraftFileUpdate>,
+    ) -> anyhow::Result<SkillDraftSummary> {
         self.authorize(actor, SkillOperation::CreateDraft, request.kind)?;
-        let authored = build_package_draft(&request)?;
+        let generated = build_package_draft(&request)?;
         self.ensure_required_tools_known(&request.required_tools)?;
+        let supplied;
+        let authored = if files.is_empty() {
+            generated.files()
+        } else {
+            supplied = crate::skill_authoring::validate_draft_updates(files)?;
+            &supplied
+        };
         self.revisions
-            .validate_authored_input(authored.files())
+            .validate_authored_input(authored)
             .map_err(|error| SkillManagementError::InvalidRequest(error.to_string()))?;
         let revision = self
             .revisions
             .create_authored_staging_revision(
                 &request.package_id,
                 request.kind,
-                authored.files(),
+                authored,
                 &actor.actor_id,
             )
             .await?;

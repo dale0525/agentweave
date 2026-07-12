@@ -42,6 +42,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -80,6 +83,7 @@ internal fun SkillDraftRoute(
   creating: Boolean,
   detail: RuntimeSkillDetail?,
   actions: Set<SkillAction>,
+  allowedKinds: Set<String>,
   busyOperation: String?,
   externalError: String?,
   validation: RuntimeSkillValidation?,
@@ -88,6 +92,7 @@ internal fun SkillDraftRoute(
   onFailure: (Throwable, String) -> Unit,
   onSaved: (RuntimeSkillDetail) -> Unit,
   onValidated: (RuntimeSkillValidation) -> Unit,
+  onDraftChanged: () -> Unit,
   onActivate: (RuntimeSkillRevision) -> Unit,
   onBack: () -> Unit,
 ) {
@@ -104,43 +109,55 @@ internal fun SkillDraftRoute(
     mutableStateOf(existingDraft?.requirements?.runtimeTools?.joinToString(", ").orEmpty())
   }
   var localError by remember { mutableStateOf<String?>(null) }
+  var dirty by remember(existingDraft, creating) { mutableStateOf(false) }
   val busy = busyOperation != null
   val activationRevision = existingDraft?.let { revision ->
-    validation?.let { revisionAfterValidation(revision, it) } ?: revision
+    validation
+      ?.takeIf { !dirty && it.ok && it.revisionId == revision.revisionId }
+      ?.let { revisionAfterValidation(revision, it) }
   }
 
   fun save() {
     val normalizedId = packageId.trim()
     val normalizedName = displayName.trim()
-    if (normalizedId.isEmpty() || normalizedName.isEmpty()) {
-      localError = "Package ID and display name are required"
+    if (normalizedId.isEmpty() || normalizedName.isEmpty() || (creating && description.isBlank())) {
+      localError = "Package ID, display name, and description are required"
       return
     }
     localError = null
+    onDraftChanged()
     onBusy("save")
     scope.launch {
       try {
         val savedDetail = withContext(Dispatchers.IO) {
-          val target = if (creating) {
+          if (creating) {
+            val tools = splitTools(requiredTools)
             runtimeClient.createSkillDraft(
               RuntimeSkillDraftRequest(
                 packageId = normalizedId,
                 displayName = normalizedName,
                 description = description.trim(),
                 kind = kind,
-                requiredTools = splitTools(requiredTools),
+                requiredTools = tools,
+                initialFiles = initialDraftFiles(
+                  normalizedId,
+                  normalizedName,
+                  kind,
+                  instructions,
+                  tools,
+                ),
               ),
             )
             runtimeClient.getSkillDetail(normalizedId)
           } else {
-            checkNotNull(detail)
+            val target = checkNotNull(detail)
+            val revision = checkNotNull(target.editableDraft) { "Editable draft is unavailable" }
+            runtimeClient.updateSkillDraft(
+              revision.revisionId,
+              draftUpdateFiles(target, revision, instructions, splitTools(requiredTools)),
+            )
+            runtimeClient.getSkillDetail(target.packageId)
           }
-          val revision = checkNotNull(target.editableDraft) { "Editable draft is unavailable" }
-          runtimeClient.updateSkillDraft(
-            revision.revisionId,
-            draftUpdateFiles(target, revision, instructions, splitTools(requiredTools)),
-          )
-          runtimeClient.getSkillDetail(target.packageId)
         }
         onSaved(savedDetail)
       } catch (error: Throwable) {
@@ -160,8 +177,13 @@ internal fun SkillDraftRoute(
     scope.launch {
       try {
         val result = withContext(Dispatchers.IO) {
+          runtimeClient.updateSkillDraft(
+            revision.revisionId,
+            draftUpdateFiles(checkNotNull(detail), revision, instructions, splitTools(requiredTools)),
+          )
           runtimeClient.validateSkillDraft(revision.revisionId)
         }
+        dirty = false
         onValidated(result)
       } catch (error: Throwable) {
         onFailure(error, "Validation failed")
@@ -177,17 +199,18 @@ internal fun SkillDraftRoute(
     kind = kind,
     instructions = instructions,
     requiredTools = requiredTools,
+    allowedKinds = allowedKinds,
     actions = actions,
     busyOperation = busyOperation,
     error = localError ?: externalError,
     validation = validation,
-    canActivate = activationRevision?.validation?.ok == true,
-    onPackageIdChange = { packageId = it },
-    onDisplayNameChange = { displayName = it },
-    onDescriptionChange = { description = it },
-    onKindChange = { kind = it },
-    onInstructionsChange = { instructions = it },
-    onRequiredToolsChange = { requiredTools = it },
+    canActivate = activationRevision != null,
+    onPackageIdChange = { packageId = it; dirty = true; onDraftChanged() },
+    onDisplayNameChange = { displayName = it; dirty = true; onDraftChanged() },
+    onDescriptionChange = { description = it; dirty = true; onDraftChanged() },
+    onKindChange = { kind = it; dirty = true; onDraftChanged() },
+    onInstructionsChange = { instructions = it; dirty = true; onDraftChanged() },
+    onRequiredToolsChange = { requiredTools = it; dirty = true; onDraftChanged() },
     onSave = ::save,
     onValidate = ::validate,
     onActivate = { activationRevision?.let(onActivate) },
@@ -205,6 +228,7 @@ fun SkillDraftScreen(
   kind: String,
   instructions: String,
   requiredTools: String,
+  allowedKinds: Set<String>,
   actions: Set<SkillAction>,
   busyOperation: String?,
   error: String?,
@@ -281,7 +305,7 @@ fun SkillDraftScreen(
           Icon(Icons.Outlined.ExpandMore, contentDescription = "Choose package kind")
         }
         DropdownMenu(expanded = kindMenuOpen, onDismissRequest = { kindMenuOpen = false }) {
-          listOf("instruction_only", "host_tools_only").forEach { option ->
+          allowedKinds.sorted().forEach { option ->
             DropdownMenuItem(
               text = { Text(statusLabel(option)) },
               onClick = {
@@ -347,7 +371,11 @@ private fun DraftValidationResult(validation: RuntimeSkillValidation) {
   val container = if (validation.ok) GaReadyContainer else MaterialTheme.colorScheme.errorContainer
   val content = if (validation.ok) GaReady else MaterialTheme.colorScheme.error
   Column(
-    modifier = Modifier.fillMaxWidth().background(container, GaLargeShape).padding(14.dp),
+    modifier = Modifier
+      .fillMaxWidth()
+      .background(container, GaLargeShape)
+      .semantics { if (!validation.ok) liveRegion = LiveRegionMode.Assertive }
+      .padding(14.dp),
     verticalArrangement = Arrangement.spacedBy(6.dp),
   ) {
     Row(verticalAlignment = Alignment.CenterVertically) {

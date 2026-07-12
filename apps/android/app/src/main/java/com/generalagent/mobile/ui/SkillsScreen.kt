@@ -31,9 +31,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -55,8 +57,8 @@ import com.generalagent.mobile.runtime.RuntimeSkillApproval
 import com.generalagent.mobile.runtime.RuntimeSkillDetail
 import com.generalagent.mobile.runtime.RuntimeSkillDraftFile
 import com.generalagent.mobile.runtime.RuntimeSkillDraftRequest
-import com.generalagent.mobile.runtime.RuntimeSkillMutation
 import com.generalagent.mobile.runtime.RuntimeSkillRevision
+import com.generalagent.mobile.runtime.RuntimeSkillRollbackOutcome
 import com.generalagent.mobile.runtime.RuntimeSkillValidation
 import com.generalagent.mobile.runtime.RuntimeClient
 import kotlinx.coroutines.CancellationException
@@ -65,17 +67,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-
-data class SkillManagementUiState(
-  val inventory: List<RuntimeSkill>,
-  val diagnostics: RuntimeDiagnostics,
-  val detail: RuntimeSkillDetail? = null,
-  val busyOperation: String? = null,
-  val inlineError: String? = null,
-)
-
-fun skillOperationFailed(state: SkillManagementUiState, message: String): SkillManagementUiState =
-  state.copy(busyOperation = null, inlineError = message.trim().ifEmpty { "Skill operation failed" })
 
 fun draftUpdateFiles(
   detail: RuntimeSkillDetail,
@@ -112,12 +103,6 @@ fun approvalCapabilities(permissionDiffJson: String, fallback: List<String>): Li
     List(added.length()) { index -> added.getString(index) }
   }.getOrDefault(fallback)
 
-private sealed interface SkillRoute {
-  data object ListRoute : SkillRoute
-  data object DetailRoute : SkillRoute
-  data class DraftRoute(val creating: Boolean) : SkillRoute
-}
-
 internal enum class SkillApprovalOperation { Activation, Rollback, Removal }
 
 internal data class SkillApprovalUiState(
@@ -131,8 +116,10 @@ internal data class SkillApprovalUiState(
 fun SkillsScreen(
   mode: SkillScreenMode,
   actions: Set<SkillAction>,
+  allowedKinds: Set<String>,
   inventory: List<RuntimeSkill>,
   diagnostics: RuntimeDiagnostics,
+  initialError: String?,
   runtimeClient: RuntimeClient,
   onSnapshotChanged: (List<RuntimeSkill>, RuntimeDiagnostics) -> Unit,
   onImmersiveChanged: (Boolean) -> Unit,
@@ -140,14 +127,19 @@ fun SkillsScreen(
 ) {
   val scope = rememberCoroutineScope()
   var route by remember { mutableStateOf<SkillRoute>(SkillRoute.ListRoute) }
-  var state by remember(inventory, diagnostics) {
-    mutableStateOf(SkillManagementUiState(inventory, diagnostics))
+  var operationGeneration by remember { mutableLongStateOf(0L) }
+  var state by remember {
+    mutableStateOf(SkillManagementUiState(inventory, diagnostics, inlineError = initialError))
   }
   var draftValidation by remember { mutableStateOf<RuntimeSkillValidation?>(null) }
   var approval by remember { mutableStateOf<SkillApprovalUiState?>(null) }
 
-  LaunchedEffect(inventory, diagnostics) {
-    state = state.copy(inventory = inventory, diagnostics = diagnostics)
+  LaunchedEffect(inventory, diagnostics, initialError) {
+    state = state.copy(
+      inventory = inventory,
+      diagnostics = diagnostics,
+      inlineError = initialError ?: state.inlineError,
+    )
   }
   LaunchedEffect(route) {
     onImmersiveChanged(route !is SkillRoute.ListRoute)
@@ -158,15 +150,25 @@ fun SkillsScreen(
     state = skillOperationFailed(state, error.message ?: fallback)
   }
 
+  fun navigate(next: SkillRoute) {
+    operationGeneration += 1
+    route = next
+    draftValidation = null
+  }
+
   fun openDetail(packageId: String) {
+    operationGeneration += 1
+    val generation = operationGeneration
     state = state.copy(busyOperation = "detail", inlineError = null)
     scope.launch {
       try {
         val detail = withContext(Dispatchers.IO) { runtimeClient.getSkillDetail(packageId) }
+        if (generation != operationGeneration) return@launch
         state = state.copy(detail = detail, busyOperation = null)
         draftValidation = null
-        route = SkillRoute.DetailRoute
+        route = SkillRoute.Detail(packageId)
       } catch (error: Throwable) {
+        if (generation != operationGeneration) return@launch
         fail(error, "Unable to load skill detail")
       }
     }
@@ -174,6 +176,7 @@ fun SkillsScreen(
 
   fun refresh(returnToDetail: Boolean = false) {
     state = state.copy(busyOperation = "refresh", inlineError = null)
+    val generation = operationGeneration
     scope.launch {
       try {
         val packageId = state.detail?.packageId
@@ -185,21 +188,28 @@ fun SkillsScreen(
             effective
           }
           val nextDiagnostics = runtimeClient.diagnostics()
-          val detail = if (returnToDetail && packageId != null) {
+          val detail = if (
+            returnToDetail && packageId != null && skills.any { it.packageId == packageId }
+          ) {
             runtimeClient.getSkillDetail(packageId)
           } else {
             null
           }
           Triple(skills, nextDiagnostics, detail)
         }
+        if (generation != operationGeneration) return@launch
+        if (returnToDetail && result.third == null) {
+          navigate(SkillRoute.ListRoute)
+        }
         state = state.copy(
           inventory = result.first,
           diagnostics = result.second,
-          detail = result.third ?: state.detail,
+          detail = if (returnToDetail) result.third else state.detail,
           busyOperation = null,
         )
         onSnapshotChanged(result.first, result.second)
       } catch (error: Throwable) {
+        if (generation != operationGeneration) return@launch
         fail(error, "Unable to refresh skills")
       }
     }
@@ -208,6 +218,7 @@ fun SkillsScreen(
   fun requestApproval(operation: SkillApprovalOperation, revision: RuntimeSkillRevision) {
     val detail = state.detail ?: return
     state = state.copy(busyOperation = operation.name.lowercase(), inlineError = null)
+    val generation = operationGeneration
     scope.launch {
       try {
         val requested = withContext(Dispatchers.IO) {
@@ -217,9 +228,11 @@ fun SkillsScreen(
             SkillApprovalOperation.Rollback -> error("Rollback uses its dedicated flow")
           }
         }
+        if (generation != operationGeneration) return@launch
         state = state.copy(busyOperation = null)
         approval = SkillApprovalUiState(operation, requested, detail, revision)
       } catch (error: Throwable) {
+        if (generation != operationGeneration) return@launch
         fail(error, "Unable to request approval")
       }
     }
@@ -228,23 +241,27 @@ fun SkillsScreen(
   fun rollback(revision: RuntimeSkillRevision) {
     val detail = state.detail ?: return
     state = state.copy(busyOperation = "rollback", inlineError = null)
+    val generation = operationGeneration
     scope.launch {
       try {
         val result = withContext(Dispatchers.IO) {
           runtimeClient.rollbackManagedSkill(detail.packageId, revision.revisionId)
         }
-        if (result.approvalRequired) {
-          approval = SkillApprovalUiState(
-            SkillApprovalOperation.Rollback,
-            result.toApproval(detail.packageId, revision.revisionId),
-            detail,
-            revision,
-          )
-          state = state.copy(busyOperation = null)
-        } else {
-          refresh(returnToDetail = true)
+        if (generation != operationGeneration) return@launch
+        when (result) {
+          is RuntimeSkillRollbackOutcome.ApprovalRequired -> {
+            approval = SkillApprovalUiState(
+              SkillApprovalOperation.Rollback,
+              result.approval,
+              detail,
+              revision,
+            )
+            state = state.copy(busyOperation = null)
+          }
+          is RuntimeSkillRollbackOutcome.Published -> refresh(returnToDetail = true)
         }
       } catch (error: Throwable) {
+        if (generation != operationGeneration) return@launch
         fail(error, "Rollback failed")
       }
     }
@@ -260,11 +277,11 @@ fun SkillsScreen(
         }
         approval = null
         if (pending.operation == SkillApprovalOperation.Removal) {
-          route = SkillRoute.ListRoute
+          navigate(SkillRoute.ListRoute)
           state = state.copy(detail = null)
           refresh()
         } else {
-          route = SkillRoute.DetailRoute
+          navigate(SkillRoute.Detail(pending.detail.packageId))
           refresh(returnToDetail = true)
         }
       } catch (error: Throwable) {
@@ -277,15 +294,15 @@ fun SkillsScreen(
   BackHandler {
     when (route) {
       SkillRoute.ListRoute -> onBack()
-      SkillRoute.DetailRoute -> {
-        route = SkillRoute.ListRoute
+      is SkillRoute.Detail -> {
+        navigate(SkillRoute.ListRoute)
         state = state.copy(detail = null, inlineError = null)
       }
-      is SkillRoute.DraftRoute -> route = if (state.detail == null) {
+      is SkillRoute.Draft -> navigate(if (state.detail == null) {
         SkillRoute.ListRoute
       } else {
-        SkillRoute.DetailRoute
-      }
+        SkillRoute.Detail(checkNotNull(state.detail).packageId)
+      })
     }
   }
 
@@ -296,28 +313,35 @@ fun SkillsScreen(
       state = state,
       onBack = onBack,
       onRefresh = { refresh() },
-      onCreate = { route = SkillRoute.DraftRoute(creating = true) },
+      onCreate = { navigate(SkillRoute.Draft(packageId = null, creating = true)) },
       onSelect = { skill -> openDetail(skill.packageId) },
     )
-    SkillRoute.DetailRoute -> state.detail?.let { detail ->
+    is SkillRoute.Detail -> state.detail?.let { detail ->
+      val targetActions = skillTargetActions(
+        SkillAccessState(mode, emptyList(), actions, allowedKinds),
+        detail,
+      )
       SkillDetailScreen(
         detail = detail,
-        actions = actions,
+        actions = targetActions,
         busyOperation = state.busyOperation,
         inlineError = state.inlineError,
         onBack = {
-          route = SkillRoute.ListRoute
+          navigate(SkillRoute.ListRoute)
           state = state.copy(detail = null, inlineError = null)
         },
-        onEdit = { route = SkillRoute.DraftRoute(creating = false) },
+        onEdit = { navigate(SkillRoute.Draft(detail.packageId, creating = false)) },
         onActivate = { revision -> requestApproval(SkillApprovalOperation.Activation, revision) },
         onDisable = {
           state = state.copy(busyOperation = "disable", inlineError = null)
+          val generation = operationGeneration
           scope.launch {
             try {
               withContext(Dispatchers.IO) { runtimeClient.disableManagedSkill(detail.packageId) }
+              if (generation != operationGeneration) return@launch
               refresh(returnToDetail = true)
             } catch (error: Throwable) {
+              if (generation != operationGeneration) return@launch
               fail(error, "Disable failed")
             }
           }
@@ -326,10 +350,11 @@ fun SkillsScreen(
         onRemove = { revision -> requestApproval(SkillApprovalOperation.Removal, revision) },
       )
     }
-    is SkillRoute.DraftRoute -> SkillDraftRoute(
+    is SkillRoute.Draft -> SkillDraftRoute(
       creating = currentRoute.creating,
       detail = state.detail,
       actions = actions,
+      allowedKinds = allowedKinds,
       busyOperation = state.busyOperation,
       externalError = state.inlineError,
       validation = draftValidation,
@@ -338,15 +363,35 @@ fun SkillsScreen(
       onFailure = { error, fallback -> fail(error, fallback) },
       onSaved = { detail ->
         state = state.copy(detail = detail, busyOperation = null, inlineError = null)
-        route = SkillRoute.DetailRoute
+        navigate(SkillRoute.Detail(detail.packageId))
+        refresh(returnToDetail = true)
       },
       onValidated = { validation ->
         draftValidation = validation
-        state = state.copy(busyOperation = null, inlineError = null)
+        val detail = state.detail
+        val draft = detail?.editableDraft
+        val merged = if (draft != null && validation.revisionId == draft.revisionId) {
+          revisionAfterValidation(draft, validation)
+        } else {
+          null
+        }
+        state = state.copy(
+          detail = if (detail != null && merged != null) {
+            detail.copy(
+              editableDraft = merged,
+              revisions = detail.revisions.map { if (it.revisionId == merged.revisionId) merged else it },
+            )
+          } else {
+            detail
+          },
+          busyOperation = null,
+          inlineError = null,
+        )
       },
+      onDraftChanged = { draftValidation = null },
       onActivate = { revision -> requestApproval(SkillApprovalOperation.Activation, revision) },
       onBack = {
-        route = if (state.detail == null) SkillRoute.ListRoute else SkillRoute.DetailRoute
+        navigate(state.detail?.let { SkillRoute.Detail(it.packageId) } ?: SkillRoute.ListRoute)
         state = state.copy(inlineError = null)
       },
     )
@@ -356,209 +401,12 @@ fun SkillsScreen(
     SkillApprovalDialog(
       state = pending,
       busy = state.busyOperation == "approval",
+      approvingActor = runtimeClient.approverActorId,
+      approvalAvailable = runtimeClient.approvalAvailable,
+      approvalUnavailableReason = runtimeClient.approvalUnavailableReason,
       onDismiss = { if (state.busyOperation != "approval") approval = null },
       onConfirm = ::resolveApproval,
     )
-  }
-}
-
-@Composable
-private fun SkillInventoryRoute(
-  mode: SkillScreenMode,
-  actions: Set<SkillAction>,
-  state: SkillManagementUiState,
-  onBack: () -> Unit,
-  onRefresh: () -> Unit,
-  onCreate: () -> Unit,
-  onSelect: (RuntimeSkill) -> Unit,
-) {
-  Column(modifier = Modifier.fillMaxSize().background(GaSurface)) {
-    SkillInventoryTopBar(
-      title = if (mode == SkillScreenMode.DiagnosticsOnly) "Skill diagnostics" else "Managed skills",
-      busy = state.busyOperation == "refresh",
-      onBack = onBack,
-      onRefresh = onRefresh,
-    )
-    SnapshotStrip(state.diagnostics, state.inventory)
-    if (mode == SkillScreenMode.OwnerManage && SkillAction.Create in actions) {
-      Row(
-        modifier = Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.End,
-      ) {
-        Button(onClick = onCreate, modifier = Modifier.height(40.dp)) {
-          Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-          Spacer(Modifier.size(8.dp))
-          Text("New draft")
-        }
-      }
-      HorizontalDivider(color = GaBorder)
-    }
-    state.inlineError?.let { InlineSkillError(it) }
-    if (state.inventory.isEmpty()) {
-      EmptySkillInventory(mode)
-    } else {
-      LazyColumn(modifier = Modifier.fillMaxSize()) {
-        items(state.inventory, key = { it.packageId }) { skill ->
-          SkillInventoryRow(
-            skill = skill,
-            generation = state.diagnostics.activeSnapshotGeneration,
-            interactive = mode == SkillScreenMode.OwnerManage,
-            onClick = { onSelect(skill) },
-          )
-          HorizontalDivider(color = GaBorder, modifier = Modifier.padding(horizontal = 16.dp))
-        }
-        item { Spacer(Modifier.height(16.dp)) }
-      }
-    }
-  }
-}
-
-@Composable
-private fun SkillInventoryTopBar(
-  title: String,
-  busy: Boolean,
-  onBack: () -> Unit,
-  onRefresh: () -> Unit,
-) {
-  Row(
-    modifier = Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 8.dp),
-    verticalAlignment = Alignment.CenterVertically,
-  ) {
-    IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-      Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
-    }
-    Text(
-      text = title,
-      style = MaterialTheme.typography.titleMedium,
-      modifier = Modifier.weight(1f),
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis,
-    )
-    IconButton(
-      onClick = onRefresh,
-      enabled = !busy,
-      modifier = Modifier.size(48.dp),
-    ) {
-      if (busy) {
-        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-      } else {
-        Icon(Icons.Outlined.Refresh, contentDescription = "Refresh skill diagnostics")
-      }
-    }
-  }
-  HorizontalDivider(color = GaBorder)
-}
-
-@Composable
-private fun SnapshotStrip(diagnostics: RuntimeDiagnostics, skills: List<RuntimeSkill>) {
-  Row(
-    modifier = Modifier
-      .fillMaxWidth()
-      .height(52.dp)
-      .background(GaSurfaceSubtle)
-      .padding(horizontal = 16.dp),
-    verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = Arrangement.SpaceBetween,
-  ) {
-    Column {
-      Text("SNAPSHOT", style = MaterialTheme.typography.labelMedium, color = GaTextSecondary)
-      Text(
-        "Generation ${diagnostics.activeSnapshotGeneration}",
-        style = MaterialTheme.typography.bodyMedium,
-        fontWeight = FontWeight.SemiBold,
-      )
-    }
-    Text(
-      "${skills.count { it.available }} active / ${skills.size} total",
-      style = MaterialTheme.typography.labelMedium,
-      color = GaTextSecondary,
-    )
-  }
-  HorizontalDivider(color = GaBorder)
-}
-
-@Composable
-private fun SkillInventoryRow(
-  skill: RuntimeSkill,
-  generation: Long,
-  interactive: Boolean,
-  onClick: () -> Unit,
-) {
-  val semantics = buildString {
-    append(skill.displayName)
-    append(", source ${skill.sourceLayer}, status ${skill.status}")
-    skill.activeRevisionId?.let { append(", revision $it") }
-    if (skill.reason.isNotBlank()) append(", ${skill.reason}")
-    append(", generation $generation")
-  }
-  val rowModifier = Modifier
-    .fillMaxWidth()
-    .heightIn(min = 96.dp)
-    .semantics { contentDescription = semantics }
-    .then(if (interactive) Modifier.clickable(onClick = onClick) else Modifier)
-    .padding(horizontal = 16.dp, vertical = 12.dp)
-  Row(modifier = rowModifier, verticalAlignment = Alignment.Top) {
-    Box(
-      modifier = Modifier.size(40.dp).background(
-        if (skill.available) GaReadyContainer else GaAmberContainer,
-        GaSmallShape,
-      ),
-      contentAlignment = Alignment.Center,
-    ) {
-      Icon(
-        if (skill.available) Icons.Outlined.Extension else Icons.Outlined.ErrorOutline,
-        contentDescription = null,
-        tint = if (skill.available) GaReady else GaAmber,
-        modifier = Modifier.size(21.dp),
-      )
-    }
-    Column(modifier = Modifier.weight(1f).padding(start = 12.dp, end = 8.dp)) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-          skill.displayName,
-          style = MaterialTheme.typography.bodyMedium,
-          fontWeight = FontWeight.SemiBold,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-          modifier = Modifier.weight(1f),
-        )
-        SourceLabel(skill.sourceLayer)
-      }
-      Text(
-        "${skill.packageId} • ${statusLabel(skill.status)}",
-        color = GaTextSecondary,
-        fontSize = 12.sp,
-        lineHeight = 18.sp,
-        maxLines = 2,
-        overflow = TextOverflow.Ellipsis,
-      )
-      Text(
-        skill.activeRevisionId?.let { "Revision ${shortRevision(it)}" }
-          ?: "No active revision",
-        color = GaTextSecondary,
-        fontSize = 12.sp,
-        lineHeight = 18.sp,
-      )
-      if (skill.reason.isNotBlank()) {
-        Text(
-          skill.reason,
-          color = if (skill.available) GaTextSecondary else GaAmberText,
-          fontSize = 12.sp,
-          lineHeight = 18.sp,
-          maxLines = 2,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
-    }
-    if (interactive) {
-      Icon(
-        Icons.Outlined.ChevronRight,
-        contentDescription = "Open skill detail",
-        tint = GaTextSecondary,
-        modifier = Modifier.size(24.dp).padding(top = 8.dp),
-      )
-    }
   }
 }
 
@@ -575,7 +423,7 @@ internal fun SourceLabel(source: String) {
 }
 
 @Composable
-internal fun InlineSkillError(message: String) {
+internal fun InlineSkillError(message: String, onRetry: (() -> Unit)? = null) {
   Row(
     modifier = Modifier
       .fillMaxWidth()
@@ -597,31 +445,13 @@ internal fun InlineSkillError(message: String) {
       message,
       color = MaterialTheme.colorScheme.error,
       style = MaterialTheme.typography.bodyMedium,
-      modifier = Modifier.padding(start = 10.dp),
+      modifier = Modifier.weight(1f).padding(start = 10.dp),
       maxLines = 3,
       overflow = TextOverflow.Ellipsis,
     )
-  }
-}
-
-@Composable
-private fun EmptySkillInventory(mode: SkillScreenMode) {
-  Column(
-    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 48.dp),
-    horizontalAlignment = Alignment.CenterHorizontally,
-    verticalArrangement = Arrangement.spacedBy(10.dp),
-  ) {
-    Icon(Icons.Outlined.Build, contentDescription = null, tint = GaTextSecondary)
-    Text("No skill packages", fontWeight = FontWeight.SemiBold)
-    Text(
-      if (mode == SkillScreenMode.DiagnosticsOnly) {
-        "The Android runtime did not report built-in or managed skills."
-      } else {
-        "Create a draft to begin managing an owner skill."
-      },
-      color = GaTextSecondary,
-      style = MaterialTheme.typography.bodyMedium,
-    )
+    if (onRetry != null) {
+      TextButton(onClick = onRetry) { Text("Retry") }
+    }
   }
 }
 
@@ -630,12 +460,3 @@ internal fun statusLabel(value: String): String =
 
 internal fun shortRevision(value: String): String =
   if (value.length <= 12) value else value.take(8) + "…" + value.takeLast(4)
-
-private fun RuntimeSkillMutation.toApproval(packageId: String, revisionId: String) = RuntimeSkillApproval(
-  approvalId = checkNotNull(approvalId),
-  packageId = this.packageId ?: packageId,
-  permissionDiffJson = "{}",
-  requestedBy = "current owner",
-  revisionId = this.revisionId ?: revisionId,
-  status = status,
-)

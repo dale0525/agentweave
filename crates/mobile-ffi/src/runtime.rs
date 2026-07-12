@@ -345,10 +345,20 @@ impl MobileRuntime {
         &self,
         request: CreateSkillDraftRequest,
     ) -> Result<SkillDraftSummary> {
-        self.tokio.block_on(
-            self.skill_management
-                .create_draft(&self.actor_context, request),
-        )
+        self.create_skill_draft_with_files(request, Vec::new())
+    }
+
+    pub fn create_skill_draft_with_files(
+        &self,
+        request: CreateSkillDraftRequest,
+        files: Vec<DraftFileUpdate>,
+    ) -> Result<SkillDraftSummary> {
+        self.tokio
+            .block_on(self.skill_management.create_draft_with_files(
+                &self.actor_context,
+                request,
+                files,
+            ))
     }
 
     pub fn update_skill_draft(
@@ -440,6 +450,15 @@ impl MobileRuntime {
                 .request_removal(&self.actor_context, &package_id),
         )?;
         Ok(approval_value(&approval))
+    }
+
+    pub fn synchronize_skills(&self) -> Result<MobileDiagnostics> {
+        let recovery = self
+            .tokio
+            .block_on(self.skill_manager.startup_reconcile())
+            .context("managed skill synchronization failed")?;
+        self.record_reload(recovery.generation);
+        self.diagnostics()
     }
 
     fn record_reload(&self, generation: u64) {

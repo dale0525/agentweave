@@ -34,6 +34,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -60,8 +64,13 @@ fun SkillDetailScreen(
   val draft = detail.editableDraft
   val active = detail.revisions.find { it.revisionId == detail.activeRevisionId }
     ?: detail.revisions.firstOrNull()
+  var selectedRollbackId by remember(detail.packageId, detail.activeRevisionId) {
+    mutableStateOf<String?>(null)
+  }
   val rollback = detail.revisions.firstOrNull { revision ->
-    !revision.editable && revision.validation.ok && revision.revisionId != detail.activeRevisionId
+    revision.revisionId == selectedRollbackId &&
+      revision.validation.ok &&
+      selectRollbackTarget(detail, revision) != null
   }
   val anyBusy = busyOperation != null
 
@@ -83,7 +92,15 @@ fun SkillDetailScreen(
         RevisionRow(
           revision = revision,
           active = revision.revisionId == detail.activeRevisionId,
-          onClick = if (revision.editable && SkillAction.Edit in actions) onEdit else null,
+          rollbackTarget = revision.revisionId == selectedRollbackId,
+          onClick = when {
+            revision.editable && SkillAction.Edit in actions -> onEdit
+            SkillAction.Rollback in actions && revision.validation.ok &&
+              selectRollbackTarget(detail, revision) != null -> {
+              { selectedRollbackId = revision.revisionId }
+            }
+            else -> null
+          },
         )
         HorizontalDivider(color = GaBorder, modifier = Modifier.padding(horizontal = 16.dp))
       }
@@ -197,6 +214,7 @@ private fun SectionTitle(text: String) {
 private fun RevisionRow(
   revision: RuntimeSkillRevision,
   active: Boolean,
+  rollbackTarget: Boolean,
   onClick: (() -> Unit)?,
 ) {
   val modifier = Modifier
@@ -229,6 +247,8 @@ private fun RevisionRow(
         )
         if (active) {
           Text("ACTIVE", color = GaReady, style = MaterialTheme.typography.labelMedium)
+        } else if (rollbackTarget) {
+          Text("ROLLBACK TARGET", color = GaPrimaryActive, style = MaterialTheme.typography.labelMedium)
         }
       }
       Text(
