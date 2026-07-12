@@ -101,6 +101,23 @@ impl StoreRootIdentity {
         })
     }
 
+    #[cfg(any(unix, windows))]
+    pub(crate) fn capture_opened(path: PathBuf, descriptor: &File) -> anyhow::Result<Self> {
+        let descriptor = descriptor.try_clone()?;
+        let handle = same_file::Handle::from_file(descriptor.try_clone()?)?;
+        #[cfg(windows)]
+        let windows_identity = crate::skill_store_windows::identity_for_file(&descriptor)?;
+        let identity = Self {
+            path,
+            handle: Arc::new(handle),
+            descriptor: Arc::new(descriptor),
+            #[cfg(windows)]
+            windows_identity,
+        };
+        identity.verify("opened")?;
+        Ok(identity)
+    }
+
     pub(crate) fn verify(&self, label: &str) -> anyhow::Result<()> {
         #[cfg(windows)]
         {

@@ -7,6 +7,7 @@ use super::{
     SkillBundlePackage,
 };
 use crate::platform::{CapabilitySet, PlatformId};
+use crate::skill_bundle_publisher_lock::{BundlePublisherLock, acquire_bundle_publisher_lock};
 use crate::skill_package::DescriptorSource;
 use crate::skill_resolver::{SkillResolutionInput, SkillResolver};
 use crate::skill_source::{DiscoveredSkillPackage, SkillLayer};
@@ -15,7 +16,8 @@ use crate::skill_store_atomic_write::{
     atomic_replace_owned_replaceable_file, atomic_replace_replaceable_file,
 };
 use crate::skill_store_directory_ops::{
-    DirectoryOwnership, prepare_opened_directory, remove_opened_directory_if_empty,
+    DirectoryOwnership, OwnedDirectoryBootstrap, prepare_opened_directory,
+    remove_owned_directory_if_empty,
 };
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 use crate::skill_store_fs::{
@@ -81,7 +83,14 @@ async fn build_skill_bundle_inner(
     let (manifest, lock) = artifact_contract(&request, &packages);
     let manifest_bytes = pretty_json(&manifest)?;
     let lock_bytes = pretty_json(&lock)?;
-    let output = prepare_output(&source_roots, &output_root).await?;
+    faults
+        .checkpoint(StoreFaultPoint::BundlePublisherLockAttempt)
+        .await;
+    let publisher_lock = acquire_bundle_publisher_lock(&output_root).await?;
+    faults
+        .checkpoint(StoreFaultPoint::BundlePublisherLockAcquired)
+        .await;
+    let output = prepare_output(&source_roots, &publisher_lock).await?;
     let previous = if output.has_current {
         match super::BundleSkillSource::open(output.root.path()).await {
             Ok(source) => match source.current_generation().await {
@@ -616,77 +625,92 @@ struct PreparedBundleOutput {
     root: PreparedStoreDirectory,
     identity: StoreRootIdentity,
     generations: PreparedStoreDirectory,
-    created_root: bool,
-    created_generations: bool,
+    root_bootstrap: Option<OwnedDirectoryBootstrap>,
+    generations_bootstrap: Option<OwnedDirectoryBootstrap>,
     has_current: bool,
 }
 
 async fn prepare_output(
     source_roots: &[PathBuf],
-    output_root: &Path,
+    publisher_lock: &BundlePublisherLock,
 ) -> anyhow::Result<PreparedBundleOutput> {
-    let parent = output_root.parent().context("output root has no parent")?;
-    tokio::fs::create_dir_all(parent).await?;
-    let parent = tokio::fs::canonicalize(parent).await?;
-    let parent_identity = StoreRootIdentity::capture(parent.clone())?;
-    let name = output_root
-        .file_name()
-        .context("output root has no file name")?;
-    let relative = PathBuf::from(name);
-    let bound_output = parent.join(&relative);
+    let parent_identity = publisher_lock.parent();
+    let relative = publisher_lock.output_relative();
+    let bound_output = parent_identity.path().join(relative);
     reject_root_overlap(source_roots, &bound_output).await?;
-    let (root, root_ownership) = prepare_opened_directory(&parent_identity, &relative).await?;
-    let created_root = root_ownership == DirectoryOwnership::Created;
+    let (root, root_ownership) = prepare_opened_directory(parent_identity, relative).await?;
+    let mut root_bootstrap = match root_ownership {
+        DirectoryOwnership::Created(owned) => Some(owned),
+        DirectoryOwnership::Existing => None,
+    };
+    let mut generations_bootstrap = None;
     let prepared = async {
-        let identity = StoreRootIdentity::capture(root.path().to_path_buf())?;
+        let identity = root.capture_identity()?;
         let has_current = verify_existing_output(&root).await?;
         let (generations, generations_ownership) =
             prepare_opened_directory(&identity, Path::new(SKILL_BUNDLE_GENERATIONS_DIR)).await?;
-        let created_generations = generations_ownership == DirectoryOwnership::Created;
+        generations_bootstrap = match generations_ownership {
+            DirectoryOwnership::Created(owned) => Some(owned),
+            DirectoryOwnership::Existing => None,
+        };
         root.verify()?;
         parent_identity.verify("bundle output parent")?;
         Ok(PreparedBundleOutput {
             root: root.clone(),
             identity,
             generations,
-            created_root,
-            created_generations,
+            root_bootstrap: root_bootstrap.take(),
+            generations_bootstrap: generations_bootstrap.take(),
             has_current,
         })
     }
     .await;
     match prepared {
         Ok(output) => Ok(output),
-        Err(error) if created_root => Err(attach_cleanup(
+        Err(error) => Err(cleanup_prepared_bootstraps(
+            &root,
+            root_bootstrap.as_ref(),
+            generations_bootstrap.as_ref(),
             error,
-            cleanup_new_output_bootstrap(&root).await,
-            "new bundle output bootstrap cleanup",
-        )),
-        Err(error) => Err(error),
+        )
+        .await),
     }
 }
 
-async fn cleanup_new_output_bootstrap(root: &PreparedStoreDirectory) -> anyhow::Result<()> {
-    let listing = list_opened_child_directories(root, 2).await?;
-    anyhow::ensure!(
-        !listing.exceeded && listing.unknown.is_empty(),
-        "new bundle output bootstrap contains unexpected evidence"
-    );
-    match listing.children.as_slice() {
-        [] => {}
-        [child] if child.name == SKILL_BUNDLE_GENERATIONS_DIR => {
-            let generations = list_opened_child_directories(&child.directory, 1).await?;
-            anyhow::ensure!(
-                generations.observed == 0,
-                "new bundle generations bootstrap is not empty"
-            );
-            remove_opened_directory_if_empty(&child.directory).await?;
-        }
-        _ => anyhow::bail!("new bundle output bootstrap contains unexpected directories"),
+async fn cleanup_prepared_bootstraps(
+    root: &PreparedStoreDirectory,
+    root_bootstrap: Option<&OwnedDirectoryBootstrap>,
+    generations_bootstrap: Option<&OwnedDirectoryBootstrap>,
+    mut error: anyhow::Error,
+) -> anyhow::Error {
+    if let Some(generations) = generations_bootstrap {
+        error = attach_cleanup(
+            error,
+            remove_owned_directory_if_empty(generations).await,
+            "new bundle generations bootstrap cleanup",
+        );
     }
-    let listing = list_opened_child_directories(root, 1).await?;
-    anyhow::ensure!(listing.observed == 0, "new bundle output bootstrap changed");
-    remove_opened_directory_if_empty(root).await
+    if let Some(root_bootstrap) = root_bootstrap {
+        match list_opened_child_directories(root, 1).await {
+            Ok(listing) if listing.observed == 0 => {
+                error = attach_cleanup(
+                    error,
+                    remove_owned_directory_if_empty(root_bootstrap).await,
+                    "new bundle output bootstrap cleanup",
+                );
+            }
+            Ok(_) => {
+                error = error
+                    .context("new bundle output bootstrap cleanup retained unexpected evidence");
+            }
+            Err(cleanup) => {
+                error = error.context(format!(
+                    "new bundle output bootstrap identity check failed: {cleanup:#}"
+                ));
+            }
+        }
+    }
+    error
 }
 
 async fn cleanup_bootstrap_error(
@@ -698,7 +722,7 @@ async fn cleanup_bootstrap_error(
         return error;
     }
     let mut error = error;
-    if output.created_generations {
+    if let Some(generations_bootstrap) = &output.generations_bootstrap {
         let empty = list_opened_child_directories(&output.generations, 1).await;
         match empty {
             Ok(listing) if listing.observed == 0 => {
@@ -707,7 +731,7 @@ async fn cleanup_bootstrap_error(
                     .await;
                 error = attach_cleanup(
                     error,
-                    remove_opened_directory_if_empty(&output.generations).await,
+                    remove_owned_directory_if_empty(generations_bootstrap).await,
                     "empty generations bootstrap cleanup",
                 );
             }
@@ -723,7 +747,7 @@ async fn cleanup_bootstrap_error(
             }
         }
     }
-    if output.created_root {
+    if let Some(root_bootstrap) = &output.root_bootstrap {
         match list_opened_child_directories(&output.root, 1).await {
             Ok(listing) if listing.observed == 0 => {
                 faults
@@ -731,7 +755,7 @@ async fn cleanup_bootstrap_error(
                     .await;
                 error = attach_cleanup(
                     error,
-                    remove_opened_directory_if_empty(&output.root).await,
+                    remove_owned_directory_if_empty(root_bootstrap).await,
                     "empty output bootstrap cleanup",
                 );
             }

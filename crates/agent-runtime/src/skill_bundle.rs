@@ -29,6 +29,8 @@ pub use source::BundleSkillSource;
 #[cfg(all(test, windows))]
 pub(crate) use source::gate_bundle_current_after_open;
 #[cfg(test)]
+pub(crate) use source::gate_bundle_current_after_read;
+#[cfg(test)]
 pub(crate) use source::gate_bundle_discovery_after_layout;
 #[cfg(all(test, unix))]
 pub(crate) use source::gate_bundle_metadata_after_inspection;

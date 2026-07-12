@@ -48,15 +48,25 @@ pub(crate) struct PreparedStoreListing {
 impl PreparedStoreDirectory {
     pub(crate) fn open(root: &StoreRootIdentity, relative: &Path) -> anyhow::Result<Self> {
         let descriptor = open_prepared_directory_platform(root, relative)?;
+        Self::from_opened(root, relative, descriptor)
+    }
+
+    pub(crate) fn from_opened(
+        root: &StoreRootIdentity,
+        relative: &Path,
+        descriptor: File,
+    ) -> anyhow::Result<Self> {
         let identity = same_file::Handle::from_file(descriptor.try_clone()?)?;
-        Ok(Self {
+        let directory = Self {
             root: root.clone(),
             relative: relative.to_path_buf(),
             path: root.path().join(relative),
             identity: Arc::new(identity),
             #[cfg(any(unix, windows))]
             descriptor: Arc::new(descriptor),
-        })
+        };
+        directory.verify()?;
+        Ok(directory)
     }
 
     pub(crate) fn verify(&self) -> anyhow::Result<()> {
@@ -77,6 +87,16 @@ impl PreparedStoreDirectory {
 
     pub(crate) fn root_identity(&self) -> &StoreRootIdentity {
         &self.root
+    }
+
+    #[cfg(any(unix, windows))]
+    pub(crate) fn capture_identity(&self) -> anyhow::Result<StoreRootIdentity> {
+        StoreRootIdentity::capture_opened(self.path.clone(), self.descriptor.as_ref())
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
+    pub(crate) fn capture_identity(&self) -> anyhow::Result<StoreRootIdentity> {
+        StoreRootIdentity::capture(self.path.clone())
     }
 
     pub(crate) fn relative(&self) -> &Path {

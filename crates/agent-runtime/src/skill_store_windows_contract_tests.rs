@@ -1,11 +1,13 @@
 use crate::skill_store_windows::{
-    DirectoryBootstrapComponent, DirectoryBootstrapState, FILE_ATTRIBUTE_REPARSE_POINT_FLAG,
-    FILE_FLAG_BACKUP_SEMANTICS_FLAG, FILE_FLAG_OPEN_REPARSE_POINT_FLAG, FILE_SHARE_DELETE_FLAG,
-    FILE_SHARE_READ_FLAG, FILE_SHARE_WRITE_FLAG, MOVEFILE_REPLACE_EXISTING_FLAG,
+    DELETE_ACCESS_FLAG, DirectoryBootstrapComponent, DirectoryBootstrapState,
+    FILE_ATTRIBUTE_REPARSE_POINT_FLAG, FILE_FLAG_BACKUP_SEMANTICS_FLAG,
+    FILE_FLAG_OPEN_REPARSE_POINT_FLAG, FILE_LIST_DIRECTORY_ACCESS_FLAG,
+    FILE_READ_ATTRIBUTES_ACCESS_FLAG, FILE_SHARE_DELETE_FLAG, FILE_SHARE_READ_FLAG,
+    FILE_SHARE_WRITE_FLAG, FILE_WRITE_ATTRIBUTES_ACCESS_FLAG, MOVEFILE_REPLACE_EXISTING_FLAG,
     MOVEFILE_WRITE_THROUGH_FLAG, atomic_replace_flags, attributes_are_reparse,
-    component_open_flags, directory_share_mode, finish_directory_child_creation,
-    lock_file_share_mode, normalized_path_is_within, regular_file_link_count_is_valid,
-    replaceable_file_share_mode,
+    bootstrap_directory_access_mask, component_open_flags, directory_share_mode,
+    finish_directory_child_creation, lock_file_share_mode, normalized_path_is_within,
+    regular_file_link_count_is_valid, replaceable_file_share_mode,
 };
 
 #[test]
@@ -13,6 +15,15 @@ fn windows_atomic_replace_contract_replaces_and_flushes() {
     let flags = atomic_replace_flags();
     assert_ne!(flags & MOVEFILE_REPLACE_EXISTING_FLAG, 0);
     assert_ne!(flags & MOVEFILE_WRITE_THROUGH_FLAG, 0);
+}
+
+#[test]
+fn windows_bootstrap_directory_handle_has_cleanup_access() {
+    let access = bootstrap_directory_access_mask();
+    assert_ne!(access & DELETE_ACCESS_FLAG, 0);
+    assert_ne!(access & FILE_LIST_DIRECTORY_ACCESS_FLAG, 0);
+    assert_ne!(access & FILE_READ_ATTRIBUTES_ACCESS_FLAG, 0);
+    assert_ne!(access & FILE_WRITE_ATTRIBUTES_ACCESS_FLAG, 0);
 }
 
 #[test]

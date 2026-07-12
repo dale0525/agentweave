@@ -145,6 +145,86 @@ async fn checkpoint_current_after_open(_path: &Path) {}
 
 #[cfg(test)]
 #[derive(Clone)]
+pub(crate) struct BundleCurrentReadCompleteGate {
+    entered: Arc<tokio::sync::Barrier>,
+    release: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+impl BundleCurrentReadCompleteGate {
+    pub(crate) async fn wait_entered(&self) {
+        wait_test_gate(&self.entered, "bundle current complete-read entry").await;
+    }
+
+    pub(crate) async fn release(&self) {
+        wait_test_gate(&self.release, "bundle current complete-read release").await;
+    }
+}
+
+#[cfg(test)]
+struct PendingCurrentReadGate {
+    remaining_reads: usize,
+    gate: BundleCurrentReadCompleteGate,
+}
+
+#[cfg(test)]
+pub(crate) fn gate_bundle_current_after_read(
+    path: &Path,
+    skip_reads: usize,
+) -> BundleCurrentReadCompleteGate {
+    let gate = BundleCurrentReadCompleteGate {
+        entered: Arc::new(tokio::sync::Barrier::new(2)),
+        release: Arc::new(tokio::sync::Barrier::new(2)),
+    };
+    complete_current_read_gates().lock().unwrap().insert(
+        canonical_test_path(path),
+        PendingCurrentReadGate {
+            remaining_reads: skip_reads,
+            gate: gate.clone(),
+        },
+    );
+    gate
+}
+
+#[cfg(test)]
+fn complete_current_read_gates() -> &'static Mutex<BTreeMap<PathBuf, PendingCurrentReadGate>> {
+    static GATES: OnceLock<Mutex<BTreeMap<PathBuf, PendingCurrentReadGate>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+async fn checkpoint_current_after_read(path: &Path) {
+    let key = canonical_test_path(path);
+    let gate = {
+        let mut gates = complete_current_read_gates().lock().unwrap();
+        let Some(pending) = gates.get_mut(&key) else {
+            return;
+        };
+        if pending.remaining_reads > 0 {
+            pending.remaining_reads -= 1;
+            return;
+        }
+        gates.remove(&key).map(|pending| pending.gate)
+    };
+    if let Some(gate) = gate {
+        wait_test_gate(
+            &gate.entered,
+            "bundle current complete-read checkpoint entry",
+        )
+        .await;
+        wait_test_gate(
+            &gate.release,
+            "bundle current complete-read checkpoint release",
+        )
+        .await;
+    }
+}
+
+#[cfg(not(test))]
+async fn checkpoint_current_after_read(_path: &Path) {}
+
+#[cfg(test)]
+#[derive(Clone)]
 pub(crate) struct BundleDiscoveryGate {
     entered: Arc<tokio::sync::Barrier>,
     release: Arc<tokio::sync::Barrier>,
@@ -589,6 +669,9 @@ async fn read_metadata_bytes(
         "bundle metadata changed while reading: {}",
         path.display()
     );
+    if relative == Path::new(SKILL_BUNDLE_CURRENT_FILE) {
+        checkpoint_current_after_read(&path).await;
+    }
     root.verify()?;
     Ok((bytes, identity))
 }

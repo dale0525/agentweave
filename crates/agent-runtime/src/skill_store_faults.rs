@@ -38,6 +38,8 @@ pub(crate) enum StoreFaultPoint {
     ManagedDiscoveryTransientIo,
     ExecutionAfterSnapshot,
     ExecutionCopyFile,
+    BundlePublisherLockAttempt,
+    BundlePublisherLockAcquired,
     BundleBeforeGenerationReservation,
     BundleBeforePublish,
     BundleBeforeGenerationsCleanup,

@@ -10,6 +10,7 @@ pub mod skill;
 pub mod skill_authoring;
 pub mod skill_availability;
 pub mod skill_bundle;
+mod skill_bundle_publisher_lock;
 pub mod skill_catalog;
 mod skill_entry_resource;
 pub mod skill_management;

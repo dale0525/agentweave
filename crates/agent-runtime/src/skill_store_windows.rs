@@ -14,7 +14,14 @@ pub(crate) const FILE_ATTRIBUTE_REPARSE_POINT_FLAG: u32 = 0x400;
 pub(crate) const FILE_FLAG_BACKUP_SEMANTICS_FLAG: u32 = 0x02000000;
 #[cfg(any(test, windows))]
 pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT_FLAG: u32 = 0x00200000;
-
+#[cfg(any(test, windows))]
+pub(crate) const DELETE_ACCESS_FLAG: u32 = 0x00010000;
+#[cfg(any(test, windows))]
+pub(crate) const FILE_LIST_DIRECTORY_ACCESS_FLAG: u32 = 0x00000001;
+#[cfg(any(test, windows))]
+pub(crate) const FILE_READ_ATTRIBUTES_ACCESS_FLAG: u32 = 0x00000080;
+#[cfg(any(test, windows))]
+pub(crate) const FILE_WRITE_ATTRIBUTES_ACCESS_FLAG: u32 = 0x00000100;
 #[cfg(any(test, windows))]
 pub(crate) const fn atomic_replace_flags() -> u32 {
     MOVEFILE_REPLACE_EXISTING_FLAG | MOVEFILE_WRITE_THROUGH_FLAG
@@ -35,6 +42,13 @@ pub(crate) const fn replaceable_file_share_mode() -> u32 {
     FILE_SHARE_READ_FLAG | FILE_SHARE_WRITE_FLAG | FILE_SHARE_DELETE_FLAG
 }
 
+#[cfg(any(test, windows))]
+pub(crate) const fn bootstrap_directory_access_mask() -> u32 {
+    DELETE_ACCESS_FLAG
+        | FILE_LIST_DIRECTORY_ACCESS_FLAG
+        | FILE_READ_ATTRIBUTES_ACCESS_FLAG
+        | FILE_WRITE_ATTRIBUTES_ACCESS_FLAG
+}
 #[cfg(any(test, windows))]
 pub(crate) const fn regular_file_link_count_is_valid(link_count: u32) -> bool {
     link_count == 1
@@ -122,8 +136,9 @@ where
 mod platform {
     use super::{
         DirectoryBootstrapComponent, DirectoryBootstrapState, atomic_replace_flags,
-        attributes_are_reparse, component_open_flags, directory_share_mode, lock_file_share_mode,
-        normalized_path_is_within, regular_file_link_count_is_valid, replaceable_file_share_mode,
+        attributes_are_reparse, bootstrap_directory_access_mask, component_open_flags,
+        directory_share_mode, lock_file_share_mode, normalized_path_is_within,
+        regular_file_link_count_is_valid, replaceable_file_share_mode,
     };
     use anyhow::Context;
     use std::ffi::{OsStr, OsString};
@@ -243,7 +258,7 @@ mod platform {
             open_direct_child(
                 &parent,
                 child_name,
-                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                bootstrap_directory_access_mask(),
                 OPEN_EXISTING,
                 true,
             )
@@ -382,7 +397,47 @@ mod platform {
         }
         Ok(file)
     }
-
+    pub(crate) fn validate_lock_file_beneath(
+        locks: &File,
+        locks_identity: WindowsFileIdentity,
+        file_name: &OsStr,
+        locked: &File,
+    ) -> anyhow::Result<()> {
+        if file_identity(locks)? != locks_identity {
+            anyhow::bail!("captured Windows locks handle identity changed");
+        }
+        let locks_final = final_path(locks)?;
+        let path = locks_final.join(file_name);
+        let current = open_path(
+            &path,
+            GENERIC_READ | FILE_READ_ATTRIBUTES,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | component_open_flags(false),
+            lock_file_share_mode(),
+        )?;
+        let current_information = file_information(&current)?;
+        reject_reparse_or_wrong_kind(&current_information, false, &path)?;
+        let locked_information = file_information(locked)?;
+        anyhow::ensure!(
+            regular_file_link_count_is_valid(locked_information.nNumberOfLinks)
+                && regular_file_link_count_is_valid(current_information.nNumberOfLinks),
+            "Windows publisher lock must have exactly one link"
+        );
+        anyhow::ensure!(
+            identity_from_information(&current_information)
+                == identity_from_information(&locked_information),
+            "Windows publisher lock directory entry changed after open"
+        );
+        let opened_final = final_path(&current)?;
+        let opened_parent = opened_final
+            .parent()
+            .context("Windows publisher lock has no parent")?;
+        anyhow::ensure!(
+            paths_equal(opened_parent, &locks_final),
+            "Windows publisher lock escaped the captured parent"
+        );
+        Ok(())
+    }
     pub(crate) struct WindowsStableParent {
         handle: File,
         final_path: PathBuf,

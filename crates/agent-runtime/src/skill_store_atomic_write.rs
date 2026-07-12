@@ -295,13 +295,13 @@ async fn atomic_replace_file_platform(
 
 #[cfg(all(not(unix), not(windows)))]
 async fn finish_platform_result(
-    result: anyhow::Result<()>,
+    result: anyhow::Result<tokio::fs::File>,
     committed: bool,
     faults: &StoreFaults,
     temporary: std::path::PathBuf,
 ) -> Result<OwnedAtomicReplace, AtomicReplaceFailure> {
-    match result {
-        Ok(file) => Ok(OwnedAtomicReplace { file }),
+    match finish_non_unix_success(result) {
+        Ok(owned) => Ok(owned),
         Err(error) if committed => Err(failure(error, AtomicReplaceCommitState::Committed, None)),
         Err(error) => {
             let cleanup = match faults.check(StoreFaultPoint::WriteTempCleanup) {
@@ -313,6 +313,13 @@ async fn finish_platform_result(
             finish_uncommitted(error, cleanup, temporary)
         }
     }
+}
+
+#[cfg(any(test, all(not(unix), not(windows))))]
+fn finish_non_unix_success(
+    result: anyhow::Result<tokio::fs::File>,
+) -> anyhow::Result<OwnedAtomicReplace> {
+    result.map(|file| OwnedAtomicReplace { file })
 }
 
 fn finish_uncommitted<T>(
@@ -331,6 +338,13 @@ fn finish_uncommitted<T>(
             Some(temporary),
         )),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn non_unix_atomic_replace_success_contract_is_file_bound() {
+    let _contract: fn(anyhow::Result<tokio::fs::File>) -> anyhow::Result<OwnedAtomicReplace> =
+        finish_non_unix_success;
 }
 
 fn cleanup_is_not_found(error: &anyhow::Error) -> bool {
