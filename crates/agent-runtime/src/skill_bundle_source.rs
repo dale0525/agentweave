@@ -5,13 +5,13 @@ use super::{
 };
 use crate::skill_package::{DescriptorSource, SkillCompatibility, SkillPackageDescriptor};
 use crate::skill_source::{
-    BundleExecutionBinding, DiscoveredSkillPackage, SkillLayer, SkillSource,
-    VerifiedPackageContent, canonical_relative_path,
+    BundleExecutionBinding, BundleGenerationBinding, DiscoveredSkillPackage, SkillLayer,
+    SkillSource, VerifiedPackageContent, canonical_relative_path,
 };
 use crate::skill_store::SkillStoreLimits;
 use crate::skill_store_locks::StoreRootIdentity;
 use crate::skill_store_operations::error_is_not_found;
-use crate::skill_store_prepared_fs::open_regular_file;
+use crate::skill_store_prepared_fs::{open_regular_file, open_replaceable_regular_file};
 use crate::skill_store_secure_roots::{
     PreparedStoreDirectory, PreparedStoreUnknownKind, list_opened_child_directories,
     open_prepared_directory, opened_package_snapshot,
@@ -92,6 +92,68 @@ async fn checkpoint_metadata_after_inspection(path: &Path) {
 
 #[cfg(not(all(test, unix)))]
 async fn checkpoint_metadata_after_inspection(_path: &Path) {}
+
+#[cfg(all(test, windows))]
+#[derive(Clone)]
+pub(crate) struct BundleCurrentReadGate {
+    entered: Arc<tokio::sync::Barrier>,
+    release: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(all(test, windows))]
+impl BundleCurrentReadGate {
+    pub(crate) async fn wait_entered(&self) {
+        self.entered.wait().await;
+    }
+
+    pub(crate) async fn release(&self) {
+        self.release.wait().await;
+    }
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn gate_bundle_current_after_open(path: &Path) -> BundleCurrentReadGate {
+    let gate = BundleCurrentReadGate {
+        entered: Arc::new(tokio::sync::Barrier::new(2)),
+        release: Arc::new(tokio::sync::Barrier::new(2)),
+    };
+    current_read_gates()
+        .lock()
+        .unwrap()
+        .insert(canonical_test_path(path), gate.clone());
+    gate
+}
+
+#[cfg(all(test, windows))]
+fn current_read_gates() -> &'static Mutex<BTreeMap<PathBuf, BundleCurrentReadGate>> {
+    static GATES: OnceLock<Mutex<BTreeMap<PathBuf, BundleCurrentReadGate>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(all(test, windows))]
+fn canonical_test_path(path: &Path) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    std::fs::canonicalize(parent)
+        .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(all(test, windows))]
+async fn checkpoint_current_after_open(path: &Path) {
+    let gate = current_read_gates()
+        .lock()
+        .unwrap()
+        .remove(&canonical_test_path(path));
+    if let Some(gate) = gate {
+        gate.entered.wait().await;
+        gate.release.wait().await;
+    }
+}
+
+#[cfg(not(all(test, windows)))]
+async fn checkpoint_current_after_open(_path: &Path) {}
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -233,9 +295,10 @@ async fn load_generation(
     generation: &PreparedStoreDirectory,
     bundle_root: &Path,
 ) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
-    let manifest: SkillBundleManifest =
-        read_json(generation, Path::new(SKILL_BUNDLE_MANIFEST_FILE)).await?;
-    let lock: SkillBundleLock = read_json(generation, Path::new(SKILL_BUNDLE_LOCK_FILE)).await?;
+    let (manifest, manifest_bytes, manifest_identity): (SkillBundleManifest, _, _) =
+        read_json_with_bytes(generation, Path::new(SKILL_BUNDLE_MANIFEST_FILE)).await?;
+    let (lock, lock_bytes, lock_identity): (SkillBundleLock, _, _) =
+        read_json_with_bytes(generation, Path::new(SKILL_BUNDLE_LOCK_FILE)).await?;
     anyhow::ensure!(
         manifest.schema_version == SKILL_BUNDLE_SCHEMA_VERSION,
         "unsupported skill bundle manifest schema version: {}",
@@ -258,6 +321,24 @@ async fn load_generation(
         validate_package_path(package)?;
     }
     let package_directories = verify_top_level_entries(generation, &manifest).await?;
+    let generation_binding = Arc::new(BundleGenerationBinding {
+        directory: generation.clone(),
+        manifest_bytes: Arc::from(manifest_bytes),
+        manifest_identity,
+        lock_bytes: Arc::from(lock_bytes),
+        lock_identity,
+        package_directories: package_directories.clone(),
+        package_hashes: manifest
+            .packages
+            .iter()
+            .map(|package| {
+                (
+                    package.id.as_str().to_string(),
+                    package.content_hash.clone(),
+                )
+            })
+            .collect(),
+    });
     checkpoint_discovery_after_layout(generation.path()).await;
 
     let mut packages = Vec::with_capacity(manifest.packages.len());
@@ -310,14 +391,14 @@ async fn load_generation(
                 execution_binding: None,
                 bundle_execution_binding: Some(BundleExecutionBinding {
                     directory: package_directory.clone(),
+                    generation: generation_binding.clone(),
                     bundle_root: bundle_root.to_path_buf(),
                 }),
             }),
         });
     }
     packages.sort_by(|left, right| left.descriptor.id.cmp(&right.descriptor.id));
-    verify_top_level_entries(generation, &manifest).await?;
-    generation.verify()?;
+    verify_bundle_generation_binding(&generation_binding).await?;
     Ok(packages)
 }
 
@@ -380,12 +461,45 @@ async fn read_json<T: serde::de::DeserializeOwned>(
     root: &PreparedStoreDirectory,
     relative: &Path,
 ) -> anyhow::Result<T> {
+    read_json_with_bytes(root, relative)
+        .await
+        .map(|(value, _, _)| value)
+}
+
+async fn read_json_with_bytes<T: serde::de::DeserializeOwned>(
+    root: &PreparedStoreDirectory,
+    relative: &Path,
+) -> anyhow::Result<(T, Vec<u8>, Arc<same_file::Handle>)> {
+    let (bytes, identity) = read_metadata_bytes(root, relative).await?;
+    let value = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "failed to parse bundle metadata {}",
+            root.path().join(relative).display()
+        )
+    })?;
+    Ok((value, bytes, identity))
+}
+
+async fn read_metadata_bytes(
+    root: &PreparedStoreDirectory,
+    relative: &Path,
+) -> anyhow::Result<(Vec<u8>, Arc<same_file::Handle>)> {
     root.verify()?;
     let path = root.path().join(relative);
     checkpoint_metadata_after_inspection(&path).await;
-    let (file, expected_bytes, _) = open_regular_file(root, relative)
-        .await
-        .with_context(|| format!("failed to open bundle metadata {}", path.display()))?;
+    let opened = if relative == Path::new(SKILL_BUNDLE_CURRENT_FILE) {
+        open_replaceable_regular_file(root, relative).await
+    } else {
+        open_regular_file(root, relative).await
+    };
+    let (file, expected_bytes, _) =
+        opened.with_context(|| format!("failed to open bundle metadata {}", path.display()))?;
+    let identity = Arc::new(same_file::Handle::from_file(
+        file.try_clone().await?.into_std().await,
+    )?);
+    if relative == Path::new(SKILL_BUNDLE_CURRENT_FILE) {
+        checkpoint_current_after_open(&path).await;
+    }
     let limits = SkillStoreLimits::default();
     anyhow::ensure!(
         expected_bytes <= limits.max_file_bytes,
@@ -404,8 +518,78 @@ async fn read_json<T: serde::de::DeserializeOwned>(
         path.display()
     );
     root.verify()?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse bundle metadata {}", path.display()))
+    Ok((bytes, identity))
+}
+
+pub(crate) async fn verify_bundle_generation_binding(
+    binding: &BundleGenerationBinding,
+) -> anyhow::Result<()> {
+    binding.directory.verify()?;
+    verify_bound_top_level_entries(binding).await?;
+    let (manifest_bytes, manifest_identity) =
+        read_metadata_bytes(&binding.directory, Path::new(SKILL_BUNDLE_MANIFEST_FILE)).await?;
+    anyhow::ensure!(
+        manifest_identity.as_ref() == binding.manifest_identity.as_ref()
+            && manifest_bytes == binding.manifest_bytes.as_ref(),
+        "bundle manifest identity or bytes changed after verification"
+    );
+    let (lock_bytes, lock_identity) =
+        read_metadata_bytes(&binding.directory, Path::new(SKILL_BUNDLE_LOCK_FILE)).await?;
+    anyhow::ensure!(
+        lock_identity.as_ref() == binding.lock_identity.as_ref()
+            && lock_bytes == binding.lock_bytes.as_ref(),
+        "bundle lock identity or bytes changed after verification"
+    );
+    for (id, directory) in &binding.package_directories {
+        directory.verify()?;
+        let snapshot =
+            opened_package_snapshot(directory, SkillStoreLimits::default().package_limits())
+                .await?;
+        anyhow::ensure!(
+            binding.package_hashes.get(id) == Some(&snapshot.content_hash),
+            "content hash mismatch for {id}"
+        );
+        directory.verify()?;
+    }
+    verify_bound_top_level_entries(binding).await?;
+    binding.directory.verify()
+}
+
+async fn verify_bound_top_level_entries(binding: &BundleGenerationBinding) -> anyhow::Result<()> {
+    let listing = list_opened_child_directories(&binding.directory, 4096).await?;
+    anyhow::ensure!(
+        !listing.exceeded,
+        "bundle contains too many top-level entries"
+    );
+    let actual_packages = listing
+        .children
+        .iter()
+        .map(|child| child.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_packages = binding
+        .package_directories
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        actual_packages == expected_packages,
+        "bundle contains unlocked content"
+    );
+    let actual_metadata = listing
+        .unknown
+        .iter()
+        .filter(|entry| entry.kind == PreparedStoreUnknownKind::RegularFile)
+        .map(|entry| entry.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_metadata = BTreeSet::from([SKILL_BUNDLE_MANIFEST_FILE, SKILL_BUNDLE_LOCK_FILE]);
+    anyhow::ensure!(
+        listing.unknown.len() == expected_metadata.len() && actual_metadata == expected_metadata,
+        "bundle contains unlocked content"
+    );
+    for directory in binding.package_directories.values() {
+        directory.verify()?;
+    }
+    Ok(())
 }
 
 fn unique_manifest_packages(

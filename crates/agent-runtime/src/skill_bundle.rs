@@ -18,10 +18,13 @@ pub(crate) use builder::{
     build_skill_bundle_with_faults, gate_bundle_after_inspection, gate_bundle_before_publish,
 };
 pub use source::BundleSkillSource;
+#[cfg(all(test, windows))]
+pub(crate) use source::gate_bundle_current_after_open;
 #[cfg(test)]
 pub(crate) use source::gate_bundle_discovery_after_layout;
 #[cfg(all(test, unix))]
 pub(crate) use source::gate_bundle_metadata_after_inspection;
+pub(crate) use source::verify_bundle_generation_binding;
 
 pub const SKILL_BUNDLE_SCHEMA_VERSION: u32 = 1;
 pub const SKILL_BUNDLE_MANIFEST_FILE: &str = "skill-bundle.json";

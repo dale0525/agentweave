@@ -1,6 +1,6 @@
 use super::server_skill_startup::load_skill_manager;
 use agent_runtime::platform::PlatformId;
-use agent_runtime::skill_bundle::{BuildSkillBundleRequest, build_skill_bundle};
+use agent_runtime::skill_bundle::{BuildSkillBundleRequest, BundleSkillSource, build_skill_bundle};
 use agent_runtime::storage::Storage;
 use std::path::Path;
 
@@ -124,6 +124,60 @@ async fn deleting_manifest_and_lock_never_downgrades_to_directory_discovery() {
     .unwrap();
 
     assert!(format!("{error:#}").contains("bundle metadata"));
+}
+
+#[tokio::test]
+async fn deleting_direct_bundle_metadata_never_downgrades_to_directory_discovery() {
+    let temp = TestDir::new("direct-metadata-deletion");
+    let source = temp.path().join("source");
+    let generated = temp.path().join("generated");
+    let direct = temp.path().join("direct");
+    write_package(&source.join("com.example.startup")).await;
+    build_skill_bundle(BuildSkillBundleRequest {
+        source_roots: vec![source],
+        output_root: generated.clone(),
+        platform: PlatformId::Desktop,
+        runtime_version: env!("CARGO_PKG_VERSION").parse().unwrap(),
+        generated_at: "2026-07-12T00:00:00Z".into(),
+    })
+    .await
+    .unwrap();
+    let current: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(generated.join("current")).await.unwrap()).unwrap();
+    tokio::fs::rename(
+        generated
+            .join("generations")
+            .join(current["generation"].as_str().unwrap()),
+        &direct,
+    )
+    .await
+    .unwrap();
+    BundleSkillSource::open(&direct).await.unwrap();
+    load_skill_manager(
+        &direct,
+        Storage::connect("sqlite::memory:").await.unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::fs::remove_file(direct.join("skill-bundle.json"))
+        .await
+        .unwrap();
+    tokio::fs::remove_file(direct.join("skill-bundle.lock"))
+        .await
+        .unwrap();
+
+    let result = load_skill_manager(
+        &direct,
+        Storage::connect("sqlite::memory:").await.unwrap(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "direct bundle downgraded to directory mode"
+    );
 }
 
 async fn assert_bundle_startup_error(name: &str, contents: &str) {

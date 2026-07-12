@@ -52,7 +52,20 @@ pub struct VerifiedPackageContent {
 #[derive(Clone, Debug)]
 pub(crate) struct BundleExecutionBinding {
     pub(crate) directory: crate::skill_store_secure_roots::PreparedStoreDirectory,
+    pub(crate) generation: Arc<BundleGenerationBinding>,
     pub(crate) bundle_root: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BundleGenerationBinding {
+    pub(crate) directory: crate::skill_store_secure_roots::PreparedStoreDirectory,
+    pub(crate) manifest_bytes: Arc<[u8]>,
+    pub(crate) manifest_identity: Arc<same_file::Handle>,
+    pub(crate) lock_bytes: Arc<[u8]>,
+    pub(crate) lock_identity: Arc<same_file::Handle>,
+    pub(crate) package_directories:
+        BTreeMap<String, crate::skill_store_secure_roots::PreparedStoreDirectory>,
+    pub(crate) package_hashes: BTreeMap<String, String>,
 }
 
 #[derive(Clone)]

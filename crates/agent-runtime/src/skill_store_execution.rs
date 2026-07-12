@@ -277,6 +277,7 @@ pub(crate) async fn prepare_bundle_execution(
     limits: PackageLimits,
     manifest: &SkillManifest,
 ) -> anyhow::Result<PreparedSkillExecution> {
+    crate::skill_bundle::verify_bundle_generation_binding(&binding.generation).await?;
     binding.directory.verify()?;
     let temporary = tempfile::Builder::new()
         .prefix("general-agent-bundle-execution-")

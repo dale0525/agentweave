@@ -4,7 +4,8 @@ use crate::skill_store_windows::{
     FILE_SHARE_READ_FLAG, FILE_SHARE_WRITE_FLAG, MOVEFILE_REPLACE_EXISTING_FLAG,
     MOVEFILE_WRITE_THROUGH_FLAG, atomic_replace_flags, attributes_are_reparse,
     component_open_flags, directory_share_mode, finish_directory_child_creation,
-    lock_file_share_mode, normalized_path_is_within,
+    lock_file_share_mode, normalized_path_is_within, regular_file_link_count_is_valid,
+    replaceable_file_share_mode,
 };
 
 #[test]
@@ -39,6 +40,21 @@ fn windows_critical_namespace_handles_deny_share_delete() {
         assert_ne!(share_mode & FILE_SHARE_WRITE_FLAG, 0);
         assert_eq!(share_mode & FILE_SHARE_DELETE_FLAG, 0);
     }
+}
+
+#[test]
+fn windows_replaceable_metadata_handles_allow_share_delete() {
+    let share_mode = replaceable_file_share_mode();
+    assert_ne!(share_mode & FILE_SHARE_READ_FLAG, 0);
+    assert_ne!(share_mode & FILE_SHARE_WRITE_FLAG, 0);
+    assert_ne!(share_mode & FILE_SHARE_DELETE_FLAG, 0);
+}
+
+#[test]
+fn windows_regular_file_link_count_contract_rejects_hardlinks() {
+    assert!(regular_file_link_count_is_valid(1));
+    assert!(!regular_file_link_count_is_valid(0));
+    assert!(!regular_file_link_count_is_valid(2));
 }
 
 #[test]

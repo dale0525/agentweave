@@ -57,6 +57,14 @@ pub(crate) async fn open_regular_file(
     ))
 }
 
+#[cfg(unix)]
+pub(crate) async fn open_replaceable_regular_file(
+    root: &PreparedStoreDirectory,
+    relative: &Path,
+) -> anyhow::Result<(tokio::fs::File, u64, u32)> {
+    open_regular_file(root, relative).await
+}
+
 #[cfg(windows)]
 pub(crate) async fn open_regular_file(
     root: &PreparedStoreDirectory,
@@ -68,6 +76,19 @@ pub(crate) async fn open_regular_file(
         relative,
         false,
         false,
+    )?;
+    Ok((tokio::fs::File::from_std(file), length, 0o644))
+}
+
+#[cfg(windows)]
+pub(crate) async fn open_replaceable_regular_file(
+    root: &PreparedStoreDirectory,
+    relative: &Path,
+) -> anyhow::Result<(tokio::fs::File, u64, u32)> {
+    canonical_relative_path(relative)?;
+    let (file, length) = crate::skill_store_windows::open_replaceable_regular_file_beneath(
+        root.windows_descriptor(),
+        relative,
     )?;
     Ok((tokio::fs::File::from_std(file), length, 0o644))
 }
@@ -87,6 +108,14 @@ pub(crate) async fn open_regular_file(
     }
     root.verify()?;
     Ok((file, metadata.len(), 0o644))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(crate) async fn open_replaceable_regular_file(
+    root: &PreparedStoreDirectory,
+    relative: &Path,
+) -> anyhow::Result<(tokio::fs::File, u64, u32)> {
+    open_regular_file(root, relative).await
 }
 
 #[cfg(unix)]

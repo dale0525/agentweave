@@ -13,11 +13,32 @@ pub(crate) async fn atomic_replace_file(
     mode: u32,
     faults: &StoreFaults,
 ) -> Result<(), AtomicReplaceFailure> {
+    atomic_replace_file_with_destination_sharing(root, relative, bytes, mode, faults, false).await
+}
+
+pub(crate) async fn atomic_replace_replaceable_file(
+    root: &PreparedStoreDirectory,
+    relative: &Path,
+    bytes: &[u8],
+    mode: u32,
+    faults: &StoreFaults,
+) -> Result<(), AtomicReplaceFailure> {
+    atomic_replace_file_with_destination_sharing(root, relative, bytes, mode, faults, true).await
+}
+
+async fn atomic_replace_file_with_destination_sharing(
+    root: &PreparedStoreDirectory,
+    relative: &Path,
+    bytes: &[u8],
+    mode: u32,
+    faults: &StoreFaults,
+    replaceable_destination: bool,
+) -> Result<(), AtomicReplaceFailure> {
     faults
         .checkpoint(StoreFaultPoint::WriteBeforeTempOpen)
         .await;
     root.verify().map_err(not_committed)?;
-    atomic_replace_file_platform(root, relative, bytes, mode, faults).await
+    atomic_replace_file_platform(root, relative, bytes, mode, faults, replaceable_destination).await
 }
 
 fn not_committed(error: anyhow::Error) -> AtomicReplaceFailure {
@@ -47,6 +68,7 @@ async fn atomic_replace_file_platform(
     bytes: &[u8],
     mode: u32,
     faults: &StoreFaults,
+    _replaceable_destination: bool,
 ) -> Result<(), AtomicReplaceFailure> {
     use rustix::fs::{
         AtFlags, FileType, Mode, OFlags, RawMode, fchmod, fstat, openat, renameat, unlinkat,
@@ -165,6 +187,7 @@ async fn atomic_replace_file_platform(
     bytes: &[u8],
     _mode: u32,
     faults: &StoreFaults,
+    replaceable_destination: bool,
 ) -> Result<(), AtomicReplaceFailure> {
     canonical_relative_path(relative).map_err(not_committed)?;
     let (parent, destination_name) =
@@ -184,7 +207,7 @@ async fn atomic_replace_file_platform(
         drop(file);
         root.verify()?;
         faults.check(StoreFaultPoint::WriteBeforeRename)?;
-        parent.atomic_replace(&temporary_name, &destination_name)?;
+        parent.atomic_replace(&temporary_name, &destination_name, replaceable_destination)?;
         committed = true;
         faults.check(StoreFaultPoint::WriteAfterRenameMode)?;
         faults.check(StoreFaultPoint::WriteAfterRenameRevalidate)?;
@@ -212,6 +235,7 @@ async fn atomic_replace_file_platform(
     bytes: &[u8],
     _mode: u32,
     faults: &StoreFaults,
+    _replaceable_destination: bool,
 ) -> Result<(), AtomicReplaceFailure> {
     canonical_relative_path(relative).map_err(not_committed)?;
     let destination = root.path().join(relative);

@@ -9,12 +9,16 @@ use crate::skill_package::DescriptorSource;
 use crate::skill_resolver::{SkillResolutionInput, SkillResolver};
 use crate::skill_source::{DiscoveredSkillPackage, SkillLayer};
 use crate::skill_store::SkillStoreLimits;
-use crate::skill_store_atomic_write::atomic_replace_file;
+use crate::skill_store_atomic_write::atomic_replace_replaceable_file;
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
-use crate::skill_store_fs::copy_package_tree_into_prepared;
+use crate::skill_store_fs::{
+    copy_package_tree_into_prepared, make_tree_readonly, make_tree_writable,
+};
 use crate::skill_store_fs_types::AtomicReplaceCommitState;
 use crate::skill_store_locks::StoreRootIdentity;
-use crate::skill_store_prepared_fs::create_regular_file;
+use crate::skill_store_prepared_fs::{
+    create_regular_file, open_regular_file, set_readonly, set_writable,
+};
 use crate::skill_store_secure_fs::secure_package_snapshot;
 use crate::skill_store_secure_roots::{
     PreparedStoreDirectory, PreparedStoreUnknownKind, ensure_opened_child_directory,
@@ -24,7 +28,7 @@ use crate::skill_store_secure_roots::{
 use anyhow::Context;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[cfg(test)]
 use std::sync::{Arc, Mutex, OnceLock};
@@ -179,20 +183,22 @@ async fn build_skill_bundle_inner(
     validate_request(&request)?;
     let source_roots = canonical_source_roots(&request).await?;
     let output_root = absolute_normalized(&request.output_root)?;
-    let output = prepare_output(&source_roots, &output_root).await?;
     let packages = inspect_packages(&source_roots).await?;
     validate_resolved_package_set(&request, &packages)?;
     checkpoint_after_inspection(&output_root).await;
     let (manifest, lock) = artifact_contract(&request, &packages);
     let manifest_bytes = pretty_json(&manifest)?;
     let lock_bytes = pretty_json(&lock)?;
+    let output = prepare_output(&source_roots, &output_root).await?;
     let generation_id = uuid::Uuid::new_v4().to_string();
     let generation_relative = PathBuf::from(SKILL_BUNDLE_GENERATIONS_DIR).join(&generation_id);
     let generation = reserve_opened_directory(&output.identity, &generation_relative).await?;
     let generation_identity = StoreRootIdentity::capture(generation.path().to_path_buf())?;
     let mut published = false;
+    let mut frozen = false;
 
     let result = async {
+        let mut staged_packages = BTreeMap::new();
         for package in &packages {
             let relative = PathBuf::from(package.descriptor.id.as_str());
             let destination = reserve_opened_directory(&generation_identity, &relative).await?;
@@ -212,23 +218,65 @@ async fn build_skill_bundle_inner(
                 "source package changed during bundle copy: staged content hash mismatch for {}",
                 package.descriptor.id.as_str()
             );
+            staged_packages.insert(package.descriptor.id.as_str().to_string(), destination);
         }
-        write_generation_metadata(&generation, SKILL_BUNDLE_MANIFEST_FILE, &manifest_bytes).await?;
-        write_generation_metadata(&generation, SKILL_BUNDLE_LOCK_FILE, &lock_bytes).await?;
+        let manifest_identity =
+            write_generation_metadata(&generation, SKILL_BUNDLE_MANIFEST_FILE, &manifest_bytes)
+                .await?;
+        let lock_identity =
+            write_generation_metadata(&generation, SKILL_BUNDLE_LOCK_FILE, &lock_bytes).await?;
+        let metadata = StagedGenerationMetadata {
+            manifest_bytes: &manifest_bytes,
+            manifest_identity: &manifest_identity,
+            lock_bytes: &lock_bytes,
+            lock_identity: &lock_identity,
+        };
         revalidate_sources(&packages).await?;
         generation.verify()?;
         generation_identity.verify("bundle generation")?;
         checkpoint_before_publish(&output_root, generation.path()).await;
         faults.check(StoreFaultPoint::BundleBeforePublish)?;
-        generation.verify()?;
-        generation_identity.verify("bundle generation")?;
-        publish_generation(&output.root, &generation_id, &faults, &mut published).await
+        validate_staged_generation(
+            &generation,
+            &generation_identity,
+            &staged_packages,
+            &manifest,
+            &metadata,
+        )
+        .await?;
+        frozen = true;
+        freeze_staged_generation(&generation, &staged_packages).await?;
+        validate_staged_generation(
+            &generation,
+            &generation_identity,
+            &staged_packages,
+            &manifest,
+            &metadata,
+        )
+        .await?;
+        let publication =
+            publish_generation(&output.root, &generation_id, &faults, &mut published).await;
+        let thaw = thaw_staged_generation(&generation).await;
+        frozen = thaw.is_err();
+        match (publication, thaw) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error.context(
+                "published bundle generation remained safely read-only after publication",
+            )),
+            (Err(error), Err(thaw)) => Err(error.context(format!(
+                "bundle generation remained safely read-only after publication failure: {thaw:#}"
+            ))),
+        }
     }
     .await;
 
     if let Err(error) = result {
         if published {
             return Err(error);
+        }
+        if frozen {
+            thaw_staged_generation(&generation).await?;
         }
         return match remove_opened_tree(&generation).await {
             Ok(()) => Err(error),
@@ -243,6 +291,154 @@ async fn build_skill_bundle_inner(
         manifest_bytes,
         lock_bytes,
     })
+}
+
+struct StagedGenerationMetadata<'a> {
+    manifest_bytes: &'a [u8],
+    manifest_identity: &'a same_file::Handle,
+    lock_bytes: &'a [u8],
+    lock_identity: &'a same_file::Handle,
+}
+
+async fn validate_staged_generation(
+    generation: &PreparedStoreDirectory,
+    generation_identity: &StoreRootIdentity,
+    staged_packages: &BTreeMap<String, PreparedStoreDirectory>,
+    manifest: &SkillBundleManifest,
+    metadata: &StagedGenerationMetadata<'_>,
+) -> anyhow::Result<()> {
+    generation.verify()?;
+    generation_identity.verify("bundle generation")?;
+    verify_staged_layout(generation, staged_packages).await?;
+    verify_staged_metadata(
+        generation,
+        SKILL_BUNDLE_MANIFEST_FILE,
+        metadata.manifest_bytes,
+        metadata.manifest_identity,
+    )
+    .await?;
+    verify_staged_metadata(
+        generation,
+        SKILL_BUNDLE_LOCK_FILE,
+        metadata.lock_bytes,
+        metadata.lock_identity,
+    )
+    .await?;
+    let expected_hashes = manifest
+        .packages
+        .iter()
+        .map(|package| (package.id.as_str(), package.content_hash.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for (id, directory) in staged_packages {
+        directory.verify()?;
+        let snapshot =
+            opened_package_snapshot(directory, SkillStoreLimits::default().package_limits())
+                .await?;
+        anyhow::ensure!(
+            expected_hashes.get(id.as_str()).copied() == Some(snapshot.content_hash.as_str()),
+            "staged bundle package content changed before publication: {id}"
+        );
+        directory.verify()?;
+    }
+    verify_staged_layout(generation, staged_packages).await?;
+    generation.verify()?;
+    generation_identity.verify("bundle generation")
+}
+
+async fn verify_staged_layout(
+    generation: &PreparedStoreDirectory,
+    staged_packages: &BTreeMap<String, PreparedStoreDirectory>,
+) -> anyhow::Result<()> {
+    let listing = list_opened_child_directories(generation, 4096).await?;
+    anyhow::ensure!(!listing.exceeded, "staged bundle contains too many entries");
+    let actual_packages = listing
+        .children
+        .iter()
+        .map(|child| child.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_packages = staged_packages
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        actual_packages == expected_packages,
+        "staged bundle top-level package layout changed before publication"
+    );
+    let actual_metadata = listing
+        .unknown
+        .iter()
+        .filter(|entry| entry.kind == PreparedStoreUnknownKind::RegularFile)
+        .map(|entry| entry.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_metadata = BTreeSet::from([SKILL_BUNDLE_MANIFEST_FILE, SKILL_BUNDLE_LOCK_FILE]);
+    anyhow::ensure!(
+        listing.unknown.len() == expected_metadata.len() && actual_metadata == expected_metadata,
+        "staged bundle metadata layout changed before publication"
+    );
+    for directory in staged_packages.values() {
+        directory.verify()?;
+    }
+    Ok(())
+}
+
+async fn verify_staged_metadata(
+    generation: &PreparedStoreDirectory,
+    name: &str,
+    expected: &[u8],
+    expected_identity: &same_file::Handle,
+) -> anyhow::Result<()> {
+    let (file, expected_bytes, _) = open_regular_file(generation, Path::new(name)).await?;
+    let actual_identity = same_file::Handle::from_file(file.try_clone().await?.into_std().await)?;
+    anyhow::ensure!(
+        actual_identity == *expected_identity,
+        "staged bundle metadata identity changed before publication: {name}"
+    );
+    anyhow::ensure!(
+        expected_bytes == u64::try_from(expected.len())?,
+        "staged bundle metadata changed before publication: {name}"
+    );
+    let mut actual = Vec::with_capacity(expected.len());
+    file.take(expected_bytes + 1)
+        .read_to_end(&mut actual)
+        .await?;
+    anyhow::ensure!(
+        actual == expected,
+        "staged bundle metadata changed before publication: {name}"
+    );
+    generation.verify()
+}
+
+async fn freeze_staged_generation(
+    generation: &PreparedStoreDirectory,
+    staged_packages: &BTreeMap<String, PreparedStoreDirectory>,
+) -> anyhow::Result<()> {
+    for directory in staged_packages.values() {
+        make_tree_readonly(directory, SkillStoreLimits::default().package_limits()).await?;
+    }
+    set_readonly(
+        generation,
+        Some(Path::new(SKILL_BUNDLE_MANIFEST_FILE)),
+        false,
+    )
+    .await?;
+    set_readonly(generation, Some(Path::new(SKILL_BUNDLE_LOCK_FILE)), false).await?;
+    set_readonly(generation, None, true).await
+}
+
+async fn thaw_staged_generation(generation: &PreparedStoreDirectory) -> anyhow::Result<()> {
+    set_writable(generation, None, true).await?;
+    let listing = list_opened_child_directories(generation, 4096).await?;
+    for child in listing.children {
+        make_tree_writable(
+            &child.directory,
+            SkillStoreLimits::default().package_limits(),
+        )
+        .await?;
+    }
+    for name in [SKILL_BUNDLE_MANIFEST_FILE, SKILL_BUNDLE_LOCK_FILE] {
+        set_writable(generation, Some(Path::new(name)), false).await?;
+    }
+    Ok(())
 }
 
 fn validate_request(request: &BuildSkillBundleRequest) -> anyhow::Result<()> {
@@ -578,12 +774,14 @@ async fn write_generation_metadata(
     generation: &PreparedStoreDirectory,
     name: &str,
     bytes: &[u8],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<same_file::Handle> {
     let mut file = create_regular_file(generation, Path::new(name), 0o644).await?;
     file.write_all(bytes).await?;
     file.flush().await?;
     file.sync_all().await?;
-    generation.verify()
+    let identity = same_file::Handle::from_file(file.try_clone().await?.into_std().await)?;
+    generation.verify()?;
+    Ok(identity)
 }
 
 async fn publish_generation(
@@ -596,7 +794,7 @@ async fn publish_generation(
         schema_version: SKILL_BUNDLE_SCHEMA_VERSION,
         generation: generation.to_string(),
     })?;
-    match atomic_replace_file(
+    match atomic_replace_replaceable_file(
         output,
         Path::new(SKILL_BUNDLE_CURRENT_FILE),
         &bytes,

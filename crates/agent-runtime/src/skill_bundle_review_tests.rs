@@ -1,11 +1,11 @@
 use crate::platform::PlatformId;
+#[cfg(windows)]
+use crate::skill_bundle::gate_bundle_current_after_open;
 use crate::skill_bundle::{
     BuildSkillBundleRequest, BundleSkillSource, SkillBundleCurrent, build_skill_bundle,
     build_skill_bundle_with_faults, gate_bundle_before_publish, gate_bundle_discovery_after_layout,
 };
-#[cfg(unix)]
 use crate::skill_resolver::{ResolvedSkillPackage, ResolvedSkillSet, SkillResolutionStatus};
-#[cfg(unix)]
 use crate::skill_snapshot::SkillSnapshot;
 use crate::skill_source::SkillSource;
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
@@ -50,6 +50,126 @@ async fn bundle_execution_never_spawns_from_replaced_package() {
         serde_json::json!({"ok": true})
     );
     assert!(!marker.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bundle_execution_rejects_unlocked_generation_content_added_after_snapshot() {
+    let fixture = BundleReviewFixture::new().await;
+    build_skill_bundle(fixture.request()).await.unwrap();
+    let source = BundleSkillSource::open(&fixture.output).await.unwrap();
+    let packages = source.packages().await.unwrap();
+    let snapshot = SkillSnapshot::build(1, active_set(packages)).await.unwrap();
+    tokio::fs::create_dir(active_generation(&fixture.output).await.join("unlocked"))
+        .await
+        .unwrap();
+
+    let error = snapshot
+        .registry()
+        .execute("com.example.atomic/run", serde_json::json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("unlocked content"));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_builder_rejects_source_hardlink_without_replacing_current() {
+    let fixture = BundleReviewFixture::new().await;
+    build_skill_bundle(fixture.request()).await.unwrap();
+    let old_current = tokio::fs::read(fixture.output.join("current"))
+        .await
+        .unwrap();
+    std::fs::hard_link(
+        fixture.package().join("skill.json"),
+        fixture.temp.path().join("source-skill-hardlink.json"),
+    )
+    .unwrap();
+
+    let error = build_skill_bundle(fixture.request()).await.unwrap_err();
+
+    assert!(format!("{error:#}").contains("hard links"));
+    assert_eq!(
+        tokio::fs::read(fixture.output.join("current"))
+            .await
+            .unwrap(),
+        old_current
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_bundle_open_rejects_package_hardlink() {
+    let fixture = BundleReviewFixture::new().await;
+    build_skill_bundle(fixture.request()).await.unwrap();
+    let generation = active_generation(&fixture.output).await;
+    std::fs::hard_link(
+        generation.join("com.example.atomic/skill.json"),
+        fixture.temp.path().join("bundle-skill-hardlink.json"),
+    )
+    .unwrap();
+
+    let error = BundleSkillSource::open(&fixture.output).await.unwrap_err();
+
+    assert!(format!("{error:#}").contains("hard links"));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_bundle_execution_rejects_package_hardlink() {
+    let fixture = BundleReviewFixture::new().await;
+    build_skill_bundle(fixture.request()).await.unwrap();
+    let source = BundleSkillSource::open(&fixture.output).await.unwrap();
+    let packages = source.packages().await.unwrap();
+    let snapshot = SkillSnapshot::build(1, active_set(packages)).await.unwrap();
+    let old_current = tokio::fs::read(fixture.output.join("current"))
+        .await
+        .unwrap();
+    std::fs::hard_link(
+        active_generation(&fixture.output)
+            .await
+            .join("com.example.atomic/index.js"),
+        fixture.temp.path().join("execution-index-hardlink.js"),
+    )
+    .unwrap();
+
+    let error = snapshot
+        .registry()
+        .execute("com.example.atomic/run", serde_json::json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("hard links"));
+    assert_eq!(
+        tokio::fs::read(fixture.output.join("current"))
+            .await
+            .unwrap(),
+        old_current
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_current_reader_allows_concurrent_atomic_publication() {
+    let fixture = BundleReviewFixture::new().await;
+    build_skill_bundle(fixture.request()).await.unwrap();
+    let source = BundleSkillSource::open(&fixture.output).await.unwrap();
+    tokio::fs::write(
+        fixture.package().join("index.js"),
+        "process.stdout.write('new')\n",
+    )
+    .await
+    .unwrap();
+    let gate = gate_bundle_current_after_open(&fixture.output.join("current"));
+    let reader = tokio::spawn(async move { source.discover().await });
+    gate.wait_entered().await;
+
+    build_skill_bundle(fixture.request()).await.unwrap();
+
+    gate.release().await;
+    assert_eq!(reader.await.unwrap().unwrap().len(), 1);
+    BundleSkillSource::open(&fixture.output).await.unwrap();
 }
 
 #[tokio::test]
@@ -162,6 +282,116 @@ async fn staging_generation_replacement_never_publishes_replacement() {
 }
 
 #[tokio::test]
+async fn staged_package_mutation_before_publication_keeps_previous_generation_readable() {
+    let fixture = BundleReviewFixture::new().await;
+    build_skill_bundle(fixture.request()).await.unwrap();
+    let source = BundleSkillSource::open(&fixture.output).await.unwrap();
+    let old_hash = package_hash(&source).await;
+    let old_current = tokio::fs::read(fixture.output.join("current"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        fixture.package().join("index.js"),
+        "process.stdout.write('new')\n",
+    )
+    .await
+    .unwrap();
+
+    let gate = gate_bundle_before_publish(&fixture.output);
+    let request = fixture.request();
+    let publishing = tokio::spawn(async move { build_skill_bundle(request).await });
+    let generation = gate.wait_entered().await;
+    tokio::fs::write(
+        generation.join("com.example.atomic/index.js"),
+        "process.stdout.write('tampered')\n",
+    )
+    .await
+    .unwrap();
+    gate.release().await;
+
+    let error = publishing.await.unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("staged bundle"));
+    assert_eq!(
+        tokio::fs::read(fixture.output.join("current"))
+            .await
+            .unwrap(),
+        old_current
+    );
+    assert_eq!(package_hash(&source).await, old_hash);
+}
+
+#[tokio::test]
+async fn staged_metadata_mutation_before_publication_keeps_previous_generation_readable() {
+    let fixture = BundleReviewFixture::new().await;
+    build_skill_bundle(fixture.request()).await.unwrap();
+    let source = BundleSkillSource::open(&fixture.output).await.unwrap();
+    let old_hash = package_hash(&source).await;
+    let old_current = tokio::fs::read(fixture.output.join("current"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        fixture.package().join("index.js"),
+        "process.stdout.write('new')\n",
+    )
+    .await
+    .unwrap();
+
+    let gate = gate_bundle_before_publish(&fixture.output);
+    let request = fixture.request();
+    let publishing = tokio::spawn(async move { build_skill_bundle(request).await });
+    let generation = gate.wait_entered().await;
+    tokio::fs::write(generation.join("skill-bundle.lock"), b"{}\n")
+        .await
+        .unwrap();
+    gate.release().await;
+
+    let error = publishing.await.unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("staged bundle"));
+    assert_eq!(
+        tokio::fs::read(fixture.output.join("current"))
+            .await
+            .unwrap(),
+        old_current
+    );
+    assert_eq!(package_hash(&source).await, old_hash);
+}
+
+#[tokio::test]
+async fn invalid_first_build_leaves_no_bundle_evidence_and_retry_succeeds() {
+    let fixture = BundleReviewFixture::new().await;
+    tokio::fs::write(fixture.package().join("general-agent.json"), b"{")
+        .await
+        .unwrap();
+
+    build_skill_bundle(fixture.request()).await.unwrap_err();
+
+    assert!(!fixture.output.exists());
+    write_runtime_package(&fixture.package()).await;
+    build_skill_bundle(fixture.request()).await.unwrap();
+    BundleSkillSource::open(&fixture.output).await.unwrap();
+}
+
+#[tokio::test]
+async fn unresolved_first_build_leaves_no_bundle_evidence_and_retry_succeeds() {
+    let fixture = BundleReviewFixture::new().await;
+    let descriptor = fixture.package().join("general-agent.json");
+    mutate_json(&descriptor, |value| {
+        value["requires"]["packages"] = serde_json::json!(["com.example.missing"]);
+    })
+    .await;
+
+    build_skill_bundle(fixture.request()).await.unwrap_err();
+
+    assert!(!fixture.output.exists());
+    mutate_json(&descriptor, |value| {
+        value["requires"]["packages"] = serde_json::json!([]);
+    })
+    .await;
+    build_skill_bundle(fixture.request()).await.unwrap();
+    BundleSkillSource::open(&fixture.output).await.unwrap();
+}
+
+#[tokio::test]
 async fn bundle_discover_rejects_unlocked_tree_added_after_open() {
     let fixture = BundleReviewFixture::new().await;
     build_skill_bundle(fixture.request()).await.unwrap();
@@ -241,6 +471,28 @@ async fn bundle_discover_rejects_generation_replaced_during_reload() {
     let displaced = fixture.temp.path().join("displaced-active-generation");
     tokio::fs::rename(&generation, &displaced).await.unwrap();
     tokio::fs::create_dir(&generation).await.unwrap();
+    gate.release().await;
+
+    let error = reload.await.unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("identity changed"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn bundle_discover_rejects_package_directory_replaced_during_reload() {
+    let fixture = BundleReviewFixture::new().await;
+    build_skill_bundle(fixture.request()).await.unwrap();
+    let source = BundleSkillSource::open(&fixture.output).await.unwrap();
+    let generation = tokio::fs::canonicalize(active_generation(&fixture.output).await)
+        .await
+        .unwrap();
+    let gate = gate_bundle_discovery_after_layout(&generation);
+    let reload = tokio::spawn(async move { source.discover().await });
+    gate.wait_entered().await;
+    let package = generation.join("com.example.atomic");
+    let displaced = fixture.temp.path().join("displaced-active-package");
+    tokio::fs::rename(&package, &displaced).await.unwrap();
+    tokio::fs::create_dir(&package).await.unwrap();
     gate.release().await;
 
     let error = reload.await.unwrap().unwrap_err();
@@ -348,7 +600,6 @@ async fn write_runtime_package(root: &Path) {
         .unwrap();
 }
 
-#[cfg(unix)]
 fn active_set(packages: Vec<crate::skill_source::DiscoveredSkillPackage>) -> ResolvedSkillSet {
     ResolvedSkillSet {
         active: packages

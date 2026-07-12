@@ -724,6 +724,12 @@ fn scan_windows_opened(
                 stack.push((relative, opened.file));
                 continue;
             }
+            if !crate::skill_store_windows::regular_file_link_count_is_valid(opened.link_count) {
+                anyhow::bail!(
+                    "skill package cannot contain hard links: {}",
+                    relative.display()
+                );
+            }
             if opened.length > limits.max_file_bytes {
                 anyhow::bail!(
                     "skill package file exceeds {} byte limit: {}",

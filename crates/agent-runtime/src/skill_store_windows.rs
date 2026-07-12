@@ -31,6 +31,16 @@ pub(crate) const fn lock_file_share_mode() -> u32 {
 }
 
 #[cfg(any(test, windows))]
+pub(crate) const fn replaceable_file_share_mode() -> u32 {
+    FILE_SHARE_READ_FLAG | FILE_SHARE_WRITE_FLAG | FILE_SHARE_DELETE_FLAG
+}
+
+#[cfg(any(test, windows))]
+pub(crate) const fn regular_file_link_count_is_valid(link_count: u32) -> bool {
+    link_count == 1
+}
+
+#[cfg(any(test, windows))]
 pub(crate) const fn component_open_flags(directory: bool) -> u32 {
     FILE_FLAG_OPEN_REPARSE_POINT_FLAG
         | if directory {
@@ -113,7 +123,7 @@ mod platform {
     use super::{
         DirectoryBootstrapComponent, DirectoryBootstrapState, atomic_replace_flags,
         attributes_are_reparse, component_open_flags, directory_share_mode, lock_file_share_mode,
-        normalized_path_is_within,
+        normalized_path_is_within, regular_file_link_count_is_valid, replaceable_file_share_mode,
     };
     use anyhow::Context;
     use std::ffi::{OsStr, OsString};
@@ -398,17 +408,24 @@ mod platform {
             &self,
             source_name: &OsStr,
             destination_name: &OsStr,
+            replaceable_destination: bool,
         ) -> anyhow::Result<()> {
             atomic_replace(
                 &self.final_path.join(source_name),
                 &self.final_path.join(destination_name),
             )?;
-            let destination = open_direct_child(
+            let share_mode = if replaceable_destination {
+                replaceable_file_share_mode()
+            } else {
+                directory_share_mode()
+            };
+            let destination = open_direct_child_with_share(
                 self,
                 destination_name,
                 FILE_READ_ATTRIBUTES,
                 OPEN_EXISTING,
                 false,
+                share_mode,
             )?;
             drop(destination);
             Ok(())
@@ -454,6 +471,23 @@ mod platform {
         writable: bool,
         create_new: bool,
     ) -> anyhow::Result<(File, u64)> {
+        open_regular_file_beneath_with_share(root, relative, writable, create_new, false)
+    }
+
+    pub(crate) fn open_replaceable_regular_file_beneath(
+        root: &File,
+        relative: &Path,
+    ) -> anyhow::Result<(File, u64)> {
+        open_regular_file_beneath_with_share(root, relative, false, false, true)
+    }
+
+    fn open_regular_file_beneath_with_share(
+        root: &File,
+        relative: &Path,
+        writable: bool,
+        create_new: bool,
+        replaceable: bool,
+    ) -> anyhow::Result<(File, u64)> {
         let (parent, name) = open_stable_parent(root, relative)?;
         let access = if writable {
             GENERIC_WRITE | FILE_READ_ATTRIBUTES
@@ -465,8 +499,20 @@ mod platform {
         } else {
             OPEN_EXISTING
         };
-        let file = open_direct_child(&parent, &name, access, disposition, false)?;
+        let share_mode = if replaceable {
+            replaceable_file_share_mode()
+        } else {
+            directory_share_mode()
+        };
+        let file =
+            open_direct_child_with_share(&parent, &name, access, disposition, false, share_mode)?;
         let information = file_information(&file)?;
+        if !regular_file_link_count_is_valid(information.nNumberOfLinks) {
+            anyhow::bail!(
+                "prepared package source cannot contain hard links: {}",
+                parent.child_path(&name).display()
+            );
+        }
         let length =
             (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
         Ok((file, length))
@@ -476,6 +522,7 @@ mod platform {
         pub(crate) file: File,
         pub(crate) is_directory: bool,
         pub(crate) length: u64,
+        pub(crate) link_count: u32,
         pub(crate) final_path: PathBuf,
     }
 
@@ -518,6 +565,7 @@ mod platform {
             is_directory: information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
             length: (u64::from(information.nFileSizeHigh) << 32)
                 | u64::from(information.nFileSizeLow),
+            link_count: information.nNumberOfLinks,
             final_path: opened,
         })
     }
