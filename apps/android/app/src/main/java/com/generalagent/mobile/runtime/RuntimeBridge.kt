@@ -7,14 +7,23 @@ import org.json.JSONObject
 class RuntimeBridge(
   private val context: Context,
   private val native: NativeRuntimeApi = NativeRuntime,
+  private val skillAssets: SkillAssetSource = AndroidSkillAssetSource(context.assets),
+  private val configuredSkillPolicy: RuntimeSkillPolicy = RuntimeSkillPolicy(),
+  private val configuredActorContext: RuntimeActorContext = RuntimeActorContext(),
 ) {
   fun initRequest(): RuntimeInitRequest {
     val filesDir = context.filesDir
+    val installedBundle = SkillAssetInstaller(filesDir, skillAssets).installVerifiedBundle()
     return RuntimeInitRequest(
       appDataDir = filesDir.absolutePath,
       cacheDir = context.cacheDir.absolutePath,
       databasePath = filesDir.resolve("general-agent.db").absolutePath,
-      skillsDir = filesDir.resolve("skills").absolutePath,
+      builtinSkillsDir = installedBundle.root.absolutePath,
+      managedSkillsDir = filesDir.resolve("managed-skills").absolutePath,
+      stagingSkillsDir = context.cacheDir.resolve("skill-staging").absolutePath,
+      quarantineSkillsDir = filesDir.resolve("skill-quarantine").absolutePath,
+      skillPolicy = configuredSkillPolicy,
+      actorContext = configuredActorContext,
     )
   }
 
@@ -36,6 +45,10 @@ class RuntimeClient internal constructor(
       databaseReady = data.getBoolean("database_ready"),
       skillsReady = data.getBoolean("skills_ready"),
       modelConfigured = data.getBoolean("model_configured"),
+      skillManagementMode = data.optString("skill_management_mode", "disabled"),
+      activeSnapshotGeneration = data.optLong("active_snapshot_generation", 0L),
+      quarantinedCount = data.optInt("quarantined_count", 0),
+      lastReloadStatus = data.optString("last_reload_status", "not_loaded"),
     )
   }
 
@@ -96,9 +109,33 @@ private fun RuntimeInitRequest.toJson(): JSONObject =
     .put("app_data_dir", appDataDir)
     .put("cache_dir", cacheDir)
     .put("database_path", databasePath)
-    .put("skills_dir", skillsDir)
+    .put("builtin_skills_dir", builtinSkillsDir)
+    .put("managed_skills_dir", managedSkillsDir)
+    .put("staging_skills_dir", stagingSkillsDir)
+    .put("quarantine_skills_dir", quarantineSkillsDir)
+    .put("skill_policy", skillPolicy.toJson())
+    .put("actor_context", actorContext.toJson())
     .put("platform", platform)
     .put("capabilities", JSONArray(capabilities))
+
+private fun RuntimeSkillPolicy.toJson(): JSONObject =
+  JSONObject()
+    .put("mode", mode)
+    .put("agent_authoring", agentAuthoring)
+    .put("allowed_kinds", JSONArray(allowedKinds))
+    .put("protected_packages", JSONArray(protectedPackages))
+    .put("allowed_overrides", JSONArray(allowedOverrides))
+    .put("activation_approval_required", activationApprovalRequired)
+    .put("permission_escalation_approval_required", permissionEscalationApprovalRequired)
+    .put("rollback_approval_required", rollbackApprovalRequired)
+
+private fun RuntimeActorContext.toJson(): JSONObject =
+  JSONObject()
+    .put("actor_id", actorId)
+    .put("role", role)
+    .put("tenant_id", tenantId)
+    .put("device_id", deviceId)
+    .put("grants", JSONArray(grants))
 
 private fun RuntimeModelConfig.toJson(): JSONObject =
   JSONObject()
@@ -143,11 +180,16 @@ private fun JSONObject.toMessage(): RuntimeMessage =
 
 private fun JSONObject.toSkill(): RuntimeSkill =
   RuntimeSkill(
-    id = getString("id"),
-    label = getString("label"),
-    description = getString("description"),
+    packageId = getString("package_id"),
+    displayName = getString("display_name"),
+    version = getString("version"),
+    sourceLayer = getString("source_layer"),
+    status = getString("status"),
     available = getBoolean("available"),
     reason = getString("reason"),
+    activeRevisionId = if (isNull("active_revision_id")) null else getString("active_revision_id"),
+    manageable = getBoolean("manageable"),
+    description = optString("description"),
   )
 
 private fun JSONObject.toModelConfig(): RuntimeModelConfig =

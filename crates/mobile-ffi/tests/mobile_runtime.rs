@@ -1,13 +1,45 @@
+use agent_runtime::platform::PlatformId;
+use agent_runtime::skill_bundle::{BuildSkillBundleRequest, build_skill_bundle};
+use agent_runtime::skill_policy::{ActorContext, SkillManagementPolicy};
 use mobile_ffi::{MobileInitConfig, MobileRuntime};
 use tempfile::tempdir;
 
 fn android_config(root: &std::path::Path) -> MobileInitConfig {
+    build_bundle(root, PlatformId::Android);
+    mobile_config(root)
+}
+
+fn build_bundle(root: &std::path::Path, platform: PlatformId) {
     let app_data_dir = root.join("files");
+    let builtin_skills_dir = app_data_dir.join("builtin-skills");
+    let source_root = root.join("source-skills");
+    std::fs::create_dir_all(&source_root).unwrap();
+    let tokio = tokio::runtime::Runtime::new().unwrap();
+    tokio
+        .block_on(build_skill_bundle(BuildSkillBundleRequest {
+            source_roots: vec![source_root],
+            output_root: builtin_skills_dir.clone(),
+            platform,
+            runtime_version: "0.1.0".parse().unwrap(),
+            generated_at: "2026-07-12T00:00:00Z".into(),
+        }))
+        .unwrap();
+}
+
+fn mobile_config(root: &std::path::Path) -> MobileInitConfig {
+    let app_data_dir = root.join("files");
+    let cache_dir = root.join("cache");
+    let builtin_skills_dir = app_data_dir.join("builtin-skills");
     MobileInitConfig {
         app_data_dir: app_data_dir.display().to_string(),
-        cache_dir: root.join("cache").display().to_string(),
+        cache_dir: cache_dir.display().to_string(),
         database_path: app_data_dir.join("general-agent.db").display().to_string(),
-        skills_dir: "skills".into(),
+        builtin_skills_dir: builtin_skills_dir.display().to_string(),
+        managed_skills_dir: app_data_dir.join("managed-skills").display().to_string(),
+        staging_skills_dir: cache_dir.join("skill-staging").display().to_string(),
+        quarantine_skills_dir: app_data_dir.join("skill-quarantine").display().to_string(),
+        skill_policy: SkillManagementPolicy::default(),
+        actor_context: ActorContext::anonymous(),
         platform: "android".into(),
         capabilities: vec![
             "network.http".into(),
@@ -67,34 +99,28 @@ fn initializes_runtime_and_returns_android_capabilities() {
 #[test]
 fn lists_instruction_only_skills_from_the_runtime_catalog() {
     let dir = tempdir().unwrap();
-    let skill_dir = dir.path().join("files/skills/notes");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: notes\ndescription: Read app notes.\n---\n\n# Notes\n",
-    )
-    .unwrap();
+    write_instruction_package(
+        &dir.path().join("source-skills"),
+        "notes",
+        "com.example.notes",
+        "notes",
+        "android",
+    );
 
     let runtime = MobileRuntime::initialize(android_config(dir.path())).unwrap();
     let skills = runtime.list_skills();
 
     assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0].id, "notes");
+    assert_eq!(skills[0].package_id, "com.example.notes");
+    assert_eq!(skills[0].display_name, "notes");
     assert!(skills[0].available);
-    assert_eq!(skills[0].reason, "Instruction skill loaded.");
+    assert_eq!(skills[0].source_layer, "builtin");
 }
 
 #[test]
-fn android_runtime_lists_only_platform_compatible_instruction_packages() {
+fn android_runtime_reports_platform_incompatible_bundle_packages() {
     let dir = tempdir().unwrap();
-    let skills_root = dir.path().join("files/skills");
-    write_instruction_package(
-        &skills_root,
-        "android",
-        "com.example.android",
-        "android-only",
-        "android",
-    );
+    let skills_root = dir.path().join("source-skills");
     write_instruction_package(
         &skills_root,
         "desktop",
@@ -103,67 +129,82 @@ fn android_runtime_lists_only_platform_compatible_instruction_packages() {
         "desktop",
     );
 
-    let runtime = MobileRuntime::initialize(android_config(dir.path())).unwrap();
+    build_bundle(dir.path(), PlatformId::Desktop);
+    let runtime = MobileRuntime::initialize(mobile_config(dir.path())).unwrap();
     let skills = runtime.list_skills();
 
     assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0].id, "android-only");
+    assert_eq!(skills[0].package_id, "com.example.desktop");
+    assert!(!skills[0].available);
+    assert_eq!(skills[0].status, "platform_unsupported");
+}
+
+#[test]
+fn android_init_uses_separate_skill_roots_and_disabled_policy_by_default() {
+    let dir = tempdir().unwrap();
+    write_instruction_package(
+        &dir.path().join("source-skills"),
+        "builtin",
+        "com.example.builtin",
+        "builtin",
+        "android",
+    );
+
+    let runtime = MobileRuntime::initialize(android_config(dir.path())).unwrap();
+
+    assert_eq!(runtime.diagnostics().skill_management_mode, "disabled");
+    assert_eq!(runtime.list_skills().len(), 1);
+    assert_eq!(runtime.list_skills()[0].source_layer, "builtin");
+}
+
+#[test]
+fn rejects_unverified_builtin_directory_without_development_fallback() {
+    let dir = tempdir().unwrap();
+    let mut config = android_config(dir.path());
+    config.builtin_skills_dir = dir.path().join("source-skills").display().to_string();
+
+    MobileRuntime::initialize(config)
+        .err()
+        .expect("unverified built-in directory should fail closed");
 }
 
 #[test]
 fn rejects_database_path_with_parent_dir_traversal() {
     let dir = tempdir().unwrap();
     let app_data_dir = dir.path().join("files");
-
-    let error = MobileRuntime::initialize(MobileInitConfig {
-        app_data_dir: app_data_dir.display().to_string(),
-        cache_dir: dir.path().join("cache").display().to_string(),
-        database_path: app_data_dir.join("../escape.db").display().to_string(),
-        skills_dir: "skills".into(),
-        platform: "android".into(),
-        capabilities: vec!["filesystem.app_data".into()],
-    })
-    .err()
-    .expect("database path traversal should fail");
+    let mut config = android_config(dir.path());
+    config.database_path = app_data_dir.join("../escape.db").display().to_string();
+    let error = MobileRuntime::initialize(config)
+        .err()
+        .expect("database path traversal should fail");
 
     assert!(error.to_string().contains("app-private"));
 }
 
 #[test]
-fn rejects_skills_dir_with_parent_dir_traversal() {
+fn rejects_managed_skills_dir_with_parent_dir_traversal() {
     let dir = tempdir().unwrap();
     let app_data_dir = dir.path().join("files");
 
-    let error = MobileRuntime::initialize(MobileInitConfig {
-        app_data_dir: app_data_dir.display().to_string(),
-        cache_dir: dir.path().join("cache").display().to_string(),
-        database_path: app_data_dir.join("general-agent.db").display().to_string(),
-        skills_dir: "../skills".into(),
-        platform: "android".into(),
-        capabilities: vec!["filesystem.app_data".into()],
-    })
-    .err()
-    .expect("skills path traversal should fail");
+    let mut config = android_config(dir.path());
+    config.managed_skills_dir = app_data_dir.join("../skills").display().to_string();
+    let error = MobileRuntime::initialize(config)
+        .err()
+        .expect("skills path traversal should fail");
 
     assert!(error.to_string().contains("app-private"));
 }
 
 #[test]
-fn rejects_absolute_skills_dir_outside_app_private_roots() {
+fn rejects_absolute_builtin_skills_dir_outside_app_private_roots() {
     let dir = tempdir().unwrap();
     let outside_dir = tempdir().unwrap();
-    let app_data_dir = dir.path().join("files");
 
-    let error = MobileRuntime::initialize(MobileInitConfig {
-        app_data_dir: app_data_dir.display().to_string(),
-        cache_dir: dir.path().join("cache").display().to_string(),
-        database_path: app_data_dir.join("general-agent.db").display().to_string(),
-        skills_dir: outside_dir.path().join("skills").display().to_string(),
-        platform: "android".into(),
-        capabilities: vec!["filesystem.app_data".into()],
-    })
-    .err()
-    .expect("absolute skills dir outside app-private roots should fail");
+    let mut config = android_config(dir.path());
+    config.builtin_skills_dir = outside_dir.path().join("skills").display().to_string();
+    let error = MobileRuntime::initialize(config)
+        .err()
+        .expect("absolute skills dir outside app-private roots should fail");
 
     assert!(error.to_string().contains("app-private"));
 }
@@ -183,22 +224,17 @@ mod unix_symlink_tests {
         std::fs::create_dir_all(&app_data_dir).unwrap();
         symlink(outside_dir.path(), &escape_link).unwrap();
 
-        let error = MobileRuntime::initialize(MobileInitConfig {
-            app_data_dir: app_data_dir.display().to_string(),
-            cache_dir: dir.path().join("cache").display().to_string(),
-            database_path: escape_link.join("general-agent.db").display().to_string(),
-            skills_dir: "skills".into(),
-            platform: "android".into(),
-            capabilities: vec!["filesystem.app_data".into()],
-        })
-        .err()
-        .expect("database path via symlink escape should fail");
+        let mut config = android_config(dir.path());
+        config.database_path = escape_link.join("general-agent.db").display().to_string();
+        let error = MobileRuntime::initialize(config)
+            .err()
+            .expect("database path via symlink escape should fail");
 
         assert!(error.to_string().contains("app-private"));
     }
 
     #[test]
-    fn rejects_symlink_escape_in_skills_dir() {
+    fn rejects_symlink_escape_in_builtin_skills_dir() {
         let dir = tempdir().unwrap();
         let outside_dir = tempdir().unwrap();
         let app_data_dir = dir.path().join("files");
@@ -207,16 +243,11 @@ mod unix_symlink_tests {
         std::fs::create_dir_all(&app_data_dir).unwrap();
         symlink(outside_dir.path(), &escape_link).unwrap();
 
-        let error = MobileRuntime::initialize(MobileInitConfig {
-            app_data_dir: app_data_dir.display().to_string(),
-            cache_dir: dir.path().join("cache").display().to_string(),
-            database_path: app_data_dir.join("general-agent.db").display().to_string(),
-            skills_dir: escape_link.join("skills").display().to_string(),
-            platform: "android".into(),
-            capabilities: vec!["filesystem.app_data".into()],
-        })
-        .err()
-        .expect("skills path via symlink escape should fail");
+        let mut config = android_config(dir.path());
+        config.builtin_skills_dir = escape_link.join("skills").display().to_string();
+        let error = MobileRuntime::initialize(config)
+            .err()
+            .expect("skills path via symlink escape should fail");
 
         assert!(error.to_string().contains("app-private"));
     }

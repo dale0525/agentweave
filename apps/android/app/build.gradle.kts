@@ -3,6 +3,8 @@ plugins {
   alias(libs.plugins.kotlin.compose)
 }
 
+val generatedSkillAssets = layout.buildDirectory.dir("generated/skillAssets/main")
+
 android {
   namespace = "com.generalagent.mobile"
   compileSdk = 37
@@ -33,6 +35,10 @@ android {
     jniLibs.directories.add("build/generated/rustJniLibs/debug")
   }
 
+  sourceSets.named("main") {
+    assets.directories.add("build/generated/skillAssets/main")
+  }
+
   sourceSets.named("release") {
     jniLibs.directories.add("build/generated/rustJniLibs/release")
   }
@@ -57,16 +63,30 @@ dependencies {
   androidTestImplementation(libs.junit)
 }
 
+val prepareAndroidSkillAssets by tasks.registering(Exec::class) {
+  workingDir(rootProject.projectDir.resolve("../.."))
+  commandLine("node", "scripts/build-android-rust.mjs", "--skills-only")
+  inputs.dir(rootProject.projectDir.resolve("../../skills"))
+  inputs.file(rootProject.projectDir.resolve("../../scripts/build-android-rust.mjs"))
+  outputs.dir(generatedSkillAssets)
+}
+
 val buildRustNativeDebug by tasks.registering(Exec::class) {
   workingDir(rootProject.projectDir.resolve("../.."))
-  commandLine("node", "scripts/build-android-rust.mjs")
+  commandLine("node", "scripts/build-android-rust.mjs", "--rust-only")
   environment("GENERAL_AGENT_ANDROID_RUST_PROFILE", "debug")
+  dependsOn(prepareAndroidSkillAssets)
 }
 
 val buildRustNativeRelease by tasks.registering(Exec::class) {
   workingDir(rootProject.projectDir.resolve("../.."))
-  commandLine("node", "scripts/build-android-rust.mjs")
+  commandLine("node", "scripts/build-android-rust.mjs", "--rust-only")
   environment("GENERAL_AGENT_ANDROID_RUST_PROFILE", "release")
+  dependsOn(prepareAndroidSkillAssets)
+}
+
+tasks.named("preBuild") {
+  dependsOn(prepareAndroidSkillAssets)
 }
 
 tasks.matching { it.name == "preDebugBuild" }.configureEach {

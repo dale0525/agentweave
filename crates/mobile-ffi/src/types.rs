@@ -1,3 +1,4 @@
+use agent_runtime::skill_policy::{ActorContext, SkillManagementPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -6,7 +7,12 @@ pub struct MobileInitConfig {
     pub app_data_dir: String,
     pub cache_dir: String,
     pub database_path: String,
-    pub skills_dir: String,
+    pub builtin_skills_dir: String,
+    pub managed_skills_dir: String,
+    pub staging_skills_dir: String,
+    pub quarantine_skills_dir: String,
+    pub skill_policy: SkillManagementPolicy,
+    pub actor_context: ActorContext,
     pub platform: String,
     pub capabilities: Vec<String>,
 }
@@ -18,6 +24,10 @@ pub struct MobileDiagnostics {
     pub database_ready: bool,
     pub skills_ready: bool,
     pub model_configured: bool,
+    pub skill_management_mode: String,
+    pub active_snapshot_generation: u64,
+    pub quarantined_count: usize,
+    pub last_reload_status: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -39,11 +49,15 @@ pub struct MobileMessageDto {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MobileSkillDto {
-    pub id: String,
-    pub label: String,
-    pub description: String,
+    pub package_id: String,
+    pub display_name: String,
+    pub version: String,
+    pub source_layer: String,
+    pub status: String,
     pub available: bool,
     pub reason: String,
+    pub active_revision_id: Option<String>,
+    pub manageable: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

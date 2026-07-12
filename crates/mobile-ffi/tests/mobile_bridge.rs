@@ -1,3 +1,6 @@
+use agent_runtime::platform::PlatformId;
+use agent_runtime::skill_bundle::{BuildSkillBundleRequest, build_skill_bundle};
+use agent_runtime::skill_policy::{ActorContext, SkillGrant, SkillManagementPolicy};
 use mobile_ffi::{
     MobileInitConfig, MobileModelConfigDto, MobileRuntime, close_runtime, initialize_runtime_json,
     invoke_runtime_json, send_message_json,
@@ -12,11 +15,30 @@ use tempfile::tempdir;
 
 fn init_config(root: &std::path::Path) -> MobileInitConfig {
     let app_data_dir = root.join("files");
+    let cache_dir = root.join("cache");
+    let builtin_skills_dir = app_data_dir.join("builtin-skills");
+    let source_root = root.join("source-skills");
+    std::fs::create_dir_all(&source_root).unwrap();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(build_skill_bundle(BuildSkillBundleRequest {
+            source_roots: vec![source_root],
+            output_root: builtin_skills_dir.clone(),
+            platform: PlatformId::Android,
+            runtime_version: "0.1.0".parse().unwrap(),
+            generated_at: "2026-07-12T00:00:00Z".into(),
+        }))
+        .unwrap();
     MobileInitConfig {
         app_data_dir: app_data_dir.display().to_string(),
-        cache_dir: root.join("cache").display().to_string(),
+        cache_dir: cache_dir.display().to_string(),
         database_path: app_data_dir.join("general-agent.db").display().to_string(),
-        skills_dir: "skills".into(),
+        builtin_skills_dir: builtin_skills_dir.display().to_string(),
+        managed_skills_dir: app_data_dir.join("managed-skills").display().to_string(),
+        staging_skills_dir: cache_dir.join("skill-staging").display().to_string(),
+        quarantine_skills_dir: app_data_dir.join("skill-quarantine").display().to_string(),
+        skill_policy: SkillManagementPolicy::default(),
+        actor_context: ActorContext::anonymous(),
         platform: "android".into(),
         capabilities: vec![
             "network.http".into(),
@@ -25,6 +47,44 @@ fn init_config(root: &std::path::Path) -> MobileInitConfig {
             "model.http_provider".into(),
         ],
     }
+}
+
+#[test]
+fn owner_operations_use_stored_actor_and_reject_json_actor_injection() {
+    let dir = tempdir().unwrap();
+    let mut config = init_config(dir.path());
+    config.skill_policy = SkillManagementPolicy::owner_only();
+    config.actor_context = ActorContext::owner("mobile-owner", [SkillGrant::Inspect]);
+    let initialized: Value = serde_json::from_str(&initialize_runtime_json(
+        &serde_json::to_string(&config).unwrap(),
+    ))
+    .unwrap();
+    let handle = initialized["data"]["handle"].as_i64().unwrap();
+
+    let stored_actor: Value = serde_json::from_str(&invoke_runtime_json(
+        handle,
+        &json!({"operation": "list_managed_skills"}).to_string(),
+    ))
+    .unwrap();
+    let spoofed_actor: Value = serde_json::from_str(&invoke_runtime_json(
+        handle,
+        &json!({
+            "operation": "list_managed_skills",
+            "actor_context": {
+                "actor_id": "attacker",
+                "role": "owner",
+                "tenant_id": null,
+                "device_id": null,
+                "grants": ["inspect"]
+            }
+        })
+        .to_string(),
+    ))
+    .unwrap();
+
+    assert_eq!(stored_actor["ok"], true);
+    assert_eq!(spoofed_actor["ok"], false);
+    close_runtime(handle);
 }
 
 fn model_config(base_url: String) -> MobileModelConfigDto {

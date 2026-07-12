@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  androidSkillAssetPaths,
   androidRustLibraryPaths,
   androidNdkHostTag,
   createAndroidRustBuildConfig,
+  runAndroidBuildSequence,
 } from "./build-android-rust.mjs";
 
 test("Android NDK host tag follows the supported host platform", () => {
@@ -66,4 +68,44 @@ test("Android Rust artifacts use variant-specific JNI directories", () => {
     source: "/project/target/aarch64-linux-android/release/libmobile_ffi.so",
     destination: "/project/apps/android/app/build/generated/rustJniLibs/release/arm64-v8a/libmobile_ffi.so",
   });
+});
+
+test("Android skill bundle uses the generated main asset directory", () => {
+  assert.deepEqual(androidSkillAssetPaths("/project"), {
+    generatedRoot: "/project/apps/android/app/build/generated/skillAssets/main",
+    assetRoot: "/project/apps/android/app/build/generated/skillAssets/main/builtin-skills",
+    bundleRoot: "/project/apps/android/app/build/generated/skillAssets/main/builtin-skills/bundle",
+    hashFile: "/project/apps/android/app/build/generated/skillAssets/main/builtin-skills/bundle.sha256",
+  });
+});
+
+test("Android build prepares skill assets before compiling Rust", () => {
+  const calls = [];
+
+  runAndroidBuildSequence({
+    prepareSkills: () => calls.push("bundle-skills --platform android"),
+    buildRust: () => calls.push("cargo build -p mobile-ffi"),
+  });
+
+  assert.deepEqual(calls, [
+    "bundle-skills --platform android",
+    "cargo build -p mobile-ffi",
+  ]);
+});
+
+test("Android build stops before Rust when skill bundling fails", () => {
+  let rustStarted = false;
+
+  assert.throws(
+    () => runAndroidBuildSequence({
+      prepareSkills: () => {
+        throw new Error("bundle failed");
+      },
+      buildRust: () => {
+        rustStarted = true;
+      },
+    }),
+    /bundle failed/,
+  );
+  assert.equal(rustStarted, false);
 });

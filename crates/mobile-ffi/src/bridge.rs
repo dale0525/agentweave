@@ -1,4 +1,5 @@
 use crate::{MobileInitConfig, MobileModelConfigDto, MobileRuntime};
+use agent_runtime::skill_management::{CreateSkillDraftRequest, DraftFileUpdate};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -9,15 +10,51 @@ static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
 static RUNTIMES: OnceLock<Mutex<HashMap<i64, Arc<MobileRuntime>>>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "operation", rename_all = "snake_case")]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum RuntimeRequest {
     Diagnostics,
     ListSkills,
-    CreateSession { title: String },
+    ListManagedSkills,
+    CreateSkillDraft {
+        request: CreateSkillDraftRequest,
+    },
+    UpdateSkillDraft {
+        revision_id: String,
+        files: Vec<DraftFileUpdate>,
+    },
+    ValidateSkillDraft {
+        revision_id: String,
+    },
+    RequestSkillActivation {
+        revision_id: String,
+    },
+    ResolveSkillApproval {
+        approval_id: String,
+        approve: bool,
+    },
+    DisableManagedSkill {
+        package_id: String,
+    },
+    RollbackManagedSkill {
+        package_id: String,
+        revision_id: String,
+    },
+    RequestSkillRemoval {
+        package_id: String,
+    },
+    CreateSession {
+        title: String,
+    },
     ListSessions,
-    GetMessages { session_id: String },
-    DeleteSession { session_id: String },
-    SaveModelConfig { config: MobileModelConfigDto },
+    GetMessages {
+        session_id: String,
+    },
+    DeleteSession {
+        session_id: String,
+    },
+    SaveModelConfig {
+        config: MobileModelConfigDto,
+    },
     LoadModelConfig,
 }
 
@@ -49,11 +86,40 @@ pub fn initialize_runtime_json(request_json: &str) -> String {
 
 pub fn invoke_runtime_json(handle: i64, request_json: &str) -> String {
     let result = (|| {
-        let request: RuntimeRequest = serde_json::from_str(request_json)?;
+        let request = parse_runtime_request(request_json)?;
         let runtime = runtime(handle)?;
         match request {
             RuntimeRequest::Diagnostics => serde_json::to_value(runtime.diagnostics()),
             RuntimeRequest::ListSkills => serde_json::to_value(runtime.list_skills()),
+            RuntimeRequest::ListManagedSkills => {
+                serde_json::to_value(runtime.list_managed_skills()?)
+            }
+            RuntimeRequest::CreateSkillDraft { request } => {
+                serde_json::to_value(runtime.create_skill_draft(request)?)
+            }
+            RuntimeRequest::UpdateSkillDraft { revision_id, files } => {
+                serde_json::to_value(runtime.update_skill_draft(&revision_id, files)?)
+            }
+            RuntimeRequest::ValidateSkillDraft { revision_id } => {
+                serde_json::to_value(runtime.validate_skill_draft(&revision_id)?)
+            }
+            RuntimeRequest::RequestSkillActivation { revision_id } => {
+                serde_json::to_value(runtime.request_skill_activation(&revision_id)?)
+            }
+            RuntimeRequest::ResolveSkillApproval {
+                approval_id,
+                approve,
+            } => Ok(runtime.resolve_skill_approval(&approval_id, approve)?),
+            RuntimeRequest::DisableManagedSkill { package_id } => {
+                Ok(runtime.disable_managed_skill(&package_id)?)
+            }
+            RuntimeRequest::RollbackManagedSkill {
+                package_id,
+                revision_id,
+            } => Ok(runtime.rollback_managed_skill(&package_id, &revision_id)?),
+            RuntimeRequest::RequestSkillRemoval { package_id } => {
+                serde_json::to_value(runtime.request_skill_removal(&package_id)?)
+            }
             RuntimeRequest::CreateSession { title } => {
                 serde_json::to_value(runtime.create_session(&title)?)
             }
@@ -74,6 +140,22 @@ pub fn invoke_runtime_json(handle: i64, request_json: &str) -> String {
         .map_err(Into::into)
     })();
     bridge_result(result)
+}
+
+fn parse_runtime_request(request_json: &str) -> anyhow::Result<RuntimeRequest> {
+    let value: Value = serde_json::from_str(request_json)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("runtime request must be a JSON object"))?;
+    if object.keys().any(|key| {
+        matches!(
+            key.as_str(),
+            "actor" | "actor_context" | "actorContext" | "principal"
+        )
+    }) {
+        anyhow::bail!("runtime request actor is established during initialization");
+    }
+    serde_json::from_value(value).map_err(Into::into)
 }
 
 pub fn send_message_json(handle: i64, request_json: &str, api_key: Option<String>) -> String {
