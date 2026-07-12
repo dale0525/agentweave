@@ -1,6 +1,46 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[cfg(unix)]
+#[tokio::test]
+async fn release_check_rejects_a_symlink_root_before_canonicalization() {
+    use std::os::unix::fs::symlink;
+
+    let root = unique_test_dir("check-root-symlink");
+    let real = root.join("real");
+    let linked = root.join("linked");
+    tokio::fs::create_dir_all(&real).await.unwrap();
+    symlink(&real, &linked).unwrap();
+
+    let output = run_check(&["--root", linked.to_str().unwrap()]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr.contains("skill root must be a real directory"),
+        "{stderr}"
+    );
+    remove_test_dir(root).await;
+}
+
+#[tokio::test]
+async fn release_check_enforces_the_real_top_level_entry_limit() {
+    let root = unique_test_dir("check-entry-limit");
+    tokio::fs::create_dir_all(&root).await.unwrap();
+    for index in 0..=agent_runtime::skill_store::DEFAULT_MAX_SKILL_ENTRIES {
+        tokio::fs::write(root.join(format!("entry-{index:04}")), b"")
+            .await
+            .unwrap();
+    }
+
+    let output = run_check(&["--root", root.to_str().unwrap()]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr.contains("exceeds 4096 entry limit"), "{stderr}");
+    remove_test_dir(root).await;
+}
+
 #[tokio::test]
 async fn repeated_roots_resolve_cross_root_packages_and_canonical_tools() {
     let root = unique_test_dir("check-roots");

@@ -25,7 +25,7 @@ impl BuiltInTools {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        definitions(self.config.mode, self.config.command_mode)
+        definitions(self.config.mode, self.config.effective_command_mode())
     }
 
     pub fn handles(name: &str) -> bool {
@@ -45,7 +45,10 @@ impl BuiltInTools {
     pub async fn execute(&self, name: &str, call_id: &str, arguments: Value) -> ToolResult {
         let started = Instant::now();
 
-        if name == command::EXEC_COMMAND && self.config.command_mode == CommandMode::Disabled {
+        if name == command::EXEC_COMMAND
+            && (self.config.command_mode == CommandMode::Disabled
+                || !self.config.excluded_workspace_roots.is_empty())
+        {
             return command::execute(&self.config, call_id, arguments, started).await;
         }
 

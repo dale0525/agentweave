@@ -106,29 +106,7 @@ pub(super) async fn load_skill_manager_with_mode(
     builtin_mode: BuiltinSkillsMode,
 ) -> anyhow::Result<LoadedSkillManager> {
     let deferred_managed_startup = managed_config.is_some();
-    let evidence = bundle_evidence(root).await?;
-    let use_bundle = match builtin_mode {
-        BuiltinSkillsMode::Bundle => true,
-        BuiltinSkillsMode::Directory => {
-            anyhow::ensure!(
-                !evidence.any(),
-                "builtin directory mode rejects bundle layout evidence"
-            );
-            false
-        }
-        BuiltinSkillsMode::Auto if evidence.generation_container => true,
-        BuiltinSkillsMode::Auto if evidence.direct_metadata => {
-            anyhow::bail!(
-                "direct bundle startup requires GENERAL_AGENT_BUILTIN_SKILLS_MODE=bundle"
-            );
-        }
-        BuiltinSkillsMode::Auto => false,
-    };
-    let builtin: Arc<dyn SkillSource> = if use_bundle {
-        Arc::new(BundleSkillSource::open(root).await?)
-    } else {
-        Arc::new(DirectorySkillSource::new(SkillLayer::Builtin, root))
-    };
+    let builtin = load_builtin_skill_source(root, builtin_mode).await?;
     let mut sources = vec![builtin];
     let mut managed_store = None;
     #[cfg(test)]
@@ -162,6 +140,35 @@ pub(super) async fn load_skill_manager_with_mode(
         managed_store,
         #[cfg(test)]
         managed_source,
+    })
+}
+
+pub(super) async fn load_builtin_skill_source(
+    root: &Path,
+    builtin_mode: BuiltinSkillsMode,
+) -> anyhow::Result<Arc<dyn SkillSource>> {
+    let evidence = bundle_evidence(root).await?;
+    let use_bundle = match builtin_mode {
+        BuiltinSkillsMode::Bundle => true,
+        BuiltinSkillsMode::Directory => {
+            anyhow::ensure!(
+                !evidence.any(),
+                "builtin directory mode rejects bundle layout evidence"
+            );
+            false
+        }
+        BuiltinSkillsMode::Auto if evidence.generation_container => true,
+        BuiltinSkillsMode::Auto if evidence.direct_metadata => {
+            anyhow::bail!(
+                "direct bundle startup requires GENERAL_AGENT_BUILTIN_SKILLS_MODE=bundle"
+            );
+        }
+        BuiltinSkillsMode::Auto => false,
+    };
+    Ok(if use_bundle {
+        Arc::new(BundleSkillSource::open(root).await?)
+    } else {
+        Arc::new(DirectorySkillSource::new(SkillLayer::Builtin, root))
     })
 }
 

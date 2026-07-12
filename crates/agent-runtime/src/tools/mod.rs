@@ -96,6 +96,14 @@ impl RuntimeConfig {
         self.excluded_workspace_roots.dedup();
         self
     }
+
+    pub(crate) fn effective_command_mode(&self) -> CommandMode {
+        if self.excluded_workspace_roots.is_empty() {
+            self.command_mode
+        } else {
+            CommandMode::Disabled
+        }
+    }
 }
 
 fn default_built_in_tools_enabled() -> bool {
@@ -213,6 +221,7 @@ pub struct ToolRegistry {
     cwd: PathBuf,
     mode: RuntimeMode,
     command_mode: CommandMode,
+    commands_blocked_by_exclusions: bool,
     tool_timeout: Duration,
     output_limit_bytes: usize,
     approval_policy: ApprovalPolicy,
@@ -256,14 +265,6 @@ impl ToolRegistry {
         config: &RuntimeConfig,
         management: Option<SkillManagementToolContext>,
     ) -> anyhow::Result<Self> {
-        if config.command_mode == CommandMode::Allowed
-            && path::workspace_contains_excluded_root(
-                &config.workspace_root,
-                &config.excluded_workspace_roots,
-            )?
-        {
-            anyhow::bail!("command workspace cannot contain skill control-plane roots");
-        }
         let external_definitions = external_definitions(&config.external_tools)?;
         let external_discovery = external_discovery(&config.external_tools)?;
         Self {
@@ -277,7 +278,8 @@ impl ToolRegistry {
             workspace_root: config.workspace_root.clone(),
             cwd: config.cwd.clone(),
             mode: config.mode,
-            command_mode: config.command_mode,
+            command_mode: config.effective_command_mode(),
+            commands_blocked_by_exclusions: !config.excluded_workspace_roots.is_empty(),
             tool_timeout: Duration::from_millis(config.tool_timeout_ms),
             output_limit_bytes: config.output_limit_bytes,
             approval_policy: config.approval_policy,
@@ -348,6 +350,10 @@ impl ToolRegistry {
                     binding.local_name.clone(),
                 ));
             }
+        }
+        if self.commands_blocked_by_exclusions {
+            definitions
+                .retain(|definition| definition.permission != ToolPermission::ExecuteCommand);
         }
         definitions
     }
@@ -500,6 +506,24 @@ impl ToolRegistry {
         }
 
         if let Some(tool) = self.external_tool(name) {
+            if self.commands_blocked_by_exclusions
+                && tool
+                    .tool_definition()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|definition| {
+                        definition.permission == ToolPermission::ExecuteCommand
+                    })
+            {
+                return ToolDispatchOutcome::unobserved(registry_failure(
+                    name,
+                    call_id,
+                    "permission_denied",
+                    "command execution is unavailable when control-plane roots are excluded",
+                    false,
+                    registry_metadata(started),
+                ));
+            }
             return ToolDispatchOutcome::unobserved(
                 self.execute_external_tool(tool, name, call_id, started),
             );

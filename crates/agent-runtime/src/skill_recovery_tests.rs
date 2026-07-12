@@ -181,6 +181,42 @@ async fn removal_requires_a_different_actor_and_is_single_use() {
 }
 
 #[tokio::test]
+async fn disabled_managed_installation_can_be_removed_with_distinct_approval() {
+    let fixture = AuthoringFixture::new().await;
+    activate_new_revision(&fixture, "1.0.0").await;
+    let package_id = crate::skill_package::SkillPackageId::parse("com.example.calendar").unwrap();
+    fixture
+        .service
+        .disable_managed_skill(&fixture.actor([SkillGrant::Disable]), &package_id)
+        .await
+        .unwrap();
+
+    let approval = fixture
+        .service
+        .request_removal(&fixture.actor([SkillGrant::DeleteManaged]), &package_id)
+        .await
+        .unwrap();
+    fixture
+        .service
+        .approve_removal(
+            &approval.approval_id,
+            &ActorContext::owner("disabled-approver", [SkillGrant::DeleteManaged]),
+        )
+        .await
+        .unwrap();
+
+    let installation = fixture
+        .state
+        .get_installation(&package_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(installation.status, SkillInstallStatus::Removed);
+    assert!(!installation.enabled);
+    assert!(fixture.manager.current_snapshot().packages().is_empty());
+}
+
+#[tokio::test]
 async fn circuit_opens_on_three_failures_and_success_resets_the_sequence() {
     let fixture = AuthoringFixture::new().await;
     let revision = activate_new_revision(&fixture, "1.0.0").await;

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
@@ -196,6 +197,7 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
             SkillGrant::CreateDraft,
             SkillGrant::Validate,
             SkillGrant::Activate,
+            SkillGrant::Disable,
             SkillGrant::Rollback,
             SkillGrant::DeleteManaged,
         ],
@@ -223,7 +225,12 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
                 "description": "Created through the mobile owner bridge.",
                 "kind": "instruction_only",
                 "required_tools": []
-            }
+            },
+            "files": initial_draft_files(
+                "com.example.mobile-authored",
+                "Mobile Authored",
+                "---\nname: mobile-authored\ndescription: Mobile authored evidence.\n---\n\nMOBILE_NEXT_TURN_ACTIVE_SKILL_EVIDENCE"
+            )
         }),
     );
     let revision_id = draft["revision_id"].as_str().unwrap();
@@ -258,6 +265,40 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
     );
     assert_eq!(resolved["status"], "approved");
     invoke_value(requester, json!({"operation": "synchronize_skills"}));
+
+    let (base_url, captured_request, server) = capture_responses_request();
+    invoke_value(
+        requester,
+        json!({
+            "operation": "save_model_config",
+            "config": model_config(base_url)
+        }),
+    );
+    let session = invoke_value(
+        requester,
+        json!({"operation": "create_session", "title": "Next turn evidence"}),
+    );
+    let turn: Value = serde_json::from_str(&send_message_json(
+        requester,
+        &json!({
+            "session_id": session["id"],
+            "content": "Use $mobile-authored for this turn"
+        })
+        .to_string(),
+        Some("sk-mobile-evidence".into()),
+    ))
+    .unwrap();
+    assert_eq!(turn["ok"], true, "{turn}");
+    let request = captured_request
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    let request_body = request.split_once("\r\n\r\n").unwrap().1;
+    assert!(request_body.contains("MOBILE_NEXT_TURN_ACTIVE_SKILL_EVIDENCE"));
+    assert!(!request_body.contains("sk-mobile-evidence"));
+    if let Ok(path) = std::env::var("TASK17_MOBILE_REQUEST_EVIDENCE") {
+        std::fs::write(path, request_body).unwrap();
+    }
+    server.join().unwrap();
 
     let second = invoke_value(
         requester,
@@ -310,6 +351,56 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
         }),
     );
     invoke_value(requester, json!({"operation": "synchronize_skills"}));
+
+    let disabled = invoke_value(
+        requester,
+        json!({
+            "operation": "disable_managed_skill",
+            "package_id": "com.example.mobile-authored"
+        }),
+    );
+    assert_eq!(disabled["active_packages"], 0);
+    invoke_value(approver, json!({"operation": "synchronize_skills"}));
+
+    let reactivation = invoke_value(
+        requester,
+        json!({
+            "operation": "create_skill_draft",
+            "request": {
+                "package_id": "com.example.mobile-authored",
+                "display_name": "Mobile Authored",
+                "description": "Reactivation revision.",
+                "kind": "instruction_only",
+                "required_tools": []
+            },
+            "files": initial_draft_files(
+                "com.example.mobile-authored",
+                "Mobile Authored",
+                "---\nname: mobile-reactivated\ndescription: Mobile reactivation evidence.\n---\n\nMOBILE_REACTIVATED_SKILL_EVIDENCE"
+            )
+        }),
+    );
+    let reactivation_revision = reactivation["revision_id"].as_str().unwrap();
+    invoke_value(
+        requester,
+        json!({"operation": "validate_skill_draft", "revision_id": reactivation_revision}),
+    );
+    let reactivation_approval = invoke_value(
+        requester,
+        json!({"operation": "request_skill_activation", "revision_id": reactivation_revision}),
+    );
+    invoke_value(
+        approver,
+        json!({
+            "operation": "resolve_skill_approval",
+            "approval_id": reactivation_approval["approval_id"],
+            "approve": true
+        }),
+    );
+    invoke_value(requester, json!({"operation": "synchronize_skills"}));
+    let reactivated = invoke_value(requester, json!({"operation": "list_managed_skills"}));
+    assert_eq!(reactivated[0]["status"], "active");
+    assert_eq!(reactivated[0]["active_revision_id"], reactivation_revision);
 
     let removal = invoke_value(
         requester,
@@ -474,6 +565,58 @@ fn model_config(base_url: String) -> MobileModelConfigDto {
         secret_id: Some("model.openai.default".into()),
         headers: BTreeMap::new(),
     }
+}
+
+fn capture_responses_request() -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let expected = loop {
+            let read = stream.read(&mut buffer).unwrap();
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(str::to_string)
+                    })
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                break header_end + 4 + content_length;
+            }
+        };
+        while request.len() < expected {
+            let read = stream.read(&mut buffer).unwrap();
+            request.extend_from_slice(&buffer[..read]);
+        }
+        sender.send(String::from_utf8(request).unwrap()).unwrap();
+        let body = json!({
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "mobile evidence reply"}]
+            }]
+        })
+        .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body,
+        )
+        .unwrap();
+    });
+    (format!("http://{address}/v1"), receiver, server)
 }
 
 #[test]

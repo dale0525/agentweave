@@ -132,20 +132,6 @@ pub fn ensure_existing_path_inside_workspace_with_exclusions(
     Ok(canonical)
 }
 
-pub(crate) fn workspace_contains_excluded_root(
-    root: &Path,
-    excluded_roots: &[PathBuf],
-) -> anyhow::Result<bool> {
-    let canonical_root = canonical_workspace_root(root)?;
-    for excluded in excluded_roots {
-        let excluded = canonical_or_normalized_excluded(&canonical_root, excluded)?;
-        if excluded == canonical_root || excluded.starts_with(&canonical_root) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 pub(crate) fn canonical_excluded_roots(
     root: &Path,
     excluded_roots: &[PathBuf],

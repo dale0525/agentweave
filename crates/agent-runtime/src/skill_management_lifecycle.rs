@@ -502,7 +502,7 @@ impl OwnerSkillManagementService {
         self.deny_builtin(package_id, SkillOperation::DeleteManaged)?;
         self.deny_protected(package_id, SkillOperation::DeleteManaged)?;
         let installation = self
-            .active_managed_installation(package_id, "request_removal")
+            .removable_managed_installation(package_id, "request_removal")
             .await?;
         let revision_id = installation
             .active_revision_id
@@ -596,7 +596,7 @@ impl OwnerSkillManagementService {
             })?;
         let binding: RemovalApprovalBinding = serde_json::from_value(binding_value.clone())?;
         let installation = self
-            .active_managed_installation(&binding.package_id, "approve_removal")
+            .removable_managed_installation(&binding.package_id, "approve_removal")
             .await?;
         let revision = self
             .managed_revision(&binding.package_id, &binding.revision_id, "approve_removal")
@@ -731,6 +731,37 @@ impl OwnerSkillManagementService {
         if installation.source_layer != SkillLayerRecord::Managed
             || installation.status != SkillInstallStatus::Active
             || !installation.enabled
+        {
+            return Err(SkillManagementError::Conflict {
+                resource: "managed installation",
+            }
+            .into());
+        }
+        Ok(installation)
+    }
+
+    async fn removable_managed_installation(
+        &self,
+        package_id: &SkillPackageId,
+        operation: &'static str,
+    ) -> anyhow::Result<crate::skill_state::SkillInstallationRecord> {
+        let installation = self
+            .state
+            .get_installation(package_id)
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_state(operation, "managed installation", error)
+            })?
+            .ok_or(SkillManagementError::NotFound {
+                resource: "managed installation",
+            })?;
+        let removable_status = matches!(
+            installation.status,
+            SkillInstallStatus::Active | SkillInstallStatus::Disabled
+        );
+        if installation.source_layer != SkillLayerRecord::Managed
+            || !removable_status
+            || installation.active_revision_id.is_none()
         {
             return Err(SkillManagementError::Conflict {
                 resource: "managed installation",

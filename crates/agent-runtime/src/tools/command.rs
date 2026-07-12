@@ -368,6 +368,15 @@ pub async fn execute(
     arguments: Value,
     started: Instant,
 ) -> ToolResult {
+    if !config.excluded_workspace_roots.is_empty() {
+        return failure(
+            call_id,
+            "permission_denied",
+            "command execution is unavailable when control-plane roots are excluded",
+            false,
+            started,
+        );
+    }
     if config.command_mode == CommandMode::Disabled {
         return failure(
             call_id,

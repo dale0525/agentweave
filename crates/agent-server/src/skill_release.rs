@@ -79,6 +79,25 @@ pub async fn validate_skill_roots(roots: &[PathBuf]) -> SkillReleaseReport {
     let mut canonical_roots = BTreeSet::new();
     let mut errors = Vec::new();
     for root in roots {
+        match tokio::fs::symlink_metadata(root).await {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                errors.push(diagnostic(
+                    None,
+                    root.clone(),
+                    "skill root must be a real directory",
+                ));
+                continue;
+            }
+            Err(error) => {
+                errors.push(diagnostic(
+                    None,
+                    root.clone(),
+                    format!("failed to inspect skill root: {error}"),
+                ));
+                continue;
+            }
+        }
         match tokio::fs::canonicalize(root).await {
             Ok(path) => {
                 canonical_roots.insert(path);

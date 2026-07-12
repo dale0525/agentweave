@@ -9,6 +9,7 @@ use agent_runtime::{
 };
 use agent_server::api;
 use agent_server::owner_api::{OwnerApiConfig, OwnerAuth};
+use agent_server::tenant_skills::{SINGLE_USER_TENANT_ID, TenantSkillRuntime};
 use model_gateway::{
     provider::{EndpointType, ProviderProfile},
     responses::GatewayHttpClient,
@@ -25,14 +26,15 @@ mod server_skill_startup;
 #[cfg(test)]
 #[path = "server_skill_startup_tests.rs"]
 mod server_skill_startup_tests;
-#[cfg(test)]
-use server_skill_startup::ManagedSkillsConfig;
-#[cfg(test)]
-use server_skill_startup::load_skill_manager;
+#[path = "server_tenant_startup.rs"]
+mod server_tenant_startup;
 use server_skill_startup::{
     LoadedSkillManager, builtin_skills_mode_from_lookup, load_skill_manager_with_mode,
     managed_skills_config_from_lookup,
 };
+#[cfg(test)]
+use server_skill_startup::{ManagedSkillsConfig, load_skill_manager};
+use server_tenant_startup::{build_managed_tenant_registry, build_tenant_app_state};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -40,47 +42,71 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let database_url =
-        std::env::var("GENERAL_AGENT_DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.into());
-    let storage = Storage::connect(&database_url).await?;
     let skills_root = skills_root_from_env();
     let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
     let builtin_mode = builtin_skills_mode_from_lookup(|name| std::env::var_os(name))?;
-    let loaded =
-        load_skill_manager_with_mode(&skills_root, storage.clone(), managed_skills, builtin_mode)
-            .await?;
     let owner_host = owner_host_config_from_lookup(|name| std::env::var_os(name))?;
-    if owner_host.is_none() {
-        reconcile_managed_startup(&loaded, storage.clone()).await?;
-    }
-    let mut control_roots = loaded.control_roots(&skills_root);
-    if let Some(database_path) = sqlite_database_path(&database_url) {
-        control_roots.push(database_path);
-    }
-    let runtime_config = runtime_config_from_env().excluding_workspace_roots(control_roots);
-    let connector_catalog = runtime_config
+    let base_runtime_config = runtime_config_from_env();
+    let connector_catalog = base_runtime_config
         .connectors
         .iter()
         .map(|connector| connector.id.clone())
         .collect::<Vec<_>>();
-    let owner_management =
-        build_owner_api_config(owner_host, &loaded, storage.clone(), connector_catalog).await?;
     let model = GatewayHttpClient::new(model_profile_from_env());
-    let state = if let Some(owner_management) = owner_management {
-        api::AppState::new_with_model_skill_manager_and_owner(
-            storage,
-            model,
-            loaded.manager,
-            runtime_config,
-            owner_management,
-        )
+    let state = if let Some(managed_skills) = managed_skills {
+        let policy = owner_host
+            .as_ref()
+            .map(|host| host.policy.clone())
+            .unwrap_or_else(|| SkillManagementPolicy {
+                mode: SkillManagementMode::DiagnosticsOnly,
+                ..SkillManagementPolicy::default()
+            });
+        let registry =
+            build_managed_tenant_registry(&skills_root, managed_skills, builtin_mode, policy)
+                .await?;
+        let runtime = registry.for_tenant(SINGLE_USER_TENANT_ID).await?;
+        let control_roots = vec![
+            skills_root.clone(),
+            runtime.data_root.clone(),
+            runtime.cache_root.clone(),
+            runtime.database_path.clone(),
+        ];
+        let runtime_config = base_runtime_config.excluding_workspace_roots(control_roots);
+        let owner_management =
+            build_tenant_owner_api_config(owner_host, &runtime, connector_catalog).await?;
+        build_tenant_app_state(runtime, model, runtime_config, owner_management)
     } else {
-        api::AppState::new_with_model_and_skill_manager(
-            storage,
-            model,
-            loaded.manager,
-            runtime_config,
-        )
+        let database_url = std::env::var("GENERAL_AGENT_DATABASE_URL")
+            .unwrap_or_else(|_| DEFAULT_DATABASE_URL.into());
+        let storage = Storage::connect(&database_url).await?;
+        let loaded =
+            load_skill_manager_with_mode(&skills_root, storage.clone(), None, builtin_mode).await?;
+        if owner_host.is_none() {
+            reconcile_managed_startup(&loaded, storage.clone()).await?;
+        }
+        let mut control_roots = loaded.control_roots(&skills_root);
+        if let Some(database_path) = sqlite_database_path(&database_url) {
+            control_roots.push(database_path);
+        }
+        let runtime_config = base_runtime_config.excluding_workspace_roots(control_roots);
+        let owner_management =
+            build_owner_api_config(owner_host, &loaded, storage.clone(), connector_catalog).await?;
+        if let Some(owner_management) = owner_management {
+            api::AppState::new_with_model_skill_manager_and_owner(
+                storage,
+                model,
+                loaded.manager,
+                runtime_config,
+                owner_management,
+            )
+        } else {
+            api::AppState::new_with_model_and_skill_manager(
+                storage,
+                model,
+                loaded.manager,
+                runtime_config,
+            )
+        }
     };
     let state = Arc::new(state.with_skills_root(skills_root.clone()));
     let app = if std::env::var("GENERAL_AGENT_DEV_API").as_deref() == Ok("1") {
@@ -94,6 +120,26 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("agent server listening on http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn build_tenant_owner_api_config(
+    host: Option<OwnerHostConfig>,
+    runtime: &TenantSkillRuntime,
+    connector_catalog: Vec<String>,
+) -> anyhow::Result<Option<OwnerApiConfig>> {
+    let Some(host) = host else {
+        return Ok(None);
+    };
+    let service = runtime
+        .management
+        .clone()
+        .with_prepared_transfer_roots(
+            runtime.data_root.join("skill-imports"),
+            runtime.data_root.join("skill-exports"),
+        )
+        .await?
+        .with_connector_catalog(connector_catalog)?;
+    Ok(Some(OwnerApiConfig::new(service, owner_auth(host)?)))
 }
 
 fn runtime_config_from_env() -> RuntimeConfig {
@@ -253,22 +299,29 @@ async fn build_owner_api_config(
         .ok_or_else(|| anyhow::anyhow!("skill quarantine root has no app-data parent"))?;
     let import_root = app_data_root.join("skill-imports");
     let export_root = app_data_root.join("skill-exports");
-    let service =
-        OwnerSkillManagementService::new(loaded.manager.clone(), revisions, state, host.policy)
-            .with_prepared_transfer_roots(import_root, export_root)
-            .await?
-            .with_connector_catalog(connector_catalog)?;
+    let service = OwnerSkillManagementService::new(
+        loaded.manager.clone(),
+        revisions,
+        state,
+        host.policy.clone(),
+    )
+    .with_prepared_transfer_roots(import_root, export_root)
+    .await?
+    .with_connector_catalog(connector_catalog)?;
     loaded
         .manager
         .startup_reconcile()
         .await
         .map_err(|error| anyhow::anyhow!("managed skill startup reconciliation failed: {error}"))?;
+    Ok(Some(OwnerApiConfig::new(service, owner_auth(host)?)))
+}
+
+fn owner_auth(host: OwnerHostConfig) -> anyhow::Result<OwnerAuth> {
     let mut principals = vec![(host.token, host.actor)];
     if let (Some(token), Some(actor)) = (host.approver_token, host.approver_actor) {
         principals.push((token, actor));
     }
-    let auth = OwnerAuth::from_principals(principals)?;
-    Ok(Some(OwnerApiConfig::new(service, auth)))
+    OwnerAuth::from_principals(principals)
 }
 
 async fn reconcile_managed_startup(

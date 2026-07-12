@@ -11,7 +11,7 @@ use semver::Version;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::sync::OnceCell;
+use tokio::sync::{Notify, OnceCell};
 
 pub const SINGLE_USER_TENANT_ID: &str = "local";
 
@@ -51,7 +51,28 @@ pub struct TenantSkillManagerRegistry {
     factory: Arc<dyn TenantSkillManagerFactory>,
 }
 
-type TenantManagerCell = Arc<OnceCell<Arc<TenantSkillRuntime>>>;
+struct TenantManagerEntry {
+    runtime: OnceCell<Arc<TenantSkillRuntime>>,
+    status: Mutex<TenantManagerStatus>,
+    notify: Notify,
+}
+
+enum TenantManagerStatus {
+    Initializing,
+    Failed,
+}
+
+impl TenantManagerEntry {
+    fn new() -> Self {
+        Self {
+            runtime: OnceCell::new(),
+            status: Mutex::new(TenantManagerStatus::Initializing),
+            notify: Notify::new(),
+        }
+    }
+}
+
+type TenantManagerCell = Arc<TenantManagerEntry>;
 type TenantManagerCells = Arc<Mutex<HashMap<String, TenantManagerCell>>>;
 
 impl TenantSkillManagerRegistry {
@@ -64,27 +85,67 @@ impl TenantSkillManagerRegistry {
 
     pub async fn for_tenant(&self, tenant_id: &str) -> anyhow::Result<Arc<TenantSkillRuntime>> {
         let tenant_id = validate_tenant_id(tenant_id)?;
-        let cell = {
+        let (cell, initialize) = {
             let mut managers = self
                 .managers
                 .lock()
                 .expect("tenant skill registry lock poisoned");
-            managers
-                .entry(tenant_id.clone())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+            if let Some(cell) = managers.get(&tenant_id) {
+                (cell.clone(), false)
+            } else {
+                let cell = Arc::new(TenantManagerEntry::new());
+                managers.insert(tenant_id.clone(), cell.clone());
+                (cell, true)
+            }
         };
-        cell.get_or_try_init(|| async {
-            self.factory
-                .create(&tenant_id)
-                .await
-                .map(Arc::new)
-                .map_err(|error| {
-                    anyhow::anyhow!("tenant skill manager initialization failed: {error}")
-                })
-        })
-        .await
-        .cloned()
+        if initialize {
+            self.spawn_initialization(tenant_id, cell.clone());
+        }
+        loop {
+            let notified = cell.notify.notified();
+            if let Some(runtime) = cell.runtime.get() {
+                return Ok(runtime.clone());
+            }
+            if matches!(
+                *cell
+                    .status
+                    .lock()
+                    .expect("tenant manager entry lock poisoned"),
+                TenantManagerStatus::Failed
+            ) {
+                anyhow::bail!("tenant skill manager initialization failed");
+            }
+            notified.await;
+        }
+    }
+
+    fn spawn_initialization(&self, tenant_id: String, cell: TenantManagerCell) {
+        let registry = self.clone();
+        tokio::spawn(async move {
+            match registry.factory.create(&tenant_id).await {
+                Ok(runtime) => {
+                    let published = cell.runtime.set(Arc::new(runtime)).is_ok();
+                    debug_assert!(published, "tenant runtime initialized more than once");
+                }
+                Err(_) => {
+                    *cell
+                        .status
+                        .lock()
+                        .expect("tenant manager entry lock poisoned") = TenantManagerStatus::Failed;
+                    let mut managers = registry
+                        .managers
+                        .lock()
+                        .expect("tenant skill registry lock poisoned");
+                    if managers
+                        .get(&tenant_id)
+                        .is_some_and(|current| Arc::ptr_eq(current, &cell))
+                    {
+                        managers.remove(&tenant_id);
+                    }
+                }
+            }
+            cell.notify.notify_waiters();
+        });
     }
 
     pub fn manager_count(&self) -> usize {
@@ -92,8 +153,15 @@ impl TenantSkillManagerRegistry {
             .lock()
             .expect("tenant skill registry lock poisoned")
             .values()
-            .filter(|cell| cell.get().is_some())
+            .filter(|cell| cell.runtime.get().is_some())
             .count()
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.managers
+            .lock()
+            .expect("tenant skill registry lock poisoned")
+            .len()
     }
 }
 
@@ -154,8 +222,31 @@ impl FilesystemTenantSkillManagerFactory {
 impl TenantSkillManagerFactory for FilesystemTenantSkillManagerFactory {
     async fn create(&self, tenant_id: &str) -> anyhow::Result<TenantSkillRuntime> {
         let tenant_id = validate_tenant_id(tenant_id)?;
-        let data_root = prepare_real_tenant_child(&self.data_tenants, &tenant_id).await?;
-        let cache_root = prepare_real_tenant_child(&self.cache_tenants, &tenant_id).await?;
+        let data = prepare_real_tenant_child(&self.data_tenants, &tenant_id).await?;
+        let cache = match prepare_real_tenant_child(&self.cache_tenants, &tenant_id).await {
+            Ok(cache) => cache,
+            Err(error) => {
+                cleanup_created_directory(&data).await;
+                return Err(error);
+            }
+        };
+        let cleanup = TenantInitializationPaths::capture(data, cache).await?;
+        let result = self.create_runtime(tenant_id, &cleanup).await;
+        if result.is_err() {
+            cleanup.cleanup().await;
+        }
+        result
+    }
+}
+
+impl FilesystemTenantSkillManagerFactory {
+    async fn create_runtime(
+        &self,
+        tenant_id: String,
+        cleanup: &TenantInitializationPaths,
+    ) -> anyhow::Result<TenantSkillRuntime> {
+        let data_root = cleanup.data.path.clone();
+        let cache_root = cleanup.cache.path.clone();
         let database_path = data_root.join("state.db");
         reject_symlink_or_non_file_if_present(&database_path).await?;
         let storage =
@@ -183,6 +274,7 @@ impl TenantSkillManagerFactory for FilesystemTenantSkillManagerFactory {
             state.clone(),
             self.config.management_policy.clone(),
         );
+        manager.startup_reconcile().await?;
         Ok(TenantSkillRuntime {
             tenant_id,
             manager,
@@ -210,13 +302,22 @@ async fn prepare_real_directory(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(tokio::fs::canonicalize(path).await?)
 }
 
-async fn prepare_real_tenant_child(parent: &Path, tenant_id: &str) -> anyhow::Result<PathBuf> {
+struct PreparedTenantDirectory {
+    path: PathBuf,
+    created: bool,
+}
+
+async fn prepare_real_tenant_child(
+    parent: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<PreparedTenantDirectory> {
     let child = parent.join(tenant_id);
+    let mut created = false;
     match tokio::fs::symlink_metadata(&child).await {
         Ok(metadata) => ensure_real_directory(&child, &metadata)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             match tokio::fs::create_dir(&child).await {
-                Ok(()) => {}
+                Ok(()) => created = true,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error.into()),
             }
@@ -231,7 +332,103 @@ async fn prepare_real_tenant_child(parent: &Path, tenant_id: &str) -> anyhow::Re
         canonical == expected,
         "tenant root has a canonical alias instead of the requested tenant id"
     );
-    Ok(canonical)
+    Ok(PreparedTenantDirectory {
+        path: canonical,
+        created,
+    })
+}
+
+struct TrackedPath {
+    path: PathBuf,
+    existed: bool,
+}
+
+struct TenantInitializationPaths {
+    data: PreparedTenantDirectory,
+    cache: PreparedTenantDirectory,
+    files: Vec<TrackedPath>,
+    directories: Vec<TrackedPath>,
+}
+
+impl TenantInitializationPaths {
+    async fn capture(
+        data: PreparedTenantDirectory,
+        cache: PreparedTenantDirectory,
+    ) -> anyhow::Result<Self> {
+        let database = data.path.join("state.db");
+        let files = vec![
+            track_path(database.clone()).await?,
+            track_path(data.path.join("state.db-wal")).await?,
+            track_path(data.path.join("state.db-shm")).await?,
+        ];
+        let directories = [
+            data.path.join("app"),
+            data.path.join("app/managed-skills"),
+            data.path.join("app/managed-skills/.locks"),
+            data.path.join("app/skill-quarantine"),
+            cache.path.join("cache"),
+            cache.path.join("cache/skill-staging"),
+        ];
+        let mut tracked_directories = Vec::new();
+        for path in directories {
+            tracked_directories.push(track_path(path).await?);
+        }
+        Ok(Self {
+            data,
+            cache,
+            files,
+            directories: tracked_directories,
+        })
+    }
+
+    async fn cleanup(&self) {
+        for tracked in &self.files {
+            if !tracked.existed {
+                remove_created_file(&tracked.path).await;
+            }
+        }
+        for tracked in self.directories.iter().rev() {
+            if !tracked.existed {
+                remove_created_empty_directory(&tracked.path).await;
+            }
+        }
+        cleanup_created_directory(&self.cache).await;
+        cleanup_created_directory(&self.data).await;
+    }
+}
+
+async fn track_path(path: PathBuf) -> anyhow::Result<TrackedPath> {
+    let existed = match tokio::fs::symlink_metadata(&path).await {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(TrackedPath { path, existed })
+}
+
+async fn cleanup_created_directory(directory: &PreparedTenantDirectory) {
+    if directory.created {
+        remove_created_empty_directory(&directory.path).await;
+    }
+}
+
+async fn remove_created_file(path: &Path) {
+    if let Err(error) = tokio::fs::remove_file(path).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("failed to clean tenant initialization file");
+    }
+}
+
+async fn remove_created_empty_directory(path: &Path) {
+    if let Err(error) = tokio::fs::remove_dir(path).await
+        && !matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+        )
+    {
+        tracing::warn!("failed to clean tenant initialization directory");
+    }
 }
 
 fn ensure_real_directory(path: &Path, metadata: &std::fs::Metadata) -> anyhow::Result<()> {

@@ -1,6 +1,163 @@
 use super::*;
 
 #[tokio::test]
+async fn production_registry_selects_local_and_isolates_two_tenant_routers() {
+    let skills_root = unique_test_dir("tenant-production-skills");
+    let app_root = unique_test_dir("tenant-production-app");
+    let cache_root = unique_test_dir("tenant-production-cache");
+    tokio::fs::create_dir_all(&skills_root).await.unwrap();
+    let registry = build_managed_tenant_registry(
+        &skills_root,
+        ManagedSkillsConfig {
+            app_data_root: app_root.clone(),
+            cache_root: cache_root.clone(),
+        },
+        server_skill_startup::BuiltinSkillsMode::Directory,
+        SkillManagementPolicy::owner_only(),
+    )
+    .await
+    .unwrap();
+    let local = registry
+        .for_tenant(agent_server::tenant_skills::SINGLE_USER_TENANT_ID)
+        .await
+        .unwrap();
+    let alpha = registry.for_tenant("alpha").await.unwrap();
+    let beta = registry.for_tenant("beta").await.unwrap();
+    let revision = activate_tenant_fixture(&alpha.management).await;
+    let alpha_session = alpha.storage.create_session("Alpha only").await.unwrap();
+
+    let local_app = tenant_router(local.clone()).await;
+    let alpha_app = tenant_router(alpha.clone()).await;
+    let beta_app = tenant_router(beta.clone()).await;
+
+    assert_eq!(
+        session_status(&alpha_app, &alpha_session.id).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        session_status(&local_app, &alpha_session.id).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        session_status(&beta_app, &alpha_session.id).await,
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        owner_managed_packages(&alpha_app)
+            .await
+            .contains(&"com.example.tenant-alpha".into())
+    );
+    assert!(owner_managed_packages(&local_app).await.is_empty());
+    assert!(owner_managed_packages(&beta_app).await.is_empty());
+    assert!(alpha.state.get_revision(&revision).await.unwrap().is_some());
+    assert!(local.state.get_revision(&revision).await.unwrap().is_none());
+    assert!(beta.state.get_revision(&revision).await.unwrap().is_none());
+
+    remove_test_dir(skills_root).await;
+    remove_test_dir(app_root).await;
+    remove_test_dir(cache_root).await;
+}
+
+async fn tenant_router(
+    runtime: Arc<agent_server::tenant_skills::TenantSkillRuntime>,
+) -> axum::Router {
+    let owner = build_tenant_owner_api_config(Some(test_owner_host()), &runtime, Vec::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let state = build_tenant_app_state(
+        runtime,
+        CapturingModel {
+            tool_names: Arc::new(Mutex::new(Vec::new())),
+        },
+        RuntimeConfig::read_only(".", ".").without_builtin_tools(),
+        Some(owner),
+    );
+    api::router(Arc::new(state))
+}
+
+async fn session_status(app: &axum::Router, session_id: &str) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/sessions/{session_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"content":"tenant check"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+async fn owner_managed_packages(app: &axum::Router) -> Vec<String> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/owner/skills")
+                .header("authorization", "Bearer owner-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    body["managed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|skill| skill["package_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+async fn activate_tenant_fixture(service: &OwnerSkillManagementService) -> String {
+    let owner = ActorContext::owner(
+        "alpha-owner",
+        [
+            SkillGrant::Inspect,
+            SkillGrant::CreateDraft,
+            SkillGrant::Validate,
+            SkillGrant::Activate,
+        ],
+    );
+    let draft = service
+        .create_draft(
+            &owner,
+            agent_runtime::skill_management::CreateSkillDraftRequest {
+                package_id: SkillPackageId::parse("com.example.tenant-alpha").unwrap(),
+                display_name: "Tenant alpha".into(),
+                description: "Alpha-only managed instruction.".into(),
+                kind: agent_runtime::skill_package::SkillPackageKind::InstructionOnly,
+                required_tools: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .validate_draft(&owner, &draft.revision_id)
+        .await
+        .unwrap();
+    let approval = service
+        .request_activation(&owner, &draft.revision_id)
+        .await
+        .unwrap();
+    service
+        .approve_activation(
+            &approval.approval_id,
+            &ActorContext::owner("alpha-approver", [SkillGrant::Activate]),
+        )
+        .await
+        .unwrap();
+    draft.revision_id
+}
+
+#[tokio::test]
 async fn production_owner_initialization_awaits_startup_reconciliation() {
     let root = unique_test_dir("startup-reconcile-skills");
     tokio::fs::create_dir_all(&root).await.unwrap();

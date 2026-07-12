@@ -183,24 +183,117 @@ async fn physical_control_roots_are_excluded_from_all_generic_filesystem_operati
     assert!(!control.join("patched.txt").exists());
 }
 
-#[test]
-fn command_mode_rejects_a_workspace_that_contains_skill_control_roots() {
+#[tokio::test]
+async fn command_is_absent_and_denied_when_any_control_root_is_configured() {
     let root = tempfile::tempdir().unwrap();
     let control = root.path().join("skill-state");
     std::fs::create_dir_all(&control).unwrap();
+    std::fs::write(root.path().join("visible.txt"), "visible").unwrap();
     let config = RuntimeConfig::workspace_write(root.path(), root.path())
         .with_command_mode(CommandMode::Allowed)
         .excluding_workspace_roots([control]);
+    let registry = ToolRegistry::try_new(SkillRegistry::empty(), &config).unwrap();
 
-    let error = ToolRegistry::try_new(SkillRegistry::empty(), &config).unwrap_err();
-
-    assert_eq!(
-        error.to_string(),
-        "command workspace cannot contain skill control-plane roots"
-    );
     assert!(
-        !error
-            .to_string()
-            .contains(root.path().to_string_lossy().as_ref())
+        !registry
+            .definitions()
+            .iter()
+            .any(|tool| tool.name == "exec_command")
     );
+    let command = registry
+        .execute(
+            "exec_command",
+            "forced-command",
+            json!({"cmd": "printf changed > changed.txt"}),
+        )
+        .await;
+    assert!(!command.ok);
+    assert_eq!(command.error.unwrap().code, "permission_denied");
+    assert!(!root.path().join("changed.txt").exists());
+
+    let read = registry
+        .execute(
+            "read_text_file",
+            "filesystem-remains",
+            json!({"path": "visible.txt"}),
+        )
+        .await;
+    assert!(read.ok);
+}
+
+#[tokio::test]
+async fn command_cannot_reach_an_absolute_control_root_outside_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "secret").unwrap();
+    let config = RuntimeConfig::workspace_write(root.path(), root.path())
+        .with_command_mode(CommandMode::Allowed)
+        .excluding_workspace_roots([outside.path().to_path_buf()]);
+    let registry = ToolRegistry::try_new(SkillRegistry::empty(), &config).unwrap();
+
+    let result = registry
+        .execute(
+            "exec_command",
+            "outside-command",
+            json!({"cmd": format!("printf changed > {}", secret.display())}),
+        )
+        .await;
+
+    assert!(!result.ok);
+    assert_eq!(result.error.unwrap().code, "permission_denied");
+    assert_eq!(std::fs::read_to_string(secret).unwrap(), "secret");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn command_cannot_reach_a_control_root_through_workspace_symlink_alias() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "secret").unwrap();
+    symlink(outside.path(), root.path().join("alias")).unwrap();
+    let config = RuntimeConfig::workspace_write(root.path(), root.path())
+        .with_command_mode(CommandMode::Allowed)
+        .excluding_workspace_roots([outside.path().to_path_buf()]);
+    let registry = ToolRegistry::try_new(SkillRegistry::empty(), &config).unwrap();
+
+    let result = registry
+        .execute(
+            "exec_command",
+            "alias-command",
+            json!({"cmd": "printf changed > alias/secret.txt"}),
+        )
+        .await;
+
+    assert!(!result.ok);
+    assert_eq!(result.error.unwrap().code, "permission_denied");
+    assert_eq!(std::fs::read_to_string(secret).unwrap(), "secret");
+}
+
+#[tokio::test]
+async fn development_command_without_control_roots_remains_available() {
+    let root = tempfile::tempdir().unwrap();
+    let config = RuntimeConfig::workspace_write(root.path(), root.path())
+        .with_command_mode(CommandMode::Allowed);
+    let registry = ToolRegistry::try_new(SkillRegistry::empty(), &config).unwrap();
+
+    assert!(
+        registry
+            .definitions()
+            .iter()
+            .any(|tool| tool.name == "exec_command")
+    );
+    let result = registry
+        .execute(
+            "exec_command",
+            "development-command",
+            json!({"cmd": "printf available"}),
+        )
+        .await;
+
+    assert!(result.ok);
+    assert_eq!(result.data.unwrap()["stdout"], "available");
 }
