@@ -221,6 +221,12 @@ impl ManagedSkillSource {
             .await
     }
 
+    pub(crate) async fn discover_valid_active_read_only(
+        &self,
+    ) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
+        Ok(self.inspect_active_installations().await?.discovered)
+    }
+
     async fn validate_revision(
         &self,
         installation_package: &crate::skill_package::SkillPackageId,

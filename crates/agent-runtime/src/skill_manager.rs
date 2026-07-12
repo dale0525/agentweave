@@ -112,6 +112,18 @@ impl SkillManager {
         ))
     }
 
+    pub async fn new_deferred_managed(config: SkillManagerConfig) -> anyhow::Result<Self> {
+        let packages = discover_non_managed_packages_read_only(&config).await?;
+        let initial = Arc::new(build_snapshot_from_packages(&config, 1, packages).await?);
+        let runtime_context =
+            SkillRuntimeContext::new(config.platform, config.capabilities.clone());
+        Ok(Self::with_mode(
+            initial,
+            SkillManagerMode::Dynamic(config),
+            Some(runtime_context),
+        ))
+    }
+
     pub fn from_registry_and_catalog(registry: SkillRegistry, catalog: SkillCatalog) -> Self {
         let snapshot = SkillSnapshot::from_registry_and_catalog(1, registry, catalog);
         Self::with_mode(Arc::new(snapshot), SkillManagerMode::Static, None)
@@ -265,6 +277,36 @@ impl SkillManager {
             .snapshot_with_status(crate::skill_state::SkillSnapshotStatus::Active)
             .await?;
         if let Some(record) = &active_record {
+            if let Some(candidate) =
+                circuit::expired_circuit_recovery_candidate(config_for(self)?, record, &backend)
+                    .await?
+            {
+                backend
+                    .state
+                    .persist_recovery_candidate(
+                        record,
+                        candidate.generation(),
+                        &crate::skill_recovery::snapshot_members(&candidate),
+                    )
+                    .await?;
+                *self
+                    .inner
+                    .current
+                    .write()
+                    .expect("skill snapshot lock poisoned") = candidate.clone();
+                let _ = backend
+                    .events
+                    .send(crate::events::RuntimeEvent::SkillRecoveryCompleted {
+                        status: crate::skill_recovery::RecoveryStatus::NewSnapshotPublished,
+                        generation: candidate.generation(),
+                    });
+                return Ok(crate::skill_recovery::SkillRecoveryReport {
+                    status: crate::skill_recovery::RecoveryStatus::NewSnapshotPublished,
+                    generation: candidate.generation(),
+                    quarantined_revisions: Vec::new(),
+                    maintenance_diagnostics,
+                });
+            }
             match self.rebuild_persisted_snapshot(&backend, record).await {
                 Ok(snapshot) => {
                     *self
@@ -301,6 +343,7 @@ impl SkillManager {
                     backend
                         .state
                         .restore_snapshot_as_active(
+                            record,
                             last_good_record
                                 .as_ref()
                                 .expect("last-known-good record checked above"),
@@ -344,6 +387,7 @@ impl SkillManager {
                     backend
                         .state
                         .persist_recovery_candidate(
+                            record,
                             candidate.generation(),
                             &crate::skill_recovery::snapshot_members(&candidate),
                         )
@@ -581,6 +625,13 @@ impl SkillManager {
             }),
         }
     }
+}
+
+fn config_for(manager: &SkillManager) -> anyhow::Result<&SkillManagerConfig> {
+    let SkillManagerMode::Dynamic(config) = &manager.inner.mode else {
+        anyhow::bail!("static skill manager has no dynamic configuration");
+    };
+    Ok(config)
 }
 
 #[derive(Default)]

@@ -125,7 +125,14 @@ impl crate::skill_manager::SkillManager {
                 retained.push(record.revision_id);
                 continue;
             }
-            backend.state.prepare_revision_cleanup(&record).await?;
+            backend
+                .revisions
+                .checkpoint(crate::skill_store_faults::StoreFaultPoint::CleanupBeforePrepare)
+                .await;
+            if !backend.state.prepare_revision_cleanup(&record).await? {
+                retained.push(record.revision_id);
+                continue;
+            }
             if let Err(error) = backend
                 .revisions
                 .delete_managed_revision_tree(&record)

@@ -55,6 +55,9 @@ pub(crate) enum StoreFaultPoint {
     ActivationAfterEvent,
     ActivationAfterSourceCleanup,
     LifecycleAfterDurableCommit,
+    CircuitAfterDurableCommit,
+    CircuitAfterStateTransition,
+    RecoveryBeforeQuarantine,
     ActivationRequestAfterCommit,
     ActivationRequestBeforeCommit,
     DraftTestBeforeSnapshot,
@@ -74,6 +77,7 @@ pub(crate) enum StoreFaultPoint {
     QuarantineSourceCleanup,
     QuarantineSourceCleanupAfter,
     CleanupBeforeTreeDelete,
+    CleanupBeforePrepare,
     CleanupAfterTreeDelete,
 }
 

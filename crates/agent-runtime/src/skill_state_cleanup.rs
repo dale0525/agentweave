@@ -77,7 +77,7 @@ impl SkillStateStore {
     pub(crate) async fn prepare_revision_cleanup(
         &self,
         record: &SkillRevisionRecord,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         if record.status != SkillRevisionStatus::Managed {
             return Err(state_conflict("only managed revisions can be cleaned up"));
         }
@@ -96,6 +96,9 @@ impl SkillStateStore {
             if current != *record {
                 return Err(state_conflict("cleanup revision changed"));
             }
+            if revision_is_durably_protected(&mut tx, &record.revision_id).await? {
+                return Ok(false);
+            }
             let existing: Option<String> = sqlx::query_scalar(
                 "SELECT expected_json FROM skill_revision_cleanup WHERE revision_id = ?",
             )
@@ -104,7 +107,7 @@ impl SkillStateStore {
             .await?;
             if let Some(existing) = existing {
                 if existing == expected {
-                    return Ok(());
+                    return Ok(true);
                 }
                 return Err(state_conflict("cleanup job conflicts with revision state"));
             }
@@ -119,7 +122,7 @@ impl SkillStateStore {
             .bind(Utc::now().to_rfc3339())
             .execute(&mut *tx)
             .await?;
-            Ok(())
+            Ok(true)
         }
         .await;
         crate::skill_state_transactions::finish(tx, result).await
@@ -222,6 +225,53 @@ impl SkillStateStore {
         .await;
         crate::skill_state_transactions::finish(tx, result).await
     }
+}
+
+async fn revision_is_durably_protected(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    revision_id: &str,
+) -> anyhow::Result<bool> {
+    let installation: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM skill_installations WHERE active_revision_id = ? AND install_status != 'removed' LIMIT 1",
+    )
+    .bind(revision_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if installation.is_some() {
+        return Ok(true);
+    }
+    let approval: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM skill_approvals WHERE revision_id = ? AND status = 'pending' LIMIT 1",
+    )
+    .bind(revision_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if approval.is_some() {
+        return Ok(true);
+    }
+    let retention: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM skill_revision_retention WHERE revision_id = ? AND retain_until > ? LIMIT 1",
+    )
+    .bind(revision_id)
+    .bind(Utc::now().to_rfc3339())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if retention.is_some() {
+        return Ok(true);
+    }
+    let snapshots: Vec<String> = sqlx::query_scalar("SELECT members_json FROM skill_snapshots")
+        .fetch_all(&mut **tx)
+        .await?;
+    for members in snapshots {
+        let value: serde_json::Value = serde_json::from_str(&members)?;
+        if crate::skill_recovery::parse_snapshot_members(value)?
+            .into_iter()
+            .any(|member| member.revision_id.as_deref() == Some(revision_id))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn cleanup_expectation(record: &SkillRevisionRecord) -> anyhow::Result<String> {

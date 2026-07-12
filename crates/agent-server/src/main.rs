@@ -197,6 +197,9 @@ where
                 SkillGrant::Activate,
                 SkillGrant::Import,
                 SkillGrant::Export,
+                SkillGrant::Rollback,
+                SkillGrant::Disable,
+                SkillGrant::DeleteManaged,
             ],
         ),
         SkillManagementMode::DiagnosticsOnly | SkillManagementMode::OrganizationManaged => {
@@ -222,7 +225,11 @@ where
             Some(Arc::from(approver_token)),
             Some(ActorContext::owner(
                 "local-approver",
-                [SkillGrant::Inspect, SkillGrant::Activate],
+                [
+                    SkillGrant::Inspect,
+                    SkillGrant::Activate,
+                    SkillGrant::Rollback,
+                ],
             )),
         )
     } else {
@@ -321,6 +328,7 @@ async fn load_skill_manager(
         });
     }
 
+    let deferred_managed_startup = managed_config.is_some();
     let mut sources: Vec<Arc<dyn SkillSource>> = vec![Arc::new(DirectorySkillSource::new(
         SkillLayer::Builtin,
         root,
@@ -339,15 +347,19 @@ async fn load_skill_manager(
             managed_source = Some(source);
         }
     }
-    let manager = SkillManager::new(SkillManagerConfig {
+    let manager_config = SkillManagerConfig {
         sources,
         platform: PlatformId::Desktop,
         capabilities: CapabilitySet::desktop_runtime(),
         protected_packages: Vec::new(),
         allowed_overrides: Vec::new(),
         runtime_version: env!("CARGO_PKG_VERSION").parse()?,
-    })
-    .await?;
+    };
+    let manager = if deferred_managed_startup {
+        SkillManager::new_deferred_managed(manager_config).await?
+    } else {
+        SkillManager::new(manager_config).await?
+    };
     Ok(LoadedSkillManager {
         manager,
         managed_store,
@@ -516,6 +528,9 @@ mod tests {
                 SkillGrant::Activate,
                 SkillGrant::Import,
                 SkillGrant::Export,
+                SkillGrant::Rollback,
+                SkillGrant::Disable,
+                SkillGrant::DeleteManaged,
             ]
             .into_iter()
             .collect()
@@ -529,9 +544,13 @@ mod tests {
         assert_eq!(approver.actor_id, "local-approver");
         assert_eq!(
             approver.grants,
-            [SkillGrant::Inspect, SkillGrant::Activate]
-                .into_iter()
-                .collect()
+            [
+                SkillGrant::Inspect,
+                SkillGrant::Activate,
+                SkillGrant::Rollback,
+            ]
+            .into_iter()
+            .collect()
         );
     }
 

@@ -27,6 +27,8 @@ use std::sync::{Arc, RwLock};
 
 #[path = "skill_store_activation.rs"]
 mod activation;
+#[path = "skill_store_recovery_quarantine.rs"]
+mod recovery_quarantine;
 
 pub use crate::skill_store_public_types::{
     DEFAULT_MAX_SKILL_DEPTH, DEFAULT_MAX_SKILL_DIRECTORIES, DEFAULT_MAX_SKILL_ENTRIES,
@@ -507,7 +509,6 @@ impl SkillRevisionStore {
             .checkpoint(StoreFaultPoint::QuarantineAfterLock)
             .await;
         self.paths.verify_identity()?;
-        let mut transition = TransitionState::new("quarantine");
         let source = self.expected_revision_path(&record)?;
         let (source_root, source_identity, source_relative) = match record.status {
             SkillRevisionStatus::Staging => {
@@ -525,6 +526,19 @@ impl SkillRevisionStore {
         };
         ensure_directory_contained(source_root, &source, "revision").await?;
         let source_directory = open_prepared_directory(source_identity, &source_relative).await?;
+        self.quarantine_opened_revision(record, source, source_directory, reason)
+            .await
+    }
+
+    async fn quarantine_opened_revision(
+        &self,
+        record: SkillRevisionRecord,
+        source: PathBuf,
+        source_directory: crate::skill_store_secure_roots::PreparedStoreDirectory,
+        reason: &str,
+    ) -> anyhow::Result<StoredSkillRevision> {
+        let revision_id = record.revision_id.as_str();
+        let mut transition = TransitionState::new("quarantine");
         measure_package_tree(&source, self.limits.package_limits(), None).await?;
         let replacement_metadata = self
             .actual_quarantine_metadata(&record, &source_directory, reason)

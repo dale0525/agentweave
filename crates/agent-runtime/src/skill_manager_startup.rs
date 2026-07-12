@@ -11,7 +11,6 @@ pub(super) async fn quarantine_invalid_snapshot_members(
             failures: 1,
         };
     };
-    let source = crate::skill_source::ManagedSkillSource::from_store(backend.revisions.clone());
     let mut result = SnapshotQuarantineResult::default();
     for member in members
         .into_iter()
@@ -88,22 +87,69 @@ pub(super) async fn quarantine_invalid_snapshot_members(
             }
             continue;
         }
-        if source
-            .load_managed_revision(&package_id, revision_id)
+        let prepared = match backend
+            .revisions
+            .prepare_invalid_managed_revision(
+                revision_record
+                    .as_ref()
+                    .expect("matching revision checked above"),
+            )
             .await
-            .is_ok()
         {
-            continue;
-        }
+            Ok(None) => continue,
+            Ok(Some(prepared)) => prepared,
+            Err(_) => {
+                record_changed_before_quarantine(backend, record.generation, &member, revision_id)
+                    .await;
+                result.failures += 1;
+                continue;
+            }
+        };
+        backend
+            .revisions
+            .checkpoint(crate::skill_store_faults::StoreFaultPoint::RecoveryBeforeQuarantine)
+            .await;
         match backend
             .revisions
-            .quarantine_revision(revision_id, "startup active snapshot verification failed")
+            .quarantine_prepared_invalid_managed_revision(
+                prepared,
+                "startup active snapshot verification failed",
+            )
             .await
         {
             Ok(_) => result.revisions.push(revision_id.to_string()),
-            Err(_) => result.failures += 1,
+            Err(_) => {
+                record_changed_before_quarantine(backend, record.generation, &member, revision_id)
+                    .await;
+                result.failures += 1;
+            }
         }
     }
     result.revisions.sort();
     result
+}
+
+async fn record_changed_before_quarantine(
+    backend: &ManagedRuntimeBackend,
+    generation: u64,
+    member: &crate::skill_recovery::PersistedSnapshotMember,
+    revision_id: &str,
+) {
+    let key = format!(
+        "snapshot-member-changed:{generation}:{}:{revision_id}",
+        member.package_id
+    );
+    let _ = backend
+        .state
+        .record_maintenance_diagnostic_once(
+            &key,
+            Some(revision_id),
+            "managed",
+            "snapshot_member_changed_before_quarantine",
+            serde_json::json!({
+                "generation": generation,
+                "ownership": "changed"
+            }),
+        )
+        .await;
 }

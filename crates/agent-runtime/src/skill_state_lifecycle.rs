@@ -97,6 +97,17 @@ impl SkillStateStore {
         })?;
         let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
         let result = async {
+            let cleanup: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM skill_revision_cleanup WHERE revision_id = ? AND status = 'pending' LIMIT 1",
+            )
+            .bind(&input.revision_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if cleanup.is_some() {
+                return Err(state_conflict(
+                    "skill revision has a pending cleanup operation",
+                ));
+            }
             let select = format!(
                 "SELECT {APPROVAL_COLUMNS} FROM skill_approvals WHERE package_id = ? AND operation = ? AND status = 'pending'"
             );

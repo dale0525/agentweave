@@ -67,6 +67,7 @@ impl SkillStateStore {
 
     pub(crate) async fn restore_snapshot_as_active(
         &self,
+        expected_active: &SkillSnapshotRecord,
         snapshot: &SkillSnapshotRecord,
         members: &[PersistedSnapshotMember],
     ) -> anyhow::Result<()> {
@@ -78,6 +79,34 @@ impl SkillStateStore {
             .collect::<Vec<_>>();
         let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
         let result = async {
+            let snapshot_query =
+                format!("SELECT {SNAPSHOT_COLUMNS} FROM skill_snapshots WHERE generation = ?");
+            let active = sqlx::query(&snapshot_query)
+                .bind(i64::try_from(expected_active.generation)?)
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|row| snapshot_from_row(&row))
+                .transpose()?;
+            if active.as_ref() != Some(expected_active)
+                || expected_active.status != SkillSnapshotStatus::Active
+            {
+                return Err(state_conflict(
+                    "authoritative active snapshot changed during recovery",
+                ));
+            }
+            let target = sqlx::query(&snapshot_query)
+                .bind(generation)
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|row| snapshot_from_row(&row))
+                .transpose()?;
+            if target.as_ref() != Some(snapshot)
+                || snapshot.status != SkillSnapshotStatus::LastKnownGood
+            {
+                return Err(state_conflict(
+                    "last-known-good snapshot changed during recovery",
+                ));
+            }
             for member in &managed {
                 let revision_id = member
                     .revision_id
@@ -146,17 +175,24 @@ impl SkillStateStore {
                 .await?;
             }
 
-            sqlx::query(
-                "UPDATE skill_snapshots SET status = 'candidate' WHERE status = 'active' AND generation != ?",
+            let demoted = sqlx::query(
+                "UPDATE skill_snapshots SET status = 'candidate' WHERE generation = ? AND status = 'active' AND members_json = ?",
             )
-            .bind(generation)
+            .bind(i64::try_from(expected_active.generation)?)
+            .bind(serde_json::to_string(&expected_active.members_json)?)
             .execute(&mut *tx)
             .await?;
+            if demoted.rows_affected() != 1 {
+                return Err(state_conflict(
+                    "authoritative active snapshot changed during recovery",
+                ));
+            }
             let changed = sqlx::query(
-                "UPDATE skill_snapshots SET status = 'active', activated_at = ? WHERE generation = ? AND status IN ('last_known_good', 'active')",
+                "UPDATE skill_snapshots SET status = 'active', activated_at = ? WHERE generation = ? AND status = 'last_known_good' AND members_json = ?",
             )
             .bind(&now)
             .bind(generation)
+            .bind(serde_json::to_string(&snapshot.members_json)?)
             .execute(&mut *tx)
             .await?;
             if changed.rows_affected() != 1 {
@@ -170,31 +206,27 @@ impl SkillStateStore {
 
     pub(crate) async fn persist_recovery_candidate(
         &self,
+        expected_active: &SkillSnapshotRecord,
         generation: u64,
         members: &serde_json::Value,
     ) -> anyhow::Result<()> {
         let generation = i64::try_from(generation)?;
+        let previous_generation = i64::try_from(expected_active.generation)?;
         let now = Utc::now().to_rfc3339();
         let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
         let result = async {
-            sqlx::query("UPDATE skill_snapshots SET status = 'candidate' WHERE status = 'active'")
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query(
-                r#"INSERT INTO skill_snapshots
-                   (generation, status, members_json, created_at, activated_at)
-                   VALUES (?, 'active', ?, ?, ?)
-                   ON CONFLICT(generation) DO UPDATE SET
-                     status = 'active', members_json = excluded.members_json,
-                     activated_at = excluded.activated_at"#,
+            if expected_active.status != SkillSnapshotStatus::Active {
+                return Err(state_conflict("expected recovery snapshot is not active"));
+            }
+            crate::skill_state_lifecycle::persist_snapshot_transition(
+                &mut tx,
+                previous_generation,
+                &expected_active.members_json,
+                generation,
+                members,
+                &now,
             )
-            .bind(generation)
-            .bind(serde_json::to_string(members)?)
-            .bind(&now)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
-            Ok(())
+            .await
         }
         .await;
         crate::skill_state_transactions::finish(tx, result).await

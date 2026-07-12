@@ -42,7 +42,11 @@ impl AuthoringFixture {
         let paths = SkillStorePaths::prepare(app.path(), cache.path())
             .await
             .unwrap();
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let database_url = format!(
+            "sqlite://{}?mode=rwc",
+            app.path().join("state.sqlite").display()
+        );
+        let storage = Storage::connect(&database_url).await.unwrap();
         let state = SkillStateStore::new(storage);
         let store = SkillRevisionStore::with_test_faults(
             paths,
@@ -76,6 +80,14 @@ impl AuthoringFixture {
             manager,
             service,
         }
+    }
+
+    pub(crate) async fn second_state_connection(&self) -> SkillStateStore {
+        let database_url = format!(
+            "sqlite://{}?mode=rwc",
+            self._app.path().join("state.sqlite").display()
+        );
+        SkillStateStore::new(Storage::connect(&database_url).await.unwrap())
     }
 
     pub(crate) async fn with_limits(limits: crate::skill_store::SkillStoreLimits) -> Self {
