@@ -55,6 +55,7 @@ pub(crate) enum StoreFaultPoint {
     ActivationAfterEvent,
     ActivationAfterSourceCleanup,
     LifecycleAfterDurableCommit,
+    CircuitBeforeDurableCommit,
     CircuitAfterDurableCommit,
     CircuitAfterStateTransition,
     RecoveryBeforeFirstManagedMutation,

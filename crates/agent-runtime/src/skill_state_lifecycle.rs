@@ -1,10 +1,12 @@
 use crate::skill_package::SkillPackageId;
 use crate::skill_state::{
-    NewSkillApproval, SkillApprovalRecord, SkillApprovalStatus, SkillInstallStatus,
-    SkillInstallationRecord, SkillLayerRecord, SkillStateBoundaryError, SkillStateStore,
+    NewSkillApproval, SkillApprovalRecord, SkillApprovalStatus, SkillCircuitStateRecord,
+    SkillInstallStatus, SkillInstallationRecord, SkillLayerRecord, SkillStateBoundaryError,
+    SkillStateStore,
 };
 use crate::skill_state_rows::{
-    APPROVAL_COLUMNS, INSTALLATION_COLUMNS, approval_from_row, installation_from_row,
+    APPROVAL_COLUMNS, CIRCUIT_COLUMNS, INSTALLATION_COLUMNS, approval_from_row, circuit_from_row,
+    installation_from_row,
 };
 use chrono::{Duration, Utc};
 
@@ -46,6 +48,7 @@ pub(crate) struct ExactSnapshotPublication<'a> {
 pub(crate) struct CircuitSnapshotMutation {
     pub package_id: SkillPackageId,
     pub revision_id: String,
+    pub expected_circuit: SkillCircuitStateRecord,
     pub transition: CircuitSnapshotTransition,
     pub operation: &'static str,
 }
@@ -66,6 +69,7 @@ impl SkillStateStore {
         let now = Utc::now().to_rfc3339();
         let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
         let result = async {
+            validate_circuit_expectations(&mut tx, input.circuit_mutations).await?;
             persist_snapshot_transition(
                 &mut tx,
                 previous_generation,
@@ -361,6 +365,30 @@ impl SkillStateStore {
         .await;
         crate::skill_state_transactions::finish(tx, result).await
     }
+}
+
+async fn validate_circuit_expectations(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    mutations: &[CircuitSnapshotMutation],
+) -> anyhow::Result<()> {
+    let query = format!("SELECT {CIRCUIT_COLUMNS} FROM skill_circuit_state WHERE revision_id = ?");
+    for mutation in mutations {
+        if mutation.expected_circuit.revision_id != mutation.revision_id {
+            return Err(state_conflict("circuit mutation identity is inconsistent"));
+        }
+        let current = sqlx::query(&query)
+            .bind(&mutation.revision_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .map(|row| circuit_from_row(&row))
+            .transpose()?;
+        if current.as_ref() != Some(&mutation.expected_circuit) {
+            return Err(state_conflict(
+                "circuit state changed before snapshot publication",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn persist_circuit_omission_transition(

@@ -166,6 +166,219 @@ async fn stale_manager_open_success_interleaving_reconciles_as_an_exact_noop() {
 }
 
 #[tokio::test]
+async fn collected_open_superseded_by_success_rolls_back_before_publication() {
+    let faults = SkillStoreTestFaults::default();
+    let gate = faults.gate_once(SkillStoreFaultPoint::CircuitBeforeDurableCommit);
+    let fixture = AuthoringFixture::with_faults(faults).await;
+    let revision = activate_new_revision(&fixture, "1.0.0").await;
+    let resetting = manager_for_store(&fixture).await;
+    let _resetting_service = bind_manager(&fixture, resetting.clone());
+    resetting.startup_reconcile().await.unwrap();
+    let source = managed_source("com.example.calendar", &revision);
+    let initial_generation = fixture.manager.current_snapshot().generation();
+    let mut events = fixture.service.subscribe_events();
+
+    record_failures(&fixture, &source, 2).await;
+    let opening_manager = fixture.manager.clone();
+    let opening_source = source.clone();
+    let opening = tokio::spawn(async move {
+        opening_manager
+            .record_execution_result(&opening_source, false)
+            .await
+    });
+    gate.wait_entered().await;
+
+    resetting
+        .record_execution_result(&source, true)
+        .await
+        .unwrap();
+    let reset_row = fixture
+        .state
+        .get_circuit_state(&revision)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reset_row.consecutive_failures, 0);
+    assert!(reset_row.open_until.is_none());
+    gate.release().await;
+    opening.await.unwrap().unwrap();
+
+    assert_eq!(
+        fixture.manager.current_snapshot().generation(),
+        initial_generation
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT MAX(generation) FROM skill_snapshots")
+            .fetch_one(fixture.state.pool())
+            .await
+            .unwrap(),
+        i64::try_from(initial_generation).unwrap()
+    );
+    assert!(
+        fixture
+            .state
+            .circuit_omission(&revision)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(circuit_publications(&fixture).await, Vec::new());
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+
+    record_failures(&fixture, &source, 3).await;
+
+    assert_eq!(
+        fixture.manager.current_snapshot().generation(),
+        initial_generation + 1
+    );
+    assert!(fixture.manager.current_snapshot().packages().is_empty());
+    let omission = fixture
+        .state
+        .circuit_omission(&revision)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(omission.omitted_generation, initial_generation + 1);
+    assert!(!omission.consumed);
+    assert_eq!(
+        circuit_publications(&fixture).await,
+        vec![(
+            "open_skill_revision_circuit".into(),
+            i64::try_from(initial_generation + 1).unwrap()
+        )]
+    );
+    assert_eq!(
+        events.recv().await.unwrap(),
+        crate::events::RuntimeEvent::SkillSnapshotPublished {
+            generation: initial_generation + 1,
+        }
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn partially_superseded_collection_recomputes_every_revision_from_authority() {
+    let faults = SkillStoreTestFaults::default();
+    let gate = faults.gate_once(SkillStoreFaultPoint::CircuitBeforeDurableCommit);
+    let fixture = AuthoringFixture::with_faults(faults).await;
+    let revisions = activate_two_packages(&fixture).await;
+    let package_ids = [
+        SkillPackageId::parse("com.example.calendar").unwrap(),
+        SkillPackageId::parse("com.example.tasks").unwrap(),
+    ];
+    for (package_id, revision_id) in package_ids.iter().zip(&revisions) {
+        for _ in 0..3 {
+            fixture
+                .state
+                .record_managed_execution_result(package_id, revision_id, false, Utc::now())
+                .await
+                .unwrap();
+        }
+    }
+    let initial_generation = fixture.manager.current_snapshot().generation();
+    let mut events = fixture.service.subscribe_events();
+
+    let publishing_manager = fixture.manager.clone();
+    let publication =
+        tokio::spawn(async move { publishing_manager.lease_snapshot_for_turn().await });
+    gate.wait_entered().await;
+
+    let (_, transition) = fixture
+        .state
+        .record_managed_execution_result(&package_ids[0], &revisions[0], true, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        transition,
+        crate::skill_state_recovery::CircuitStateTransition::Closed
+    );
+    gate.release().await;
+    let lease = publication.await.unwrap().unwrap();
+
+    assert_eq!(lease.generation(), initial_generation + 1);
+    assert_eq!(lease.snapshot().packages().len(), 1);
+    assert_eq!(
+        lease.snapshot().packages()[0].package.descriptor.id,
+        package_ids[0]
+    );
+    let active = fixture
+        .state
+        .snapshot_with_status(crate::skill_state::SkillSnapshotStatus::Active)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.generation, initial_generation + 1);
+    assert_eq!(
+        active.members_json,
+        crate::skill_recovery::snapshot_members(lease.snapshot())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT MAX(generation) FROM skill_snapshots")
+            .fetch_one(fixture.state.pool())
+            .await
+            .unwrap(),
+        i64::try_from(initial_generation + 1).unwrap()
+    );
+
+    let reset_row = fixture
+        .state
+        .get_circuit_state(&revisions[0])
+        .await
+        .unwrap()
+        .unwrap();
+    let still_open_row = fixture
+        .state
+        .get_circuit_state(&revisions[1])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reset_row.consecutive_failures, 0);
+    assert!(reset_row.open_until.is_none());
+    assert_eq!(still_open_row.consecutive_failures, 3);
+    assert!(still_open_row.open_until.is_some());
+    assert!(
+        fixture
+            .state
+            .circuit_omission(&revisions[0])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let omission = fixture
+        .state
+        .circuit_omission(&revisions[1])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(omission.omitted_generation, initial_generation + 1);
+    assert!(!omission.consumed);
+    assert_eq!(
+        circuit_publications(&fixture).await,
+        vec![(
+            "open_skill_revision_circuit".into(),
+            i64::try_from(initial_generation + 1).unwrap()
+        )]
+    );
+    assert_eq!(
+        events.recv().await.unwrap(),
+        crate::events::RuntimeEvent::SkillSnapshotPublished {
+            generation: initial_generation + 1,
+        }
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn two_revision_in_process_expiry_consumes_every_omission_before_reopen() {
     let fixture = AuthoringFixture::new().await;
     let revisions = activate_two_packages(&fixture).await;
@@ -325,6 +538,15 @@ async fn assert_all_omissions(fixture: &AuthoringFixture, revisions: &[String; 2
             consumed
         );
     }
+}
+
+async fn circuit_publications(fixture: &AuthoringFixture) -> Vec<(String, i64)> {
+    sqlx::query_as(
+        "SELECT operation, json_extract(metadata_json, '$.generation') FROM skill_audit_log WHERE operation IN ('open_skill_revision_circuit', 'close_skill_revision_circuit', 'expire_skill_revision_circuit') ORDER BY created_at, id",
+    )
+    .fetch_all(fixture.state.pool())
+    .await
+    .unwrap()
 }
 
 async fn manager_for_store(fixture: &AuthoringFixture) -> SkillManager {

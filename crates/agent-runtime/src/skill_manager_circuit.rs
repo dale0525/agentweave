@@ -200,51 +200,92 @@ impl SkillManager {
         let SkillManagerMode::Dynamic(config) = &self.inner.mode else {
             anyhow::bail!("static skill manager cannot publish circuit state");
         };
-        let generation = publication
-            .base_generation()
-            .checked_add(1)
-            .context("skill snapshot generation overflow")?;
-        let candidate =
-            Arc::new(build_snapshot_with_runtime(config, generation, Some(&backend)).await?);
-        let previous_members =
-            crate::skill_recovery::snapshot_members(&publication.base_snapshot());
-        let candidate_members = crate::skill_recovery::snapshot_members(&candidate);
-        let mut mutations = circuit_snapshot_mutations(
-            &previous_members,
-            &candidate,
-            &backend,
-            "open_skill_revision_circuit",
-            "expire_skill_revision_circuit",
-        )
-        .await?;
-        let selected = mutations.iter_mut().find(|mutation| {
-            mutation.package_id == *package_id
-                && mutation.revision_id == revision_id
-                && mutation.transition == transition
-        });
-        if let Some(selected) = selected {
-            selected.operation = operation;
-        } else if mutations.is_empty() && candidate_members == previous_members {
-            return Ok(());
-        }
-        let durable = backend
-            .state
-            .commit_exact_snapshot_publication(
-                crate::skill_state_lifecycle::ExactSnapshotPublication {
-                    actor_id: "system-circuit",
-                    previous_generation: publication.base_generation(),
-                    previous_members,
-                    generation,
-                    members: candidate_members,
-                    circuit_mutations: &mutations,
-                },
+        let mut baseline = publication.base_snapshot();
+        let mut previous_generation = baseline.generation();
+        let mut previous_members = crate::skill_recovery::snapshot_members(&baseline);
+        let mut authoritative_record = None;
+        let mut conflicts = 0_u8;
+        loop {
+            let generation = previous_generation
+                .checked_add(1)
+                .context("skill snapshot generation overflow")?;
+            let packages = discover_packages(config).await?;
+            let build = build_snapshot_from_packages_with_circuit_observations(
+                config, generation, packages, &backend,
             )
-            .await;
-        if let Err(error) = durable {
+            .await?;
+            let candidate_members = crate::skill_recovery::snapshot_members(&build.snapshot);
+            let mut mutations = circuit_snapshot_mutations(
+                &previous_members,
+                &build,
+                &backend,
+                "open_skill_revision_circuit",
+                "expire_skill_revision_circuit",
+            )
+            .await?;
+            backend
+                .revisions
+                .checkpoint(crate::skill_store_faults::StoreFaultPoint::CircuitBeforeDurableCommit)
+                .await;
+            let selected = mutations.iter_mut().find(|mutation| {
+                mutation.package_id == *package_id
+                    && mutation.revision_id == revision_id
+                    && mutation.transition == transition
+            });
+            if let Some(selected) = selected {
+                selected.operation = operation;
+            } else if mutations.is_empty() && candidate_members == previous_members {
+                let current = self.current_snapshot();
+                if current.generation() != baseline.generation()
+                    || crate::skill_recovery::snapshot_members(&current) != previous_members
+                {
+                    let converged = if let Some(record) = authoritative_record.as_ref() {
+                        self.rebuild_persisted_snapshot(&backend, record).await?
+                    } else {
+                        baseline
+                    };
+                    publication.publish(converged);
+                }
+                return Ok(());
+            }
+            let candidate = Arc::new(build.snapshot);
+            let durable = backend
+                .state
+                .commit_exact_snapshot_publication(
+                    crate::skill_state_lifecycle::ExactSnapshotPublication {
+                        actor_id: "system-circuit",
+                        previous_generation,
+                        previous_members: previous_members.clone(),
+                        generation,
+                        members: candidate_members,
+                        circuit_mutations: &mutations,
+                    },
+                )
+                .await;
+            if durable.is_ok() {
+                backend
+                    .revisions
+                    .checkpoint(
+                        crate::skill_store_faults::StoreFaultPoint::CircuitAfterDurableCommit,
+                    )
+                    .await;
+                let report = publication.publish(candidate);
+                let _ = backend
+                    .events
+                    .send(crate::events::RuntimeEvent::SkillSnapshotPublished {
+                        generation: report.active_generation,
+                    });
+                return Ok(());
+            }
+            let error = durable.expect_err("circuit publication result checked above");
             if !matches!(
                 error.downcast_ref::<crate::skill_state::SkillStateBoundaryError>(),
                 Some(crate::skill_state::SkillStateBoundaryError::Conflict(_))
             ) {
+                return Err(error);
+            }
+            conflicts = conflicts.saturating_add(1);
+            if conflicts >= 3 {
                 return Err(error);
             }
             let authoritative = backend
@@ -252,27 +293,20 @@ impl SkillManager {
                 .snapshot_with_status(crate::skill_state::SkillSnapshotStatus::Active)
                 .await?
                 .context("authoritative active snapshot is missing")?;
-            if authoritative.generation <= publication.base_generation() {
-                return Err(error);
-            }
-            let snapshot = self
-                .rebuild_persisted_snapshot(&backend, &authoritative)
+            baseline = self
+                .verify_persisted_snapshot(&backend, &authoritative)
                 .await?;
-            publication.publish(snapshot);
-            return Ok(());
+            previous_generation = authoritative.generation;
+            previous_members = authoritative.members_json.clone();
+            authoritative_record = Some(authoritative);
         }
-        backend
-            .revisions
-            .checkpoint(crate::skill_store_faults::StoreFaultPoint::CircuitAfterDurableCommit)
-            .await;
-        let report = publication.publish(candidate);
-        let _ = backend
-            .events
-            .send(crate::events::RuntimeEvent::SkillSnapshotPublished {
-                generation: report.active_generation,
-            });
-        Ok(())
     }
+}
+
+struct CircuitSnapshotBuild {
+    snapshot: SkillSnapshot,
+    circuit_rows: std::collections::BTreeMap<String, crate::skill_state::SkillCircuitStateRecord>,
+    observed_at: chrono::DateTime<chrono::Utc>,
 }
 
 pub(super) struct CircuitRecoveryCandidate {
@@ -325,17 +359,19 @@ pub(super) async fn circuit_recovery_candidate(
         .generation
         .checked_add(1)
         .context("skill snapshot generation overflow")?;
-    let snapshot = Arc::new(
-        build_snapshot_from_packages_with_circuits(config, generation, packages, backend).await?,
-    );
+    let build = build_snapshot_from_packages_with_circuit_observations(
+        config, generation, packages, backend,
+    )
+    .await?;
     let mutations = circuit_snapshot_mutations(
         &active.members_json,
-        &snapshot,
+        &build,
         backend,
         "recover_open_skill_revision_circuit",
         "recover_closed_skill_revision_circuit",
     )
     .await?;
+    let snapshot = Arc::new(build.snapshot);
     Ok(Some(CircuitRecoveryCandidate {
         snapshot,
         mutations,
@@ -344,16 +380,15 @@ pub(super) async fn circuit_recovery_candidate(
 
 async fn circuit_snapshot_mutations(
     previous_members: &serde_json::Value,
-    candidate: &SkillSnapshot,
+    candidate: &CircuitSnapshotBuild,
     backend: &ManagedRuntimeBackend,
     open_operation: &'static str,
     consume_operation: &'static str,
 ) -> anyhow::Result<Vec<crate::skill_state_lifecycle::CircuitSnapshotMutation>> {
     let persisted = crate::skill_recovery::parse_snapshot_members(previous_members.clone())?;
     let candidate_members = crate::skill_recovery::parse_snapshot_members(
-        crate::skill_recovery::snapshot_members(candidate),
+        crate::skill_recovery::snapshot_members(&candidate.snapshot),
     )?;
-    let now = chrono::Utc::now();
     let mut mutations = Vec::new();
     for installation in backend.state.list_active_installations().await? {
         if installation.source_layer != crate::skill_state::SkillLayerRecord::Managed {
@@ -370,7 +405,10 @@ async fn circuit_snapshot_mutations(
             member.package_id == installation.package_id.as_str()
                 && member.revision_id.as_deref() == Some(revision_id)
         });
-        let open = backend.state.circuit_is_open(revision_id, now).await?;
+        let circuit = candidate.circuit_rows.get(revision_id);
+        let open = circuit
+            .and_then(|state| state.open_until)
+            .is_some_and(|deadline| deadline > candidate.observed_at);
         let omission = backend.state.circuit_omission(revision_id).await?;
         let pending_omission = omission.as_ref().is_some_and(|record| {
             !record.consumed
@@ -391,9 +429,13 @@ async fn circuit_snapshot_mutations(
             None
         };
         if let Some((transition, operation)) = transition {
+            let expected_circuit = circuit
+                .cloned()
+                .context("circuit mutation state is missing")?;
             mutations.push(crate::skill_state_lifecycle::CircuitSnapshotMutation {
                 package_id: installation.package_id,
                 revision_id: revision_id.to_string(),
+                expected_circuit,
                 transition,
                 operation,
             });
@@ -439,6 +481,33 @@ pub(super) async fn build_snapshot_from_packages_with_circuits(
     packages: Vec<DiscoveredSkillPackage>,
     backend: &ManagedRuntimeBackend,
 ) -> anyhow::Result<SkillSnapshot> {
+    Ok(build_snapshot_from_packages_with_circuit_observations(
+        config, generation, packages, backend,
+    )
+    .await?
+    .snapshot)
+}
+
+async fn build_snapshot_from_packages_with_circuit_observations(
+    config: &SkillManagerConfig,
+    generation: u64,
+    packages: Vec<DiscoveredSkillPackage>,
+    backend: &ManagedRuntimeBackend,
+) -> anyhow::Result<CircuitSnapshotBuild> {
+    let observed_at = chrono::Utc::now();
+    let mut circuit_rows = std::collections::BTreeMap::new();
+    for package in &packages {
+        let revision_id = package
+            .verified_content
+            .as_ref()
+            .and_then(|content| content.execution_binding.as_ref())
+            .map(|binding| binding.revision_id.as_str());
+        if let Some(revision_id) = revision_id
+            && let Some(row) = backend.state.get_circuit_state(revision_id).await?
+        {
+            circuit_rows.insert(revision_id.to_string(), row);
+        }
+    }
     let mut eligible = Vec::with_capacity(packages.len());
     let mut circuit_open = Vec::new();
     for package in packages {
@@ -448,10 +517,10 @@ pub(super) async fn build_snapshot_from_packages_with_circuits(
             .and_then(|content| content.execution_binding.as_ref())
             .map(|binding| binding.revision_id.as_str());
         if let Some(revision_id) = revision_id
-            && backend
-                .state
-                .circuit_is_open(revision_id, chrono::Utc::now())
-                .await?
+            && circuit_rows
+                .get(revision_id)
+                .and_then(|state| state.open_until)
+                .is_some_and(|deadline| deadline > observed_at)
         {
             circuit_open.push(package);
         } else {
@@ -475,9 +544,14 @@ pub(super) async fn build_snapshot_from_packages_with_circuits(
                 reason: "managed revision circuit open".into(),
             }
         }));
-    SkillSnapshot::build(generation, resolved)
+    let snapshot = SkillSnapshot::build(generation, resolved)
         .await
         .map(|snapshot| {
             snapshot.with_platform_capabilities(config.platform, config.capabilities.clone())
-        })
+        })?;
+    Ok(CircuitSnapshotBuild {
+        snapshot,
+        circuit_rows,
+        observed_at,
+    })
 }
