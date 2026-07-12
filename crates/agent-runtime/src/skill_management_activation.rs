@@ -421,6 +421,7 @@ impl OwnerSkillManagementService {
         self.revisions
             .checkpoint(crate::skill_store_faults::StoreFaultPoint::ActivationAfterSourceCleanup)
             .await;
+        drop(publication);
         Ok(report)
     }
 

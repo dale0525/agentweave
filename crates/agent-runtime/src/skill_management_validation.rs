@@ -10,8 +10,6 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-const DRAFT_TEST_TERMINAL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
-
 struct DraftTestEvaluation {
     candidate: crate::skill_store_draft::StagingPackageSnapshot,
     validation: SkillDraftValidation,
@@ -327,17 +325,7 @@ impl OwnerSkillManagementService {
                 .await
             {
                 Ok(result) => result?,
-                Err(_) => tokio::time::timeout(
-                    DRAFT_TEST_TERMINAL_DEADLINE,
-                    self.timeout_draft_test(actor, revision_id),
-                )
-                .await
-                .map_err(|_| {
-                    SkillManagementError::internal(
-                        "test_draft",
-                        anyhow::anyhow!("draft test timeout state could not be loaded"),
-                    )
-                })??,
+                Err(_) => self.timeout_draft_test(actor, revision_id).await?,
             };
         let result = evaluation.result.clone();
         self.persist_draft_test_owned(evaluation).await?;
@@ -494,17 +482,9 @@ impl OwnerSkillManagementService {
     ) -> anyhow::Result<()> {
         let service = self.clone();
         let task = tokio::spawn(async move { service.persist_draft_test(evaluation).await });
-        tokio::time::timeout(DRAFT_TEST_TERMINAL_DEADLINE, task)
-            .await
-            .map_err(|_| {
-                SkillManagementError::internal(
-                    "test_draft",
-                    anyhow::anyhow!("draft test terminal persistence timed out"),
-                )
-            })?
-            .map_err(|error| {
-                SkillManagementError::internal("test_draft", anyhow::Error::new(error))
-            })??;
+        task.await.map_err(|error| {
+            SkillManagementError::internal("test_draft", anyhow::Error::new(error))
+        })??;
         Ok(())
     }
 

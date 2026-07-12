@@ -291,7 +291,7 @@ impl SkillPublicationGuard {
         ))
     }
 
-    pub(crate) fn publish(self, candidate: Arc<SkillSnapshot>) -> SkillReloadReport {
+    pub(crate) fn publish(&self, candidate: Arc<SkillSnapshot>) -> SkillReloadReport {
         let report = SkillReloadReport {
             previous_generation: self.previous.generation(),
             active_generation: candidate.generation(),

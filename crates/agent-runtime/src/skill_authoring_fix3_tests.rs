@@ -212,6 +212,103 @@ async fn draft_test_holds_generation_guard_through_result_persistence() {
 }
 
 #[tokio::test]
+async fn activation_publication_lease_orders_event_before_next_generation_and_cleanup() {
+    let faults = SkillStoreTestFaults::default();
+    let fixture = AuthoringFixture::with_faults(faults.clone()).await;
+    let (_, approval) =
+        validated_activation(&fixture, "com.example.activation-publication-lease").await;
+    let after_memory = faults.gate_once(SkillStoreFaultPoint::ActivationAfterMemoryPublish);
+    let after_cleanup = faults.gate_once(SkillStoreFaultPoint::ActivationAfterSourceCleanup);
+    let mut events = fixture.service.subscribe_events();
+    let activation = spawn_approval(&fixture, &approval.approval_id);
+    after_memory.wait_entered().await;
+    assert_eq!(fixture.manager.current_snapshot().generation(), 2);
+
+    let manager = fixture.manager.clone();
+    let mut reload = tokio::spawn(async move { manager.reload().await });
+    let early_reload =
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut reload).await;
+    let reload_published_before_event = early_reload.is_ok();
+
+    after_memory.release().await;
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("activation publication event must arrive")
+        .unwrap();
+    after_cleanup.wait_entered().await;
+    let reload_blocked_through_cleanup = !reload.is_finished();
+    after_cleanup.release().await;
+
+    let activation_report = activation.await.unwrap().unwrap();
+    let reload_report = match early_reload {
+        Ok(result) => result.unwrap().unwrap(),
+        Err(_) => reload.await.unwrap().unwrap(),
+    };
+    assert!(
+        !reload_published_before_event,
+        "generation N+1 published before generation N event"
+    );
+    assert!(
+        reload_blocked_through_cleanup,
+        "publication lease ended before activation terminal cleanup"
+    );
+    assert!(matches!(
+        event,
+        crate::events::RuntimeEvent::SkillSnapshotPublished { generation: 2 }
+    ));
+    assert_eq!(activation_report.active_generation, 2);
+    assert_eq!(reload_report.previous_generation, 2);
+    assert_eq!(reload_report.active_generation, 3);
+}
+
+#[tokio::test]
+async fn draft_test_timeout_waits_for_publication_lease_and_persists_once() {
+    let fixture = AuthoringFixture::new().await;
+    let (draft, _) =
+        validated_activation_without_request(&fixture, "com.example.timeout-publication-lease")
+            .await;
+    let publication = fixture.manager.begin_publication().await.unwrap();
+    let service = fixture
+        .service
+        .clone()
+        .with_draft_test_deadline(std::time::Duration::from_millis(30));
+    let actor = fixture.actor([SkillGrant::Test]);
+    let revision_id = draft.revision_id.clone();
+    let waiter = tokio::spawn(async move { service.test_draft(&actor, &revision_id).await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(650)).await;
+    let waiter_finished_while_serialization_was_busy = waiter.is_finished();
+    drop(publication);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+        .await
+        .expect("timeout terminalization must finish after publication lease release")
+        .unwrap()
+        .unwrap();
+    let persisted = fixture
+        .state
+        .revision_validation(&draft.revision_id)
+        .await
+        .unwrap();
+
+    assert!(
+        !waiter_finished_while_serialization_was_busy,
+        "terminal continuation was cancelled by a secondary timeout"
+    );
+    assert!(!result.ok);
+    assert_eq!(result.error_class.as_deref(), Some("timeout"));
+    assert_eq!(persisted["test"], serde_json::to_value(&result).unwrap());
+    assert_eq!(fixture.manager.current_snapshot().generation(), 1);
+    assert!(
+        fixture
+            .state
+            .get_installation(&draft.package_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn malformed_revision_id_is_invalid_for_service_and_model_tool() {
     let fixture = AuthoringFixture::new().await;
     let actor = fixture.actor([SkillGrant::Validate]);
