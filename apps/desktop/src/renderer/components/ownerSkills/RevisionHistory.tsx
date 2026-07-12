@@ -8,6 +8,7 @@ type RevisionHistoryProps = {
   canRollback: boolean;
   busy: boolean;
   revisions: OwnerSkillRevision[];
+  isMobile: boolean;
   onRollback: (revision: OwnerSkillRevision) => void;
 };
 
@@ -16,10 +17,34 @@ export function RevisionHistory({
   canRollback,
   busy,
   revisions,
+  isMobile,
   onRollback
 }: RevisionHistoryProps): JSX.Element {
   if (revisions.length === 0) {
     return <Text color="gray" size="2">No revision history is available.</Text>;
+  }
+
+  if (isMobile) {
+    return (
+      <Flex aria-label="Revision history" direction="column" gap="2" role="list">
+        {revisions.map((revision) => {
+          const active = revision.revision_id === activeRevisionId;
+          return (
+            <Box key={revision.revision_id} role="listitem" style={{ borderBottom: "1px solid var(--gray-a6)", padding: "10px 0" }}>
+              <Flex align="center" justify="between" gap="2">
+                <Text weight="medium">{revision.version}{active ? " Active" : ""}</Text>
+                <Badge color={active ? "teal" : "gray"}>{active ? "Active" : revision.status}</Badge>
+              </Flex>
+              <Text as="div" color="gray" size="1" mt="1" style={{ overflowWrap: "anywhere" }}>{revision.revision_id}</Text>
+              <Flex align="center" justify="between" gap="2" mt="2">
+                <Text color="gray" size="1">{revision.created_by || "Unknown"}</Text>
+                {!active && canRollback ? <Button disabled={busy || !revision.validation.ok} onClick={() => onRollback(revision)} size="1" variant="soft"><RotateCcw size={13} aria-hidden="true" /> Rollback to {revision.version}</Button> : null}
+              </Flex>
+            </Box>
+          );
+        })}
+      </Flex>
+    );
   }
 
   return (

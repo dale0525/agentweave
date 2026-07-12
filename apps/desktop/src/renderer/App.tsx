@@ -42,7 +42,7 @@ export default function App(): JSX.Element {
       })
       .catch(() => {
         if (active) {
-          setOwnerPolicy({ mode: "disabled", actorId: "anonymous", grants: [] });
+          setOwnerPolicy({ mode: "disabled", actorId: "anonymous", role: "anonymous", grants: [] });
         }
       });
     return () => {

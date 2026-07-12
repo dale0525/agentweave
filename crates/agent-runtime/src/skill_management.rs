@@ -18,6 +18,8 @@ use tokio::sync::broadcast;
 mod activation;
 #[path = "skill_management_lifecycle.rs"]
 mod lifecycle;
+#[path = "skill_management_read.rs"]
+mod read;
 #[path = "skill_management_transfer.rs"]
 mod transfer;
 #[path = "skill_management_validation.rs"]
@@ -115,12 +117,15 @@ pub(crate) struct SkillApprovalBinding {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SkillPackageStatus {
     pub package_id: SkillPackageId,
+    pub display_name: String,
     pub version: String,
     pub source_layer: String,
     pub status: String,
     pub reason: String,
     pub active_revision_id: Option<String>,
 }
+
+pub use read::{SkillPackageDetail, SkillRevisionDetail, SkillRevisionRequirements};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SkillRollbackReport {
@@ -369,6 +374,7 @@ impl OwnerSkillManagementService {
             .iter()
             .map(|resolved| SkillPackageStatus {
                 package_id: resolved.package.descriptor.id.clone(),
+                display_name: resolved.package.descriptor.display_name.clone(),
                 version: resolved.package.descriptor.version.to_string(),
                 source_layer: layer_name(resolved.package.layer).into(),
                 status: "active".into(),
@@ -381,6 +387,7 @@ impl OwnerSkillManagementService {
                     .iter()
                     .map(|resolved| SkillPackageStatus {
                         package_id: resolved.package.descriptor.id.clone(),
+                        display_name: resolved.package.descriptor.display_name.clone(),
                         version: resolved.package.descriptor.version.to_string(),
                         source_layer: layer_name(resolved.package.layer).into(),
                         status: resolution_status_name(resolved.status).into(),
@@ -405,6 +412,21 @@ impl OwnerSkillManagementService {
             .await?
         {
             let installation = row.installation;
+            let display_name = match installation.active_revision_id.as_deref() {
+                Some(revision_id) => self
+                    .state
+                    .get_revision(revision_id)
+                    .await?
+                    .and_then(|record| {
+                        serde_json::from_value::<crate::skill_package::SkillPackageDescriptor>(
+                            record.descriptor_json,
+                        )
+                        .ok()
+                    })
+                    .map(|descriptor| descriptor.display_name)
+                    .unwrap_or_else(|| display_name(installation.package_id.as_str())),
+                None => display_name(installation.package_id.as_str()),
+            };
             let version = match (&installation.active_revision_id, row.active_version) {
                 (Some(_), Some(version)) => version,
                 (None, None) => String::new(),
@@ -415,11 +437,34 @@ impl OwnerSkillManagementService {
             };
             statuses.push(SkillPackageStatus {
                 package_id: installation.package_id,
+                display_name,
                 version,
                 source_layer: "managed".into(),
                 status: installation.status.as_str().into(),
                 reason: installation_reason(installation.status, installation.enabled).into(),
                 active_revision_id: installation.active_revision_id,
+            });
+        }
+        for revision in self.state.list_staging_revisions().await? {
+            if statuses
+                .iter()
+                .any(|status| status.package_id == revision.package_id)
+            {
+                continue;
+            }
+            statuses.push(SkillPackageStatus {
+                display_name:
+                    serde_json::from_value::<crate::skill_package::SkillPackageDescriptor>(
+                        revision.descriptor_json.clone(),
+                    )
+                    .map(|descriptor| descriptor.display_name)
+                    .unwrap_or_else(|_| display_name(revision.package_id.as_str())),
+                package_id: revision.package_id,
+                version: revision.version,
+                source_layer: "managed".into(),
+                status: "draft".into(),
+                reason: "editable staging draft".into(),
+                active_revision_id: None,
             });
         }
         sort_statuses(&mut statuses);
@@ -613,4 +658,12 @@ fn sort_statuses(statuses: &mut [SkillPackageStatus]) {
             .then_with(|| left.source_layer.cmp(&right.source_layer))
             .then_with(|| left.status.cmp(&right.status))
     });
+}
+
+fn display_name(package_id: &str) -> String {
+    package_id
+        .rsplit('.')
+        .next()
+        .unwrap_or(package_id)
+        .replace('-', " ")
 }

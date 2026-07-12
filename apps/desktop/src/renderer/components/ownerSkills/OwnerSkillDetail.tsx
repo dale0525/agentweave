@@ -10,7 +10,7 @@ import {
   Separator,
   Text
 } from "@radix-ui/themes";
-import { Power, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
+import { Power, RotateCcw, Trash2 } from "lucide-react";
 
 import { OwnerPolicy, canManageOwnerSkills } from "../../ownerBridge";
 import { OwnerSkillPackage, OwnerSkillRevision, OwnerSkillValidation } from "../../api";
@@ -56,10 +56,21 @@ export function OwnerSkillDetail({
 }: OwnerSkillDetailProps): JSX.Element {
   const managed = selected.source_layer === "managed";
   const hasGrant = (grant: string) => canManageOwnerSkills(ownerPolicy, grant);
-  const validated = selectedRevision.validation.ok || selected.status === "active";
-  const revisions = selected.revisions ?? [selectedRevision];
+  const validated = selectedRevision.validation.ok;
+  const revisions = selected.revisions;
+  const hasDraft = selected.editable_draft !== null;
+  const canDisable = managed
+    && selected.status !== "disabled"
+    && selected.status !== "removed"
+    && hasGrant("disable");
+  const canRemove = managed
+    && selected.status !== "removed"
+    && hasGrant("delete_managed");
   const rollbackRevision = revisions.find(
-    (revision) => revision.revision_id !== selected.active_revision_id && revision.validation.ok
+    (revision) => !revision.editable
+      && revision.status === "managed"
+      && revision.revision_id !== selected.active_revision_id
+      && revision.validation.ok
   );
 
   return (
@@ -83,11 +94,6 @@ export function OwnerSkillDetail({
               {managed && hasGrant("rollback") && rollbackRevision ? (
                 <Button disabled={busy} onClick={() => onRollback(rollbackRevision)} variant="soft">
                   <RotateCcw size={15} aria-hidden="true" /> Rollback to {rollbackRevision.version}
-                </Button>
-              ) : null}
-              {managed && hasGrant("activate") ? (
-                <Button disabled={busy || !validated} onClick={onActivate}>
-                  <ShieldCheck size={15} aria-hidden="true" /> Activate revision
                 </Button>
               ) : null}
             </Flex> : null}
@@ -123,6 +129,7 @@ export function OwnerSkillDetail({
         >
           <Tabs.List
             aria-label="Skill details"
+            className="owner-tabs-list"
             style={{
               display: "flex",
               gap: 4,
@@ -136,10 +143,11 @@ export function OwnerSkillDetail({
             {[
               ["overview", "Overview"],
               ["revisions", "Revisions"],
-              ...(managed ? [["draft", "Draft"]] : []),
+              ...(managed && hasDraft ? [["draft", "Draft"]] : []),
               ["requirements", "Requirements"]
             ].map(([value, label]) => (
               <Tabs.Trigger
+                className="owner-tab-trigger"
                 key={value}
                 value={value}
                 style={{
@@ -147,7 +155,7 @@ export function OwnerSkillDetail({
                   minHeight: 40,
                   padding: "0 12px",
                   border: 0,
-                  borderBottom: "2px solid transparent",
+                  borderBottom: undefined,
                   background: "transparent",
                   color: "inherit",
                   cursor: "pointer",
@@ -173,10 +181,11 @@ export function OwnerSkillDetail({
                 canRollback={managed && hasGrant("rollback")}
                 onRollback={onRollback}
                 revisions={revisions}
+                isMobile={isMobile}
               />
             </Box>
           </Tabs.Content>
-          {managed ? (
+          {managed && hasDraft ? (
             <Tabs.Content style={{ minWidth: 0 }} value="draft">
               <Box pt="4">
                 <SkillDraftEditor
@@ -198,15 +207,15 @@ export function OwnerSkillDetail({
           ) : null}
           <Tabs.Content style={{ minWidth: 0 }} value="requirements">
             <Grid columns={{ initial: "1", md: "2" }} gap="3" pt="4" style={{ minWidth: 0 }}>
-              <Requirement label="Runtime tools" values={selectedRevision.required_tools} />
-              <Requirement label="Capabilities" values={selectedRevision.required_capabilities} />
-              <Requirement label="Connectors" values={selectedRevision.required_connectors ?? []} />
-              <Requirement label="Dependencies" values={selectedRevision.dependencies ?? []} />
+              <Requirement label="Runtime tools" values={selectedRevision.requirements.runtime_tools} />
+              <Requirement label="Capabilities" values={selectedRevision.requirements.capabilities} />
+              <Requirement label="Connectors" values={selectedRevision.requirements.connectors} />
+              <Requirement label="Dependencies" values={selectedRevision.requirements.packages} />
             </Grid>
           </Tabs.Content>
         </Tabs.Root>
 
-        {managed && (hasGrant("disable") || hasGrant("delete_managed")) ? (
+        {canDisable || canRemove ? (
           <Box>
             <Separator size="4" mb="4" />
             <Flex align="center" justify="between" gap="4" wrap="wrap">
@@ -215,12 +224,12 @@ export function OwnerSkillDetail({
                 <Text color="gray" size="2">Disable or remove this managed package.</Text>
               </Box>
               <Flex gap="2" wrap="wrap">
-                {hasGrant("disable") ? (
+                {canDisable ? (
                   <Button color="red" disabled={busy} onClick={onDisable} variant="soft">
                     <Power size={15} aria-hidden="true" /> Disable skill
                   </Button>
                 ) : null}
-                {hasGrant("delete_managed") ? (
+                {canRemove ? (
                   <Button color="red" disabled={busy || !validated} onClick={onRemove} variant="outline">
                     <Trash2 size={15} aria-hidden="true" /> Remove skill
                   </Button>
@@ -231,7 +240,7 @@ export function OwnerSkillDetail({
         ) : null}
       </Flex>
       </ScrollArea>
-      {isMobile && managed && (hasGrant("activate") || (hasGrant("rollback") && rollbackRevision)) ? (
+      {isMobile && managed && hasGrant("rollback") && rollbackRevision ? (
         <Flex
           gap="2"
           p="3"
@@ -244,11 +253,6 @@ export function OwnerSkillDetail({
           {hasGrant("rollback") && rollbackRevision ? (
             <Button disabled={busy} onClick={() => onRollback(rollbackRevision)} variant="soft" style={{ flex: 1 }}>
               <RotateCcw size={15} aria-hidden="true" /> Rollback
-            </Button>
-          ) : null}
-          {hasGrant("activate") ? (
-            <Button disabled={busy || !validated} onClick={onActivate} style={{ flex: 1 }}>
-              <ShieldCheck size={15} aria-hidden="true" /> Activate
             </Button>
           ) : null}
         </Flex>
@@ -272,7 +276,7 @@ function Requirement({ label, values }: { label: string; values: string[] }): JS
       <Heading as="h3" mb="2" size="2">{label}</Heading>
       <Flex gap="2" wrap="wrap">
         {values.length > 0
-          ? values.map((value) => <Badge key={value}>{value}</Badge>)
+          ? values.map((value) => <Badge key={value} style={{ maxWidth: "100%", overflowWrap: "anywhere", whiteSpace: "normal" }}>{value}</Badge>)
           : <Text color="gray" size="2">None</Text>}
       </Flex>
     </Box>

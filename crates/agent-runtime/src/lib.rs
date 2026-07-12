@@ -45,6 +45,7 @@ mod skill_store_execution;
 mod skill_store_faults;
 mod skill_store_fs;
 mod skill_store_fs_types;
+mod skill_store_inspection;
 mod skill_store_locks;
 mod skill_store_operations;
 mod skill_store_path_prepare;

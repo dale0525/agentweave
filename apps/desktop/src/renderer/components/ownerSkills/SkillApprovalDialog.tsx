@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Badge, Box, Button, Flex, Heading, ScrollArea, Separator, Text, Theme } from "@radix-ui/themes";
+import { Badge, Box, Button, Flex, Heading, IconButton, ScrollArea, Separator, Text, Theme, Tooltip } from "@radix-ui/themes";
 import { LoaderCircle, X } from "lucide-react";
 
 import { OwnerSkillApproval, OwnerSkillRevision } from "../../api";
@@ -8,6 +8,8 @@ export type OwnerApprovalOperation = "activation" | "removal" | "rollback";
 
 type SkillApprovalDialogProps = {
   approval: OwnerSkillApproval | null;
+  approverActor: string | null;
+  approverAvailable: boolean;
   busy: boolean;
   error: string | null;
   operation: OwnerApprovalOperation;
@@ -18,6 +20,8 @@ type SkillApprovalDialogProps = {
 
 export function SkillApprovalDialog({
   approval,
+  approverActor,
+  approverAvailable,
   busy,
   error,
   operation,
@@ -75,11 +79,7 @@ export function SkillApprovalDialog({
                 </Badge>
               </Flex>
             </Box>
-            <Dialog.Close asChild>
-              <Button aria-label="Close approval" disabled={busy} size="1" variant="ghost">
-                <X size={17} aria-hidden="true" />
-              </Button>
-            </Dialog.Close>
+            <Tooltip content="Close approval"><Dialog.Close asChild><IconButton aria-label="Close approval" disabled={busy} size="1" variant="ghost"><X size={17} aria-hidden="true" /></IconButton></Dialog.Close></Tooltip>
           </Flex>
           <Separator size="4" />
           <ScrollArea scrollbars="vertical" style={{ maxHeight: "calc(100vh - 300px)" }}>
@@ -97,11 +97,11 @@ export function SkillApprovalDialog({
                     whiteSpace: "pre-wrap"
                   }}
                 >
-                  <Text size="1">{revision?.instructions || "No instruction changes"}</Text>
+                  <DiffText value={revision?.instructions || "No instruction changes"} />
                 </Box>
               </ApprovalSection>
               <ApprovalSection title="Required tools">
-                <ValueList empty="No runtime tools" values={revision?.required_tools ?? []} />
+                <ValueList empty="No runtime tools" values={revision?.requirements.runtime_tools ?? []} />
               </ApprovalSection>
               <ApprovalSection title="Capability diff">
                 {capabilities.length === 0 ? (
@@ -112,14 +112,18 @@ export function SkillApprovalDialog({
                 <ValueList
                   empty="No connector or dependency changes"
                   values={[
-                    ...(revision?.required_connectors ?? []),
-                    ...(revision?.dependencies ?? [])
+                    ...(revision?.requirements.connectors ?? []),
+                    ...(revision?.requirements.packages ?? [])
                   ]}
                 />
               </ApprovalSection>
               <Flex justify="between" gap="3" wrap="wrap">
-                <Text color="gray" size="2">Approving actor</Text>
+                <Text color="gray" size="2">Requested by</Text>
                 <Text size="2" weight="medium">{approval?.requested_by ?? "Unknown"}</Text>
+              </Flex>
+              <Flex justify="between" gap="3" wrap="wrap">
+                <Text color="gray" size="2">Approving actor</Text>
+                <Text size="2" weight="medium">{approverActor ?? "Independent approver unavailable"}</Text>
               </Flex>
               <Text color="gray" size="2">
                 {operation === "removal"
@@ -134,7 +138,7 @@ export function SkillApprovalDialog({
             <Dialog.Close asChild>
               <Button disabled={busy} variant="soft">Cancel</Button>
             </Dialog.Close>
-            <Button disabled={busy || !revision?.validation.ok} onClick={onApprove}>
+            <Button disabled={busy || !revision?.validation.ok || !approverAvailable} onClick={onApprove}>
               {busy ? <LoaderCircle size={15} aria-hidden="true" /> : null}
               {busy ? "Approving..." : `Approve ${operation}`}
             </Button>
@@ -168,7 +172,11 @@ function getAddedCapabilities(
     const added = permissionDiff.capabilities.added;
     if (Array.isArray(added)) return added.filter((value): value is string => typeof value === "string");
   }
-  return revision?.required_capabilities ?? [];
+  return revision?.requirements.capabilities ?? [];
+}
+
+function DiffText({ value }: { value: string }): JSX.Element {
+  return <>{value.split("\n").map((line, index) => <Text as="div" color={line.startsWith("+") ? "green" : line.startsWith("-") ? "red" : undefined} key={`${index}-${line}`} size="1">{line || " "}</Text>)}</>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

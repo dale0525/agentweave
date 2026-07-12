@@ -4,7 +4,7 @@ use agent_runtime::skill_management::{
     SkillPackageStatus,
 };
 use agent_runtime::skill_policy::{
-    ActorContext, SkillManagementMode, SkillManagementPolicy, SkillOperation,
+    ActorContext, SkillGrant, SkillManagementMode, SkillManagementPolicy, SkillOperation,
 };
 use agent_runtime::skill_state::SkillAuditRecord;
 use axum::body::Body;
@@ -110,6 +110,15 @@ struct OwnerSkillsResponse {
     managed: Vec<SkillPackageStatus>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OwnerPrincipalResponse {
+    actor_id: String,
+    role: String,
+    grants: Vec<SkillGrant>,
+    policy: SkillManagementPolicy,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateDraftBody {
@@ -151,8 +160,10 @@ pub(crate) fn router(state: &Arc<AppState>) -> Option<Router<Arc<AppState>>> {
         return None;
     }
     let mut router = Router::new()
+        .route("/owner/principal", get(owner_principal))
         .route("/owner/policy", get(owner_policy))
         .route("/owner/skills", get(list_skills))
+        .route("/owner/skills/{package_id}/detail", get(skill_detail))
         .route("/owner/skills/{package_id}/audit", get(list_audit));
     if allows_route(owner, SkillOperation::CreateDraft) {
         router = router.route("/owner/skills/drafts", post(create_draft));
@@ -202,6 +213,19 @@ pub(crate) fn router(state: &Arc<AppState>) -> Option<Router<Arc<AppState>>> {
     Some(router.route_layer(middleware::from_fn_with_state(state.clone(), require_owner)))
 }
 
+async fn owner_principal(
+    State(state): State<Arc<AppState>>,
+    Extension(actor): Extension<ActorContext>,
+) -> Result<Json<OwnerPrincipalResponse>, OwnerApiError> {
+    let owner = owner_config(&state)?;
+    Ok(Json(OwnerPrincipalResponse {
+        actor_id: actor.actor_id,
+        role: actor.role,
+        grants: actor.grants.into_iter().collect(),
+        policy: owner.policy().clone(),
+    }))
+}
+
 fn allows_route(owner: &OwnerApiConfig, operation: SkillOperation) -> bool {
     owner.auth.actors().any(|actor| {
         owner
@@ -237,6 +261,22 @@ async fn list_skills(
         .await
         .map_err(OwnerApiError::from_service)?;
     Ok(Json(OwnerSkillsResponse { effective, managed }))
+}
+
+async fn skill_detail(
+    State(state): State<Arc<AppState>>,
+    Extension(actor): Extension<ActorContext>,
+    Path(package_id): Path<String>,
+) -> Result<Json<agent_runtime::skill_management::SkillPackageDetail>, OwnerApiError> {
+    let package_id = agent_runtime::skill_package::SkillPackageId::parse(&package_id)
+        .map_err(|_| OwnerApiError::BadRequest)?;
+    Ok(Json(
+        owner_config(&state)?
+            .service
+            .get_skill_detail(&actor, &package_id)
+            .await
+            .map_err(OwnerApiError::from_service)?,
+    ))
 }
 
 async fn list_audit(
@@ -566,6 +606,35 @@ impl IntoResponse for OwnerApiError {
 #[cfg(test)]
 mod terminal_tests {
     use super::*;
+
+    #[test]
+    fn desktop_principal_fixture_matches_rust_serialization() {
+        let actor =
+            ActorContext::owner("limited-owner", [SkillGrant::Inspect, SkillGrant::Validate]);
+        let actual = serde_json::to_value(OwnerPrincipalResponse {
+            actor_id: actor.actor_id,
+            role: actor.role,
+            grants: actor.grants.into_iter().collect(),
+            policy: SkillManagementPolicy::owner_only(),
+        })
+        .unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../apps/desktop/tests/fixtures/owner-principal.json"
+        ))
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn desktop_package_detail_fixture_matches_rust_dto_shape() {
+        let fixture =
+            include_str!("../../../apps/desktop/tests/fixtures/owner-package-detail.json");
+        let detail: agent_runtime::skill_management::SkillPackageDetail =
+            serde_json::from_str(fixture).unwrap();
+        let actual = serde_json::to_value(detail).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        assert_eq!(actual, expected);
+    }
 
     #[tokio::test]
     async fn typed_concurrent_validation_conflict_maps_to_safe_http_409() {

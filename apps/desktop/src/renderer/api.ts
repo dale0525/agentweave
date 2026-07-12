@@ -62,36 +62,35 @@ export type OwnerSkillRevision = {
   revision_id: string;
   version: string;
   status: string;
+  editable: boolean;
   created_by: string;
   created_at: string;
   kind: string;
   instructions: string;
   validation: OwnerSkillValidation;
-  required_tools: string[];
-  required_capabilities: string[];
-  required_connectors?: string[];
-  dependencies?: string[];
+  requirements: OwnerSkillRequirements;
   permission_diff?: unknown;
 };
 
-export type OwnerSkillPackage = {
+export type OwnerSkillPackageSummary = {
   package_id: string;
-  display_name?: string;
+  display_name: string;
   version: string;
   source_layer: string;
   status: string;
   reason: string;
   active_revision_id: string | null;
-  kind?: string;
-  instructions?: string;
-  validation?: OwnerSkillValidation;
-  requirements?: OwnerSkillRequirements;
-  revisions?: OwnerSkillRevision[];
+};
+
+export type OwnerSkillPackage = OwnerSkillPackageSummary & {
+  display_name: string;
+  revisions: OwnerSkillRevision[];
+  editable_draft: OwnerSkillRevision | null;
 };
 
 export type OwnerSkillInventory = {
-  effective: OwnerSkillPackage[];
-  managed: OwnerSkillPackage[];
+  effective: OwnerSkillPackageSummary[];
+  managed: OwnerSkillPackageSummary[];
 };
 
 export type OwnerSkillDraftSummary = {
@@ -117,17 +116,6 @@ export type OwnerSkillMutationReport = {
   active_generation?: number;
   active_revision_id?: string;
   generation?: number;
-};
-
-export type OwnerSkillAuditRecord = {
-  id: string;
-  actor_id: string;
-  operation: string;
-  package_id: string;
-  revision_id: string | null;
-  result: string;
-  metadata_json: Record<string, unknown>;
-  created_at: string;
 };
 
 export type DevSkillPackageKind =

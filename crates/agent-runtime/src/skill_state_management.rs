@@ -1,7 +1,8 @@
 use crate::skill_package::SkillPackageId;
 use crate::skill_state::SkillStateStore;
 use crate::skill_state_rows::{
-    INSTALLATION_COLUMNS, SkillInstallationRecord, installation_from_row,
+    INSTALLATION_COLUMNS, REVISION_COLUMNS, SkillInstallationRecord, SkillRevisionRecord,
+    installation_from_row, revision_from_row,
 };
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
@@ -15,6 +16,34 @@ pub struct ManagedSkillInstallationView {
 }
 
 impl SkillStateStore {
+    pub async fn list_package_revisions(
+        &self,
+        package_id: &SkillPackageId,
+    ) -> anyhow::Result<Vec<SkillRevisionRecord>> {
+        let query = format!(
+            "SELECT {REVISION_COLUMNS} FROM skill_revisions WHERE package_id = ? ORDER BY created_at DESC, revision_id DESC"
+        );
+        sqlx::query(&query)
+            .bind(package_id.as_str())
+            .fetch_all(self.pool())
+            .await?
+            .iter()
+            .map(revision_from_row)
+            .collect()
+    }
+
+    pub async fn list_staging_revisions(&self) -> anyhow::Result<Vec<SkillRevisionRecord>> {
+        let query = format!(
+            "SELECT {REVISION_COLUMNS} FROM skill_revisions WHERE lifecycle_status = 'staging' ORDER BY created_at DESC, revision_id DESC"
+        );
+        sqlx::query(&query)
+            .fetch_all(self.pool())
+            .await?
+            .iter()
+            .map(revision_from_row)
+            .collect()
+    }
+
     pub async fn get_installation(
         &self,
         package_id: &SkillPackageId,
