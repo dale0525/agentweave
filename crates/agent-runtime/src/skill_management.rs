@@ -708,6 +708,7 @@ fn resolution_status_name(status: SkillResolutionStatus) -> &'static str {
         SkillResolutionStatus::PlatformUnsupported => "platform_unsupported",
         SkillResolutionStatus::RuntimeIncompatible => "runtime_incompatible",
         SkillResolutionStatus::CircuitOpen => "circuit_open",
+        SkillResolutionStatus::NetworkPolicyUnavailable => "network_policy_unavailable",
     }
 }
 

@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(deprecated))]
+
 use agent_runtime::{
     skill_management::OwnerSkillManagementService,
     skill_policy::{ActorContext, SkillGrant, SkillManagementMode, SkillManagementPolicy},
@@ -51,7 +53,11 @@ async fn main() -> anyhow::Result<()> {
     if owner_host.is_none() {
         reconcile_managed_startup(&loaded, storage.clone()).await?;
     }
-    let runtime_config = runtime_config_from_env();
+    let mut control_roots = loaded.control_roots(&skills_root);
+    if let Some(database_path) = sqlite_database_path(&database_url) {
+        control_roots.push(database_path);
+    }
+    let runtime_config = runtime_config_from_env().excluding_workspace_roots(control_roots);
     let connector_catalog = runtime_config
         .connectors
         .iter()
@@ -106,6 +112,15 @@ fn skills_root_from_env() -> PathBuf {
     std::env::var("GENERAL_AGENT_SKILLS_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_SKILLS_ROOT))
+}
+
+fn sqlite_database_path(url: &str) -> Option<PathBuf> {
+    let value = url
+        .strip_prefix("sqlite://")
+        .or_else(|| url.strip_prefix("sqlite:"))?
+        .split('?')
+        .next()?;
+    (!value.is_empty() && value != ":memory:").then(|| PathBuf::from(value))
 }
 
 #[derive(Clone)]

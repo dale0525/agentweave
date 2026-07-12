@@ -19,6 +19,7 @@ pub enum VfsError {
     UnsupportedScheme,
     UnsupportedRoot,
     EmptyPath,
+    ReservedSkillControlPath,
     PathTraversal,
     PathEscape,
 }
@@ -32,6 +33,8 @@ impl AppDataVfs {
     }
 
     pub fn resolve_uri(&self, uri: &str) -> Result<PathBuf, VfsError> {
+        crate::skill_security::reject_reserved_skill_uri(uri)
+            .map_err(|_| VfsError::ReservedSkillControlPath)?;
         let rest = uri
             .strip_prefix("app://")
             .ok_or(VfsError::UnsupportedScheme)?;

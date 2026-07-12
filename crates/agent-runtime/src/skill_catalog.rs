@@ -69,6 +69,9 @@ impl SkillCatalog {
         })
     }
 
+    #[deprecated(
+        note = "development/test compatibility only; production hosts must use SkillManager"
+    )]
     pub async fn load_development(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         let root = root.as_ref();
         let canonical_root = tokio::fs::canonicalize(root)

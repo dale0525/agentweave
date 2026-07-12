@@ -87,6 +87,9 @@ test("Android skill bundle uses the generated main asset directory", () => {
     assetRoot: "/project/apps/android/app/build/generated/skillAssets/main/builtin-skills",
     bundleRoot: "/project/apps/android/app/build/generated/skillAssets/main/builtin-skills/bundle",
     hashFile: "/project/apps/android/app/build/generated/skillAssets/main/builtin-skills/bundle.sha256",
+    compatibilityRoot: "/project/apps/android/app/build/generated/skillAssets/main/skills",
+    compatibilityManifest: "/project/apps/android/app/build/generated/skillAssets/main/skills/skill-bundle.json",
+    compatibilityLock: "/project/apps/android/app/build/generated/skillAssets/main/skills/skill-bundle.lock",
   });
 });
 
@@ -150,7 +153,15 @@ test("Android asset preparation removes stale output and round-trips staged bund
       assert.equal(existsSync(join(sourceRoot, "desktop-skill")), false);
       const generation = join(bundleRoot, "generations/test-generation");
       mkdirSync(generation, { recursive: true });
-      writeFileSync(join(bundleRoot, "current"), "current");
+      writeFileSync(join(bundleRoot, "current"), JSON.stringify({
+        schemaVersion: 2,
+        active: {
+          generation: "test-generation",
+          manifestSha256: "a".repeat(64),
+          lockSha256: "b".repeat(64),
+        },
+        previous: null,
+      }));
       writeFileSync(join(generation, "skill-bundle.json"), "manifest");
       writeFileSync(join(generation, "skill-bundle.lock"), "lock");
     });
@@ -158,6 +169,8 @@ test("Android asset preparation removes stale output and round-trips staged bund
     assert.equal(existsSync(stale), false);
     assert.match(result.contentHash, /^[0-9a-f]{64}$/);
     assert.equal(readFileSync(result.hashFile, "utf8"), `${result.contentHash}\n`);
+    assert.equal(readFileSync(result.compatibilityManifest, "utf8"), "manifest");
+    assert.equal(readFileSync(result.compatibilityLock, "utf8"), "lock");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

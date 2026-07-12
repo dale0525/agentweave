@@ -15,7 +15,6 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillManifest {
     pub name: String,
@@ -26,7 +25,6 @@ pub struct SkillManifest {
     pub entry: SkillEntry,
     pub tools: Vec<SkillTool>,
 }
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillEntry {
     #[serde(rename = "type")]
@@ -35,7 +33,6 @@ pub struct SkillEntry {
     #[serde(default)]
     pub args: Vec<String>,
 }
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillTool {
     pub name: String,
@@ -44,7 +41,6 @@ pub struct SkillTool {
     pub permission: ToolPermission,
     pub input_schema: Value,
 }
-
 #[derive(Debug, Clone)]
 pub struct SkillExecutionContext {
     pub workspace_root: PathBuf,
@@ -122,10 +118,9 @@ impl SkillRegistry {
         })
     }
 
-    pub async fn load(root: impl AsRef<Path>) -> anyhow::Result<Self> {
-        Self::load_development(root).await
-    }
-
+    #[deprecated(
+        note = "development/test compatibility only; production hosts must use SkillManager"
+    )]
     pub async fn load_development(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         let mut skills = Vec::new();
         let mut entries = tokio::fs::read_dir(root).await?;
@@ -669,7 +664,7 @@ mod tests {
             .and_then(Path::parent)
             .unwrap()
             .join("skills");
-        let registry = SkillRegistry::load(skills_root).await.unwrap();
+        let registry = SkillRegistry::load_development(skills_root).await.unwrap();
 
         assert!(registry.tools().iter().any(|tool| tool.name == "echo"));
     }

@@ -169,7 +169,14 @@ impl MobileRuntime {
             .block_on(skill_manager.startup_reconcile())
             .context("managed skill startup reconciliation failed")?;
         let model_configured = tokio.block_on(storage.load_model_config())?.is_some();
-        let runtime_config = RuntimeConfig::workspace_write(&app_data_dir, &app_data_dir);
+        let runtime_config = RuntimeConfig::workspace_write(&app_data_dir, &app_data_dir)
+            .excluding_workspace_roots([
+                prepared_builtin,
+                managed_skills_path,
+                staging_skills_path,
+                quarantine_skills_path,
+                database_path,
+            ]);
 
         Ok(Self {
             tokio,
@@ -778,6 +785,7 @@ fn resolution_status_name(status: SkillResolutionStatus) -> &'static str {
         SkillResolutionStatus::PlatformUnsupported => "platform_unsupported",
         SkillResolutionStatus::RuntimeIncompatible => "runtime_incompatible",
         SkillResolutionStatus::CircuitOpen => "circuit_open",
+        SkillResolutionStatus::NetworkPolicyUnavailable => "network_policy_unavailable",
     }
 }
 

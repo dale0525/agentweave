@@ -38,6 +38,8 @@ pub enum CommandMode {
 pub struct RuntimeConfig {
     pub workspace_root: PathBuf,
     pub cwd: PathBuf,
+    #[serde(default)]
+    pub excluded_workspace_roots: Vec<PathBuf>,
     pub mode: RuntimeMode,
     pub command_mode: CommandMode,
     #[serde(default = "default_built_in_tools_enabled")]
@@ -64,6 +66,7 @@ impl RuntimeConfig {
         Self {
             workspace_root: workspace_root.into(),
             cwd: cwd.into(),
+            excluded_workspace_roots: Vec::new(),
             mode,
             command_mode: CommandMode::Disabled,
             built_in_tools_enabled: true,
@@ -84,6 +87,13 @@ impl RuntimeConfig {
 
     pub fn without_builtin_tools(mut self) -> Self {
         self.built_in_tools_enabled = false;
+        self
+    }
+
+    pub fn excluding_workspace_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.excluded_workspace_roots.extend(roots);
+        self.excluded_workspace_roots.sort();
+        self.excluded_workspace_roots.dedup();
         self
     }
 }
@@ -246,6 +256,14 @@ impl ToolRegistry {
         config: &RuntimeConfig,
         management: Option<SkillManagementToolContext>,
     ) -> anyhow::Result<Self> {
+        if config.command_mode == CommandMode::Allowed
+            && path::workspace_contains_excluded_root(
+                &config.workspace_root,
+                &config.excluded_workspace_roots,
+            )?
+        {
+            anyhow::bail!("command workspace cannot contain skill control-plane roots");
+        }
         let external_definitions = external_definitions(&config.external_tools)?;
         let external_discovery = external_discovery(&config.external_tools)?;
         Self {

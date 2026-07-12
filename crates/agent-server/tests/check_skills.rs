@@ -133,11 +133,13 @@ async fn legacy_synthesis_is_a_warning_not_a_release_error() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("warning: legacy package descriptor synthesized")
-    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("warning: legacy package descriptor synthesized"));
+    assert!(stderr.contains("migration: synthesized package id legacy.local.legacy"));
+    assert!(stderr.contains("inferred kind native_runtime"));
+    assert!(stderr.contains("recommended general-agent.json"));
+    assert!(stderr.contains("\"schemaVersion\":1"));
+    assert!(!root.join("legacy/general-agent.json").exists());
     remove_test_dir(root).await;
 }
 

@@ -427,15 +427,23 @@ fn plan_add(
     path: String,
     lines: Vec<String>,
 ) -> Result<PlannedChange, PatchFailure> {
-    let requested_path =
-        super::path::resolve_workspace_path(&config.workspace_root, &path).map_err(path_failure)?;
+    let requested_path = super::path::resolve_workspace_path_with_exclusions(
+        &config.workspace_root,
+        &path,
+        &config.excluded_workspace_roots,
+    )
+    .map_err(path_failure)?;
     match fs::symlink_metadata(&requested_path.absolute) {
         Ok(_) => return Err(PatchFailure::new("path_exists", "path already exists")),
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(PatchFailure::new("internal_error", error.to_string())),
     }
-    let workspace_path = super::path::resolve_workspace_output_path(&config.workspace_root, &path)
-        .map_err(path_failure)?;
+    let workspace_path = super::path::resolve_workspace_output_path_with_exclusions(
+        &config.workspace_root,
+        &path,
+        &config.excluded_workspace_roots,
+    )
+    .map_err(path_failure)?;
     Ok(PlannedChange::Add {
         path: display_path(&workspace_path.relative),
         absolute: workspace_path.absolute,
@@ -449,9 +457,12 @@ fn plan_update(
     path: String,
     hunks: Vec<Hunk>,
 ) -> Result<PlannedChange, PatchFailure> {
-    let workspace_path =
-        super::path::resolve_existing_workspace_path(&config.workspace_root, &path)
-            .map_err(path_failure)?;
+    let workspace_path = super::path::resolve_existing_workspace_path_with_exclusions(
+        &config.workspace_root,
+        &path,
+        &config.excluded_workspace_roots,
+    )
+    .map_err(path_failure)?;
     ensure_file(&workspace_path.absolute)?;
     let original = read_text_file(&workspace_path.absolute)?;
     let (content, added_lines, removed_lines) = apply_hunks(original, &hunks)?;
@@ -465,9 +476,12 @@ fn plan_update(
 }
 
 fn plan_delete(config: &RuntimeConfig, path: String) -> Result<PlannedChange, PatchFailure> {
-    let workspace_path =
-        super::path::resolve_existing_workspace_path(&config.workspace_root, &path)
-            .map_err(path_failure)?;
+    let workspace_path = super::path::resolve_existing_workspace_path_with_exclusions(
+        &config.workspace_root,
+        &path,
+        &config.excluded_workspace_roots,
+    )
+    .map_err(path_failure)?;
     ensure_file(&workspace_path.absolute)?;
     let removed_lines = fs::read(&workspace_path.absolute)
         .map(|bytes| count_lines(&bytes))
@@ -611,7 +625,11 @@ fn path_failure(error: anyhow::Error) -> PatchFailure {
 }
 
 fn error_code_for_path(message: &str) -> &'static str {
-    if message.contains("outside workspace") || message.contains("parent traversal") {
+    if message == crate::skill_security::RESERVED_SKILL_URI_ERROR
+        || message == "workspace path is reserved for skill management"
+    {
+        "permission_denied"
+    } else if message.contains("outside workspace") || message.contains("parent traversal") {
         "path_escape"
     } else if message.contains("No such file") || message.contains("not found") {
         "path_not_found"

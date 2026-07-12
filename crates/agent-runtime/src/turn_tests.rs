@@ -55,7 +55,7 @@ async fn executes_tool_and_continues_until_text_response() {
         .and_then(Path::parent)
         .unwrap()
         .join("skills");
-    let skills = SkillRegistry::load(skills_root).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root).await.unwrap();
     let runner = TurnRunner::new(
         FakeModel {
             calls: AtomicUsize::new(0),
@@ -87,7 +87,7 @@ async fn sends_runtime_tool_schemas_to_the_model() {
         calls: AtomicUsize::new(0),
         requests: Mutex::new(Vec::new()),
     };
-    let skills = SkillRegistry::load(skills_root).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root).await.unwrap();
     let runner = TurnRunner::new(model, skills);
 
     let _events = runner.run("echo hello").await.unwrap();
@@ -203,7 +203,9 @@ fn request_has_tool(request: &model_gateway::responses::GatewayRequest, name: &s
 #[tokio::test]
 async fn builtin_create_directory_creates_workspace_directory_through_turn_loop() {
     let workspace = test_workspace("create-directory");
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
     let runner = TurnRunner::new_with_config(
         ScriptedModel {
@@ -253,7 +255,9 @@ async fn builtin_create_directory_creates_workspace_directory_through_turn_loop(
 async fn phase_two_search_files_executes_through_turn_loop() {
     let workspace = test_workspace("phase-two-search-files");
     fs::write(workspace.join("notes.txt"), "find me\n").unwrap();
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
     let runner = TurnRunner::new_with_config(
         FakePhaseTwoModel {
@@ -278,7 +282,9 @@ async fn phase_two_search_files_executes_through_turn_loop() {
 #[tokio::test]
 async fn phase_two_exec_command_is_advertised_only_when_allowed() {
     let disabled_workspace = test_workspace("phase-two-command-disabled");
-    let disabled_skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let disabled_skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let disabled_config =
         RuntimeConfig::workspace_write(disabled_workspace.clone(), disabled_workspace.clone());
     let disabled_runner = TurnRunner::new_with_config(
@@ -307,7 +313,9 @@ async fn phase_two_exec_command_is_advertised_only_when_allowed() {
     remove_workspace(&disabled_workspace);
 
     let workspace = test_workspace("phase-two-command-allowed");
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone())
         .with_command_mode(crate::tools::CommandMode::Allowed);
     let runner = TurnRunner::new_with_config(
@@ -336,7 +344,9 @@ async fn phase_two_exec_command_is_advertised_only_when_allowed() {
 #[tokio::test]
 async fn phase_two_apply_patch_executes_through_turn_loop() {
     let workspace = test_workspace("phase-two-apply-patch");
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
     let runner = TurnRunner::new_with_config(
         FakePhaseTwoModel {
@@ -367,7 +377,9 @@ async fn phase_two_apply_patch_executes_through_turn_loop() {
 #[tokio::test]
 async fn approval_required_blocks_tool_before_raw_arguments_event() {
     let workspace = test_workspace("approval-required");
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let mut config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
     config.approval_policy = crate::policy::ApprovalPolicy::OnWorkspaceWrite;
     let runner = TurnRunner::new_with_config(
@@ -402,7 +414,9 @@ async fn approval_required_blocks_tool_before_raw_arguments_event() {
 #[tokio::test]
 async fn deferred_external_tools_are_not_sent_as_model_tool_schemas() {
     let workspace = test_workspace("deferred-tools-hidden");
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let config = RuntimeConfig {
         external_tools: vec![crate::tools::discovery::ExternalToolConfig::mcp(
             "search",
@@ -443,7 +457,9 @@ async fn deferred_external_tools_are_not_sent_as_model_tool_schemas() {
 #[tokio::test]
 async fn goal_context_is_injected_into_turn_input() {
     let workspace = test_workspace("goal-context");
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let runner = TurnRunner::new_with_config(
         ScriptedModel {
             calls: AtomicUsize::new(0),
@@ -471,7 +487,9 @@ async fn goal_context_is_injected_into_turn_input() {
 #[tokio::test]
 async fn usage_budget_accumulates_gateway_usage_and_stops_turn() {
     let workspace = test_workspace("usage-budget");
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let runner = TurnRunner::new_with_config(
         ScriptedModel {
             calls: AtomicUsize::new(0),
@@ -509,7 +527,9 @@ async fn usage_budget_accumulates_gateway_usage_and_stops_turn() {
 #[tokio::test]
 async fn context_compaction_emits_event_when_budget_applies() {
     let workspace = test_workspace("context-compaction");
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let runner = TurnRunner::new_with_config(
         ScriptedModel {
             calls: AtomicUsize::new(0),
@@ -580,7 +600,9 @@ async fn first_request_includes_instruction_context_and_tool_schemas() {
         "Project instruction from AGENTS.md",
     )
     .unwrap();
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
     let runner = TurnRunner::new_with_config(
         ScriptedModel {
@@ -631,7 +653,9 @@ async fn first_request_includes_instruction_context_and_tool_schemas() {
 #[tokio::test]
 async fn read_only_mode_denies_create_directory_and_does_not_create_folder() {
     let workspace = test_workspace("read-only");
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let config = RuntimeConfig::read_only(workspace.clone(), workspace.clone());
     let runner = TurnRunner::new_with_config(
         ScriptedModel {
@@ -679,7 +703,9 @@ async fn read_only_mode_denies_create_directory_and_does_not_create_folder() {
 #[tokio::test]
 async fn runaway_tool_loop_stops_at_max_tool_calls_per_turn() {
     let workspace = test_workspace("max-tool-calls");
-    let skills = SkillRegistry::load(skills_root()).await.unwrap();
+    let skills = SkillRegistry::load_development(skills_root())
+        .await
+        .unwrap();
     let mut config = RuntimeConfig::workspace_write(workspace.clone(), workspace.clone());
     config.max_tool_calls_per_turn = 2;
     let runner = TurnRunner::new_with_config(

@@ -34,6 +34,20 @@ pub(super) struct LoadedSkillManager {
     pub(super) managed_source: Option<ManagedSkillSource>,
 }
 
+impl LoadedSkillManager {
+    pub(super) fn control_roots(&self, builtin_root: &Path) -> Vec<PathBuf> {
+        let mut roots = vec![builtin_root.to_path_buf()];
+        if let Some(store) = &self.managed_store {
+            roots.extend([
+                store.paths().managed.clone(),
+                store.paths().staging.clone(),
+                store.paths().quarantine.clone(),
+            ]);
+        }
+        roots
+    }
+}
+
 pub(super) fn managed_skills_config_from_lookup<F>(
     lookup: F,
 ) -> anyhow::Result<Option<ManagedSkillsConfig>>

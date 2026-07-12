@@ -80,11 +80,15 @@ export function androidSkillAssetPaths(projectRoot) {
     "main",
   );
   const assetRoot = join(generatedRoot, "builtin-skills");
+  const compatibilityRoot = join(generatedRoot, "skills");
   return {
     generatedRoot,
     assetRoot,
     bundleRoot: join(assetRoot, "bundle"),
     hashFile: join(assetRoot, "bundle.sha256"),
+    compatibilityRoot,
+    compatibilityManifest: join(compatibilityRoot, "skill-bundle.json"),
+    compatibilityLock: join(compatibilityRoot, "skill-bundle.lock"),
   };
 }
 
@@ -152,7 +156,9 @@ export function prepareAndroidSkillAssetsAt(root, runBundle) {
     "androidSkillSource",
   );
   makeTreeWritableNoFollow(paths.assetRoot);
+  makeTreeWritableNoFollow(paths.compatibilityRoot);
   rmSync(paths.assetRoot, { recursive: true, force: true });
+  rmSync(paths.compatibilityRoot, { recursive: true, force: true });
   rmSync(sourceRoot, { recursive: true, force: true });
   mkdirSync(paths.assetRoot, { recursive: true });
   mkdirSync(sourceRoot, { recursive: true });
@@ -160,7 +166,28 @@ export function prepareAndroidSkillAssetsAt(root, runBundle) {
   runBundle({ sourceRoot, bundleRoot: paths.bundleRoot });
   const contentHash = hashSkillBundle(paths.bundleRoot);
   writeFileSync(paths.hashFile, `${contentHash}\n`, { encoding: "utf8", mode: 0o600 });
+  publishCompatibilityAssets(paths);
   return { ...paths, sourceRoot, contentHash };
+}
+
+function publishCompatibilityAssets(paths) {
+  const current = JSON.parse(readFileSync(join(paths.bundleRoot, "current"), "utf8"));
+  const generation = current?.schemaVersion === 2 && current?.active?.generation;
+  if (typeof generation !== "string" || !/^[A-Za-z0-9-]+$/.test(generation)) {
+    throw new Error("Android skill bundle current metadata has an invalid active generation");
+  }
+  const generationRoot = join(paths.bundleRoot, "generations", generation);
+  const manifest = join(generationRoot, "skill-bundle.json");
+  const lock = join(generationRoot, "skill-bundle.lock");
+  for (const source of [manifest, lock]) {
+    const metadata = lstatSync(source);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`Android skill compatibility asset is not a regular file: ${source}`);
+    }
+  }
+  mkdirSync(paths.compatibilityRoot, { recursive: true });
+  copyFileSync(manifest, paths.compatibilityManifest);
+  copyFileSync(lock, paths.compatibilityLock);
 }
 
 function makeTreeWritableNoFollow(root) {

@@ -13,8 +13,19 @@ pub fn resolve_workspace_path(
     root: impl AsRef<Path>,
     requested: impl AsRef<Path>,
 ) -> anyhow::Result<WorkspacePath> {
+    resolve_workspace_path_with_exclusions(root, requested, &[])
+}
+
+pub fn resolve_workspace_path_with_exclusions(
+    root: impl AsRef<Path>,
+    requested: impl AsRef<Path>,
+    excluded_roots: &[PathBuf],
+) -> anyhow::Result<WorkspacePath> {
     let root = root.as_ref();
     let requested = requested.as_ref();
+    if let Some(requested) = requested.to_str() {
+        crate::skill_security::reject_reserved_skill_uri(requested)?;
+    }
     if requested.as_os_str().is_empty() {
         bail!("empty workspace path");
     }
@@ -43,22 +54,30 @@ pub fn resolve_workspace_path(
         normalize_relative_path(requested)?
     };
 
-    Ok(WorkspacePath {
-        absolute: canonical_root.join(&relative),
-        relative,
-    })
+    let absolute = canonical_root.join(&relative);
+    reject_excluded_workspace_path(&canonical_root, &absolute, excluded_roots)?;
+    Ok(WorkspacePath { absolute, relative })
 }
 
 pub fn resolve_existing_workspace_path(
     root: impl AsRef<Path>,
     requested: impl AsRef<Path>,
 ) -> anyhow::Result<WorkspacePath> {
+    resolve_existing_workspace_path_with_exclusions(root, requested, &[])
+}
+
+pub fn resolve_existing_workspace_path_with_exclusions(
+    root: impl AsRef<Path>,
+    requested: impl AsRef<Path>,
+    excluded_roots: &[PathBuf],
+) -> anyhow::Result<WorkspacePath> {
     let root = root.as_ref();
-    let workspace_path = resolve_workspace_path(root, requested)?;
+    let workspace_path = resolve_workspace_path_with_exclusions(root, requested, excluded_roots)?;
     let canonical_root = canonical_workspace_root(root)?;
     let canonical_absolute =
         ensure_existing_path_inside_canonical_workspace(&canonical_root, &workspace_path.absolute)?;
 
+    reject_excluded_workspace_path(&canonical_root, &canonical_absolute, excluded_roots)?;
     workspace_path_from_absolute(&canonical_root, canonical_absolute)
 }
 
@@ -66,19 +85,37 @@ pub fn resolve_workspace_output_path(
     root: impl AsRef<Path>,
     requested: impl AsRef<Path>,
 ) -> anyhow::Result<WorkspacePath> {
+    resolve_workspace_output_path_with_exclusions(root, requested, &[])
+}
+
+pub fn resolve_workspace_output_path_with_exclusions(
+    root: impl AsRef<Path>,
+    requested: impl AsRef<Path>,
+    excluded_roots: &[PathBuf],
+) -> anyhow::Result<WorkspacePath> {
     let root = root.as_ref();
-    let workspace_path = resolve_workspace_path(root, requested)?;
+    let workspace_path = resolve_workspace_path_with_exclusions(root, requested, excluded_roots)?;
     let canonical_root = canonical_workspace_root(root)?;
     let (existing_ancestor, missing_suffix) = nearest_existing_ancestor(&workspace_path.absolute)?;
     let canonical_ancestor =
         ensure_existing_path_inside_canonical_workspace(&canonical_root, &existing_ancestor)?;
 
-    workspace_path_from_absolute(&canonical_root, canonical_ancestor.join(missing_suffix))
+    let absolute = canonical_ancestor.join(missing_suffix);
+    reject_excluded_workspace_path(&canonical_root, &absolute, excluded_roots)?;
+    workspace_path_from_absolute(&canonical_root, absolute)
 }
 
 pub fn ensure_existing_path_inside_workspace(
     root: impl AsRef<Path>,
     absolute: impl AsRef<Path>,
+) -> anyhow::Result<PathBuf> {
+    ensure_existing_path_inside_workspace_with_exclusions(root, absolute, &[])
+}
+
+pub fn ensure_existing_path_inside_workspace_with_exclusions(
+    root: impl AsRef<Path>,
+    absolute: impl AsRef<Path>,
+    excluded_roots: &[PathBuf],
 ) -> anyhow::Result<PathBuf> {
     let root = root.as_ref();
     let absolute = absolute.as_ref();
@@ -90,7 +127,73 @@ pub fn ensure_existing_path_inside_workspace(
     }
 
     let canonical_root = canonical_workspace_root(root)?;
-    ensure_existing_path_inside_canonical_workspace(&canonical_root, absolute)
+    let canonical = ensure_existing_path_inside_canonical_workspace(&canonical_root, absolute)?;
+    reject_excluded_workspace_path(&canonical_root, &canonical, excluded_roots)?;
+    Ok(canonical)
+}
+
+pub(crate) fn workspace_contains_excluded_root(
+    root: &Path,
+    excluded_roots: &[PathBuf],
+) -> anyhow::Result<bool> {
+    let canonical_root = canonical_workspace_root(root)?;
+    for excluded in excluded_roots {
+        let excluded = canonical_or_normalized_excluded(&canonical_root, excluded)?;
+        if excluded == canonical_root || excluded.starts_with(&canonical_root) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn canonical_excluded_roots(
+    root: &Path,
+    excluded_roots: &[PathBuf],
+) -> anyhow::Result<Vec<PathBuf>> {
+    let canonical_root = canonical_workspace_root(root)?;
+    let mut roots = excluded_roots
+        .iter()
+        .map(|excluded| canonical_or_normalized_excluded(&canonical_root, excluded))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+pub(crate) fn path_is_excluded(path: &Path, excluded_roots: &[PathBuf]) -> bool {
+    excluded_roots
+        .iter()
+        .any(|excluded| path == excluded || path.starts_with(excluded))
+}
+
+fn reject_excluded_workspace_path(
+    canonical_root: &Path,
+    candidate: &Path,
+    excluded_roots: &[PathBuf],
+) -> anyhow::Result<()> {
+    for excluded in excluded_roots {
+        let excluded = canonical_or_normalized_excluded(canonical_root, excluded)?;
+        if candidate == excluded || candidate.starts_with(&excluded) {
+            bail!("workspace path is reserved for skill management");
+        }
+    }
+    Ok(())
+}
+
+fn canonical_or_normalized_excluded(
+    canonical_root: &Path,
+    excluded: &Path,
+) -> anyhow::Result<PathBuf> {
+    let absolute = if excluded.is_absolute() {
+        normalize_absolute_path(excluded)?
+    } else {
+        canonical_root.join(normalize_relative_path(excluded)?)
+    };
+    match absolute.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(absolute),
+        Err(error) => Err(error).context("failed to resolve excluded workspace root"),
+    }
 }
 
 fn canonical_workspace_root(root: &Path) -> anyhow::Result<PathBuf> {

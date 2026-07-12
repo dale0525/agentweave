@@ -134,8 +134,11 @@ impl BuiltInTools {
         started: Instant,
     ) -> anyhow::Result<ToolResult> {
         let requested = required_string(&arguments, "path")?;
-        let workspace_path =
-            path::resolve_workspace_output_path(&self.config.workspace_root, requested)?;
+        let workspace_path = path::resolve_workspace_output_path_with_exclusions(
+            &self.config.workspace_root,
+            requested,
+            &self.config.excluded_workspace_roots,
+        )?;
         let existed = workspace_path.absolute.is_dir();
         tokio::fs::create_dir_all(&workspace_path.absolute).await?;
 
@@ -158,12 +161,26 @@ impl BuiltInTools {
     ) -> anyhow::Result<ToolResult> {
         let requested = required_string(&arguments, "path")?;
         let limit = optional_limit(&arguments)?;
-        let workspace_path =
-            path::resolve_existing_workspace_path(&self.config.workspace_root, requested)?;
+        let workspace_path = path::resolve_existing_workspace_path_with_exclusions(
+            &self.config.workspace_root,
+            requested,
+            &self.config.excluded_workspace_roots,
+        )?;
+        let excluded = path::canonical_excluded_roots(
+            &self.config.workspace_root,
+            &self.config.excluded_workspace_roots,
+        )?;
         let mut read_dir = tokio::fs::read_dir(&workspace_path.absolute).await?;
         let mut entries = Vec::new();
 
         while let Some(entry) = read_dir.next_entry().await? {
+            let entry_path = match tokio::fs::canonicalize(entry.path()).await {
+                Ok(path) => path,
+                Err(_) => entry.path(),
+            };
+            if path::path_is_excluded(&entry_path, &excluded) {
+                continue;
+            }
             let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
             let name = entry.file_name().to_string_lossy().to_string();
             let entry_relative = workspace_path.relative.join(&name);
@@ -203,7 +220,11 @@ impl BuiltInTools {
         started: Instant,
     ) -> anyhow::Result<ToolResult> {
         let requested = required_string(&arguments, "path")?;
-        let workspace_path = path::resolve_workspace_path(&self.config.workspace_root, requested)?;
+        let workspace_path = path::resolve_workspace_path_with_exclusions(
+            &self.config.workspace_root,
+            requested,
+            &self.config.excluded_workspace_roots,
+        )?;
         let file_metadata = match tokio::fs::symlink_metadata(&workspace_path.absolute).await {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -219,9 +240,10 @@ impl BuiltInTools {
             }
             Err(error) => return Err(error.into()),
         };
-        path::ensure_existing_path_inside_workspace(
+        path::ensure_existing_path_inside_workspace_with_exclusions(
             &self.config.workspace_root,
             &workspace_path.absolute,
+            &self.config.excluded_workspace_roots,
         )?;
 
         Ok(ToolResult::success(
@@ -244,8 +266,11 @@ impl BuiltInTools {
         started: Instant,
     ) -> anyhow::Result<ToolResult> {
         let requested = required_string(&arguments, "path")?;
-        let workspace_path =
-            path::resolve_existing_workspace_path(&self.config.workspace_root, requested)?;
+        let workspace_path = path::resolve_existing_workspace_path_with_exclusions(
+            &self.config.workspace_root,
+            requested,
+            &self.config.excluded_workspace_roots,
+        )?;
         let file_metadata = tokio::fs::metadata(&workspace_path.absolute).await?;
         if file_metadata.len() > self.config.output_limit_bytes as u64 {
             return Ok(output_limit_failure(READ_TEXT_FILE, call_id, started));
@@ -274,8 +299,11 @@ impl BuiltInTools {
         let requested = required_string(&arguments, "path")?;
         let text = required_string(&arguments, "text")?;
         let overwrite = optional_bool(&arguments, "overwrite")?;
-        let workspace_path =
-            path::resolve_workspace_output_path(&self.config.workspace_root, requested)?;
+        let workspace_path = path::resolve_workspace_output_path_with_exclusions(
+            &self.config.workspace_root,
+            requested,
+            &self.config.excluded_workspace_roots,
+        )?;
 
         if workspace_path.absolute.exists() && !overwrite {
             return Ok(failure(
@@ -477,7 +505,11 @@ fn mapped_failure(tool: &str, call_id: &str, error: anyhow::Error, started: Inst
 }
 
 fn error_code(message: &str) -> &'static str {
-    if message.contains("outside workspace")
+    if message == crate::skill_security::RESERVED_SKILL_URI_ERROR
+        || message == "workspace path is reserved for skill management"
+    {
+        "permission_denied"
+    } else if message.contains("outside workspace")
         || message.contains("parent traversal")
         || message.contains("empty workspace path")
         || message.contains("must be an absolute path")

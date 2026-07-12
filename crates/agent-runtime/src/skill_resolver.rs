@@ -15,6 +15,7 @@ pub enum SkillResolutionStatus {
     PlatformUnsupported,
     RuntimeIncompatible,
     CircuitOpen,
+    NetworkPolicyUnavailable,
 }
 
 #[derive(Clone, Debug)]

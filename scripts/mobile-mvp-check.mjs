@@ -1,45 +1,53 @@
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const projectRoot = resolve(process.env.PIXI_PROJECT_ROOT ?? process.cwd());
-const androidRoot = resolve(projectRoot, "apps/android");
-const androidSdk = resolve(projectRoot, ".tool/android-sdk");
-const androidEnvironment = {
-  ...process.env,
-  ANDROID_HOME: androidSdk,
-  ANDROID_SDK_ROOT: androidSdk,
-};
-
-const checks = [
-  { command: "cargo", args: ["test", "-p", "agent-runtime"], cwd: projectRoot },
-  { command: "cargo", args: ["test", "-p", "mobile-ffi"], cwd: projectRoot },
-  {
-    command: resolve(androidRoot, "gradlew"),
-    args: [":app:testDebugUnitTest"],
-    cwd: androidRoot,
-    env: androidEnvironment,
-  },
-  {
-    command: resolve(androidRoot, "gradlew"),
-    args: [":app:assembleDebug"],
-    cwd: androidRoot,
-    env: androidEnvironment,
-  },
+export const REQUIRED_APK_SKILL_ASSETS = [
+  "assets/skills/skill-bundle.json",
+  "assets/skills/skill-bundle.lock",
 ];
 
-for (const check of checks) {
-  const label = `${check.command} ${check.args.join(" ")}`;
-  console.log(`\n==> ${label}`);
-  const result = spawnSync(check.command, check.args, {
-    cwd: check.cwd,
-    env: check.env ?? process.env,
-    stdio: "inherit",
-  });
-  if (result.error) {
-    console.error(result.error.message);
-    process.exit(1);
+export function mobileMvpTaskNames() {
+  return ["android-native", "android-test", "android-assemble"];
+}
+
+export function assertRequiredApkAssets(entries) {
+  const available = new Set(entries);
+  for (const asset of REQUIRED_APK_SKILL_ASSETS) {
+    if (!available.has(asset)) {
+      throw new Error(`Android APK is missing required skill asset: ${asset}`);
+    }
   }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+}
+
+export function runMobileMvpCheck(root = resolve(dirname(fileURLToPath(import.meta.url)), "..")) {
+  for (const task of mobileMvpTaskNames()) {
+    runChecked("pixi", ["run", task], root, `${task} failed`);
+  }
+  const apk = resolve(root, "apps/android/app/build/outputs/apk/debug/app-debug.apk");
+  const listing = spawnSync("jar", ["tf", apk], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (listing.error) throw listing.error;
+  if (listing.status !== 0) {
+    throw new Error("failed to inspect assembled Android APK");
+  }
+  assertRequiredApkAssets(listing.stdout.split(/\r?\n/).filter(Boolean));
+  console.log(`Verified Android skill assets in ${apk}`);
+}
+
+function runChecked(command, args, cwd, message) {
+  const result = spawnSync(command, args, { cwd, stdio: "inherit" });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(message);
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try {
+    runMobileMvpCheck();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
   }
 }

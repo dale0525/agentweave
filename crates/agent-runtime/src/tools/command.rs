@@ -401,7 +401,11 @@ pub async fn execute(
         );
     }
 
-    let cwd = match path::resolve_existing_workspace_path(&config.workspace_root, &request.cwd) {
+    let cwd = match path::resolve_existing_workspace_path_with_exclusions(
+        &config.workspace_root,
+        &request.cwd,
+        &config.excluded_workspace_roots,
+    ) {
         Ok(cwd) => cwd,
         Err(error) => return path_failure(call_id, error.to_string(), started),
     };
@@ -848,7 +852,11 @@ fn failure(
 }
 
 fn path_failure(call_id: &str, message: String, started: Instant) -> ToolResult {
-    let code = if message.contains("outside workspace") || message.contains("parent traversal") {
+    let code = if message == crate::skill_security::RESERVED_SKILL_URI_ERROR
+        || message == "workspace path is reserved for skill management"
+    {
+        "permission_denied"
+    } else if message.contains("outside workspace") || message.contains("parent traversal") {
         "path_outside_workspace"
     } else if message.contains("failed to resolve workspace path") {
         "path_not_found"

@@ -19,6 +19,17 @@ async fn main() {
             diagnostic_location(warning)
         );
     }
+    for migration in &report.legacy_migrations {
+        let descriptor = serde_json::to_string(&migration.recommended_descriptor)
+            .expect("recommended legacy descriptor must serialize");
+        eprintln!(
+            "migration: synthesized package id {} at {}; inferred kind {}; recommended general-agent.json: {}",
+            migration.synthesized_package_id.as_str(),
+            migration.package_path.display(),
+            package_kind_name(migration.inferred_kind),
+            descriptor
+        );
+    }
     if report.is_ready() {
         println!(
             "Skill release check passed: {} package(s) across {} root(s)",
@@ -32,6 +43,14 @@ async fn main() {
         eprintln!("- {}", format_diagnostic(error));
     }
     std::process::exit(1);
+}
+
+fn package_kind_name(kind: agent_runtime::skill_package::SkillPackageKind) -> &'static str {
+    match kind {
+        agent_runtime::skill_package::SkillPackageKind::InstructionOnly => "instruction_only",
+        agent_runtime::skill_package::SkillPackageKind::HostToolsOnly => "host_tools_only",
+        agent_runtime::skill_package::SkillPackageKind::NativeRuntime => "native_runtime",
+    }
 }
 
 fn roots_from_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Option<Vec<PathBuf>>> {

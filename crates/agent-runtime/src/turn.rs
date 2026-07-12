@@ -42,16 +42,21 @@ impl<C> TurnRunner<C>
 where
     C: ModelClient,
 {
+    #[allow(deprecated)]
+    #[deprecated(note = "production turns must use new_with_manager_and_config")]
     pub fn new(model: C, skills: SkillRegistry) -> Self {
         let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
         let config = RuntimeConfig::workspace_write(workspace.clone(), workspace);
         Self::new_with_config(model, skills, config)
     }
 
+    #[allow(deprecated)]
+    #[deprecated(note = "production turns must use new_with_manager_and_config")]
     pub fn new_with_config(model: C, skills: SkillRegistry, config: RuntimeConfig) -> Self {
         Self::new_with_catalog_and_config(model, skills, SkillCatalog::empty(), config)
     }
 
+    #[deprecated(note = "production turns must use new_with_manager_and_config")]
     pub fn new_with_catalog_and_config(
         model: C,
         skills: SkillRegistry,

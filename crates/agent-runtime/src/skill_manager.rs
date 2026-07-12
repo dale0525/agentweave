@@ -16,6 +16,8 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 mod circuit;
 #[path = "skill_manager_startup.rs"]
 mod startup;
+#[path = "skill_manager_upgrade.rs"]
+mod upgrade;
 
 #[derive(Clone)]
 pub struct SkillManager {
@@ -270,7 +272,19 @@ impl SkillManager {
         } else {
             None
         };
-        if last_good.is_none() && active_verified.is_none() && initial_candidate.is_none() {
+        let application_update_authority = if active_verified.is_none()
+            && last_good.is_none()
+            && let Some(record) = &active_record
+        {
+            upgrade::has_application_update_authority(self, &backend, record).await?
+        } else {
+            false
+        };
+        if last_good.is_none()
+            && active_verified.is_none()
+            && initial_candidate.is_none()
+            && !application_update_authority
+        {
             return Err(
                 crate::skill_state::SkillStateBoundaryError::Conflict(anyhow::anyhow!(
                     "managed startup has no verified snapshot authority"
@@ -315,11 +329,32 @@ impl SkillManager {
             .as_ref()
             .or(last_good.as_ref())
             .or(initial_candidate.as_ref())
-            .expect("verified startup authority checked above")
-            .generation();
+            .map_or_else(
+                || {
+                    debug_assert!(application_update_authority);
+                    active_record
+                        .as_ref()
+                        .expect("application update authority checked above")
+                        .generation
+                },
+                |snapshot| snapshot.generation(),
+            );
         maintenance_diagnostics +=
             crate::skill_recovery::reconcile_startup_residue(&backend, authority_generation)
                 .await?;
+
+        if let Some(record) = &active_record
+            && let Some(mut report) = upgrade::reconcile_application_update(
+                self,
+                &backend,
+                record,
+                active_verified.is_some(),
+            )
+            .await?
+        {
+            report.maintenance_diagnostics += maintenance_diagnostics;
+            return Ok(report);
+        }
 
         if let Some(record) = &active_record {
             if let Some(recovery) =
@@ -499,6 +534,8 @@ impl SkillManager {
             let snapshot = self
                 .rebuild_persisted_snapshot(&backend, &authoritative)
                 .await?;
+            upgrade::record_initial_application_graph(self, &backend, snapshot.generation())
+                .await?;
             *self
                 .inner
                 .current
@@ -522,6 +559,7 @@ impl SkillManager {
             .current
             .write()
             .expect("skill snapshot lock poisoned") = candidate.clone();
+        upgrade::record_initial_application_graph(self, &backend, candidate.generation()).await?;
         let _ = backend
             .events
             .send(crate::events::RuntimeEvent::SkillRecoveryCompleted {

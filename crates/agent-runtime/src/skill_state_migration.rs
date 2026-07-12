@@ -149,6 +149,12 @@ async fn create_supporting_tables(tx: &mut Transaction<'_, Sqlite>) -> anyhow::R
           metadata_json TEXT NOT NULL,
           created_at TEXT NOT NULL
         )"#,
+        r#"CREATE TABLE IF NOT EXISTS skill_application_state (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+          graph_fingerprint TEXT NOT NULL CHECK(length(graph_fingerprint) = 64),
+          snapshot_generation INTEGER NOT NULL CHECK(snapshot_generation >= 0),
+          updated_at TEXT NOT NULL
+        )"#,
     ] {
         sqlx::query(statement).execute(&mut **tx).await?;
     }

@@ -51,21 +51,31 @@ pub async fn execute(
             return failure("invalid_arguments", error.to_string(), call_id, started);
         }
     };
-    let workspace_path =
-        match super::path::resolve_existing_workspace_path(&config.workspace_root, &args.path) {
-            Ok(path) => path,
-            Err(error) => {
-                return failure(
-                    error_code(&error.to_string()),
-                    error.to_string(),
-                    call_id,
-                    started,
-                );
-            }
-        };
+    let workspace_path = match super::path::resolve_existing_workspace_path_with_exclusions(
+        &config.workspace_root,
+        &args.path,
+        &config.excluded_workspace_roots,
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            return failure(
+                error_code(&error.to_string()),
+                error.to_string(),
+                call_id,
+                started,
+            );
+        }
+    };
     let workspace_root = match config.workspace_root.canonicalize() {
         Ok(path) => path,
         Err(error) => return failure("path_not_found", error.to_string(), call_id, started),
+    };
+    let excluded = match super::path::canonical_excluded_roots(
+        &config.workspace_root,
+        &config.excluded_workspace_roots,
+    ) {
+        Ok(paths) => paths,
+        Err(error) => return failure("permission_denied", error.to_string(), call_id, started),
     };
 
     let (matches, truncated, engine) = match rg_search(
@@ -73,6 +83,7 @@ pub async fn execute(
         &workspace_path.absolute,
         &args.pattern,
         args.limit,
+        &excluded,
     )
     .await
     {
@@ -83,6 +94,7 @@ pub async fn execute(
                 &workspace_path.relative,
                 &args.pattern,
                 args.limit,
+                &excluded,
             )
             .await
             {
@@ -177,14 +189,33 @@ async fn rg_search(
     absolute: &Path,
     pattern: &str,
     limit: usize,
+    excluded: &[PathBuf],
 ) -> anyhow::Result<Option<(Vec<SearchMatch>, bool)>> {
-    let mut child = match Command::new("rg")
+    let mut command = Command::new("rg");
+    command
+        .current_dir(workspace_root)
         .arg("--json")
         .arg("--color")
-        .arg("never")
+        .arg("never");
+    for root in excluded {
+        let Ok(relative) = root.strip_prefix(workspace_root) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if !relative.is_empty() {
+            command.arg("--glob").arg(format!("!{relative}"));
+            command.arg("--glob").arg(format!("!{relative}/**"));
+        }
+    }
+    let target = absolute
+        .strip_prefix(workspace_root)
+        .ok()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut child = match command
         .arg("--")
         .arg(pattern)
-        .arg(absolute)
+        .arg(target)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -261,9 +292,10 @@ async fn fallback_search(
     relative: &Path,
     pattern: &str,
     limit: usize,
+    excluded: &[PathBuf],
 ) -> anyhow::Result<(Vec<SearchMatch>, bool)> {
     let mut files = Vec::new();
-    collect_files(absolute, relative, &mut files).await?;
+    collect_files(absolute, relative, excluded, &mut files).await?;
     files.sort_by(|left, right| left.1.cmp(&right.1));
 
     let mut matches = Vec::new();
@@ -297,10 +329,14 @@ async fn fallback_search(
 async fn collect_files(
     absolute: &Path,
     relative: &Path,
+    excluded: &[PathBuf],
     files: &mut Vec<(PathBuf, PathBuf)>,
 ) -> anyhow::Result<()> {
     let mut stack = vec![(absolute.to_path_buf(), relative.to_path_buf())];
     while let Some((current_absolute, current_relative)) = stack.pop() {
+        if super::path::path_is_excluded(&current_absolute, excluded) {
+            continue;
+        }
         let metadata = tokio::fs::symlink_metadata(&current_absolute).await?;
         if metadata.is_file() {
             files.push((current_absolute, current_relative));
@@ -341,7 +377,11 @@ fn failure(code: &str, message: impl Into<String>, call_id: &str, started: Insta
 }
 
 fn error_code(message: &str) -> &'static str {
-    if message.contains("outside workspace")
+    if message == crate::skill_security::RESERVED_SKILL_URI_ERROR
+        || message == "workspace path is reserved for skill management"
+    {
+        "permission_denied"
+    } else if message.contains("outside workspace")
         || message.contains("parent traversal")
         || message.contains("empty workspace path")
         || message.contains("must be an absolute path")
@@ -358,7 +398,11 @@ fn error_code(message: &str) -> &'static str {
 }
 
 fn relative_path(path: &Path) -> String {
-    let value = path.to_string_lossy().to_string();
+    let normalized = path
+        .components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect::<PathBuf>();
+    let value = normalized.to_string_lossy().to_string();
     if value.is_empty() {
         ".".to_string()
     } else {
@@ -512,7 +556,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (matches, truncated) = fallback_search(&root, Path::new(""), "needle", 10)
+        let (matches, truncated) = fallback_search(&root, Path::new(""), "needle", 10, &[])
             .await
             .unwrap();
 

@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(deprecated))]
+
 pub mod context;
 pub mod events;
 pub mod instructions;
@@ -16,11 +18,13 @@ mod skill_entry_resource;
 pub mod skill_management;
 pub mod skill_management_tools;
 pub mod skill_manager;
+pub mod skill_migration;
 pub mod skill_package;
 pub mod skill_policy;
 pub mod skill_recovery;
 pub mod skill_resolver;
 mod skill_runtime_source;
+pub mod skill_security;
 pub mod skill_snapshot;
 pub mod skill_source;
 pub mod skill_state;
@@ -35,6 +39,7 @@ mod skill_state_revision_cas;
 mod skill_state_rows;
 mod skill_state_startup;
 mod skill_state_transactions;
+mod skill_state_upgrade;
 pub mod skill_store;
 mod skill_store_atomic_write;
 mod skill_store_authoring;

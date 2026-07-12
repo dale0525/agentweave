@@ -2,6 +2,7 @@ use agent_runtime::{
     platform::CapabilitySet,
     skill::SkillRegistry,
     skill_catalog::SkillCatalog,
+    skill_migration::{LegacySkillMigrationDiagnostic, diagnostics_from_packages},
     skill_package::SkillPackageId,
     skill_source::{DirectorySkillSource, DiscoveredSkillPackage, SkillLayer},
 };
@@ -65,6 +66,7 @@ pub struct SkillReleaseReport {
     pub package_count: usize,
     pub errors: Vec<SkillReleaseDiagnostic>,
     pub warnings: Vec<SkillReleaseDiagnostic>,
+    pub legacy_migrations: Vec<LegacySkillMigrationDiagnostic>,
 }
 
 impl SkillReleaseReport {
@@ -121,6 +123,7 @@ pub async fn validate_skill_roots(roots: &[PathBuf]) -> SkillReleaseReport {
     });
     checkpoint_release_validation_after_discovery(&packages).await;
     let package_count = packages.len();
+    let legacy_migrations = diagnostics_from_packages(packages.clone());
     let mut warnings = legacy_warnings(&packages);
     validate_duplicate_ids(&packages, &mut errors);
     let available_ids = packages
@@ -143,6 +146,7 @@ pub async fn validate_skill_roots(roots: &[PathBuf]) -> SkillReleaseReport {
         package_count,
         errors,
         warnings,
+        legacy_migrations,
     }
 }
 

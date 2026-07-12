@@ -167,6 +167,7 @@ impl<R> HttpMobileRuntimeHost<R>
 where
     R: SecretResolver,
 {
+    #[deprecated(note = "production mobile hosts must use new_with_manager")]
     pub fn new(
         storage: Storage,
         skills: SkillRegistry,
