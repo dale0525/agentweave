@@ -6,7 +6,7 @@ use crate::skill_store_faults::StoreFaultPoint;
 use crate::skill_store_fs::{
     copy_prepared_package_tree_into_prepared, ensure_directory_contained, make_tree_writable,
 };
-use crate::skill_store_locks::acquire_revision_lock;
+use crate::skill_store_locks::{RevisionOperationGuard, acquire_revision_lock};
 use crate::skill_store_operations::{error_is_not_found, storage_path};
 use crate::skill_store_prepared_fs::open_regular_file;
 use crate::skill_store_public_types::SkillStoreBoundaryError;
@@ -25,7 +25,34 @@ pub(crate) struct StagingPackageSnapshot {
     pub instructions_file: Option<Vec<u8>>,
 }
 
+pub(crate) struct LockedStagingPackageSnapshot {
+    pub(crate) snapshot: StagingPackageSnapshot,
+    _revision_lock: RevisionOperationGuard,
+}
+
 impl SkillRevisionStore {
+    pub(crate) async fn lock_staging_revision_snapshot(
+        &self,
+        revision_id: &str,
+    ) -> anyhow::Result<LockedStagingPackageSnapshot> {
+        let revision_lock =
+            acquire_revision_lock(&self.paths.identity, revision_id, &self.faults).await?;
+        let record = self.state.get_revision(revision_id).await?.ok_or_else(|| {
+            SkillStoreBoundaryError::NotFound(anyhow::anyhow!("skill revision not found"))
+        })?;
+        if record.status != crate::skill_state::SkillRevisionStatus::Staging {
+            return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                "revision is not an editable staging revision"
+            ))
+            .into());
+        }
+        let snapshot = self.snapshot_inactive_record(record).await?;
+        Ok(LockedStagingPackageSnapshot {
+            snapshot,
+            _revision_lock: revision_lock,
+        })
+    }
+
     pub(crate) async fn snapshot_staging_revision(
         &self,
         revision_id: &str,
@@ -58,7 +85,15 @@ impl SkillRevisionStore {
             ))
             .into());
         }
+        self.snapshot_inactive_record(record).await
+    }
+
+    async fn snapshot_inactive_record(
+        &self,
+        record: SkillRevisionRecord,
+    ) -> anyhow::Result<StagingPackageSnapshot> {
         self.paths.verify_identity()?;
+        let revision_id = &record.revision_id;
         let (identity, relative) = match record.status {
             crate::skill_state::SkillRevisionStatus::Staging => {
                 let (_, relative) = self.staging_revision_path(&record)?;

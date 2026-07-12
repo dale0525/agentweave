@@ -64,10 +64,10 @@ async fn detached_import_completes_at_every_transfer_stage_after_waiter_abort() 
 }
 
 #[tokio::test]
-async fn import_pre_row_and_cleanup_failures_leave_no_row_or_partial_tree() {
+async fn import_cleanup_failure_retains_owned_tree_marker_and_retries_safely() {
     let faults = SkillStoreTestFaults::default();
     faults.fail_once(SkillStoreFaultPoint::ImportBeforeRow);
-    faults.fail_once(SkillStoreFaultPoint::TransferCleanup);
+    faults.fail_times(SkillStoreFaultPoint::TransferCleanup, 2);
     let fixture = AuthoringFixture::with_faults(faults).await;
     write_package(
         &fixture.imports.path().join("failed-import"),
@@ -94,11 +94,58 @@ async fn import_pre_row_and_cleanup_failures_leave_no_row_or_partial_tree() {
         .await
         .unwrap();
     assert_eq!(row_count, 0);
-    assert_eq!(
-        directory_entry_count(&fixture.store.paths().quarantine).await,
-        0
+    let retained = directory_entries(&fixture.store.paths().quarantine).await;
+    assert_eq!(retained.len(), 1);
+    let issues = fixture.store.maintenance_issues();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].operation, "import_quarantine_candidate_cleanup");
+    assert_eq!(issues[0].revision_id, retained[0]);
+    assert_eq!(issues[0].path, Path::new(&retained[0]));
+    assert!(issues[0].path.is_relative());
+    assert!(
+        !issues[0]
+            .message
+            .contains(fixture.store.paths().quarantine.to_str().unwrap())
+    );
+    assert!(
+        fixture
+            .state
+            .get_installation(
+                &crate::skill_package::SkillPackageId::parse("com.example.failed-import").unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_none()
     );
     assert_eq!(fixture.manager.current_snapshot().generation(), 1);
+
+    let retry = fixture
+        .service
+        .import_draft(
+            &fixture.actor([SkillGrant::Import]),
+            Path::new("failed-import"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.status, "quarantined");
+    let after_retry = directory_entries(&fixture.store.paths().quarantine).await;
+    assert_eq!(after_retry.len(), 2);
+    assert!(after_retry.contains(&retained[0]));
+    assert!(after_retry.contains(&retry.revision_id));
+    let replay = fixture
+        .service
+        .import_draft(
+            &fixture.actor([SkillGrant::Import]),
+            Path::new("failed-import"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.revision_id, retry.revision_id);
+    assert_eq!(
+        directory_entry_count(&fixture.store.paths().quarantine).await,
+        2
+    );
+    assert_eq!(fixture.store.maintenance_issues().len(), 1);
 }
 
 #[tokio::test]
@@ -568,4 +615,14 @@ async fn directory_entry_count(root: &Path) -> usize {
         count += 1;
     }
     count
+}
+
+async fn directory_entries(root: &Path) -> Vec<String> {
+    let mut entries = tokio::fs::read_dir(root).await.unwrap();
+    let mut names = Vec::new();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    names
 }

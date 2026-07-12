@@ -29,6 +29,11 @@ pub(crate) enum SkillStateBoundaryError {
     Conflict(#[source] anyhow::Error),
 }
 
+pub(crate) fn validate_revision_id(revision_id: &str) -> anyhow::Result<()> {
+    validate_uuid_v4("revision_id", revision_id).map_err(SkillStateBoundaryError::InvalidInput)?;
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct SkillStateStore {
     storage: Storage,
@@ -93,7 +98,7 @@ impl SkillStateStore {
         input: NewSkillRevision,
         status: SkillRevisionStatus,
     ) -> anyhow::Result<SkillRevisionRecord> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         validate_storage_path(&input.storage_path)?;
         let created_at = Utc::now();
         let descriptor_json = serde_json::to_string(&input.descriptor_json)?;
@@ -135,7 +140,7 @@ impl SkillStateStore {
         &self,
         revision_id: &str,
     ) -> anyhow::Result<Option<SkillRevisionRecord>> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         let query = format!("SELECT {REVISION_COLUMNS} FROM skill_revisions WHERE revision_id = ?");
         sqlx::query(&query)
             .bind(revision_id)
@@ -146,7 +151,7 @@ impl SkillStateStore {
     }
 
     pub async fn revision_validation(&self, revision_id: &str) -> anyhow::Result<Value> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         let value: Option<String> =
             sqlx::query_scalar("SELECT validation_json FROM skill_revisions WHERE revision_id = ?")
                 .bind(revision_id)
@@ -161,7 +166,7 @@ impl SkillStateStore {
         revision_id: &str,
         value: Value,
     ) -> anyhow::Result<()> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         let value = serde_json::to_string(&value)?;
         let result =
             sqlx::query("UPDATE skill_revisions SET validation_json = ? WHERE revision_id = ?")
@@ -177,7 +182,7 @@ impl SkillStateStore {
         revision_id: &str,
         metadata: SkillRevisionMetadata,
     ) -> anyhow::Result<SkillRevisionRecord> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         let descriptor_json = serde_json::to_string(&metadata.descriptor_json)?;
         let validation_json = serde_json::to_string(&metadata.validation_json)?;
         let query = format!(
@@ -216,7 +221,7 @@ impl SkillStateStore {
         revision_id: &str,
         managed_storage_path: &str,
     ) -> anyhow::Result<SkillRevisionRecord> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         validate_storage_path(managed_storage_path)?;
         let mut tx = crate::skill_state_transactions::begin_immediate(self.storage.pool()).await?;
         let result = async {
@@ -245,7 +250,7 @@ impl SkillStateStore {
         revision_id: &str,
         promotion: SkillRevisionPromotion,
     ) -> anyhow::Result<SkillRevisionRecord> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         validate_storage_path(&promotion.storage_path)?;
         let descriptor_json = serde_json::to_string(&promotion.descriptor_json)?;
         let validation_json = serde_json::to_string(&promotion.validation_json)?;
@@ -294,7 +299,7 @@ impl SkillStateStore {
         layer: SkillLayerRecord,
         actor_id: &str,
     ) -> anyhow::Result<()> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         let now = Utc::now().to_rfc3339();
         let mut tx = self.storage.pool().begin().await?;
         let result = async {
@@ -524,7 +529,7 @@ impl SkillStateStore {
         operation: &str,
         metadata: Value,
     ) -> anyhow::Result<()> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         if operation.trim().is_empty() {
             anyhow::bail!("diagnostic operation cannot be empty");
         }
@@ -599,7 +604,7 @@ impl SkillStateStore {
         expected: Option<SkillRevisionExpectation>,
         replacement_metadata: Option<SkillRevisionMetadata>,
     ) -> anyhow::Result<SkillRevisionRecord> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         let now = Utc::now();
         let mut tx = crate::skill_state_transactions::begin_immediate(self.storage.pool()).await?;
         let result = async {
@@ -609,16 +614,20 @@ impl SkillStateStore {
                 .bind(revision_id)
                 .fetch_optional(&mut *tx)
                 .await?
-                .with_context(|| format!("skill revision not found: {revision_id}"))?;
+                .ok_or_else(|| {
+                    SkillStateBoundaryError::NotFound(anyhow::anyhow!(
+                        "skill revision not found"
+                    ))
+                })?;
             let revision = revision_from_row(&row)?;
             if !matches!(
                 revision.status,
                 SkillRevisionStatus::Staging | SkillRevisionStatus::Managed
             ) {
-                anyhow::bail!(
-                    "skill revision cannot be quarantined from {} state",
-                    revision.status.as_str()
-                );
+                return Err(SkillStateBoundaryError::Conflict(anyhow::anyhow!(
+                    "skill revision lifecycle changed before quarantine"
+                ))
+                .into());
             }
             if let Some(expected) = &expected
                 && (revision.status != expected.status
@@ -628,9 +637,10 @@ impl SkillStateStore {
                     || revision.descriptor_json != expected.descriptor_json
                     || revision.validation_json != expected.validation_json)
             {
-                anyhow::bail!(
-                    "skill revision changed since operation observation: {revision_id}"
-                );
+                return Err(SkillStateBoundaryError::Conflict(anyhow::anyhow!(
+                    "skill revision changed since operation observation"
+                ))
+                .into());
             }
             let (version, content_hash, descriptor_json, validation_json) =
                 if let Some(metadata) = replacement_metadata {
@@ -701,11 +711,17 @@ impl SkillStateStore {
                 .await?
             };
             if result.rows_affected() == 0 && expected.is_some() {
-                anyhow::bail!(
-                    "skill revision changed since operation observation: {revision_id}"
-                );
+                return Err(SkillStateBoundaryError::Conflict(anyhow::anyhow!(
+                    "skill revision changed since operation observation"
+                ))
+                .into());
             }
-            ensure_changed(result.rows_affected(), "skill revision", revision_id)?;
+            if result.rows_affected() == 0 {
+                return Err(SkillStateBoundaryError::NotFound(anyhow::anyhow!(
+                    "skill revision not found"
+                ))
+                .into());
+            }
             sqlx::query(
                 r#"UPDATE skill_installations
                    SET active_revision_id = NULL, enabled = 0, install_status = 'quarantined', updated_at = ?
@@ -861,7 +877,7 @@ impl SkillStateStore {
         &self,
         revision_id: &str,
     ) -> anyhow::Result<Option<SkillCircuitStateRecord>> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         let query =
             format!("SELECT {CIRCUIT_COLUMNS} FROM skill_circuit_state WHERE revision_id = ?");
         sqlx::query(&query)

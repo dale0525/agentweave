@@ -1,7 +1,7 @@
 use crate::skill_package::SkillPackageId;
 use crate::skill_state::{
     NewSkillRevision, SkillRevisionExpectation, SkillRevisionMetadata, SkillRevisionPromotion,
-    SkillRevisionStatus, SkillStateStore,
+    SkillRevisionStatus, SkillStateBoundaryError, SkillStateStore,
 };
 use crate::storage::Storage;
 use serde_json::json;
@@ -58,11 +58,11 @@ async fn promotion_cas_rejects_metadata_changed_after_observation() {
         .await
         .unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("revision changed since operation observation")
-    );
+    assert!(matches!(
+        error.downcast_ref::<SkillStateBoundaryError>(),
+        Some(SkillStateBoundaryError::Conflict(_))
+    ));
+    assert!(!error.to_string().contains(&observed.revision_id));
 }
 
 #[tokio::test]
@@ -92,11 +92,11 @@ async fn quarantine_cas_rejects_metadata_changed_after_observation() {
         .await
         .unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("revision changed since operation observation")
-    );
+    assert!(matches!(
+        error.downcast_ref::<SkillStateBoundaryError>(),
+        Some(SkillStateBoundaryError::Conflict(_))
+    ));
+    assert!(!error.to_string().contains(&observed.revision_id));
 }
 
 #[tokio::test]
@@ -129,11 +129,11 @@ async fn staging_metadata_cas_rejects_metadata_changed_after_observation() {
         .await
         .unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("revision changed since operation observation")
-    );
+    assert!(matches!(
+        error.downcast_ref::<SkillStateBoundaryError>(),
+        Some(SkillStateBoundaryError::Conflict(_))
+    ));
+    assert!(!error.to_string().contains(&observed.revision_id));
     let record = state
         .get_revision(&observed.revision_id)
         .await
@@ -162,7 +162,11 @@ async fn staging_metadata_cas_rejects_non_staging_expectation_before_sql() {
         .await
         .unwrap_err();
 
-    assert!(format!("{error:#}").contains("expected staging lifecycle"));
+    assert!(matches!(
+        error.downcast_ref::<SkillStateBoundaryError>(),
+        Some(SkillStateBoundaryError::Conflict(_))
+    ));
+    assert!(!error.to_string().contains(&record.revision_id));
 }
 
 #[tokio::test]

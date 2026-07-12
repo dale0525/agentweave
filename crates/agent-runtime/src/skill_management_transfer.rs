@@ -138,7 +138,13 @@ impl OwnerSkillManagementService {
             .state
             .get_revision(&revision_id)
             .await
-            .map_err(|error| SkillManagementError::internal("export_managed_skill", error))?
+            .map_err(|error| {
+                SkillManagementError::from_state(
+                    "export_managed_skill",
+                    "active managed revision",
+                    error,
+                )
+            })?
             .ok_or(SkillManagementError::NotFound {
                 resource: "active managed revision",
             })?;

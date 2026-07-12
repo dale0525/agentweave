@@ -22,6 +22,12 @@ pub(crate) struct ExactActivationPublication<'a> {
     pub members: serde_json::Value,
 }
 
+pub(crate) struct ExactActivationApprovalRequest {
+    pub(crate) approval: NewSkillApproval,
+    pub(crate) revision_expectation: crate::skill_state::SkillRevisionExpectation,
+    pub(crate) expected_generation: u64,
+}
+
 impl SkillStateStore {
     pub(crate) async fn commit_exact_activation_publication(
         &self,
@@ -189,10 +195,43 @@ impl SkillStateStore {
 
     pub(crate) async fn create_activation_approval_unique(
         &self,
-        input: NewSkillApproval,
+        request: ExactActivationApprovalRequest,
     ) -> anyhow::Result<(SkillApprovalRecord, bool)> {
+        let ExactActivationApprovalRequest {
+            approval: input,
+            revision_expectation,
+            expected_generation,
+        } = request;
+        let expected_generation = i64::try_from(expected_generation)
+            .context("snapshot generation exceeds SQLite range")?;
         let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
         let result = async {
+            let revision_query = format!(
+                "SELECT {} FROM skill_revisions WHERE revision_id = ?",
+                crate::skill_state_rows::REVISION_COLUMNS
+            );
+            let revision_row = sqlx::query(&revision_query)
+                .bind(&input.revision_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| state_not_found("skill revision not found"))?;
+            let revision = crate::skill_state_rows::revision_from_row(&revision_row)?;
+            if revision.package_id != input.package_id
+                || crate::skill_state::SkillRevisionExpectation::from(&revision)
+                    != revision_expectation
+            {
+                return Err(state_conflict("skill revision changed before approval request"));
+            }
+            let active_generation: Option<i64> = sqlx::query_scalar(
+                "SELECT generation FROM skill_snapshots WHERE status = 'active'",
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+            if active_generation.is_some_and(|generation| generation != expected_generation) {
+                return Err(state_conflict(
+                    "skill snapshot generation changed before approval request",
+                ));
+            }
             let select = format!(
                 "SELECT {APPROVAL_COLUMNS} FROM skill_approvals WHERE revision_id = ? AND operation = ? AND status = 'pending' ORDER BY created_at LIMIT 1"
             );

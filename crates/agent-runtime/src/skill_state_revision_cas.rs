@@ -1,10 +1,8 @@
 use crate::skill_state::{
     SkillRevisionExpectation, SkillRevisionMetadata, SkillRevisionPromotion, SkillRevisionRecord,
-    SkillStateStore,
+    SkillStateBoundaryError, SkillStateStore, validate_revision_id,
 };
-use crate::skill_state_rows::{
-    REVISION_COLUMNS, revision_from_row, validate_storage_path, validate_uuid_v4,
-};
+use crate::skill_state_rows::{REVISION_COLUMNS, revision_from_row, validate_storage_path};
 use sqlx::{Executor, Sqlite};
 
 impl SkillStateStore {
@@ -14,9 +12,9 @@ impl SkillStateStore {
         expected: SkillRevisionExpectation,
         validation_json: serde_json::Value,
     ) -> anyhow::Result<SkillRevisionRecord> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         if expected.status != crate::skill_state::SkillRevisionStatus::Quarantined {
-            anyhow::bail!("quarantine validation CAS requires quarantined lifecycle");
+            return Err(state_conflict("quarantine validation lifecycle changed"));
         }
         let expected_descriptor = serde_json::to_string(&expected.descriptor_json)?;
         let expected_validation = serde_json::to_string(&expected.validation_json)?;
@@ -51,10 +49,11 @@ impl SkillStateStore {
         staging_storage_path: &str,
         validation_json: serde_json::Value,
     ) -> anyhow::Result<SkillRevisionRecord> {
-        validate_uuid_v4("revision_id", revision_id)?;
-        validate_storage_path(staging_storage_path)?;
+        validate_revision_id(revision_id)?;
+        validate_storage_path(staging_storage_path)
+            .map_err(SkillStateBoundaryError::InvalidInput)?;
         if expected.status != crate::skill_state::SkillRevisionStatus::Quarantined {
-            anyhow::bail!("quarantine release CAS requires quarantined lifecycle");
+            return Err(state_conflict("quarantine release lifecycle changed"));
         }
         let expected_descriptor = serde_json::to_string(&expected.descriptor_json)?;
         let expected_validation = serde_json::to_string(&expected.validation_json)?;
@@ -101,15 +100,14 @@ impl SkillStateStore {
         replacement_storage_path: &str,
         metadata: SkillRevisionMetadata,
     ) -> anyhow::Result<SkillRevisionRecord> {
-        validate_uuid_v4("revision_id", revision_id)?;
+        validate_revision_id(revision_id)?;
         if expected.status != crate::skill_state::SkillRevisionStatus::Staging {
-            anyhow::bail!(
-                "staging metadata CAS expected staging lifecycle, got {}",
-                expected.status.as_str()
-            );
+            return Err(state_conflict("staging metadata lifecycle changed"));
         }
-        validate_storage_path(&expected.storage_path)?;
-        validate_storage_path(replacement_storage_path)?;
+        validate_storage_path(&expected.storage_path)
+            .map_err(SkillStateBoundaryError::InvalidInput)?;
+        validate_storage_path(replacement_storage_path)
+            .map_err(SkillStateBoundaryError::InvalidInput)?;
         let expected_descriptor_json = serde_json::to_string(&expected.descriptor_json)?;
         let expected_validation_json = serde_json::to_string(&expected.validation_json)?;
         let descriptor_json = serde_json::to_string(&metadata.descriptor_json)?;
@@ -154,9 +152,11 @@ impl SkillStateStore {
         expected: SkillRevisionExpectation,
         promotion: SkillRevisionPromotion,
     ) -> anyhow::Result<SkillRevisionRecord> {
-        validate_uuid_v4("revision_id", revision_id)?;
-        validate_storage_path(&expected.storage_path)?;
-        validate_storage_path(&promotion.storage_path)?;
+        validate_revision_id(revision_id)?;
+        validate_storage_path(&expected.storage_path)
+            .map_err(SkillStateBoundaryError::InvalidInput)?;
+        validate_storage_path(&promotion.storage_path)
+            .map_err(SkillStateBoundaryError::InvalidInput)?;
         let expected_descriptor_json = serde_json::to_string(&expected.descriptor_json)?;
         let expected_validation_json = serde_json::to_string(&expected.validation_json)?;
         let descriptor_json = serde_json::to_string(&promotion.descriptor_json)?;
@@ -210,7 +210,15 @@ where
             .fetch_optional(executor)
             .await?;
     if exists.is_none() {
-        anyhow::bail!("skill revision not found: {revision_id}");
+        return Err(
+            SkillStateBoundaryError::NotFound(anyhow::anyhow!("skill revision not found")).into(),
+        );
     }
-    anyhow::bail!("skill revision changed since operation observation: {revision_id}")
+    Err(state_conflict(
+        "skill revision changed since operation observation",
+    ))
+}
+
+fn state_conflict(message: &'static str) -> anyhow::Error {
+    SkillStateBoundaryError::Conflict(anyhow::anyhow!(message)).into()
 }

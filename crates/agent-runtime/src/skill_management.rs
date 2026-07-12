@@ -158,7 +158,7 @@ impl SkillManagementError {
             Ok(crate::skill_store_public_types::SkillStoreBoundaryError::Conflict(_)) => {
                 Self::Conflict { resource }
             }
-            Err(error) => Self::internal(operation, error),
+            Err(error) => Self::from_state(operation, resource, error),
         }
     }
 
@@ -303,7 +303,9 @@ impl OwnerSkillManagementService {
             .state
             .get_revision(revision_id)
             .await
-            .map_err(|error| SkillManagementError::internal("update_draft", error))?
+            .map_err(|error| {
+                SkillManagementError::from_state("update_draft", "skill revision", error)
+            })?
             .ok_or(SkillManagementError::NotFound {
                 resource: "skill revision",
             })?;
@@ -323,7 +325,9 @@ impl OwnerSkillManagementService {
             .state
             .get_revision(revision_id)
             .await
-            .map_err(|error| SkillManagementError::internal("update_draft", error))?
+            .map_err(|error| {
+                SkillManagementError::from_state("update_draft", "skill revision", error)
+            })?
             .ok_or(SkillManagementError::NotFound {
                 resource: "skill revision",
             })?;

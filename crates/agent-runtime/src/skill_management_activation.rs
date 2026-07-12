@@ -34,7 +34,9 @@ impl OwnerSkillManagementService {
             .state
             .get_revision(revision_id)
             .await
-            .map_err(|error| SkillManagementError::internal("request_activation", error))?
+            .map_err(|error| {
+                SkillManagementError::from_state("request_activation", "skill revision", error)
+            })?
             .is_none()
         {
             return Err(SkillManagementError::NotFound {
@@ -68,7 +70,58 @@ impl OwnerSkillManagementService {
             }
             .into());
         }
-        let current_snapshot = self.manager.current_snapshot();
+        let initial_expectation =
+            crate::skill_state::SkillRevisionExpectation::from(&candidate.record);
+        self.revisions
+            .checkpoint(crate::skill_store_faults::StoreFaultPoint::ActivationRequestBeforeCommit)
+            .await;
+        let publication = self
+            .manager
+            .begin_publication()
+            .await
+            .map_err(|error| SkillManagementError::internal("request_activation", error))?;
+        if publication.base_generation() != validation.snapshot_generation {
+            return Err(SkillManagementError::Conflict {
+                resource: "draft validation generation",
+            }
+            .into());
+        }
+        let locked = self
+            .revisions
+            .lock_staging_revision_snapshot(revision_id)
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_store("request_activation", "skill revision", error)
+            })?;
+        let candidate = &locked.snapshot;
+        if crate::skill_state::SkillRevisionExpectation::from(&candidate.record)
+            != initial_expectation
+            || candidate.content_hash != validation.content_hash
+        {
+            return Err(SkillManagementError::Conflict {
+                resource: "skill revision",
+            }
+            .into());
+        }
+        let descriptor = &candidate.descriptor.descriptor;
+        let validation: SkillDraftValidation =
+            serde_json::from_value(candidate.record.validation_json.clone()).map_err(|_| {
+                SkillManagementError::InvalidRequest(
+                    "draft must have a persisted validation before activation".into(),
+                )
+            })?;
+        if !validation.ok
+            || validation.revision_id != candidate.record.revision_id
+            || validation.content_hash != candidate.content_hash
+            || validation.snapshot_generation != publication.base_generation()
+            || validation.resolver_status != "active"
+        {
+            return Err(SkillManagementError::Conflict {
+                resource: "draft validation",
+            }
+            .into());
+        }
+        let current_snapshot = publication.base_snapshot();
         let collides_with_builtin = current_snapshot
             .packages()
             .iter()
@@ -92,7 +145,7 @@ impl OwnerSkillManagementService {
             revision_id: revision_id.to_string(),
             revision_version: candidate.record.version.clone(),
             revision_storage_path: candidate.record.storage_path.clone(),
-            content_hash: candidate.content_hash,
+            content_hash: candidate.content_hash.clone(),
             descriptor_document: candidate.record.descriptor_json.clone(),
             validation_digest: json_digest(&validation_document)?,
             validation_document,
@@ -100,19 +153,24 @@ impl OwnerSkillManagementService {
             permission_diff_digest: json_digest(&permission_diff)?,
             requesting_actor: actor.actor_id.clone(),
         };
-        self.revisions
-            .checkpoint(crate::skill_store_faults::StoreFaultPoint::ActivationRequestBeforeCommit)
-            .await;
+        let revision_expectation =
+            crate::skill_state::SkillRevisionExpectation::from(&candidate.record);
         let (approval, created) = self
             .state
-            .create_activation_approval_unique(NewSkillApproval {
-                package_id: descriptor.id.clone(),
-                revision_id: revision_id.to_string(),
-                operation: SkillOperation::Activate.as_str().into(),
-                requested_by: actor.actor_id.clone(),
-                permission_diff,
-                binding: Some(serde_json::to_value(binding)?),
-            })
+            .create_activation_approval_unique(
+                crate::skill_state_activation::ExactActivationApprovalRequest {
+                    approval: NewSkillApproval {
+                        package_id: descriptor.id.clone(),
+                        revision_id: revision_id.to_string(),
+                        operation: SkillOperation::Activate.as_str().into(),
+                        requested_by: actor.actor_id.clone(),
+                        permission_diff,
+                        binding: Some(serde_json::to_value(binding)?),
+                    },
+                    revision_expectation,
+                    expected_generation: publication.base_generation(),
+                },
+            )
             .await
             .map_err(|error| {
                 SkillManagementError::from_state("request_activation", "skill approval", error)
@@ -318,6 +376,13 @@ impl OwnerSkillManagementService {
         self.revisions
             .checkpoint(crate::skill_store_faults::StoreFaultPoint::ActivationBeforeDurableCommit)
             .await;
+        if let Err(error) = prepared.revalidate_destination().await {
+            let cleanup = prepared.abort().await;
+            self.revisions
+                .checkpoint(crate::skill_store_faults::StoreFaultPoint::ActivationAfterCompensation)
+                .await;
+            return Err(combine_activation_error(error, cleanup));
+        }
         let commit = self
             .state
             .commit_exact_activation_publication(
@@ -379,7 +444,9 @@ impl OwnerSkillManagementService {
             .state
             .get_revision(&approval.revision_id)
             .await
-            .map_err(|error| SkillManagementError::internal("reject_activation", error))?
+            .map_err(|error| {
+                SkillManagementError::from_state("reject_activation", "skill revision", error)
+            })?
             .ok_or(SkillManagementError::NotFound {
                 resource: "skill revision",
             })?;
@@ -401,29 +468,53 @@ fn json_digest(value: &Value) -> anyhow::Result<String> {
 
 fn combine_activation_error(error: anyhow::Error, cleanup: anyhow::Result<()>) -> anyhow::Error {
     match cleanup {
-        Ok(()) => match error.downcast::<crate::skill_state::SkillStateBoundaryError>() {
-            Ok(crate::skill_state::SkillStateBoundaryError::Conflict(_)) => {
-                SkillManagementError::Conflict {
-                    resource: "activation publication",
+        Ok(()) => {
+            match error.downcast::<crate::skill_store_public_types::SkillStoreBoundaryError>() {
+                Ok(crate::skill_store_public_types::SkillStoreBoundaryError::Conflict(_)) => {
+                    SkillManagementError::Conflict {
+                        resource: "activation publication",
+                    }
+                    .into()
                 }
-                .into()
-            }
-            Ok(crate::skill_state::SkillStateBoundaryError::NotFound(_)) => {
-                SkillManagementError::NotFound {
-                    resource: "activation publication",
+                Ok(crate::skill_store_public_types::SkillStoreBoundaryError::NotFound(_)) => {
+                    SkillManagementError::NotFound {
+                        resource: "activation publication",
+                    }
+                    .into()
                 }
-                .into()
+                Ok(crate::skill_store_public_types::SkillStoreBoundaryError::InvalidInput(_)) => {
+                    SkillManagementError::InvalidRequest("invalid activation publication".into())
+                        .into()
+                }
+                Err(error) => combine_activation_state_error(error),
             }
-            Ok(crate::skill_state::SkillStateBoundaryError::InvalidInput(_)) => {
-                SkillManagementError::InvalidRequest("invalid activation publication".into()).into()
-            }
-            Err(error) => SkillManagementError::internal("approve_activation", error).into(),
-        },
+        }
         Err(cleanup) => SkillManagementError::internal(
             "approve_activation",
             error.context(format!("activation compensation failed: {cleanup}")),
         )
         .into(),
+    }
+}
+
+fn combine_activation_state_error(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast::<crate::skill_state::SkillStateBoundaryError>() {
+        Ok(crate::skill_state::SkillStateBoundaryError::Conflict(_)) => {
+            SkillManagementError::Conflict {
+                resource: "activation publication",
+            }
+            .into()
+        }
+        Ok(crate::skill_state::SkillStateBoundaryError::NotFound(_)) => {
+            SkillManagementError::NotFound {
+                resource: "activation publication",
+            }
+            .into()
+        }
+        Ok(crate::skill_state::SkillStateBoundaryError::InvalidInput(_)) => {
+            SkillManagementError::InvalidRequest("invalid activation publication".into()).into()
+        }
+        Err(error) => SkillManagementError::internal("approve_activation", error).into(),
     }
 }
 

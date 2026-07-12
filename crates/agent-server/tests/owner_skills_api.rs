@@ -827,6 +827,24 @@ async fn task10_service_errors_map_to_stable_http_boundaries_without_leaks() {
         .unwrap();
     assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
 
+    let malformed_revision = test
+        .app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/owner/skills/drafts/private-not-a-revision/validate",
+            token,
+            Some(json!({})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(malformed_revision.status(), StatusCode::BAD_REQUEST);
+    let malformed_body = response_json(malformed_revision).await.to_string();
+    assert!(!malformed_body.contains("private-not-a-revision"));
+    assert!(!malformed_body.contains("skill_revisions"));
+    assert!(!malformed_body.contains("secret-token"));
+    assert!(!malformed_body.contains(test.roots.app_root.to_string_lossy().as_ref()));
+
     let missing = test
         .app
         .clone()

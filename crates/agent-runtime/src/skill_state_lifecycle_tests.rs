@@ -1,7 +1,7 @@
 use crate::skill_package::SkillPackageId;
 use crate::skill_state::{
     NewSkillApproval, NewSkillRevision, SkillApprovalStatus, SkillInstallStatus, SkillLayerRecord,
-    SkillRevisionPromotion, SkillRevisionStatus, SkillStateStore,
+    SkillRevisionPromotion, SkillRevisionStatus, SkillStateBoundaryError, SkillStateStore,
 };
 use crate::storage::Storage;
 use serde_json::json;
@@ -270,7 +270,11 @@ async fn staging_revision_rejects_non_v4_authoritative_id_without_writing() {
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("UUID v4"));
+    assert!(matches!(
+        error.downcast_ref::<SkillStateBoundaryError>(),
+        Some(SkillStateBoundaryError::InvalidInput(_))
+    ));
+    assert!(!error.to_string().contains("rev-1"));
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill_revisions")
         .fetch_one(storage.pool())
         .await
@@ -671,14 +675,15 @@ async fn concurrent_quarantine_has_one_business_winner_without_sqlite_busy() {
         .unwrap()
         .storage_path
         .clone();
-    let loser = first_result
-        .err()
-        .or_else(|| second_result.err())
-        .unwrap()
-        .to_string();
-    assert!(loser.contains("quarantined"), "unexpected loser: {loser}");
-    assert!(!loser.contains("database is locked"));
-    assert!(!loser.contains("SQLITE_BUSY"));
+    let loser = first_result.err().or_else(|| second_result.err()).unwrap();
+    assert!(matches!(
+        loser.downcast_ref::<SkillStateBoundaryError>(),
+        Some(SkillStateBoundaryError::Conflict(_))
+    ));
+    let loser_message = loser.to_string();
+    assert!(!loser_message.contains(&revision.revision_id));
+    assert!(!loser_message.contains("database is locked"));
+    assert!(!loser_message.contains("SQLITE_BUSY"));
 
     let state = SkillStateStore::new(first_storage);
     let stored = state

@@ -71,6 +71,8 @@ mod skill_authoring_fix2_stage_tests;
 #[cfg(test)]
 mod skill_authoring_fix2_tests;
 #[cfg(test)]
+mod skill_authoring_fix3_tests;
+#[cfg(test)]
 mod skill_authoring_tests;
 #[cfg(test)]
 mod skill_authoring_transfer_tests;

@@ -16,6 +16,7 @@ struct DraftTestEvaluation {
     candidate: crate::skill_store_draft::StagingPackageSnapshot,
     validation: SkillDraftValidation,
     result: SkillDraftTestResult,
+    publication: crate::skill_manager::SkillPublicationGuard,
 }
 
 impl OwnerSkillManagementService {
@@ -29,7 +30,9 @@ impl OwnerSkillManagementService {
             .state
             .get_revision(revision_id)
             .await
-            .map_err(|error| SkillManagementError::internal("validate_draft", error))?
+            .map_err(|error| {
+                SkillManagementError::from_state("validate_draft", "skill revision", error)
+            })?
             .is_none()
         {
             return Err(SkillManagementError::NotFound {
@@ -247,6 +250,9 @@ impl OwnerSkillManagementService {
             snapshot_generation: runtime_snapshot.generation(),
         };
         let validation_json = serde_json::to_value(&validation)?;
+        self.revisions
+            .checkpoint(crate::skill_store_faults::StoreFaultPoint::ValidateDraftBeforePersist)
+            .await;
         match candidate.record.status {
             crate::skill_state::SkillRevisionStatus::Staging => {
                 self.state
@@ -260,12 +266,18 @@ impl OwnerSkillManagementService {
                             validation_json,
                         },
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        SkillManagementError::from_state("validate_draft", "skill revision", error)
+                    })?;
             }
             crate::skill_state::SkillRevisionStatus::Quarantined if validation.ok => {
                 self.revisions
                     .release_quarantined_revision(candidate.record, validation_json)
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        SkillManagementError::from_store("validate_draft", "skill revision", error)
+                    })?;
             }
             crate::skill_state::SkillRevisionStatus::Quarantined => {
                 self.state
@@ -274,7 +286,10 @@ impl OwnerSkillManagementService {
                         crate::skill_state::SkillRevisionExpectation::from(&candidate.record),
                         validation_json,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        SkillManagementError::from_state("validate_draft", "skill revision", error)
+                    })?;
             }
             crate::skill_state::SkillRevisionStatus::Managed => {
                 anyhow::bail!("managed revision cannot be validated as a draft")
@@ -343,8 +358,18 @@ impl OwnerSkillManagementService {
         self.revisions
             .checkpoint(crate::skill_store_faults::StoreFaultPoint::DraftTestBeforePreview)
             .await;
-        let preview = self
+        let publication = self
             .manager
+            .begin_publication()
+            .await
+            .map_err(|error| SkillManagementError::internal("test_draft", error))?;
+        if publication.base_generation() != validation.snapshot_generation {
+            return Err(SkillManagementError::Conflict {
+                resource: "draft validation generation",
+            }
+            .into());
+        }
+        let preview = publication
             .preview_candidate(discovered_candidate(
                 &candidate,
                 self.revisions.clone(),
@@ -365,12 +390,6 @@ impl OwnerSkillManagementService {
             }
             Err(_) => false,
         };
-        if validation.snapshot_generation != self.manager.current_snapshot().generation() {
-            return Err(SkillManagementError::Conflict {
-                resource: "draft validation generation",
-            }
-            .into());
-        }
         let error_class = validation_error_class(&validation, preview_ok);
         Ok(DraftTestEvaluation {
             result: SkillDraftTestResult {
@@ -381,6 +400,7 @@ impl OwnerSkillManagementService {
             },
             candidate,
             validation,
+            publication,
         })
     }
 
@@ -396,7 +416,9 @@ impl OwnerSkillManagementService {
             .state
             .get_revision(revision_id)
             .await
-            .map_err(|error| SkillManagementError::internal("test_draft", error))?
+            .map_err(|error| {
+                SkillManagementError::from_state("test_draft", "skill revision", error)
+            })?
             .is_none()
         {
             return Err(SkillManagementError::NotFound {
@@ -442,6 +464,17 @@ impl OwnerSkillManagementService {
         revision_id: &str,
     ) -> anyhow::Result<DraftTestEvaluation> {
         let (candidate, validation) = self.load_draft_test(actor, revision_id).await?;
+        let publication = self
+            .manager
+            .begin_publication()
+            .await
+            .map_err(|error| SkillManagementError::internal("test_draft", error))?;
+        if publication.base_generation() != validation.snapshot_generation {
+            return Err(SkillManagementError::Conflict {
+                resource: "draft validation generation",
+            }
+            .into());
+        }
         Ok(DraftTestEvaluation {
             result: SkillDraftTestResult {
                 ok: false,
@@ -451,6 +484,7 @@ impl OwnerSkillManagementService {
             },
             candidate,
             validation,
+            publication,
         })
     }
 
@@ -479,7 +513,14 @@ impl OwnerSkillManagementService {
             candidate,
             validation,
             result,
+            publication,
         } = evaluation;
+        if publication.base_generation() != validation.snapshot_generation {
+            return Err(SkillManagementError::Conflict {
+                resource: "draft validation generation",
+            }
+            .into());
+        }
         let mut persisted = serde_json::to_value(&validation)?;
         persisted["test"] = serde_json::to_value(&result)?;
         self.revisions
@@ -497,10 +538,14 @@ impl OwnerSkillManagementService {
                     validation_json: persisted,
                 },
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_state("test_draft", "skill revision", error)
+            })?;
         self.revisions
             .checkpoint(crate::skill_store_faults::StoreFaultPoint::DraftTestAfterPersist)
             .await;
+        drop(publication);
         Ok(())
     }
 }

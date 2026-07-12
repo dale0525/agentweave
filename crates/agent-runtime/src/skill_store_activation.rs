@@ -189,6 +189,51 @@ impl PreparedManagedActivation {
         self.candidate.clone()
     }
 
+    pub(crate) async fn revalidate_destination(&self) -> anyhow::Result<()> {
+        self.store.paths.verify_identity()?;
+        self.destination
+            .verify()
+            .map_err(SkillStoreBoundaryError::Conflict)?;
+        let snapshot =
+            opened_package_snapshot(&self.destination, self.store.limits.package_limits())
+                .await
+                .map_err(SkillStoreBoundaryError::Conflict)?;
+        self.destination
+            .verify()
+            .map_err(SkillStoreBoundaryError::Conflict)?;
+        let descriptor_json = serde_json::to_value(&snapshot.descriptor.descriptor)?;
+        let binding = self
+            .candidate
+            .verified_content
+            .as_ref()
+            .and_then(|content| content.execution_binding.as_ref())
+            .ok_or_else(|| {
+                SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                    "prepared activation has no execution binding"
+                ))
+            })?;
+        let exact = snapshot.descriptor.descriptor.id == self.record.package_id
+            && snapshot.descriptor.descriptor.version.to_string() == self.expectation.version
+            && snapshot.descriptor.descriptor.kind == self.candidate.descriptor.kind
+            && descriptor_json == self.expectation.descriptor_json
+            && snapshot.content_hash == self.expectation.content_hash
+            && snapshot.content_hash == self.candidate.content_hash
+            && self.candidate.root == self.destination_path
+            && binding.package_id == self.record.package_id
+            && binding.revision_id == self.record.revision_id
+            && binding.storage_path == self.destination_path
+            && binding.store.paths.identity == self.store.paths.identity
+            && self.promotion.content_hash == self.expectation.content_hash
+            && PathBuf::from(&self.promotion.storage_path) == self.destination_path;
+        if !exact {
+            return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                "prepared activation destination changed"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
     pub(crate) async fn abort(self) -> anyhow::Result<()> {
         self.store
             .cleanup_failed_promotion_destination(&self.destination)

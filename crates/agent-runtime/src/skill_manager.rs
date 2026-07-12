@@ -164,22 +164,10 @@ impl SkillManager {
         &self,
         candidate: DiscoveredSkillPackage,
     ) -> anyhow::Result<SkillSnapshotPreview> {
-        let _guard = self.inner.reload_lock.lock().await;
-        let SkillManagerMode::Dynamic(config) = &self.inner.mode else {
-            anyhow::bail!("static skill manager cannot preview a managed candidate");
-        };
-        if candidate.layer != SkillLayer::Managed {
-            anyhow::bail!("skill preview candidate must use the managed layer");
-        }
-        let base = self.current_snapshot();
-        let packages = discover_packages_read_only(config).await?;
-        let candidate_snapshot = Arc::new(
-            build_snapshot_with_candidate(config, base.generation(), packages, candidate).await?,
-        );
-        Ok(SkillSnapshotPreview {
-            base,
-            candidate: candidate_snapshot,
-        })
+        self.begin_publication()
+            .await?
+            .preview_candidate(candidate)
+            .await
     }
 
     pub(crate) async fn begin_publication(&self) -> anyhow::Result<SkillPublicationGuard> {
@@ -248,6 +236,31 @@ impl SkillManager {
 impl SkillPublicationGuard {
     pub(crate) fn base_generation(&self) -> u64 {
         self.previous.generation()
+    }
+
+    pub(crate) fn base_snapshot(&self) -> Arc<SkillSnapshot> {
+        self.previous.clone()
+    }
+
+    pub(crate) async fn preview_candidate(
+        &self,
+        candidate: DiscoveredSkillPackage,
+    ) -> anyhow::Result<SkillSnapshotPreview> {
+        let SkillManagerMode::Dynamic(config) = &self.manager.inner.mode else {
+            anyhow::bail!("static skill manager cannot preview a managed candidate");
+        };
+        if candidate.layer != SkillLayer::Managed {
+            anyhow::bail!("skill preview candidate must use the managed layer");
+        }
+        let packages = discover_packages_read_only(config).await?;
+        let candidate_snapshot = Arc::new(
+            build_snapshot_with_candidate(config, self.previous.generation(), packages, candidate)
+                .await?,
+        );
+        Ok(SkillSnapshotPreview {
+            base: self.previous.clone(),
+            candidate: candidate_snapshot,
+        })
     }
 
     pub(crate) async fn inspect_sources(&self) -> anyhow::Result<SkillPublicationSourceView> {

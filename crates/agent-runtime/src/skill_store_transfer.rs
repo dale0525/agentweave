@@ -232,15 +232,8 @@ impl SkillRevisionStore {
         let result = match result {
             Ok(revision) => Ok(revision),
             Err(error) => {
-                let cleanup = remove_opened_tree(&reserved).await;
-                let injected_cleanup = self.faults.check(StoreFaultPoint::TransferCleanup);
-                match (cleanup, injected_cleanup) {
-                    (Ok(()), Ok(())) => Err(error),
-                    (Err(cleanup), Ok(())) => Err(with_compensation(error, cleanup)),
-                    (Ok(()), Err(cleanup)) | (Err(_), Err(cleanup)) => {
-                        Err(with_compensation(error, cleanup))
-                    }
-                }
+                self.finish_failed_import(error, &revision_id, &reserved)
+                    .await
             }
         };
         self.faults
@@ -320,6 +313,33 @@ impl SkillRevisionStore {
         let mut limits = self.limits.package_limits();
         limits.max_file_bytes = limits.max_file_bytes.min(IMPORT_MAX_FILE_BYTES);
         limits
+    }
+
+    async fn finish_failed_import<T>(
+        &self,
+        primary: anyhow::Error,
+        revision_id: &str,
+        candidate: &crate::skill_store_secure_roots::PreparedStoreDirectory,
+    ) -> anyhow::Result<T> {
+        let mut last_cleanup = None;
+        for _ in 0..2 {
+            let cleanup = match self.faults.check(StoreFaultPoint::TransferCleanup) {
+                Ok(()) => remove_opened_tree(candidate).await,
+                Err(error) => Err(error),
+            };
+            match cleanup {
+                Ok(()) => return Err(primary),
+                Err(error) => last_cleanup = Some(error),
+            }
+        }
+        let cleanup = last_cleanup.expect("cleanup attempt must produce a result");
+        self.record_maintenance_issue(
+            revision_id,
+            "import_quarantine_candidate_cleanup",
+            Path::new(revision_id),
+            &cleanup,
+        );
+        Err(with_compensation(primary, cleanup))
     }
 
     async fn find_inactive_import_replay(
