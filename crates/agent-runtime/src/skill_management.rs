@@ -16,6 +16,8 @@ use tokio::sync::broadcast;
 
 #[path = "skill_management_activation.rs"]
 mod activation;
+#[path = "skill_management_lifecycle.rs"]
+mod lifecycle;
 #[path = "skill_management_transfer.rs"]
 mod transfer;
 #[path = "skill_management_validation.rs"]
@@ -120,6 +122,14 @@ pub struct SkillPackageStatus {
     pub active_revision_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SkillRollbackReport {
+    pub package_id: SkillPackageId,
+    pub active_revision_id: String,
+    pub replaced_revision_id: String,
+    pub generation: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SkillManagementError {
     #[error("skills.{operation} denied")]
@@ -190,6 +200,7 @@ impl OwnerSkillManagementService {
         policy: SkillManagementPolicy,
     ) -> Self {
         let (events, _) = broadcast::channel(64);
+        manager.bind_managed_runtime(revisions.clone(), events.clone());
         Self {
             manager,
             revisions,
@@ -571,6 +582,7 @@ fn resolution_status_name(status: SkillResolutionStatus) -> &'static str {
         SkillResolutionStatus::CapabilityMissing => "capability_missing",
         SkillResolutionStatus::PlatformUnsupported => "platform_unsupported",
         SkillResolutionStatus::RuntimeIncompatible => "runtime_incompatible",
+        SkillResolutionStatus::CircuitOpen => "circuit_open",
     }
 }
 

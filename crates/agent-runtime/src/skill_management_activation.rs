@@ -5,7 +5,7 @@ use crate::events::RuntimeEvent;
 use crate::skill_package::SkillPackageDescriptor;
 use crate::skill_policy::{ActorContext, SkillOperation};
 use crate::skill_state::{NewSkillApproval, SkillApprovalRecord, SkillApprovalStatus};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 impl OwnerSkillManagementService {
@@ -372,7 +372,9 @@ impl OwnerSkillManagementService {
             .get_installation(&binding.package_id)
             .await
             .map_err(|error| SkillManagementError::internal("approve_activation", error))?;
-        let members = snapshot_members(&candidate_snapshot);
+        let members = crate::skill_recovery::snapshot_members(&candidate_snapshot);
+        let previous_members =
+            crate::skill_recovery::snapshot_members(&publication.base_snapshot());
         self.revisions
             .checkpoint(crate::skill_store_faults::StoreFaultPoint::ActivationBeforeDurableCommit)
             .await;
@@ -395,6 +397,8 @@ impl OwnerSkillManagementService {
                     expectation: prepared.expectation(),
                     promotion: prepared.promotion(),
                     previous_installation: previous.as_ref(),
+                    previous_generation: publication.base_generation(),
+                    previous_members,
                     generation: candidate_snapshot.generation(),
                     members,
                 },
@@ -517,20 +521,4 @@ fn combine_activation_state_error(error: anyhow::Error) -> anyhow::Error {
         }
         Err(error) => SkillManagementError::internal("approve_activation", error).into(),
     }
-}
-
-fn snapshot_members(snapshot: &crate::skill_snapshot::SkillSnapshot) -> Value {
-    let mut members = snapshot
-        .packages()
-        .iter()
-        .map(|resolved| {
-            json!({
-                "contentHash": resolved.package.content_hash,
-                "packageId": resolved.package.descriptor.id.as_str(),
-                "version": resolved.package.descriptor.version.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
-    members.sort_by(|left, right| left["packageId"].as_str().cmp(&right["packageId"].as_str()));
-    Value::Array(members)
 }

@@ -13,7 +13,7 @@ use axum::extract::{Extension, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -139,6 +139,12 @@ struct ResolveApprovalBody {
     decision: ApprovalDecision,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RollbackBody {
+    revision_id: String,
+}
+
 pub(crate) fn router(state: &Arc<AppState>) -> Option<Router<Arc<AppState>>> {
     let owner = state.owner_management()?;
     if owner.policy().mode == SkillManagementMode::Disabled {
@@ -167,18 +173,30 @@ pub(crate) fn router(state: &Arc<AppState>) -> Option<Router<Arc<AppState>>> {
         router = router.route("/owner/skills/drafts/{revision_id}/test", post(test_draft));
     }
     if allows_route(owner, SkillOperation::Activate) {
-        router = router
-            .route(
-                "/owner/skills/drafts/{revision_id}/activation",
-                post(request_activation),
-            )
-            .route(
-                "/owner/skills/approvals/{approval_id}",
-                post(resolve_approval),
-            );
+        router = router.route(
+            "/owner/skills/drafts/{revision_id}/activation",
+            post(request_activation),
+        );
+    }
+    if allows_route(owner, SkillOperation::Activate)
+        || allows_route(owner, SkillOperation::DeleteManaged)
+    {
+        router = router.route(
+            "/owner/skills/approvals/{approval_id}",
+            post(resolve_approval),
+        );
     }
     if allows_route(owner, SkillOperation::Export) {
         router = router.route("/owner/skills/{package_id}/export", post(export_skill));
+    }
+    if allows_route(owner, SkillOperation::Rollback) {
+        router = router.route("/owner/skills/{package_id}/rollback", post(rollback_skill));
+    }
+    if allows_route(owner, SkillOperation::Disable) {
+        router = router.route("/owner/skills/{package_id}/disable", post(disable_skill));
+    }
+    if allows_route(owner, SkillOperation::DeleteManaged) {
+        router = router.route("/owner/skills/{package_id}", delete(request_removal));
     }
     Some(router.route_layer(middleware::from_fn_with_state(state.clone(), require_owner)))
 }
@@ -349,6 +367,57 @@ async fn export_skill(
     Ok(Json(serde_json::json!({"name": body.name})))
 }
 
+async fn rollback_skill(
+    State(state): State<Arc<AppState>>,
+    Extension(actor): Extension<ActorContext>,
+    Path(package_id): Path<String>,
+    payload: Result<Json<RollbackBody>, JsonRejection>,
+) -> Result<Json<agent_runtime::skill_management::SkillRollbackReport>, OwnerApiError> {
+    let package_id = agent_runtime::skill_package::SkillPackageId::parse(&package_id)
+        .map_err(|_| OwnerApiError::BadRequest)?;
+    let Json(body) = payload.map_err(|_| OwnerApiError::BadRequest)?;
+    validate_uuid(&body.revision_id)?;
+    Ok(Json(
+        owner_config(&state)?
+            .service
+            .rollback_managed_skill(&actor, &package_id, &body.revision_id)
+            .await
+            .map_err(OwnerApiError::from_service)?,
+    ))
+}
+
+async fn disable_skill(
+    State(state): State<Arc<AppState>>,
+    Extension(actor): Extension<ActorContext>,
+    Path(package_id): Path<String>,
+    payload: Result<Json<EmptyBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, OwnerApiError> {
+    let package_id = agent_runtime::skill_package::SkillPackageId::parse(&package_id)
+        .map_err(|_| OwnerApiError::BadRequest)?;
+    let Json(_) = payload.map_err(|_| OwnerApiError::BadRequest)?;
+    let report = owner_config(&state)?
+        .service
+        .disable_managed_skill(&actor, &package_id)
+        .await
+        .map_err(OwnerApiError::from_service)?;
+    Ok(Json(reload_report_json(&report)))
+}
+
+async fn request_removal(
+    State(state): State<Arc<AppState>>,
+    Extension(actor): Extension<ActorContext>,
+    Path(package_id): Path<String>,
+) -> Result<impl IntoResponse, OwnerApiError> {
+    let package_id = agent_runtime::skill_package::SkillPackageId::parse(&package_id)
+        .map_err(|_| OwnerApiError::BadRequest)?;
+    let approval = owner_config(&state)?
+        .service
+        .request_removal(&actor, &package_id)
+        .await
+        .map_err(OwnerApiError::from_service)?;
+    Ok((StatusCode::ACCEPTED, Json(approval_json(&approval))))
+}
+
 async fn resolve_approval(
     State(state): State<Arc<AppState>>,
     Extension(actor): Extension<ActorContext>,
@@ -361,27 +430,34 @@ async fn resolve_approval(
         ApprovalDecision::Approve => {
             let report = owner_config(&state)?
                 .service
-                .approve_activation(&approval_id, &actor)
+                .approve_pending_skill_operation(&approval_id, &actor)
                 .await
                 .map_err(OwnerApiError::from_service)?;
-            serde_json::json!({
-                "active_generation": report.active_generation,
-                "active_packages": report.active_packages,
-                "inactive_packages": report.inactive_packages,
-                "previous_generation": report.previous_generation,
-                "status": "approved"
-            })
+            let mut value = reload_report_json(&report);
+            value["status"] = serde_json::json!("approved");
+            value
         }
         ApprovalDecision::Reject => {
             let approval = owner_config(&state)?
                 .service
-                .reject_activation(&approval_id, &actor)
+                .reject_pending_skill_operation(&approval_id, &actor)
                 .await
                 .map_err(OwnerApiError::from_service)?;
             approval_json(&approval)
         }
     };
     Ok(Json(value))
+}
+
+fn reload_report_json(
+    report: &agent_runtime::skill_manager::SkillReloadReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "active_generation": report.active_generation,
+        "active_packages": report.active_packages,
+        "inactive_packages": report.inactive_packages,
+        "previous_generation": report.previous_generation,
+    })
 }
 
 fn approval_json(approval: &agent_runtime::skill_state::SkillApprovalRecord) -> serde_json::Value {

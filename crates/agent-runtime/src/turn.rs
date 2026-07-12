@@ -6,7 +6,7 @@ use crate::skill_catalog::SkillCatalog;
 use crate::skill_management::OwnerSkillManagementService;
 use crate::skill_management_tools::SkillManagementToolContext;
 use crate::skill_manager::SkillManager;
-use crate::skill_snapshot::SkillSnapshot;
+use crate::skill_snapshot::SkillSnapshotLease;
 use crate::tools::result::{ToolError, ToolResult, ToolResultMetadata};
 use crate::tools::{RuntimeConfig, ToolDefinition, ToolRegistry};
 use crate::turn_request::{BudgetPolicy, TurnRequest};
@@ -86,15 +86,16 @@ where
     }
 
     pub async fn run_request(&self, request: TurnRequest) -> anyhow::Result<Vec<RuntimeEvent>> {
-        let snapshot = self.skill_manager.current_snapshot();
-        self.run_with_snapshot(request, snapshot).await
+        let lease = self.skill_manager.lease_snapshot();
+        self.run_with_snapshot(request, lease).await
     }
 
     async fn run_with_snapshot(
         &self,
         request: TurnRequest,
-        snapshot: Arc<SkillSnapshot>,
+        lease: SkillSnapshotLease,
     ) -> anyhow::Result<Vec<RuntimeEvent>> {
+        let snapshot = lease.snapshot();
         let management = self
             .management
             .as_ref()
@@ -106,7 +107,8 @@ where
             snapshot.registry().clone(),
             &self.config,
             management,
-        )?;
+        )?
+        .with_execution_observer(Arc::new(self.skill_manager.clone()));
         let skill_catalog = snapshot.catalog();
         let turn_id = Uuid::new_v4().to_string();
         let mut events = vec![RuntimeEvent::TurnStarted {

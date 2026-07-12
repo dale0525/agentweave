@@ -95,7 +95,7 @@ struct SkillBundleEntry {
 
 #[derive(Debug, Clone)]
 pub struct SkillRegistry {
-    skills: Vec<InstalledSkill>,
+    pub(crate) skills: Vec<InstalledSkill>,
     availability: Option<SkillAvailabilityContext>,
 }
 
@@ -375,7 +375,7 @@ impl SkillRegistry {
         })
     }
 
-    fn skill_is_available(&self, skill: &InstalledSkill) -> bool {
+    pub(crate) fn skill_is_available(&self, skill: &InstalledSkill) -> bool {
         self.skill_availability(skill).status == SkillAvailabilityStatus::Available
     }
 

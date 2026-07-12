@@ -19,6 +19,12 @@ pub(crate) struct PreparedStoreDirectory {
     descriptor: Arc<File>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedStoreChild {
+    pub(crate) name: String,
+    pub(crate) directory: PreparedStoreDirectory,
+}
+
 impl PreparedStoreDirectory {
     fn open(root: &StoreRootIdentity, relative: &Path) -> anyhow::Result<Self> {
         let descriptor = open_prepared_directory_platform(root, relative)?;
@@ -104,6 +110,73 @@ pub(crate) async fn remove_opened_tree(directory: &PreparedStoreDirectory) -> an
     tokio::task::spawn_blocking(move || remove_opened_tree_platform(&directory))
         .await
         .context("prepared-root opened cleanup worker failed")?
+}
+
+pub(crate) async fn list_opened_root_directories(
+    root: &StoreRootIdentity,
+    max_entries: usize,
+) -> anyhow::Result<Vec<PreparedStoreChild>> {
+    root.verify("store enumeration root")?;
+    let mut entries = tokio::fs::read_dir(root.path()).await?;
+    let mut children = Vec::new();
+    let mut observed = 0usize;
+    while let Some(entry) = entries.next_entry().await? {
+        observed = observed
+            .checked_add(1)
+            .context("store enumeration entry count overflow")?;
+        if observed > max_entries {
+            anyhow::bail!("store enumeration exceeded its bounded entry limit");
+        }
+        let file_type = entry.file_type().await?;
+        if file_type.is_symlink() || !file_type.is_dir() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("store entry name is not UTF-8"))?;
+        let relative = std::path::PathBuf::from(&name);
+        canonical_relative_path(&relative)?;
+        let directory = open_prepared_directory(root, &relative).await?;
+        children.push(PreparedStoreChild { name, directory });
+    }
+    root.verify("store enumeration root")?;
+    children.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(children)
+}
+
+pub(crate) async fn list_opened_child_directories(
+    parent: &PreparedStoreDirectory,
+    max_entries: usize,
+) -> anyhow::Result<Vec<PreparedStoreChild>> {
+    parent.verify()?;
+    let mut entries = tokio::fs::read_dir(parent.path()).await?;
+    let mut children = Vec::new();
+    let mut observed = 0usize;
+    while let Some(entry) = entries.next_entry().await? {
+        observed = observed
+            .checked_add(1)
+            .context("store enumeration entry count overflow")?;
+        if observed > max_entries {
+            anyhow::bail!("store enumeration exceeded its bounded entry limit");
+        }
+        let file_type = entry.file_type().await?;
+        if file_type.is_symlink() || !file_type.is_dir() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("store entry name is not UTF-8"))?;
+        let relative_name = std::path::PathBuf::from(&name);
+        canonical_relative_path(&relative_name)?;
+        let relative = parent.relative.join(&relative_name);
+        let directory = open_prepared_directory(&parent.root, &relative).await?;
+        children.push(PreparedStoreChild { name, directory });
+    }
+    parent.verify()?;
+    children.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(children)
 }
 
 pub(crate) async fn ensure_opened_child_directory(

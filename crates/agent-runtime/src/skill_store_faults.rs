@@ -72,6 +72,8 @@ pub(crate) enum StoreFaultPoint {
     QuarantineDestinationCleanupAfter,
     QuarantineSourceCleanup,
     QuarantineSourceCleanupAfter,
+    CleanupBeforeTreeDelete,
+    CleanupAfterTreeDelete,
 }
 
 #[derive(Clone, Default)]

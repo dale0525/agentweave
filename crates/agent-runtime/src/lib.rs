@@ -16,16 +16,22 @@ pub mod skill_management_tools;
 pub mod skill_manager;
 pub mod skill_package;
 pub mod skill_policy;
+pub mod skill_recovery;
 pub mod skill_resolver;
+mod skill_runtime_source;
 pub mod skill_snapshot;
 pub mod skill_source;
 pub mod skill_state;
 mod skill_state_activation;
+mod skill_state_cleanup;
 mod skill_state_compensation;
+mod skill_state_lifecycle;
 mod skill_state_management;
 mod skill_state_migration;
+mod skill_state_recovery;
 mod skill_state_revision_cas;
 mod skill_state_rows;
+mod skill_state_startup;
 mod skill_state_transactions;
 pub mod skill_store;
 mod skill_store_atomic_write;
@@ -42,9 +48,11 @@ mod skill_store_path_prepare;
 mod skill_store_prepared_fs;
 mod skill_store_public_types;
 mod skill_store_recovery;
+mod skill_store_revision_cleanup;
 mod skill_store_secure_fs;
 mod skill_store_secure_fs_faults;
 mod skill_store_secure_roots;
+mod skill_store_startup;
 mod skill_store_transfer;
 mod skill_store_windows;
 mod skill_verified;
@@ -63,6 +71,12 @@ mod skill_policy_tests;
 
 #[cfg(test)]
 mod skill_management_tests;
+#[cfg(test)]
+mod skill_recovery_cleanup_tests;
+#[cfg(test)]
+mod skill_recovery_residue_tests;
+#[cfg(test)]
+mod skill_recovery_tests;
 
 #[cfg(test)]
 mod skill_authoring_activation_tests;

@@ -516,7 +516,28 @@ async fn skill_state_migration_is_idempotent_with_foreign_keys_enabled() {
             .fetch_all(storage.pool())
             .await
             .unwrap();
-    assert_eq!(rows.len(), 7);
+    let names = rows
+        .iter()
+        .map(|row| row.try_get::<String, _>("name").unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        names,
+        [
+            "skill_approval_bindings",
+            "skill_approvals",
+            "skill_audit_log",
+            "skill_circuit_state",
+            "skill_installations",
+            "skill_maintenance_diagnostics",
+            "skill_revision_cleanup",
+            "skill_revision_retention",
+            "skill_revisions",
+            "skill_snapshots",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    );
 }
 
 async fn snapshot_status(storage: &Storage, generation: u64) -> String {

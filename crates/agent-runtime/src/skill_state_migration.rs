@@ -111,6 +111,31 @@ async fn create_supporting_tables(tx: &mut Transaction<'_, Sqlite>) -> anyhow::R
           open_until TEXT,
           updated_at TEXT NOT NULL
         )"#,
+        r#"CREATE TABLE IF NOT EXISTS skill_revision_retention (
+          revision_id TEXT PRIMARY KEY,
+          package_id TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          retain_until TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(revision_id) REFERENCES skill_revisions(revision_id) ON DELETE CASCADE
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS skill_revision_cleanup (
+          revision_id TEXT PRIMARY KEY,
+          package_id TEXT NOT NULL,
+          expected_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status = 'pending'),
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(revision_id) REFERENCES skill_revisions(revision_id) ON DELETE CASCADE
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS skill_maintenance_diagnostics (
+          idempotency_key TEXT PRIMARY KEY,
+          revision_id TEXT,
+          area TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          outcome TEXT NOT NULL,
+          metadata_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )"#,
     ] {
         sqlx::query(statement).execute(&mut **tx).await?;
     }
@@ -300,6 +325,7 @@ async fn create_indexes(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> 
         "CREATE INDEX IF NOT EXISTS idx_skill_audit_package_created ON skill_audit_log(package_id, created_at, id)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_snapshots_single_active ON skill_snapshots(status) WHERE status = 'active'",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_snapshots_single_lkg ON skill_snapshots(status) WHERE status = 'last_known_good'",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_approvals_single_removal ON skill_approvals(package_id, operation) WHERE status = 'pending' AND operation = 'remove'",
     ] {
         sqlx::query(statement).execute(&mut **tx).await?;
     }

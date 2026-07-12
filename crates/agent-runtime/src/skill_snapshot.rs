@@ -2,6 +2,7 @@ use crate::platform::{CapabilitySet, PlatformId};
 use crate::skill::SkillRegistry;
 use crate::skill_catalog::{SkillCatalog, SkillCatalogEntry};
 use crate::skill_resolver::{ResolvedSkillPackage, ResolvedSkillSet};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct SkillSnapshot {
@@ -10,6 +11,29 @@ pub struct SkillSnapshot {
     inactive: Vec<ResolvedSkillPackage>,
     registry: SkillRegistry,
     catalog: SkillCatalog,
+}
+
+#[derive(Clone, Debug)]
+pub struct SkillSnapshotLease {
+    snapshot: Arc<SkillSnapshot>,
+}
+
+impl SkillSnapshotLease {
+    pub(crate) fn new(snapshot: Arc<SkillSnapshot>) -> Self {
+        Self { snapshot }
+    }
+
+    pub fn snapshot(&self) -> &SkillSnapshot {
+        &self.snapshot
+    }
+
+    pub fn snapshot_arc(&self) -> Arc<SkillSnapshot> {
+        self.snapshot.clone()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.snapshot.generation()
+    }
 }
 
 impl SkillSnapshot {

@@ -43,7 +43,9 @@ async fn runtime_skill_diagnostics_include_skill_source() {
     assert_eq!(
         diagnostic.source,
         ToolSource::RuntimeSkill {
-            skill_name: "echoer".into()
+            skill_name: "echoer".into(),
+            package_id: "echoer".into(),
+            revision_id: None,
         }
     );
     assert!(diagnostic.schema.valid);
@@ -253,7 +255,9 @@ async fn project_filesystem_skill_executes_when_builtin_tools_are_disabled() {
     assert_eq!(
         definition.source,
         ToolSource::RuntimeSkill {
-            skill_name: "filesystem".to_string()
+            skill_name: "filesystem".to_string(),
+            package_id: "filesystem".to_string(),
+            revision_id: None,
         }
     );
     assert_eq!(definition.permission, ToolPermission::WriteWorkspace);

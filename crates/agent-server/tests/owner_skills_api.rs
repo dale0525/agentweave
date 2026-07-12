@@ -977,3 +977,6 @@ async fn directory_is_empty(path: &std::path::Path) -> bool {
         .unwrap()
         .is_none()
 }
+
+#[path = "support/owner_skills_lifecycle_api.rs"]
+mod lifecycle_api;

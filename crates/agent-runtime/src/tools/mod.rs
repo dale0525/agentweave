@@ -17,8 +17,9 @@ use result::{ToolError, ToolResult, ToolResultMetadata};
 use schema::{ToolDiagnostic, validate_tool_definition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_TOOL_CALLS_PER_TURN: usize = 16;
@@ -118,9 +119,28 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ToolSource {
     BuiltIn,
-    RuntimeSkill { skill_name: String },
-    Mcp { server: String },
-    AppConnector { connector: String },
+    RuntimeSkill {
+        skill_name: String,
+        package_id: String,
+        revision_id: Option<String>,
+    },
+    Mcp {
+        server: String,
+    },
+    AppConnector {
+        connector: String,
+    },
+}
+
+#[async_trait::async_trait]
+pub trait ToolExecutionObserver: Send + Sync {
+    async fn finished(&self, source: &ToolSource, success: bool) -> anyhow::Result<()>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolObserverDiagnostic {
+    pub operation: &'static str,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -150,7 +170,6 @@ pub fn permission_allowed(
     }
 }
 
-#[derive(Debug)]
 pub struct ToolRegistry {
     builtins: BuiltInTools,
     built_in_tools_enabled: bool,
@@ -167,6 +186,20 @@ pub struct ToolRegistry {
     output_limit_bytes: usize,
     approval_policy: ApprovalPolicy,
     management: Option<SkillManagementToolContext>,
+    execution_observer: Option<Arc<dyn ToolExecutionObserver>>,
+    observer_diagnostics: Arc<Mutex<VecDeque<ToolObserverDiagnostic>>>,
+}
+
+impl std::fmt::Debug for ToolRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolRegistry")
+            .field("built_in_tools_enabled", &self.built_in_tools_enabled)
+            .field("external_tools", &self.external_tools.len())
+            .field("has_management", &self.management.is_some())
+            .field("has_execution_observer", &self.execution_observer.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ToolRegistry {
@@ -210,8 +243,24 @@ impl ToolRegistry {
             output_limit_bytes: config.output_limit_bytes,
             approval_policy: config.approval_policy,
             management,
+            execution_observer: None,
+            observer_diagnostics: Arc::new(Mutex::new(VecDeque::with_capacity(32))),
         }
         .validate()
+    }
+
+    pub fn with_execution_observer(mut self, observer: Arc<dyn ToolExecutionObserver>) -> Self {
+        self.execution_observer = Some(observer);
+        self
+    }
+
+    pub fn observer_diagnostics(&self) -> Vec<ToolObserverDiagnostic> {
+        self.observer_diagnostics
+            .lock()
+            .expect("tool observer diagnostic lock poisoned")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -231,23 +280,30 @@ impl ToolRegistry {
         } else {
             Vec::new()
         };
-        definitions.extend(self.skills.tools_with_skill_names().into_iter().filter_map(
-            |(skill_name, tool)| {
-                if self.built_in_tools_enabled && BuiltInTools::handles(&tool.name) {
-                    return None;
-                }
+        definitions.extend(
+            self.skills
+                .tools_with_runtime_sources()
+                .into_iter()
+                .filter_map(|(skill_name, package_id, revision_id, tool)| {
+                    if self.built_in_tools_enabled && BuiltInTools::handles(&tool.name) {
+                        return None;
+                    }
 
-                Some(ToolDefinition {
-                    name: tool.name,
-                    namespace: None,
-                    description: tool.description,
-                    input_schema: tool.input_schema,
-                    output_schema: None,
-                    permission: tool.permission,
-                    source: ToolSource::RuntimeSkill { skill_name },
-                })
-            },
-        ));
+                    Some(ToolDefinition {
+                        name: tool.name,
+                        namespace: None,
+                        description: tool.description,
+                        input_schema: tool.input_schema,
+                        output_schema: None,
+                        permission: tool.permission,
+                        source: ToolSource::RuntimeSkill {
+                            skill_name,
+                            package_id,
+                            revision_id,
+                        },
+                    })
+                }),
+        );
         definitions.extend(self.external_definitions.clone());
         definitions
     }
@@ -353,14 +409,17 @@ impl ToolRegistry {
 
         match execution.await {
             Ok(result) => self.apply_output_limit(result),
-            Err(_) => registry_failure(
-                name,
-                call_id,
-                "timeout",
-                "tool execution timed out",
-                true,
-                registry_metadata(started),
-            ),
+            Err(_) => {
+                self.observe_runtime_timeout(name).await;
+                registry_failure(
+                    name,
+                    call_id,
+                    "timeout",
+                    "tool execution timed out",
+                    true,
+                    registry_metadata(started),
+                )
+            }
         }
     }
 
@@ -402,7 +461,8 @@ impl ToolRegistry {
             );
         }
 
-        match self
+        let source = self.runtime_tool_source(name);
+        let result = match self
             .skills
             .execute_with_context(
                 name,
@@ -425,7 +485,73 @@ impl ToolRegistry {
                 }
                 registry_failure(name, call_id, code, message, false, metadata)
             }
+        };
+        let attributable = result.ok
+            || result.error.as_ref().is_some_and(|error| {
+                error.message.contains("skill command failed")
+                    || error
+                        .message
+                        .contains("tool output exceeded runtime output limit")
+            });
+        if attributable {
+            self.observe_execution(&source, result.ok).await;
         }
+        result
+    }
+
+    fn runtime_tool_source(&self, name: &str) -> ToolSource {
+        self.find_runtime_tool_source(name)
+            .expect("runtime tool source must exist for an executable skill tool")
+    }
+
+    fn find_runtime_tool_source(&self, name: &str) -> Option<ToolSource> {
+        self.skills
+            .tools_with_runtime_sources()
+            .into_iter()
+            .find_map(|(skill_name, package_id, revision_id, tool)| {
+                (tool.name == name).then_some(ToolSource::RuntimeSkill {
+                    skill_name,
+                    package_id,
+                    revision_id,
+                })
+            })
+    }
+
+    async fn observe_runtime_timeout(&self, name: &str) {
+        if (self.built_in_tools_enabled && BuiltInTools::handles(name))
+            || self.external_tool(name).is_some()
+        {
+            return;
+        }
+        let allowed = self.skills.tools().iter().any(|tool| {
+            tool.name == name && permission_allowed(self.mode, self.command_mode, tool.permission)
+        });
+        if !allowed {
+            return;
+        }
+        if let Some(source) = self.find_runtime_tool_source(name) {
+            self.observe_execution(&source, false).await;
+        }
+    }
+
+    async fn observe_execution(&self, source: &ToolSource, success: bool) {
+        let Some(observer) = &self.execution_observer else {
+            return;
+        };
+        if observer.finished(source, success).await.is_ok() {
+            return;
+        }
+        let mut diagnostics = self
+            .observer_diagnostics
+            .lock()
+            .expect("tool observer diagnostic lock poisoned");
+        if diagnostics.len() == 32 {
+            diagnostics.pop_front();
+        }
+        diagnostics.push_back(ToolObserverDiagnostic {
+            operation: "tool_execution_observer",
+            message: "tool execution observer failed".into(),
+        });
     }
 
     fn external_tool(&self, name: &str) -> Option<&ExternalToolConfig> {
@@ -578,6 +704,9 @@ fn skill_error_code(message: &str) -> &'static str {
 
 #[cfg(test)]
 mod registry_tests;
+
+#[cfg(test)]
+mod execution_observer_tests;
 
 #[cfg(test)]
 mod management_registry_tests;

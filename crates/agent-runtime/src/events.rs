@@ -37,6 +37,10 @@ pub enum RuntimeEvent {
         revision_id: String,
         generation: u64,
     },
+    SkillRecoveryCompleted {
+        status: crate::skill_recovery::RecoveryStatus,
+        generation: u64,
+    },
     ToolCallStarted {
         call_id: String,
         name: String,

@@ -18,6 +18,8 @@ pub(crate) struct ExactActivationPublication<'a> {
     pub expectation: &'a SkillRevisionExpectation,
     pub promotion: &'a SkillRevisionPromotion,
     pub previous_installation: Option<&'a SkillInstallationRecord>,
+    pub previous_generation: u64,
+    pub previous_members: serde_json::Value,
     pub generation: u64,
     pub members: serde_json::Value,
 }
@@ -42,6 +44,8 @@ impl SkillStateStore {
             expectation,
             promotion,
             previous_installation,
+            previous_generation,
+            previous_members,
             generation,
             members,
         } = input;
@@ -49,7 +53,10 @@ impl SkillStateStore {
             .map_err(crate::skill_state::SkillStateBoundaryError::InvalidInput)?;
         let generation =
             i64::try_from(generation).context("snapshot generation exceeds SQLite range")?;
+        let previous_generation = i64::try_from(previous_generation)
+            .context("previous snapshot generation exceeds SQLite range")?;
         let members = serde_json::to_string(&members)?;
+        let previous_members = serde_json::to_string(&previous_members)?;
         let now = Utc::now().to_rfc3339();
         let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
         let result = async {
@@ -152,6 +159,18 @@ impl SkillStateStore {
             sqlx::query(
                 r#"INSERT INTO skill_snapshots
                    (generation, status, members_json, created_at, activated_at)
+                   VALUES (?, 'last_known_good', ?, ?, ?)
+                   ON CONFLICT(generation) DO NOTHING"#,
+            )
+            .bind(previous_generation)
+            .bind(previous_members)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"INSERT INTO skill_snapshots
+                   (generation, status, members_json, created_at, activated_at)
                    VALUES (?, 'candidate', ?, ?, NULL)"#,
             )
             .bind(generation)
@@ -159,9 +178,12 @@ impl SkillStateStore {
             .bind(&now)
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
-                "UPDATE skill_snapshots SET status = 'candidate' WHERE status = 'active' AND generation != ?",
-            )
+            sqlx::query("UPDATE skill_snapshots SET status = 'candidate' WHERE status = 'last_known_good' AND generation NOT IN (?, ?)")
+            .bind(previous_generation)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("UPDATE skill_snapshots SET status = 'last_known_good' WHERE status = 'active' AND generation != ?")
             .bind(generation)
             .execute(&mut *tx)
             .await?;

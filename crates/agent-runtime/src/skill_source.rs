@@ -212,6 +212,15 @@ impl ManagedSkillSource {
             .clone()
     }
 
+    pub(crate) async fn load_managed_revision(
+        &self,
+        package_id: &crate::skill_package::SkillPackageId,
+        revision_id: &str,
+    ) -> anyhow::Result<DiscoveredSkillPackage> {
+        self.validate_revision(package_id, SkillLayerRecord::Managed, revision_id)
+            .await
+    }
+
     async fn validate_revision(
         &self,
         installation_package: &crate::skill_package::SkillPackageId,
