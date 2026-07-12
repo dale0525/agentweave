@@ -132,6 +132,7 @@ fun SkillsScreen(
   protectedPackages: Set<String>,
   allowedOverrides: Set<String>,
   agentAuthoring: Boolean,
+  canOverrideProtected: Boolean,
   inventory: List<RuntimeSkill>,
   diagnostics: RuntimeDiagnostics,
   initialError: String?,
@@ -148,6 +149,7 @@ fun SkillsScreen(
   }
   var draftValidation by remember { mutableStateOf<RuntimeSkillValidation?>(null) }
   var approval by remember { mutableStateOf<SkillApprovalUiState?>(null) }
+  var synchronizationRecoveryPending by remember { mutableStateOf(false) }
 
   LaunchedEffect(inventory, diagnostics, initialError) {
     state = parentSkillSnapshotUpdated(state, inventory, diagnostics, initialError)
@@ -225,6 +227,26 @@ fun SkillsScreen(
     }
   }
 
+  fun recoverSynchronization(returnToDetail: Boolean) {
+    state = state.copy(busyOperation = "synchronize")
+    val generation = operationGeneration.begin()
+    scope.launch {
+      try {
+        withContext(Dispatchers.IO) { runtimeClient.synchronizeSkills() }
+        if (!operationGeneration.accepts(generation)) return@launch
+        synchronizationRecoveryPending = false
+        refresh(returnToDetail)
+      } catch (error: Throwable) {
+        if (!operationGeneration.accepts(generation)) return@launch
+        if (error is CancellationException) throw error
+        state = publicationSynchronizationRetryFailed(
+          state,
+          error.message ?: "Requester synchronization failed",
+        )
+      }
+    }
+  }
+
   fun requestApproval(operation: SkillApprovalOperation, revision: RuntimeSkillRevision) {
     val detail = state.detail ?: return
     state = state.copy(busyOperation = operation.name.lowercase(), inlineError = null)
@@ -294,13 +316,16 @@ fun SkillsScreen(
           navigate(SkillRoute.Detail(pending.detail.packageId))
         }
         if (warning != null) {
+          synchronizationRecoveryPending = true
           state = state.copy(
             busyOperation = null,
             inlineError = publicationSynchronizationWarning(warning),
           )
         } else if (pending.operation == SkillApprovalOperation.Removal) {
+          synchronizationRecoveryPending = false
           refresh()
         } else {
+          synchronizationRecoveryPending = false
           refresh(returnToDetail = true)
         }
       } catch (error: Throwable) {
@@ -331,7 +356,9 @@ fun SkillsScreen(
       actions = actions,
       state = state,
       onBack = onBack,
-      onRefresh = { refresh() },
+      onRefresh = {
+        if (synchronizationRecoveryPending) recoverSynchronization(returnToDetail = false) else refresh()
+      },
       onCreate = { navigate(SkillRoute.Draft(packageId = null, creating = true)) },
       onSelect = { skill -> openDetail(skill.packageId) },
     )
@@ -345,6 +372,7 @@ fun SkillsScreen(
           protectedPackages = protectedPackages,
           allowedOverrides = allowedOverrides,
           agentAuthoring = agentAuthoring,
+          canOverrideProtected = canOverrideProtected,
         ),
         detail,
         manageable = state.inventory.find { it.packageId == detail.packageId }?.manageable == true,
@@ -354,7 +382,11 @@ fun SkillsScreen(
         actions = targetActions,
         busyOperation = state.busyOperation,
         inlineError = state.inlineError,
-        onRetry = { refresh(returnToDetail = true) },
+        onRetry = {
+          if (synchronizationRecoveryPending) recoverSynchronization(returnToDetail = true) else {
+            refresh(returnToDetail = true)
+          }
+        },
         onBack = {
           navigate(SkillRoute.ListRoute)
           state = state.copy(detail = null, inlineError = null)
@@ -438,9 +470,6 @@ fun SkillsScreen(
     )
   }
 }
-
-fun publicationSynchronizationWarning(message: String): String =
-  "Published, refresh required: $message"
 
 @Composable
 internal fun SourceLabel(source: String) {

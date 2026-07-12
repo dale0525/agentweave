@@ -183,14 +183,37 @@ class RuntimeBridgeTest {
     )
 
     val resolution = client.resolveSkillApproval("approval-1", approve = true)
+    val synchronized = client.synchronizeSkills()
     val refreshed = client.listSkills()
 
     assertEquals("approved", resolution.mutation.status)
     assertEquals(8L, resolution.mutation.activeGeneration)
     assertTrue(resolution.synchronizationWarning?.contains("synchronization failed") == true)
+    assertEquals(8L, synchronized.activeSnapshotGeneration)
     assertTrue(refreshed.isEmpty())
     assertEquals(1, native.operations.count { it == "resolve_skill_approval" })
-    assertEquals(listOf("resolve_skill_approval", "synchronize_skills", "list_skills"), native.operations)
+    assertEquals(
+      listOf("resolve_skill_approval", "synchronize_skills", "synchronize_skills", "list_skills"),
+      native.operations,
+    )
+  }
+
+  @Test
+  fun failedSynchronizationRetryDoesNotResolveApprovalAgain() {
+    val native = SynchronizationFailureNativeRuntime(recoverySucceeds = false)
+    val client = RuntimeClient(
+      handle = 9L,
+      native = native,
+      actorContext = RuntimeActorContext(actorId = "requester", role = "owner"),
+      approverClient = RuntimeApprovalClient(10L, native, "approver"),
+    )
+
+    val resolution = client.resolveSkillApproval("approval-1", approve = true)
+    assertThrows(RuntimeBridgeException::class.java) { client.synchronizeSkills() }
+
+    assertTrue(resolution.synchronizationWarning != null)
+    assertEquals(1, native.operations.count { it == "resolve_skill_approval" })
+    assertEquals(2, native.operations.count { it == "synchronize_skills" })
   }
 
   @Test
@@ -474,7 +497,11 @@ private class MultiHandleNativeRuntime : NativeRuntimeApi {
 
   override fun invoke(handle: Long, requestJson: String): String {
     invokeHandles += handle
-    return """{"ok":true,"data":{"previous_generation":7,"active_generation":8,"active_packages":1,"inactive_packages":0,"status":"approved"}}"""
+    return if (JSONObject(requestJson).getString("operation") == "synchronize_skills") {
+      """{"ok":true,"data":{"platform":"android","capabilities":[],"database_ready":true,"skills_ready":true,"model_configured":false,"skill_management_mode":"owner_only","active_snapshot_generation":8,"quarantined_count":0,"last_reload_status":"generation:8"}}"""
+    } else {
+      """{"ok":true,"data":{"previous_generation":7,"active_generation":8,"active_packages":1,"inactive_packages":0,"status":"approved"}}"""
+    }
   }
 
   override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String = error("not used")
@@ -482,8 +509,11 @@ private class MultiHandleNativeRuntime : NativeRuntimeApi {
   override fun close(handle: Long): String = """{"ok":true,"data":null}"""
 }
 
-private class SynchronizationFailureNativeRuntime : NativeRuntimeApi {
+private class SynchronizationFailureNativeRuntime(
+  private val recoverySucceeds: Boolean = true,
+) : NativeRuntimeApi {
   val operations = mutableListOf<String>()
+  private var synchronizationAttempts = 0
 
   override fun initialize(requestJson: String): String = error("not used")
 
@@ -494,7 +524,11 @@ private class SynchronizationFailureNativeRuntime : NativeRuntimeApi {
       "resolve_skill_approval" ->
         """{"ok":true,"data":{"active_generation":8,"status":"approved"}}"""
       "synchronize_skills" ->
-        """{"ok":false,"error":{"code":"runtime_error","message":"requester synchronization failed"}}"""
+        if (++synchronizationAttempts == 1 || !recoverySucceeds) {
+          """{"ok":false,"error":{"code":"runtime_error","message":"requester synchronization failed"}}"""
+        } else {
+          """{"ok":true,"data":{"platform":"android","capabilities":[],"database_ready":true,"skills_ready":true,"model_configured":false,"skill_management_mode":"owner_only","active_snapshot_generation":8,"quarantined_count":0,"last_reload_status":"generation:8"}}"""
+        }
       "list_skills" -> """{"ok":true,"data":[]}"""
       else -> error("unexpected operation: $operation")
     }

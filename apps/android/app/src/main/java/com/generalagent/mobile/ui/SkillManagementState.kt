@@ -48,6 +48,7 @@ fun skillAccessState(policy: RuntimeSkillPolicy, actor: RuntimeActorContext): Sk
     protectedPackages = policy.protectedPackages.toSet(),
     allowedOverrides = policy.allowedOverrides.toSet(),
     agentAuthoring = policy.agentAuthoring,
+    canOverrideProtected = "override_builtin" in actor.grants,
   )
 }
 
@@ -56,29 +57,46 @@ fun skillTargetActions(
   detail: RuntimeSkillDetail,
   manageable: Boolean,
 ): Set<SkillAction> {
-  if (access.mode != SkillScreenMode.OwnerManage || detail.sourceLayer != "managed") return emptySet()
-  if (!manageable || detail.packageId in access.protectedPackages) return emptySet()
-  if (detail.status in setOf("removed", "quarantined", "inactive")) return emptySet()
+  if (access.mode != SkillScreenMode.OwnerManage) return emptySet()
   val draft = detail.editableDraft
-  val draftAllowed = draft != null && draft.kind in access.allowedKinds
+  val protected = detail.packageId in access.protectedPackages
+  val protectedDraftAllowed = !protected || (
+    detail.packageId in access.allowedOverrides && access.canOverrideProtected
+  )
+  val draftAllowed = draft != null &&
+    draft.editable &&
+    draft.status == "staging" &&
+    draft.kind in access.allowedKinds &&
+    protectedDraftAllowed
   val active = detail.activeRevisionId?.let { activeId ->
     detail.revisions.find { it.revisionId == activeId && !it.editable && it.status == "managed" }
   }
-  val activeInstallation = detail.status == "active" && active != null
+  val activeInstallation = detail.sourceLayer == "managed" && detail.status == "active" && active != null
   val activeKindAllowed = active?.kind in access.allowedKinds
-  val rollbackAvailable = activeInstallation && detail.revisions.any { revision ->
+  val lifecycleAllowed = manageable && !protected && activeInstallation && activeKindAllowed
+  val rollbackAvailable = lifecycleAllowed && detail.revisions.any { revision ->
     revision.kind in access.allowedKinds && selectRollbackTarget(detail, revision) != null
   }
   return access.actions.filterTo(mutableSetOf()) { action ->
     when (action) {
       SkillAction.Create -> false
-      SkillAction.Edit, SkillAction.Validate, SkillAction.Activate -> draftAllowed
-      SkillAction.Disable -> activeInstallation && activeKindAllowed
-      SkillAction.Rollback -> rollbackAvailable && activeKindAllowed
-      SkillAction.Delete -> activeInstallation && activeKindAllowed
+      SkillAction.Edit -> draftAllowed && access.agentAuthoring
+      SkillAction.Validate, SkillAction.Activate -> draftAllowed
+      SkillAction.Disable -> lifecycleAllowed
+      SkillAction.Rollback -> rollbackAvailable
+      SkillAction.Delete -> lifecycleAllowed
     }
   }
 }
+
+fun publicationSynchronizationWarning(message: String): String =
+  "Published, refresh required: $message"
+
+fun publicationSynchronizationRetryFailed(
+  state: SkillManagementUiState,
+  message: String,
+): SkillManagementUiState =
+  skillOperationFailed(state, publicationSynchronizationWarning(message))
 
 fun initialDraftKind(allowedKinds: Set<String>): String = allowedKinds.firstOrNull().orEmpty()
 

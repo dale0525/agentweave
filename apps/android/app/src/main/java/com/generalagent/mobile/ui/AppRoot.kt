@@ -73,6 +73,7 @@ data class SkillAccessState(
   val protectedPackages: Set<String> = emptySet(),
   val allowedOverrides: Set<String> = emptySet(),
   val agentAuthoring: Boolean = false,
+  val canOverrideProtected: Boolean = false,
 )
 
 fun skillScreenMode(mode: String, grants: Set<String>): SkillScreenMode =
@@ -106,7 +107,12 @@ fun skillAccessState(mode: String, grants: Set<String>): SkillAccessState {
   val tabs = visibleTabs(mode).filter { tab ->
     tab != AppTab.Skills || screenMode != SkillScreenMode.Hidden
   }
-  return SkillAccessState(screenMode, tabs, skillActions(screenMode, grants))
+  return SkillAccessState(
+    screenMode,
+    tabs,
+    skillActions(screenMode, grants),
+    canOverrideProtected = "override_builtin" in grants,
+  )
 }
 
 fun admittedPolicyTab(current: AppTab, requested: AppTab, visibleTabs: List<AppTab>): AppTab =
@@ -278,6 +284,7 @@ fun AppRoot(
               protectedPackages = skillAccess.protectedPackages,
               allowedOverrides = skillAccess.allowedOverrides,
               agentAuthoring = skillAccess.agentAuthoring,
+              canOverrideProtected = skillAccess.canOverrideProtected,
               inventory = skills,
               diagnostics = diagnostics,
               initialError = skillLoadError,

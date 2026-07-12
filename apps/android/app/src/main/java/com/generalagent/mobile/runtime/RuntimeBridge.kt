@@ -81,20 +81,11 @@ class RuntimeClient internal constructor(
   val approvalUnavailableReason: String?
     get() = if (approvalAvailable) null else "A distinct approving actor is unavailable"
 
-  fun diagnostics(): RuntimeDiagnostics {
-    val data = invoke(JSONObject().put("operation", "diagnostics"))
-    return RuntimeDiagnostics(
-      platform = data.getString("platform"),
-      capabilities = data.getJSONArray("capabilities").strings(),
-      databaseReady = data.getBoolean("database_ready"),
-      skillsReady = data.getBoolean("skills_ready"),
-      modelConfigured = data.getBoolean("model_configured"),
-      skillManagementMode = data.optString("skill_management_mode", "disabled"),
-      activeSnapshotGeneration = data.optLong("active_snapshot_generation", 0L),
-      quarantinedCount = data.optInt("quarantined_count", 0),
-      lastReloadStatus = data.optString("last_reload_status", "not_loaded"),
-    )
-  }
+  fun diagnostics(): RuntimeDiagnostics =
+    invoke(JSONObject().put("operation", "diagnostics")).toDiagnostics()
+
+  fun synchronizeSkills(): RuntimeDiagnostics =
+    invoke(JSONObject().put("operation", "synchronize_skills")).toDiagnostics()
 
   fun createSession(title: String): RuntimeSession =
     invoke(JSONObject().put("operation", "create_session").put("title", title)).toSession()
@@ -161,9 +152,7 @@ class RuntimeClient internal constructor(
         .put("approval_id", approvalId)
         .put("approve", approve),
     ).toSkillMutation()
-    val synchronizationWarning = runCatching {
-      invoke(JSONObject().put("operation", "synchronize_skills"))
-    }.exceptionOrNull()?.let { error ->
+    val synchronizationWarning = runCatching { synchronizeSkills() }.exceptionOrNull()?.let { error ->
       error.message ?: "Requester synchronization failed"
     }
     return RuntimeSkillApprovalResolution(mutation, synchronizationWarning)
@@ -353,6 +342,19 @@ private fun JSONObject.toMessage(): RuntimeMessage =
     role = getString("role"),
     content = getString("content"),
     createdAt = getString("created_at"),
+  )
+
+private fun JSONObject.toDiagnostics(): RuntimeDiagnostics =
+  RuntimeDiagnostics(
+    platform = getString("platform"),
+    capabilities = getJSONArray("capabilities").strings(),
+    databaseReady = getBoolean("database_ready"),
+    skillsReady = getBoolean("skills_ready"),
+    modelConfigured = getBoolean("model_configured"),
+    skillManagementMode = optString("skill_management_mode", "disabled"),
+    activeSnapshotGeneration = optLong("active_snapshot_generation", 0L),
+    quarantinedCount = optInt("quarantined_count", 0),
+    lastReloadStatus = optString("last_reload_status", "not_loaded"),
   )
 
 private fun JSONObject.toSkill(): RuntimeSkill =

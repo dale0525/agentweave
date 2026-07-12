@@ -294,12 +294,19 @@ class SkillManagementStateTest {
         SkillAction.Delete,
       ),
       allowedKinds = setOf("instruction_only"),
+      agentAuthoring = true,
     )
     val unmanaged = skillDetail(activeRevisionId = "revision-active").copy(sourceLayer = "builtin")
-    assertTrue(skillTargetActions(access, unmanaged, manageable = false).isEmpty())
+    assertEquals(
+      setOf(SkillAction.Edit, SkillAction.Validate, SkillAction.Activate),
+      skillTargetActions(access, unmanaged, manageable = false),
+    )
 
     val removed = skillDetail(activeRevisionId = "revision-active").copy(status = "removed")
-    assertTrue(skillTargetActions(access, removed, manageable = true).isEmpty())
+    assertEquals(
+      setOf(SkillAction.Edit, SkillAction.Validate, SkillAction.Activate),
+      skillTargetActions(access, removed, manageable = true),
+    )
 
     val managed = skillDetailWithHistory()
     val actions = skillTargetActions(access, managed, manageable = true)
@@ -346,6 +353,114 @@ class SkillManagementStateTest {
     assertFalse(SkillAction.Delete in draftActions)
     assertFalse(SkillAction.Disable in draftActions)
     assertFalse(SkillAction.Rollback in draftActions)
+  }
+
+  @Test
+  fun draftActionsDoNotRequirePackageLifecycleManageability() {
+    val detail = skillDetailWithHistory().let { original ->
+      original.copy(
+        revisions = original.revisions.map { revision ->
+          if (revision.revisionId == original.activeRevisionId) {
+            revision.copy(kind = "host_tools_only")
+          } else {
+            revision
+          }
+        },
+      )
+    }
+    val activateOnly = skillAccessState(
+      RuntimeSkillPolicy(
+        mode = "owner_only",
+        agentAuthoring = true,
+        allowedKinds = listOf("instruction_only"),
+      ),
+      RuntimeActorContext(role = "owner", grants = listOf("inspect", "activate")),
+    )
+    val editOnly = skillAccessState(
+      RuntimeSkillPolicy(
+        mode = "owner_only",
+        agentAuthoring = true,
+        allowedKinds = listOf("instruction_only"),
+      ),
+      RuntimeActorContext(role = "owner", grants = listOf("inspect", "edit_draft")),
+    )
+
+    assertEquals(setOf(SkillAction.Activate), skillTargetActions(activateOnly, detail, manageable = false))
+    assertEquals(setOf(SkillAction.Edit), skillTargetActions(editOnly, detail, manageable = false))
+  }
+
+  @Test
+  fun authoringPolicyDisablesEditWithoutHidingOtherDraftActions() {
+    val detail = skillDetailWithHistory()
+    val access = skillAccessState(
+      RuntimeSkillPolicy(
+        mode = "owner_only",
+        agentAuthoring = false,
+        allowedKinds = listOf("instruction_only"),
+      ),
+      RuntimeActorContext(
+        role = "owner",
+        grants = listOf("inspect", "edit_draft", "validate", "activate"),
+      ),
+    )
+
+    assertEquals(
+      setOf(SkillAction.Validate, SkillAction.Activate),
+      skillTargetActions(access, detail, manageable = false),
+    )
+  }
+
+  @Test
+  fun protectedOverrideAllowsOnlyValidationAndActivation() {
+    val detail = skillDetailWithHistory()
+    val policy = RuntimeSkillPolicy(
+      mode = "owner_only",
+      agentAuthoring = true,
+      allowedKinds = listOf("instruction_only"),
+      protectedPackages = listOf(detail.packageId),
+      allowedOverrides = listOf(detail.packageId),
+    )
+    val access = skillAccessState(
+      policy,
+      RuntimeActorContext(
+        role = "owner",
+        grants = listOf(
+          "inspect",
+          "validate",
+          "activate",
+          "disable",
+          "rollback",
+          "delete_managed",
+          "override_builtin",
+        ),
+      ),
+    )
+
+    assertEquals(
+      setOf(SkillAction.Validate, SkillAction.Activate),
+      skillTargetActions(access, detail, manageable = true),
+    )
+    assertTrue(
+      skillTargetActions(
+        access.copy(canOverrideProtected = false),
+        detail,
+        manageable = true,
+      ).isEmpty(),
+    )
+  }
+
+  @Test
+  fun synchronizationRetryFailureRetainsPublishedWarning() {
+    val state = SkillManagementUiState(
+      inventory = listOf(runtimeSkill(activeRevisionId = "revision-active")),
+      diagnostics = diagnostics(generation = 7),
+      busyOperation = "synchronize",
+    )
+
+    val failed = publicationSynchronizationRetryFailed(state, "requester still stale")
+
+    assertEquals(null, failed.busyOperation)
+    assertTrue(failed.inlineError?.startsWith("Published, refresh required") == true)
   }
 
   @Test
