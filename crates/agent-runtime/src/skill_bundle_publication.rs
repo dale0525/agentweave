@@ -39,3 +39,16 @@ pub(super) async fn verify_first_publication_or_neutralize(
         }
     }
 }
+
+pub(super) async fn verify_expected_active(
+    output: &PreparedStoreDirectory,
+    expected: &SkillBundleGeneration,
+) -> anyhow::Result<()> {
+    let source = BundleSkillSource::open(output.path()).await?;
+    let selected = source.current_generation().await?;
+    anyhow::ensure!(
+        selected.as_ref() == Some(expected),
+        "committed bundle publication did not select the expected active generation"
+    );
+    Ok(())
+}

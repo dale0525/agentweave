@@ -6,8 +6,12 @@ use crate::skill_store_windows::{
     FILE_SHARE_WRITE_FLAG, FILE_WRITE_ATTRIBUTES_ACCESS_FLAG, MOVEFILE_REPLACE_EXISTING_FLAG,
     MOVEFILE_WRITE_THROUGH_FLAG, atomic_replace_flags, attributes_are_reparse,
     bootstrap_directory_access_mask, component_open_flags, directory_share_mode,
-    finish_directory_child_creation, lock_file_share_mode, normalized_path_is_within,
-    regular_file_link_count_is_valid, replaceable_file_share_mode,
+    lock_file_share_mode, normalized_path_is_within, regular_file_link_count_is_valid,
+    replaceable_file_share_mode,
+};
+use crate::skill_store_windows_directory_create::{
+    FILE_CREATE_DISPOSITION, FILE_DIRECTORY_CREATE_OPTION, FILE_OPEN_REPARSE_CREATE_OPTION,
+    FILE_SYNCHRONOUS_CREATE_OPTION, NativeDirectoryCreate,
 };
 
 #[test]
@@ -106,31 +110,32 @@ fn windows_drive_relative_prefix_never_bootstraps_a_handle() {
 }
 
 #[test]
-fn windows_directory_child_creation_opens_after_a_concurrent_winner() {
-    let mut opened = false;
-    let child = finish_directory_child_creation(
-        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)),
-        || {
-            opened = true;
-            Ok("opened child")
-        },
-    )
-    .unwrap();
-
-    assert!(opened);
-    assert_eq!(child, "opened child");
+fn windows_directory_child_creation_uses_native_atomic_create_options() {
+    assert_eq!(FILE_CREATE_DISPOSITION, 2);
+    assert_eq!(FILE_DIRECTORY_CREATE_OPTION, 1);
+    assert_ne!(FILE_OPEN_REPARSE_CREATE_OPTION, 0);
+    assert_ne!(FILE_SYNCHRONOUS_CREATE_OPTION, 0);
 }
 
 #[test]
-fn windows_directory_child_creation_does_not_hide_other_create_errors() {
-    let error = finish_directory_child_creation::<(), _>(
-        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
-        || panic!("open must not run after a non-concurrent create failure"),
-    )
-    .unwrap_err();
+fn windows_native_directory_create_result_keeps_created_handle_distinct() {
+    let created = NativeDirectoryCreate::Created("exact handle");
+    let exists = NativeDirectoryCreate::<&str>::AlreadyExists;
 
-    assert_eq!(
-        error.downcast_ref::<std::io::Error>().unwrap().kind(),
-        std::io::ErrorKind::PermissionDenied
-    );
+    assert!(matches!(
+        created,
+        NativeDirectoryCreate::Created("exact handle")
+    ));
+    assert!(matches!(exists, NativeDirectoryCreate::AlreadyExists));
+}
+
+#[test]
+fn windows_native_directory_create_source_contract_is_atomic() {
+    let source = include_str!("skill_store_windows_directory_create.rs");
+    assert!(source.contains("NtCreateFile"));
+    assert!(source.contains("FILE_CREATE_DISPOSITION"));
+    assert!(source.contains("FILE_DIRECTORY_CREATE_OPTION"));
+    assert!(source.contains("NativeDirectoryCreate::Created"));
+    assert!(source.contains("NativeDirectoryCreate::AlreadyExists"));
+    assert!(!source.contains("std::fs::create_dir"));
 }

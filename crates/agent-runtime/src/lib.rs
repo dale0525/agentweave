@@ -59,6 +59,7 @@ mod skill_store_secure_snapshot;
 mod skill_store_startup;
 mod skill_store_transfer;
 mod skill_store_windows;
+mod skill_store_windows_directory_create;
 mod skill_verified;
 pub mod storage;
 pub mod subagent;

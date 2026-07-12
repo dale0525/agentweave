@@ -16,7 +16,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[cfg(unix)]
 #[tokio::test]
-async fn generation_replacement_after_final_validation_falls_back_to_previous_commitment() {
+async fn generation_replacement_after_final_validation_returns_error_with_previous_lkg() {
     let fixture = FinalReviewFixture::new().await;
     build_skill_bundle(fixture.request()).await.unwrap();
     let old = selected_package(&fixture.output).await;
@@ -34,7 +34,8 @@ async fn generation_replacement_after_final_validation_falls_back_to_previous_co
         .await
         .unwrap();
     gate.release().await;
-    publishing.await.unwrap().unwrap();
+    let error = publishing.await.unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("expected active generation"));
 
     let current = read_current(&fixture.output).await;
     assert_ne!(current, original_current);
@@ -49,7 +50,7 @@ async fn generation_replacement_after_final_validation_falls_back_to_previous_co
 
 #[cfg(unix)]
 #[tokio::test]
-async fn preopened_writer_after_final_validation_falls_back_to_previous_commitment() {
+async fn preopened_writer_after_final_validation_returns_error_with_previous_lkg() {
     let fixture = FinalReviewFixture::new().await;
     build_skill_bundle(fixture.request()).await.unwrap();
     let old = selected_package(&fixture.output).await;
@@ -70,7 +71,8 @@ async fn preopened_writer_after_final_validation_falls_back_to_previous_commitme
     writer.set_len(26).unwrap();
     writer.sync_all().unwrap();
     final_gate.release().await;
-    publishing.await.unwrap().unwrap();
+    let error = publishing.await.unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("expected active generation"));
 
     let current = read_current(&fixture.output).await;
     assert_ne!(current, original_current);
@@ -257,17 +259,39 @@ async fn subprocess_builders_publish_in_lock_order_without_output_collision() {
     let marker = fixture.source.with_file_name("first.locked");
     let release = fixture.source.with_file_name("first.release");
     let first_result = fixture.source.with_file_name("first.result");
+    let second_attempt = fixture.source.with_file_name("second.attempt");
+    let second_acquired = fixture.source.with_file_name("second.acquired");
     let second_result = fixture.source.with_file_name("second.result");
-    let mut first = spawn_bundle_builder_helper(&fixture, &first_result, Some((&marker, &release)));
+    let alias = fixture.output.with_file_name("Bundle");
+    let case_alias = if filesystem_is_case_insensitive(fixture.output.parent().unwrap()).await {
+        alias.as_path()
+    } else {
+        fixture.output.as_path()
+    };
+    let mut first = spawn_bundle_builder_helper(
+        &fixture.source,
+        case_alias,
+        &first_result,
+        Some((&marker, &release)),
+        None,
+    );
     wait_for_path(&marker).await;
-    let mut second = spawn_bundle_builder_helper(&fixture, &second_result, None);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut second = spawn_bundle_builder_helper(
+        &fixture.source,
+        &fixture.output,
+        &second_result,
+        None,
+        Some((&second_attempt, &second_acquired)),
+    );
+    wait_for_path(&second_attempt).await;
 
+    assert!(!second_acquired.exists());
     assert!(!second_result.exists());
     assert!(!fixture.output.exists());
 
     tokio::fs::write(&release, b"go").await.unwrap();
     wait_for_path(&first_result).await;
+    wait_for_path(&second_acquired).await;
     wait_for_path(&second_result).await;
     assert!(first.wait().unwrap().success());
     assert!(second.wait().unwrap().success());
@@ -277,6 +301,48 @@ async fn subprocess_builders_publish_in_lock_order_without_output_collision() {
         "ok"
     );
     assert_eq!(generation_count(&fixture.output).await, 2);
+}
+
+#[tokio::test]
+async fn subprocess_lock_is_attempted_before_source_canonicalization() {
+    let fixture = FinalReviewFixture::new().await;
+    let first_locked = fixture.source.with_file_name("scope-first.locked");
+    let first_release = fixture.source.with_file_name("scope-first.release");
+    let first_result = fixture.source.with_file_name("scope-first.result");
+    let second_attempt = fixture.source.with_file_name("scope-second.attempt");
+    let second_acquired = fixture.source.with_file_name("scope-second.acquired");
+    let second_result = fixture.source.with_file_name("scope-second.result");
+    let missing_source = fixture.source.with_file_name("missing-source");
+    let mut first = spawn_bundle_builder_helper(
+        &fixture.source,
+        &fixture.output,
+        &first_result,
+        Some((&first_locked, &first_release)),
+        None,
+    );
+    wait_for_path(&first_locked).await;
+    let mut second = spawn_bundle_builder_helper(
+        &missing_source,
+        &fixture.output,
+        &second_result,
+        None,
+        Some((&second_attempt, &second_acquired)),
+    );
+    wait_for_path(&second_attempt).await;
+
+    assert!(!second_acquired.exists());
+    assert!(!second_result.exists());
+
+    tokio::fs::write(&first_release, b"go").await.unwrap();
+    wait_for_path(&first_result).await;
+    wait_for_path(&second_acquired).await;
+    wait_for_path(&second_result).await;
+    assert!(first.wait().unwrap().success());
+    assert!(second.wait().unwrap().success());
+    assert_eq!(tokio::fs::read_to_string(first_result).await.unwrap(), "ok");
+    let error = tokio::fs::read_to_string(second_result).await.unwrap();
+    assert!(error.starts_with("error:"));
+    assert!(error.contains("source root"));
 }
 
 #[test]
@@ -371,8 +437,12 @@ async fn generations_cleanup_preserves_foreign_generation_created_after_empty_ob
     let message = format!("{error:#}");
     assert!(message.contains("BundleBeforeGenerationReservation"));
     assert!(message.contains("empty generations bootstrap cleanup failed safely"));
+    let quarantine = find_cleanup_quarantine(&fixture.output).await;
+    assert!(message.contains(&quarantine.display().to_string()));
     assert_eq!(
-        tokio::fs::read(foreign.join("foreign")).await.unwrap(),
+        tokio::fs::read(quarantine.join(&foreign_id).join("foreign"))
+            .await
+            .unwrap(),
         b"preserve me"
     );
 }
@@ -383,7 +453,7 @@ async fn generations_cleanup_preserves_empty_replacement_directory() {
     let fixture = FinalReviewFixture::new().await;
     let faults = StoreFaults::default();
     faults.fail_once(StoreFaultPoint::BundleBeforeGenerationReservation);
-    let gate = faults.gate_once(StoreFaultPoint::BundleBeforeGenerationsCleanup);
+    let gate = faults.gate_once(StoreFaultPoint::BundleBeforeGenerationsCleanupMove);
     let request = fixture.request();
     let publishing =
         tokio::spawn(async move { build_skill_bundle_with_faults(request, faults).await });
@@ -396,10 +466,12 @@ async fn generations_cleanup_preserves_empty_replacement_directory() {
 
     let error = publishing.await.unwrap().unwrap_err();
     assert!(format!("{error:#}").contains("cleanup failed safely"));
+    let quarantine = find_cleanup_quarantine(&fixture.output).await;
     assert!(
-        generations.is_dir(),
-        "foreign empty generations replacement was removed"
+        quarantine.is_dir(),
+        "foreign empty replacement evidence was removed"
     );
+    assert!(format!("{error:#}").contains(&quarantine.display().to_string()));
     assert!(displaced.is_dir(), "owned bootstrap evidence was lost");
 }
 
@@ -421,7 +493,12 @@ async fn output_cleanup_preserves_foreign_file_created_after_empty_observation()
     let message = format!("{error:#}");
     assert!(message.contains("BundleBeforeGenerationReservation"));
     assert!(message.contains("empty output bootstrap cleanup failed safely"));
-    assert_eq!(tokio::fs::read(foreign).await.unwrap(), b"preserve me");
+    let quarantine = find_cleanup_quarantine(fixture.output.parent().unwrap()).await;
+    assert!(message.contains(&quarantine.display().to_string()));
+    assert_eq!(
+        tokio::fs::read(quarantine.join("foreign")).await.unwrap(),
+        b"preserve me"
+    );
 }
 
 #[cfg(unix)]
@@ -430,7 +507,7 @@ async fn output_cleanup_preserves_empty_replacement_directory() {
     let fixture = FinalReviewFixture::new().await;
     let faults = StoreFaults::default();
     faults.fail_once(StoreFaultPoint::BundleBeforeGenerationReservation);
-    let gate = faults.gate_once(StoreFaultPoint::BundleBeforeOutputCleanup);
+    let gate = faults.gate_once(StoreFaultPoint::BundleBeforeOutputCleanupMove);
     let request = fixture.request();
     let publishing =
         tokio::spawn(async move { build_skill_bundle_with_faults(request, faults).await });
@@ -444,11 +521,79 @@ async fn output_cleanup_preserves_empty_replacement_directory() {
 
     let error = publishing.await.unwrap().unwrap_err();
     assert!(format!("{error:#}").contains("cleanup failed safely"));
+    let quarantine = find_cleanup_quarantine(fixture.output.parent().unwrap()).await;
     assert!(
-        fixture.output.is_dir(),
-        "foreign empty output replacement was removed"
+        quarantine.is_dir(),
+        "foreign empty replacement evidence was removed"
     );
+    assert!(format!("{error:#}").contains(&quarantine.display().to_string()));
     assert!(displaced.is_dir(), "owned bootstrap evidence was lost");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn generations_cleanup_preserves_foreign_empty_quarantine_replacement_before_delete() {
+    let fixture = FinalReviewFixture::new().await;
+    let faults = StoreFaults::default();
+    faults.fail_once(StoreFaultPoint::BundleBeforeGenerationReservation);
+    let gate = faults.gate_once(StoreFaultPoint::BundleBeforeGenerationsCleanupDelete);
+    let request = fixture.request();
+    let publishing =
+        tokio::spawn(async move { build_skill_bundle_with_faults(request, faults).await });
+    gate.wait_entered().await;
+
+    let quarantine = find_cleanup_quarantine(&fixture.output).await;
+    let owned_evidence = fixture.output.join("owned-generations-quarantine");
+    tokio::fs::rename(&quarantine, &owned_evidence)
+        .await
+        .unwrap();
+    tokio::fs::create_dir(&quarantine).await.unwrap();
+    gate.release().await;
+
+    let error = publishing.await.unwrap().unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("cleanup quarantine identity changed before deletion"));
+    assert!(message.contains(&quarantine.display().to_string()));
+    assert!(
+        quarantine.is_dir(),
+        "foreign quarantine replacement was removed"
+    );
+    assert!(
+        owned_evidence.is_dir(),
+        "owned generations evidence was lost"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn output_cleanup_preserves_foreign_empty_quarantine_replacement_before_delete() {
+    let fixture = FinalReviewFixture::new().await;
+    let faults = StoreFaults::default();
+    faults.fail_once(StoreFaultPoint::BundleBeforeGenerationReservation);
+    let gate = faults.gate_once(StoreFaultPoint::BundleBeforeOutputCleanupDelete);
+    let request = fixture.request();
+    let publishing =
+        tokio::spawn(async move { build_skill_bundle_with_faults(request, faults).await });
+    gate.wait_entered().await;
+
+    let parent = fixture.output.parent().unwrap();
+    let quarantine = find_cleanup_quarantine(parent).await;
+    let owned_evidence = parent.join("owned-output-quarantine");
+    tokio::fs::rename(&quarantine, &owned_evidence)
+        .await
+        .unwrap();
+    tokio::fs::create_dir(&quarantine).await.unwrap();
+    gate.release().await;
+
+    let error = publishing.await.unwrap().unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("cleanup quarantine identity changed before deletion"));
+    assert!(message.contains(&quarantine.display().to_string()));
+    assert!(
+        quarantine.is_dir(),
+        "foreign quarantine replacement was removed"
+    );
+    assert!(owned_evidence.is_dir(), "owned output evidence was lost");
 }
 
 #[tokio::test]
@@ -608,10 +753,26 @@ async fn generation_count(output: &Path) -> usize {
     count
 }
 
+async fn find_cleanup_quarantine(parent: &Path) -> PathBuf {
+    let mut entries = tokio::fs::read_dir(parent).await.unwrap();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".skill-cleanup-quarantine-")
+        {
+            return entry.path();
+        }
+    }
+    panic!("no cleanup quarantine found under {}", parent.display());
+}
+
 fn spawn_bundle_builder_helper(
-    fixture: &FinalReviewFixture,
+    source: &Path,
+    output: &Path,
     result: &Path,
     lock_gate: Option<(&Path, &Path)>,
+    lock_markers: Option<(&Path, &Path)>,
 ) -> std::process::Child {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
@@ -619,8 +780,8 @@ fn spawn_bundle_builder_helper(
         .arg("--exact")
         .arg("skill_bundle_final_review_tests::subprocess_bundle_builder_helper")
         .arg("--nocapture")
-        .env("GENERAL_AGENT_TEST_BUNDLE_SOURCE", &fixture.source)
-        .env("GENERAL_AGENT_TEST_BUNDLE_OUTPUT", &fixture.output)
+        .env("GENERAL_AGENT_TEST_BUNDLE_SOURCE", source)
+        .env("GENERAL_AGENT_TEST_BUNDLE_OUTPUT", output)
         .env("GENERAL_AGENT_TEST_BUNDLE_RESULT", result)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -629,7 +790,21 @@ fn spawn_bundle_builder_helper(
             .env("GENERAL_AGENT_TEST_BUNDLE_LOCK_MARKER", marker)
             .env("GENERAL_AGENT_TEST_BUNDLE_LOCK_RELEASE", release);
     }
+    if let Some((attempt, acquired)) = lock_markers {
+        command
+            .env("GENERAL_AGENT_TEST_BUNDLE_LOCK_ATTEMPT", attempt)
+            .env("GENERAL_AGENT_TEST_BUNDLE_LOCK_ACQUIRED", acquired);
+    }
     command.spawn().unwrap()
+}
+
+async fn filesystem_is_case_insensitive(parent: &Path) -> bool {
+    let lower = parent.join(format!("case-probe-{}", uuid::Uuid::new_v4()));
+    let upper = lower.with_file_name(lower.file_name().unwrap().to_string_lossy().to_uppercase());
+    tokio::fs::write(&lower, b"probe").await.unwrap();
+    let insensitive = upper.exists();
+    tokio::fs::remove_file(lower).await.unwrap();
+    insensitive
 }
 
 async fn wait_for_path(path: &Path) {

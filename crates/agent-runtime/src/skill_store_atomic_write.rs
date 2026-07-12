@@ -257,69 +257,23 @@ async fn atomic_replace_file_platform(
 
 #[cfg(all(not(unix), not(windows)))]
 async fn atomic_replace_file_platform(
-    root: &PreparedStoreDirectory,
-    relative: &Path,
-    bytes: &[u8],
+    _root: &PreparedStoreDirectory,
+    _relative: &Path,
+    _bytes: &[u8],
     _mode: u32,
-    faults: &StoreFaults,
+    _faults: &StoreFaults,
     _replaceable_destination: bool,
 ) -> Result<OwnedAtomicReplace, AtomicReplaceFailure> {
-    canonical_relative_path(relative).map_err(not_committed)?;
-    let destination = root.path().join(relative);
-    let parent = destination
-        .parent()
-        .context("staging file has no parent")
-        .map_err(not_committed)?;
-    let temporary = parent.join(format!(".skill-write-{}.tmp", uuid::Uuid::new_v4()));
-    let mut committed = false;
-    let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .await?;
-        file.write_all(bytes).await?;
-        file.flush().await?;
-        root.verify()?;
-        faults.check(StoreFaultPoint::WriteBeforeRename)?;
-        tokio::fs::rename(&temporary, &destination).await?;
-        committed = true;
-        faults.check(StoreFaultPoint::WriteAfterRenameMode)?;
-        faults.check(StoreFaultPoint::WriteAfterRenameRevalidate)?;
-        root.verify()?;
-        Ok::<tokio::fs::File, anyhow::Error>(file)
-    }
-    .await;
-    finish_platform_result(result, committed, faults, temporary).await
-}
-
-#[cfg(all(not(unix), not(windows)))]
-async fn finish_platform_result(
-    result: anyhow::Result<tokio::fs::File>,
-    committed: bool,
-    faults: &StoreFaults,
-    temporary: std::path::PathBuf,
-) -> Result<OwnedAtomicReplace, AtomicReplaceFailure> {
-    match finish_non_unix_success(result) {
-        Ok(owned) => Ok(owned),
-        Err(error) if committed => Err(failure(error, AtomicReplaceCommitState::Committed, None)),
-        Err(error) => {
-            let cleanup = match faults.check(StoreFaultPoint::WriteTempCleanup) {
-                Ok(()) => tokio::fs::remove_file(&temporary)
-                    .await
-                    .map_err(anyhow::Error::from),
-                Err(cleanup) => Err(cleanup),
-            };
-            finish_uncommitted(error, cleanup, temporary)
-        }
-    }
+    Err(unsupported_atomic_replace_failure())
 }
 
 #[cfg(any(test, all(not(unix), not(windows))))]
-fn finish_non_unix_success(
-    result: anyhow::Result<tokio::fs::File>,
-) -> anyhow::Result<OwnedAtomicReplace> {
-    result.map(|file| OwnedAtomicReplace { file })
+fn unsupported_atomic_replace_failure() -> AtomicReplaceFailure {
+    failure(
+        anyhow::anyhow!("bundle atomic publication is unsupported on this platform"),
+        AtomicReplaceCommitState::NotCommitted,
+        None,
+    )
 }
 
 fn finish_uncommitted<T>(
@@ -342,9 +296,11 @@ fn finish_uncommitted<T>(
 
 #[cfg(test)]
 #[test]
-fn non_unix_atomic_replace_success_contract_is_file_bound() {
-    let _contract: fn(anyhow::Result<tokio::fs::File>) -> anyhow::Result<OwnedAtomicReplace> =
-        finish_non_unix_success;
+fn unsupported_atomic_replace_contract_is_explicitly_not_committed() {
+    let failure = unsupported_atomic_replace_failure();
+    assert_eq!(failure.state, AtomicReplaceCommitState::NotCommitted);
+    let message = format!("{:#}", failure.error);
+    assert!(message.contains("unsupported") && message.contains("platform"));
 }
 
 fn cleanup_is_not_found(error: &anyhow::Error) -> bool {

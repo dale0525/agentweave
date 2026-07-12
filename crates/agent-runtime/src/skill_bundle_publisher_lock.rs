@@ -1,6 +1,5 @@
 use crate::skill_store_locks::StoreRootIdentity;
 use anyhow::Context;
-use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
@@ -9,6 +8,7 @@ use std::time::{Duration, Instant};
 
 const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+const PUBLISHER_LOCK_NAME: &str = ".skill-bundle-publisher.lock";
 
 pub(crate) struct BundlePublisherLock {
     parent: StoreRootIdentity,
@@ -29,6 +29,7 @@ impl BundlePublisherLock {
 pub(crate) async fn acquire_bundle_publisher_lock(
     output_root: &Path,
 ) -> anyhow::Result<BundlePublisherLock> {
+    ensure_bundle_publication_platform_supported()?;
     let parent = output_root.parent().context("output root has no parent")?;
     tokio::fs::create_dir_all(parent).await?;
     let parent_path = tokio::fs::canonicalize(parent).await?;
@@ -37,7 +38,7 @@ pub(crate) async fn acquire_bundle_publisher_lock(
         .file_name()
         .context("output root has no file name")?;
     let output_relative = PathBuf::from(output_name);
-    let lock_name = publisher_lock_name(output_name);
+    let lock_name = OsString::from(PUBLISHER_LOCK_NAME);
     let lock_path = parent.path().join(&lock_name);
     let parent_for_worker = parent.clone();
     let output_root = output_root.to_path_buf();
@@ -81,9 +82,15 @@ fn subprocess_after_lock_checkpoint() -> anyhow::Result<()> {
 
 fn wait_for_publisher_lock(descriptor: &mut File, lock_path: &Path) -> anyhow::Result<()> {
     let started = Instant::now();
+    #[cfg(test)]
+    write_subprocess_marker("GENERAL_AGENT_TEST_BUNDLE_LOCK_ATTEMPT", b"attempt")?;
     loop {
         match fs2::FileExt::try_lock_exclusive(descriptor) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                #[cfg(test)]
+                write_subprocess_marker("GENERAL_AGENT_TEST_BUNDLE_LOCK_ACQUIRED", b"acquired")?;
+                return Ok(());
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if started.elapsed() >= LOCK_WAIT_TIMEOUT {
                     let holder = read_lock_diagnostic(descriptor)
@@ -109,6 +116,14 @@ fn wait_for_publisher_lock(descriptor: &mut File, lock_path: &Path) -> anyhow::R
     }
 }
 
+#[cfg(test)]
+fn write_subprocess_marker(variable: &str, value: &[u8]) -> anyhow::Result<()> {
+    if let Some(path) = std::env::var_os(variable) {
+        std::fs::write(path, value)?;
+    }
+    Ok(())
+}
+
 fn write_lock_diagnostic(descriptor: &mut File, output_root: &Path) -> anyhow::Result<()> {
     descriptor.set_len(0)?;
     descriptor.rewind()?;
@@ -128,34 +143,6 @@ fn read_lock_diagnostic(descriptor: &File) -> anyhow::Result<String> {
     let mut diagnostic = String::new();
     copy.take(4096).read_to_string(&mut diagnostic)?;
     Ok(diagnostic)
-}
-
-fn publisher_lock_name(output_name: &OsStr) -> OsString {
-    let mut digest = Sha256::new();
-    update_path_digest(&mut digest, output_name);
-    OsString::from(format!(
-        ".skill-bundle-publisher-{}.lock",
-        hex::encode(digest.finalize())
-    ))
-}
-
-#[cfg(unix)]
-fn update_path_digest(digest: &mut Sha256, value: &OsStr) {
-    use std::os::unix::ffi::OsStrExt;
-    digest.update(value.as_bytes());
-}
-
-#[cfg(windows)]
-fn update_path_digest(digest: &mut Sha256, value: &OsStr) {
-    use std::os::windows::ffi::OsStrExt;
-    for unit in value.encode_wide() {
-        digest.update(unit.to_le_bytes());
-    }
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn update_path_digest(digest: &mut Sha256, value: &OsStr) {
-    digest.update(value.to_string_lossy().as_bytes());
 }
 
 #[cfg(unix)]
@@ -222,33 +209,38 @@ fn validate_publisher_lock(
 }
 
 #[cfg(all(not(unix), not(windows)))]
-fn open_publisher_lock(parent: &StoreRootIdentity, name: &OsStr) -> anyhow::Result<File> {
-    parent.verify("bundle publisher lock parent")?;
-    let path = parent.path().join(name);
-    let descriptor = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(&path)?;
-    anyhow::ensure!(
-        descriptor.metadata()?.is_file(),
-        "bundle publisher lock is not a file"
-    );
-    Ok(descriptor)
+fn open_publisher_lock(_parent: &StoreRootIdentity, _name: &OsStr) -> anyhow::Result<File> {
+    unsupported_bundle_publication_platform()
 }
 
 #[cfg(all(not(unix), not(windows)))]
 fn validate_publisher_lock(
-    parent: &StoreRootIdentity,
-    name: &OsStr,
-    descriptor: &File,
+    _parent: &StoreRootIdentity,
+    _name: &OsStr,
+    _descriptor: &File,
 ) -> anyhow::Result<()> {
-    parent.verify("bundle publisher lock parent")?;
-    let expected = same_file::Handle::from_file(descriptor.try_clone()?)?;
-    let current = same_file::Handle::from_path(parent.path().join(name))?;
-    anyhow::ensure!(
-        expected == current,
-        "bundle publisher lock entry changed after open"
-    );
+    unsupported_bundle_publication_platform()
+}
+
+#[cfg(any(test, all(not(unix), not(windows))))]
+fn unsupported_bundle_publication_platform<T>() -> anyhow::Result<T> {
+    anyhow::bail!("bundle publication is unsupported on this platform")
+}
+
+#[cfg(any(unix, windows))]
+fn ensure_bundle_publication_platform_supported() -> anyhow::Result<()> {
     Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn ensure_bundle_publication_platform_supported() -> anyhow::Result<()> {
+    unsupported_bundle_publication_platform()
+}
+
+#[cfg(test)]
+#[test]
+fn unsupported_publisher_lock_contract_fails_closed() {
+    let error = unsupported_bundle_publication_platform::<()>().unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("unsupported") && message.contains("platform"));
 }

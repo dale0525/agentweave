@@ -75,14 +75,8 @@ async fn build_skill_bundle_inner(
     faults: StoreFaults,
 ) -> anyhow::Result<BuildSkillBundleResult> {
     validate_request(&request)?;
-    let source_roots = canonical_source_roots(&request).await?;
     let output_root = absolute_normalized(&request.output_root)?;
-    let packages = inspect_packages(&source_roots).await?;
-    validate_resolved_package_set(&request, &packages)?;
-    checkpoint_after_inspection(&output_root).await;
-    let (manifest, lock) = artifact_contract(&request, &packages);
-    let manifest_bytes = pretty_json(&manifest)?;
-    let lock_bytes = pretty_json(&lock)?;
+    reject_lexical_root_overlap(&request, &output_root)?;
     faults
         .checkpoint(StoreFaultPoint::BundlePublisherLockAttempt)
         .await;
@@ -90,7 +84,14 @@ async fn build_skill_bundle_inner(
     faults
         .checkpoint(StoreFaultPoint::BundlePublisherLockAcquired)
         .await;
-    let output = prepare_output(&source_roots, &publisher_lock).await?;
+    let source_roots = canonical_source_roots(&request).await?;
+    let packages = inspect_packages(&source_roots).await?;
+    validate_resolved_package_set(&request, &packages)?;
+    checkpoint_after_inspection(&output_root).await;
+    let (manifest, lock) = artifact_contract(&request, &packages);
+    let manifest_bytes = pretty_json(&manifest)?;
+    let lock_bytes = pretty_json(&lock)?;
+    let output = prepare_output(&source_roots, &publisher_lock, &faults).await?;
     let previous = if output.has_current {
         match super::BundleSkillSource::open(output.root.path()).await {
             Ok(source) => match source.current_generation().await {
@@ -386,6 +387,23 @@ fn validate_request(request: &BuildSkillBundleRequest) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn reject_lexical_root_overlap(
+    request: &BuildSkillBundleRequest,
+    output_root: &Path,
+) -> anyhow::Result<()> {
+    for source_root in &request.source_roots {
+        let source_root = absolute_normalized(source_root)?;
+        if output_root.starts_with(&source_root) || source_root.starts_with(output_root) {
+            anyhow::bail!(
+                "source and output roots must not overlap: {} and {}",
+                source_root.display(),
+                output_root.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_resolved_package_set(
     request: &BuildSkillBundleRequest,
     packages: &[InspectedPackage],
@@ -633,6 +651,7 @@ struct PreparedBundleOutput {
 async fn prepare_output(
     source_roots: &[PathBuf],
     publisher_lock: &BundlePublisherLock,
+    faults: &StoreFaults,
 ) -> anyhow::Result<PreparedBundleOutput> {
     let parent_identity = publisher_lock.parent();
     let relative = publisher_lock.output_relative();
@@ -671,6 +690,7 @@ async fn prepare_output(
             &root,
             root_bootstrap.as_ref(),
             generations_bootstrap.as_ref(),
+            faults,
             error,
         )
         .await),
@@ -681,12 +701,19 @@ async fn cleanup_prepared_bootstraps(
     root: &PreparedStoreDirectory,
     root_bootstrap: Option<&OwnedDirectoryBootstrap>,
     generations_bootstrap: Option<&OwnedDirectoryBootstrap>,
+    faults: &StoreFaults,
     mut error: anyhow::Error,
 ) -> anyhow::Error {
     if let Some(generations) = generations_bootstrap {
         error = attach_cleanup(
             error,
-            remove_owned_directory_if_empty(generations).await,
+            remove_owned_directory_if_empty(
+                generations,
+                faults,
+                StoreFaultPoint::BundleBeforeGenerationsCleanupMove,
+                StoreFaultPoint::BundleBeforeGenerationsCleanupDelete,
+            )
+            .await,
             "new bundle generations bootstrap cleanup",
         );
     }
@@ -695,7 +722,13 @@ async fn cleanup_prepared_bootstraps(
             Ok(listing) if listing.observed == 0 => {
                 error = attach_cleanup(
                     error,
-                    remove_owned_directory_if_empty(root_bootstrap).await,
+                    remove_owned_directory_if_empty(
+                        root_bootstrap,
+                        faults,
+                        StoreFaultPoint::BundleBeforeOutputCleanupMove,
+                        StoreFaultPoint::BundleBeforeOutputCleanupDelete,
+                    )
+                    .await,
                     "new bundle output bootstrap cleanup",
                 );
             }
@@ -731,7 +764,13 @@ async fn cleanup_bootstrap_error(
                     .await;
                 error = attach_cleanup(
                     error,
-                    remove_owned_directory_if_empty(generations_bootstrap).await,
+                    remove_owned_directory_if_empty(
+                        generations_bootstrap,
+                        faults,
+                        StoreFaultPoint::BundleBeforeGenerationsCleanupMove,
+                        StoreFaultPoint::BundleBeforeGenerationsCleanupDelete,
+                    )
+                    .await,
                     "empty generations bootstrap cleanup",
                 );
             }
@@ -755,7 +794,13 @@ async fn cleanup_bootstrap_error(
                     .await;
                 error = attach_cleanup(
                     error,
-                    remove_owned_directory_if_empty(root_bootstrap).await,
+                    remove_owned_directory_if_empty(
+                        root_bootstrap,
+                        faults,
+                        StoreFaultPoint::BundleBeforeOutputCleanupMove,
+                        StoreFaultPoint::BundleBeforeOutputCleanupDelete,
+                    )
+                    .await,
                     "empty output bootstrap cleanup",
                 );
             }
@@ -879,7 +924,7 @@ async fn publish_generation(
     {
         Ok(()) => {
             *published = true;
-            Ok(())
+            super::publication::verify_expected_active(output, &expected).await
         }
         Err(failure) => {
             *published = failure.state == AtomicReplaceCommitState::Committed;

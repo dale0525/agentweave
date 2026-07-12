@@ -117,21 +117,6 @@ impl DirectoryBootstrapState {
     }
 }
 
-#[cfg(any(test, windows))]
-pub(crate) fn finish_directory_child_creation<T, F>(
-    create: std::io::Result<()>,
-    open: F,
-) -> anyhow::Result<T>
-where
-    F: FnOnce() -> anyhow::Result<T>,
-{
-    match create {
-        Ok(()) => open(),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => open(),
-        Err(error) => Err(error.into()),
-    }
-}
-
 #[cfg(windows)]
 mod platform {
     use super::{
@@ -251,19 +236,35 @@ mod platform {
             final_path: final_path(parent_handle)?,
             identity: parent_identity,
         };
-        let child_path = parent.final_path.join(child_name);
-        let create = std::fs::create_dir(&child_path);
-        let created = create.is_ok();
-        let child = super::finish_directory_child_creation(create, || {
-            open_direct_child(
+        let (child, created) = match
+            crate::skill_store_windows_directory_create::create_directory_child_atomically(
+                &parent.handle,
+                child_name,
+                bootstrap_directory_access_mask(),
+                directory_share_mode(),
+            )?
+        {
+            crate::skill_store_windows_directory_create::NativeDirectoryCreate::Created(child) => {
+                (child, true)
+            }
+            crate::skill_store_windows_directory_create::NativeDirectoryCreate::AlreadyExists => (
+                open_direct_child(
                 &parent,
                 child_name,
                 bootstrap_directory_access_mask(),
                 OPEN_EXISTING,
                 true,
-            )
-        })?;
+                )?,
+                false,
+            ),
+        };
+        let information = file_information(&child)?;
+        reject_reparse_or_wrong_kind(&information, true, &parent.final_path.join(child_name))?;
         let identity = file_identity(&child)?;
+        anyhow::ensure!(
+            identity.volume_serial == parent_identity.volume_serial,
+            "Windows directory bootstrap crossed its parent volume"
+        );
         let child_final = final_path(&child)?;
         Ok((child, identity, child_final, created))
     }
@@ -994,6 +995,5 @@ mod platform {
         }
     }
 }
-
 #[cfg(windows)]
 pub(crate) use platform::*;
