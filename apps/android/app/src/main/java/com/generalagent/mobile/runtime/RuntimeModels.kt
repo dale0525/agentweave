@@ -210,6 +210,22 @@ data class RuntimeSkillApprovalResolution(
   val synchronizationWarning: String? = null,
 )
 
+enum class RuntimeSkillApprovalOperation(val requiredGrant: String) {
+  Activation("activate"),
+  Rollback("rollback"),
+  Removal("delete_managed"),
+}
+
+data class RuntimeApproverAccess(
+  val actorContext: RuntimeActorContext,
+  val skillPolicy: RuntimeSkillPolicy,
+)
+
+data class RuntimeApprovalAuthority(
+  val available: Boolean,
+  val reason: String = "",
+)
+
 sealed interface RuntimeSkillRollbackOutcome {
   data class Published(val mutation: RuntimeSkillMutation) : RuntimeSkillRollbackOutcome
   data class ApprovalRequired(val approval: RuntimeSkillApproval) : RuntimeSkillRollbackOutcome

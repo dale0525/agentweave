@@ -542,6 +542,83 @@ class SkillManagementStateTest {
   }
 
   @Test
+  fun existingDraftRouteUsesTargetSpecificActions() {
+    val global = setOf(SkillAction.Edit, SkillAction.Validate, SkillAction.Activate)
+
+    assertEquals(
+      setOf(SkillAction.Validate),
+      draftRouteActions(
+        creating = false,
+        globalActions = global,
+        targetActions = setOf(SkillAction.Validate),
+      ),
+    )
+    assertEquals(
+      setOf(SkillAction.Activate),
+      draftRouteActions(
+        creating = false,
+        globalActions = global,
+        targetActions = setOf(SkillAction.Activate),
+      ),
+    )
+    assertEquals(
+      setOf(SkillAction.Edit),
+      draftRouteActions(
+        creating = false,
+        globalActions = global,
+        targetActions = setOf(SkillAction.Edit),
+      ),
+    )
+    assertTrue(canOpenExistingDraft(setOf(SkillAction.Validate)))
+    assertFalse(shouldPersistBeforeValidation(setOf(SkillAction.Validate)))
+    assertTrue(shouldPersistBeforeValidation(setOf(SkillAction.Edit, SkillAction.Validate)))
+  }
+
+  @Test
+  fun activateOnlyDraftUsesAuthoritativePersistedValidation() {
+    val draft = checkNotNull(skillDetailWithHistory().editableDraft).copy(
+      validation = RuntimeSkillValidationSummary(true, emptyList(), emptyList()),
+      contentHash = "authoritative-hash",
+    )
+
+    assertEquals(draft, authoritativeDraftActivationRevision(draft, validation = null, dirty = false))
+    assertEquals(null, authoritativeDraftActivationRevision(draft, validation = null, dirty = true))
+  }
+
+  @Test
+  fun sameIdCreateKeepsBuiltinCollisionBeforeInventoryRefresh() {
+    val builtin = runtimeSkill(activeRevisionId = "revision-builtin").copy(
+      sourceLayer = "builtin",
+      activeRevisionId = null,
+      builtInCollision = false,
+    )
+    val created = skillDetail(activeRevisionId = "revision-active").copy(
+      packageId = builtin.packageId,
+      sourceLayer = "managed",
+      status = "draft",
+      activeRevisionId = null,
+    )
+
+    val collisionBeforeCreate = builtin.packageId in setOf(builtin.packageId)
+    val local = createdDraftDetailWithCollision(
+      created,
+      builtInCollision = collisionBeforeCreate,
+    )
+    val retained = skillOperationFailed(
+      SkillManagementUiState(
+        inventory = listOf(builtin),
+        diagnostics = diagnostics(generation = 7),
+        detail = skillDetailWithInventoryFacts(local, builtin),
+        busyOperation = "refresh",
+      ),
+      "refresh failed",
+    )
+
+    assertTrue(local.builtInCollision)
+    assertTrue(retained.detail?.builtInCollision == true)
+  }
+
+  @Test
   fun synchronizationRetryFailureRetainsPublishedWarning() {
     val state = SkillManagementUiState(
       inventory = listOf(runtimeSkill(activeRevisionId = "revision-active")),

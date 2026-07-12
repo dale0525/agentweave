@@ -81,20 +81,30 @@ class MainActivityInstrumentedTest {
       failInitialLoad = arguments.getString("skill_initial_error") == "true",
       failSynchronization = arguments.getString("skill_sync_warning") == "true",
     )
+    val policy = RuntimeSkillPolicy(
+      mode = mode,
+      agentAuthoring = mode == "owner_only",
+      allowedKinds = arguments.getString("skill_allowed_kinds")
+        ?.split(',')
+        ?.filter(String::isNotBlank)
+        ?: listOf("instruction_only", "host_tools_only"),
+    )
     val client = RuntimeClient(
       handle = 77L,
       native = native,
       skillGrants = grants,
       actorContext = RuntimeActorContext("android-requester", "owner", grants = grants.toList()),
-      skillPolicy = RuntimeSkillPolicy(
-        mode = mode,
-        agentAuthoring = mode == "owner_only",
-        allowedKinds = arguments.getString("skill_allowed_kinds")
-          ?.split(',')
-          ?.filter(String::isNotBlank)
-          ?: listOf("instruction_only", "host_tools_only"),
+      skillPolicy = policy,
+      approverClient = RuntimeApprovalClient(
+        78L,
+        native,
+        RuntimeActorContext(
+          "android-approver",
+          "owner",
+          grants = listOf("activate", "rollback", "delete_managed", "override_builtin"),
+        ),
+        policy,
       ),
-      approverClient = RuntimeApprovalClient(78L, native, "android-approver"),
     )
     val turnGate = RuntimeTurnGate()
     val settingsGate = RuntimeSettingsGate()
@@ -125,12 +135,25 @@ class MainActivityInstrumentedTest {
   fun distinctActorsApproveActivationRollbackAndRemoval() {
     val native = VisualNativeRuntime("owner_only")
     val actor = RuntimeActorContext("android-requester", "owner", grants = listOf("inspect", "activate"))
+    val policy = RuntimeSkillPolicy(
+      mode = "owner_only",
+      allowedKinds = listOf("instruction_only", "host_tools_only"),
+    )
     val client = RuntimeClient(
       handle = 77L,
       native = native,
       actorContext = actor,
-      skillPolicy = RuntimeSkillPolicy(mode = "owner_only"),
-      approverClient = RuntimeApprovalClient(78L, native, "android-approver"),
+      skillPolicy = policy,
+      approverClient = RuntimeApprovalClient(
+        78L,
+        native,
+        RuntimeActorContext(
+          "android-approver",
+          "owner",
+          grants = listOf("activate", "rollback", "delete_managed"),
+        ),
+        policy,
+      ),
     )
 
     val activation = client.requestSkillActivation("revision-draft")

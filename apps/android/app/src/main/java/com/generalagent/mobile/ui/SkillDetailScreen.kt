@@ -23,6 +23,7 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Publish
 import androidx.compose.material.icons.outlined.Restore
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -75,6 +76,7 @@ fun SkillDetailScreen(
       selectRollbackTarget(detail, revision) != null
   }
   val anyBusy = busyOperation != null
+  val canOpenDraft = canOpenExistingDraft(actions)
 
   Column(modifier = Modifier.fillMaxSize().background(GaSurface)) {
     DetailTopBar(detail.displayName, onBack)
@@ -96,13 +98,14 @@ fun SkillDetailScreen(
           active = revision.revisionId == detail.activeRevisionId,
           rollbackTarget = revision.revisionId == selectedRollbackId,
           onClick = when {
-            revision.editable && SkillAction.Edit in actions -> onEdit
+            revision.editable && canOpenDraft -> onEdit
             SkillAction.Rollback in actions && revision.validation.ok &&
               selectRollbackTarget(detail, revision) != null -> {
               { selectedRollbackId = revision.revisionId }
             }
             else -> null
           },
+          draftCanEdit = SkillAction.Edit in actions,
         )
         HorizontalDivider(color = GaBorder, modifier = Modifier.padding(horizontal = 16.dp))
       }
@@ -218,6 +221,7 @@ private fun RevisionRow(
   active: Boolean,
   rollbackTarget: Boolean,
   onClick: (() -> Unit)?,
+  draftCanEdit: Boolean,
 ) {
   val modifier = Modifier
     .fillMaxWidth()
@@ -267,7 +271,11 @@ private fun RevisionRow(
       )
     }
     if (revision.editable && onClick != null) {
-      Icon(Icons.Outlined.Edit, contentDescription = "Edit draft", modifier = Modifier.size(22.dp))
+      Icon(
+        if (draftCanEdit) Icons.Outlined.Edit else Icons.Outlined.Visibility,
+        contentDescription = if (draftCanEdit) "Edit draft" else "Open draft",
+        modifier = Modifier.size(22.dp),
+      )
     }
   }
 }
@@ -293,10 +301,17 @@ private fun DetailActionBar(
       horizontalArrangement = Arrangement.spacedBy(4.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      if (draft != null && SkillAction.Edit in actions) {
+      if (draft != null && canOpenExistingDraft(actions)) {
         TextButton(onClick = onEdit, enabled = !busy, modifier = Modifier.weight(1f)) {
-          Icon(Icons.Outlined.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
-          Text("Edit", modifier = Modifier.padding(start = 4.dp))
+          Icon(
+            if (SkillAction.Edit in actions) Icons.Outlined.Edit else Icons.Outlined.Visibility,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+          )
+          Text(
+            if (SkillAction.Edit in actions) "Edit" else "Open",
+            modifier = Modifier.padding(start = 4.dp),
+          )
         }
       }
       if (draft != null && draft.validation.ok && SkillAction.Activate in actions) {

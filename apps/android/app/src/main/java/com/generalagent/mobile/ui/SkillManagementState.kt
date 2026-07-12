@@ -96,7 +96,54 @@ fun skillDetailWithInventoryFacts(
   detail: RuntimeSkillDetail,
   inventorySkill: RuntimeSkill?,
 ): RuntimeSkillDetail =
-  detail.copy(builtInCollision = detail.builtInCollision || inventorySkill?.builtInCollision == true)
+  detail.copy(
+    builtInCollision = detail.builtInCollision ||
+      inventorySkill?.builtInCollision == true ||
+      (inventorySkill?.sourceLayer == "builtin" && detail.editableDraft != null),
+  )
+
+private val existingDraftActionSet =
+  setOf(SkillAction.Edit, SkillAction.Validate, SkillAction.Activate)
+
+fun draftRouteActions(
+  creating: Boolean,
+  globalActions: Set<SkillAction>,
+  targetActions: Set<SkillAction>,
+): Set<SkillAction> =
+  if (creating) globalActions else targetActions.intersect(existingDraftActionSet)
+
+fun canOpenExistingDraft(actions: Set<SkillAction>): Boolean =
+  actions.any(existingDraftActionSet::contains)
+
+fun shouldPersistBeforeValidation(actions: Set<SkillAction>): Boolean =
+  SkillAction.Edit in actions
+
+fun authoritativeDraftActivationRevision(
+  revision: RuntimeSkillRevision?,
+  validation: RuntimeSkillValidation?,
+  dirty: Boolean,
+): RuntimeSkillRevision? {
+  if (revision == null || dirty) return null
+  if (validation != null) {
+    return validation
+      .takeIf { it.ok && it.revisionId == revision.revisionId }
+      ?.let {
+        revisionAfterValidation(
+          revision,
+          it,
+          savedInstructions = revision.instructions,
+          savedTools = revision.requirements.runtimeTools,
+        )
+      }
+  }
+  return revision.takeIf { it.validation.ok && it.contentHash.isNotBlank() }
+}
+
+fun createdDraftDetailWithCollision(
+  detail: RuntimeSkillDetail,
+  builtInCollision: Boolean,
+): RuntimeSkillDetail =
+  detail.copy(builtInCollision = detail.builtInCollision || builtInCollision)
 
 internal fun skillSynchronizationRetryCallback(
   scope: CoroutineScope,

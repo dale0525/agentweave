@@ -120,6 +120,9 @@ class RuntimeBridgeTest {
     assertEquals(listOf(102L, 101L), native.invokeHandles)
     assertEquals("android-approver", client.approverActorId)
     assertTrue(client.approvalAvailable)
+    assertEquals("owner", client.approverAccess?.actorContext?.role)
+    assertEquals(listOf("inspect", "activate"), client.approverAccess?.actorContext?.grants)
+    assertEquals(policy, client.approverAccess?.skillPolicy)
     assertNull(resolution.synchronizationWarning)
   }
 
@@ -132,7 +135,12 @@ class RuntimeBridgeTest {
       approverClient = RuntimeApprovalClient(
         handle = 10L,
         native = OwnerNativeRuntime(),
-        actorId = "same-owner",
+        actorContext = RuntimeActorContext(
+          actorId = "same-owner",
+          role = "owner",
+          grants = listOf("activate"),
+        ),
+        skillPolicy = ownerApprovalPolicy(),
       ),
     )
 
@@ -141,6 +149,104 @@ class RuntimeBridgeTest {
     assertThrows(RuntimeBridgeException::class.java) {
       client.resolveSkillApproval("approval-1", approve = true)
     }
+  }
+
+  @Test
+  fun approverAuthorityRequiresDistinctOperationGrantAndOverride() {
+    val native = OwnerNativeRuntime()
+    val policy = RuntimeSkillPolicy(
+      mode = "owner_only",
+      allowedKinds = listOf("instruction_only"),
+      allowedOverrides = listOf("com.example.owner"),
+    )
+    fun client(approver: RuntimeActorContext) = RuntimeClient(
+      handle = 9L,
+      native = native,
+      actorContext = RuntimeActorContext(actorId = "requester", role = "owner"),
+      skillPolicy = policy,
+      approverClient = RuntimeApprovalClient(10L, native, approver, policy),
+    )
+
+    val self = client(
+      RuntimeActorContext(actorId = "requester", role = "owner", grants = listOf("activate")),
+    ).approvalAuthority(
+      RuntimeSkillApprovalOperation.Activation,
+      "com.example.owner",
+      "instruction_only",
+      overrideRequired = false,
+    )
+    val insufficient = client(
+      RuntimeActorContext(actorId = "approver", role = "owner", grants = listOf("inspect")),
+    ).approvalAuthority(
+      RuntimeSkillApprovalOperation.Activation,
+      "com.example.owner",
+      "instruction_only",
+      overrideRequired = false,
+    )
+    val missingOverride = client(
+      RuntimeActorContext(actorId = "approver", role = "owner", grants = listOf("activate")),
+    ).approvalAuthority(
+      RuntimeSkillApprovalOperation.Activation,
+      "com.example.owner",
+      "instruction_only",
+      overrideRequired = true,
+    )
+    val allowed = client(
+      RuntimeActorContext(
+        actorId = "approver",
+        role = "owner",
+        grants = listOf("activate", "override_builtin"),
+      ),
+    ).approvalAuthority(
+      RuntimeSkillApprovalOperation.Activation,
+      "com.example.owner",
+      "instruction_only",
+      overrideRequired = true,
+    )
+
+    assertFalse(self.available)
+    assertTrue(self.reason.contains("distinct", ignoreCase = true))
+    assertFalse(insufficient.available)
+    assertTrue(insufficient.reason.contains("activate"))
+    assertFalse(missingOverride.available)
+    assertTrue(missingOverride.reason.contains("override"))
+    assertTrue(allowed.available)
+    assertEquals("approver", client(RuntimeActorContext(actorId = "approver")).approverAccess?.actorContext?.actorId)
+  }
+
+  @Test
+  fun approverAuthorityUsesRollbackAndRemovalGrants() {
+    val native = OwnerNativeRuntime()
+    val policy = RuntimeSkillPolicy(mode = "owner_only", allowedKinds = listOf("instruction_only"))
+    val client = RuntimeClient(
+      handle = 9L,
+      native = native,
+      actorContext = RuntimeActorContext(actorId = "requester", role = "owner"),
+      skillPolicy = policy,
+      approverClient = RuntimeApprovalClient(
+        10L,
+        native,
+        RuntimeActorContext(actorId = "approver", role = "owner", grants = listOf("rollback")),
+        policy,
+      ),
+    )
+
+    assertTrue(
+      client.approvalAuthority(
+        RuntimeSkillApprovalOperation.Rollback,
+        "com.example.owner",
+        "instruction_only",
+        overrideRequired = false,
+      ).available,
+    )
+    assertFalse(
+      client.approvalAuthority(
+        RuntimeSkillApprovalOperation.Removal,
+        "com.example.owner",
+        "instruction_only",
+        overrideRequired = false,
+      ).available,
+    )
   }
 
   @Test
@@ -179,7 +285,7 @@ class RuntimeBridgeTest {
       handle = 9L,
       native = native,
       actorContext = RuntimeActorContext(actorId = "requester", role = "owner"),
-      approverClient = RuntimeApprovalClient(10L, native, "approver"),
+      approverClient = testApprovalClient(native),
     )
 
     val resolution = client.resolveSkillApproval("approval-1", approve = true)
@@ -205,7 +311,7 @@ class RuntimeBridgeTest {
       handle = 9L,
       native = native,
       actorContext = RuntimeActorContext(actorId = "requester", role = "owner"),
-      approverClient = RuntimeApprovalClient(10L, native, "approver"),
+      approverClient = testApprovalClient(native),
     )
 
     val resolution = client.resolveSkillApproval("approval-1", approve = true)
@@ -267,7 +373,7 @@ class RuntimeBridgeTest {
       native = native,
       skillGrants = setOf("inspect", "activate"),
       actorContext = RuntimeActorContext(actorId = "owner", role = "owner"),
-      approverClient = RuntimeApprovalClient(10L, native, "approver"),
+      approverClient = testApprovalClient(native),
     )
 
     val managed = client.listManagedSkills().single()
@@ -385,7 +491,7 @@ class RuntimeBridgeTest {
     val client = RuntimeClient(
       handle = 9L,
       native = native,
-      approverClient = RuntimeApprovalClient(10L, native, "approver"),
+      approverClient = testApprovalClient(native),
     )
 
     val error = assertThrows(RuntimeBridgeException::class.java) { client.close() }
@@ -396,6 +502,28 @@ class RuntimeBridgeTest {
     assertTrue(error.message?.contains("requester close failed") == true)
   }
 }
+
+private fun ownerApprovalPolicy(): RuntimeSkillPolicy =
+  RuntimeSkillPolicy(
+    mode = "owner_only",
+    allowedKinds = listOf("instruction_only", "host_tools_only"),
+  )
+
+private fun testApprovalClient(
+  native: NativeRuntimeApi,
+  handle: Long = 10L,
+  actorId: String = "approver",
+): RuntimeApprovalClient =
+  RuntimeApprovalClient(
+    handle,
+    native,
+    RuntimeActorContext(
+      actorId = actorId,
+      role = "owner",
+      grants = listOf("activate", "rollback", "delete_managed", "override_builtin"),
+    ),
+    ownerApprovalPolicy(),
+  )
 
 private class BridgeSkillAssets : SkillAssetSource {
   private val files = mapOf(

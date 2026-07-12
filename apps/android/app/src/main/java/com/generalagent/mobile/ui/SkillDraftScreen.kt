@@ -88,6 +88,7 @@ internal fun SkillDraftRoute(
   detail: RuntimeSkillDetail?,
   actions: Set<SkillAction>,
   allowedKinds: Set<String>,
+  effectiveBuiltins: Set<String>,
   busyOperation: String?,
   externalError: String?,
   validation: RuntimeSkillValidation?,
@@ -115,22 +116,12 @@ internal fun SkillDraftRoute(
   var localError by remember { mutableStateOf<String?>(null) }
   var dirty by remember(existingDraft, creating) { mutableStateOf(false) }
   val busy = busyOperation != null
-  val activationRevision = existingDraft?.let { revision ->
-    validation
-      ?.takeIf { !dirty && it.ok && it.revisionId == revision.revisionId }
-      ?.let {
-        revisionAfterValidation(
-          revision,
-          it,
-          savedInstructions = revision.instructions,
-          savedTools = revision.requirements.runtimeTools,
-        )
-      }
-  }
+  val activationRevision = authoritativeDraftActivationRevision(existingDraft, validation, dirty)
 
   fun save() {
     val normalizedId = packageId.trim()
     val normalizedName = displayName.trim()
+    val creatingBuiltInCollision = creating && normalizedId in effectiveBuiltins
     if (!admitDraftKind(kind, allowedKinds)) {
       localError = "Package kind is not allowed by policy"
       return
@@ -163,7 +154,10 @@ internal fun SkillDraftRoute(
                 ),
               ),
             )
-            runtimeClient.getSkillDetail(normalizedId)
+            createdDraftDetailWithCollision(
+              runtimeClient.getSkillDetail(normalizedId),
+              creatingBuiltInCollision,
+            )
           } else {
             val target = checkNotNull(detail)
             val revision = checkNotNull(target.editableDraft) { "Editable draft is unavailable" }
@@ -194,10 +188,12 @@ internal fun SkillDraftRoute(
     scope.launch {
       try {
         val result = withContext(Dispatchers.IO) {
-          runtimeClient.updateSkillDraft(
-            revision.revisionId,
-            draftUpdateFiles(checkNotNull(detail), revision, savedInstructions, savedTools),
-          )
+          if (shouldPersistBeforeValidation(actions)) {
+            runtimeClient.updateSkillDraft(
+              revision.revisionId,
+              draftUpdateFiles(checkNotNull(detail), revision, savedInstructions, savedTools),
+            )
+          }
           runtimeClient.validateSkillDraft(revision.revisionId)
         }
         dirty = false

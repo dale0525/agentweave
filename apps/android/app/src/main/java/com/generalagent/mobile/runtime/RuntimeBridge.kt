@@ -47,7 +47,7 @@ class RuntimeBridge(
       val approverClient = configuredApproverContext?.let { approver ->
         val approverEnvelope = responseEnvelope(native.initialize(initRequest(approver).toJson().toString()))
         approverHandle = approverEnvelope.getJSONObject("data").getLong("handle")
-        RuntimeApprovalClient(checkNotNull(approverHandle), native, approver.actorId)
+        RuntimeApprovalClient(checkNotNull(approverHandle), native, approver, configuredSkillPolicy)
       }
       return RuntimeClient(
         handle = allocatedHandle,
@@ -75,11 +75,42 @@ class RuntimeClient internal constructor(
   private val approverClient: RuntimeApprovalClient? = null,
 ) : AutoCloseable {
   private val closed = AtomicBoolean(false)
+  val approverAccess: RuntimeApproverAccess? get() = approverClient?.access
   val approverActorId: String? get() = approverClient?.actorId
   val approvalAvailable: Boolean
     get() = approverClient != null && approverClient.actorId != actorContext.actorId
   val approvalUnavailableReason: String?
     get() = if (approvalAvailable) null else "A distinct approving actor is unavailable"
+
+  fun approvalAuthority(
+    operation: RuntimeSkillApprovalOperation,
+    packageId: String,
+    kind: String,
+    overrideRequired: Boolean,
+  ): RuntimeApprovalAuthority {
+    val access = approverAccess
+      ?: return RuntimeApprovalAuthority(false, "A distinct approving actor is unavailable")
+    val actor = access.actorContext
+    val policy = access.skillPolicy
+    if (actor.actorId == actorContext.actorId) {
+      return RuntimeApprovalAuthority(false, "A distinct approving actor is required")
+    }
+    if (policy.mode != "owner_only" || actor.role != "owner") {
+      return RuntimeApprovalAuthority(false, "Approving actor must have the owner role")
+    }
+    if (kind !in policy.allowedKinds) {
+      return RuntimeApprovalAuthority(false, "Package kind is not allowed for the approving actor")
+    }
+    if (operation.requiredGrant !in actor.grants) {
+      return RuntimeApprovalAuthority(false, "Approving actor lacks ${operation.requiredGrant} grant")
+    }
+    if (overrideRequired && (
+      packageId !in policy.allowedOverrides || "override_builtin" !in actor.grants
+    )) {
+      return RuntimeApprovalAuthority(false, "Approving actor lacks override authority for this package")
+    }
+    return RuntimeApprovalAuthority(true)
+  }
 
   fun diagnostics(): RuntimeDiagnostics =
     invoke(JSONObject().put("operation", "diagnostics")).toDiagnostics()
@@ -243,9 +274,12 @@ class RuntimeClient internal constructor(
 class RuntimeApprovalClient internal constructor(
   val handle: Long,
   private val native: NativeRuntimeApi,
-  val actorId: String,
+  actorContext: RuntimeActorContext,
+  skillPolicy: RuntimeSkillPolicy,
 ) : AutoCloseable {
   private val closed = AtomicBoolean(false)
+  val access = RuntimeApproverAccess(actorContext, skillPolicy)
+  val actorId: String get() = access.actorContext.actorId
 
   internal fun resolve(request: JSONObject): JSONObject =
     responseData(native.invoke(handle, request.toString()))

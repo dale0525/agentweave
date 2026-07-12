@@ -59,6 +59,7 @@ import com.generalagent.mobile.runtime.RuntimeSkillDraftRequest
 import com.generalagent.mobile.runtime.RuntimeSkillRevision
 import com.generalagent.mobile.runtime.RuntimeSkillRollbackOutcome
 import com.generalagent.mobile.runtime.RuntimeSkillValidation
+import com.generalagent.mobile.runtime.RuntimeSkillApprovalOperation
 import com.generalagent.mobile.runtime.RuntimeClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -116,6 +117,13 @@ private fun MutableList<String>.addPermissionChanges(
 }
 
 internal enum class SkillApprovalOperation { Activation, Rollback, Removal }
+
+private fun SkillApprovalOperation.runtimeOperation(): RuntimeSkillApprovalOperation =
+  when (this) {
+    SkillApprovalOperation.Activation -> RuntimeSkillApprovalOperation.Activation
+    SkillApprovalOperation.Rollback -> RuntimeSkillApprovalOperation.Rollback
+    SkillApprovalOperation.Removal -> RuntimeSkillApprovalOperation.Removal
+  }
 
 internal data class SkillApprovalUiState(
   val operation: SkillApprovalOperation,
@@ -259,6 +267,22 @@ fun SkillsScreen(
     )
   }
 
+  fun targetActions(detail: RuntimeSkillDetail): Set<SkillAction> =
+    skillTargetActions(
+      SkillAccessState(
+        mode = mode,
+        visibleTabs = emptyList(),
+        actions = actions,
+        allowedKinds = allowedKinds,
+        protectedPackages = protectedPackages,
+        allowedOverrides = allowedOverrides,
+        agentAuthoring = agentAuthoring,
+        canOverrideProtected = canOverrideProtected,
+      ),
+      detail,
+      manageable = state.inventory.find { it.packageId == detail.packageId }?.manageable == true,
+    )
+
   fun requestApproval(operation: SkillApprovalOperation, revision: RuntimeSkillRevision) {
     val detail = state.detail ?: return
     state = state.copy(busyOperation = operation.name.lowercase(), inlineError = null)
@@ -377,20 +401,7 @@ fun SkillsScreen(
       onSelect = { skill -> openDetail(skill.packageId) },
     )
     is SkillRoute.Detail -> state.detail?.let { detail ->
-      val targetActions = skillTargetActions(
-        SkillAccessState(
-          mode = mode,
-          visibleTabs = emptyList(),
-          actions = actions,
-          allowedKinds = allowedKinds,
-          protectedPackages = protectedPackages,
-          allowedOverrides = allowedOverrides,
-          agentAuthoring = agentAuthoring,
-          canOverrideProtected = canOverrideProtected,
-        ),
-        detail,
-        manageable = state.inventory.find { it.packageId == detail.packageId }?.manageable == true,
-      )
+      val targetActions = targetActions(detail)
       SkillDetailScreen(
         detail = detail,
         actions = targetActions,
@@ -425,11 +436,21 @@ fun SkillsScreen(
         onRemove = { revision -> requestApproval(SkillApprovalOperation.Removal, revision) },
       )
     }
-    is SkillRoute.Draft -> SkillDraftRoute(
+    is SkillRoute.Draft -> {
+      val detail = state.detail
+      val routeActions = draftRouteActions(
+        creating = currentRoute.creating,
+        globalActions = actions,
+        targetActions = detail?.let(::targetActions).orEmpty(),
+      )
+      SkillDraftRoute(
       creating = currentRoute.creating,
-      detail = state.detail,
-      actions = actions,
+      detail = detail,
+      actions = routeActions,
       allowedKinds = allowedKinds,
+      effectiveBuiltins = state.inventory
+        .filter { it.sourceLayer == "builtin" }
+        .mapTo(mutableSetOf()) { it.packageId },
       busyOperation = state.busyOperation,
       externalError = state.inlineError,
       validation = draftValidation,
@@ -474,16 +495,24 @@ fun SkillsScreen(
         navigate(state.detail?.let { SkillRoute.Detail(it.packageId) } ?: SkillRoute.ListRoute)
         state = state.copy(inlineError = null)
       },
-    )
+      )
+    }
   }
 
   approval?.let { pending ->
+    val authority = runtimeClient.approvalAuthority(
+      operation = pending.operation.runtimeOperation(),
+      packageId = pending.detail.packageId,
+      kind = pending.revision.kind,
+      overrideRequired = pending.detail.builtInCollision ||
+        pending.detail.packageId in protectedPackages,
+    )
     SkillApprovalDialog(
       state = pending,
       busy = state.busyOperation == "approval",
       approvingActor = runtimeClient.approverActorId,
-      approvalAvailable = runtimeClient.approvalAvailable,
-      approvalUnavailableReason = runtimeClient.approvalUnavailableReason,
+      approvalAvailable = authority.available,
+      approvalUnavailableReason = authority.reason.ifBlank { null },
       onDismiss = { if (state.busyOperation != "approval") approval = null },
       onConfirm = ::resolveApproval,
     )
