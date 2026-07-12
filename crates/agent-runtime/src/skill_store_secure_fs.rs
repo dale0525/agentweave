@@ -6,7 +6,7 @@ use crate::skill_store_fs::PackageLimits;
 use crate::skill_store_secure_snapshot::{SecurePackageSnapshot, SecureTreeSnapshot};
 use anyhow::Context;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
@@ -306,6 +306,7 @@ pub(crate) fn snapshot_opened(
         content_hash: scanned.content_hash,
         runtime_manifest: scanned.runtime_manifest,
         instructions_file: scanned.instructions_file,
+        file_paths: scanned.file_paths,
     })
 }
 
@@ -451,7 +452,9 @@ fn scan_relative_files(
     let mut descriptor_bytes = None;
     let mut runtime_manifest = None;
     let mut instructions_file = None;
+    let mut file_paths = BTreeSet::new();
     for opened in files {
+        file_paths.insert(opened.relative.clone());
         let descriptor = open_relative_file(root_fd, &opened.relative, display_root)?;
         let stat = rustix::fs::fstat(&descriptor)?;
         if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
@@ -510,6 +513,7 @@ fn scan_relative_files(
         descriptor_bytes,
         runtime_manifest,
         instructions_file,
+        file_paths,
     })
 }
 
@@ -664,6 +668,7 @@ pub(crate) fn snapshot_windows_opened(
         content_hash: scanned.content_hash,
         runtime_manifest: scanned.runtime_manifest,
         instructions_file: scanned.instructions_file,
+        file_paths: scanned.file_paths,
     })
 }
 
@@ -683,6 +688,7 @@ fn scan_windows_opened(
     use std::io::Read;
 
     struct OpenedFile {
+        relative: PathBuf,
         canonical: Vec<u8>,
         bytes: Vec<u8>,
     }
@@ -750,7 +756,11 @@ fn scan_windows_opened(
                     opened.final_path.display()
                 );
             }
-            files.push(OpenedFile { canonical, bytes });
+            files.push(OpenedFile {
+                relative,
+                canonical,
+                bytes,
+            });
         }
     }
     files.sort_by(|left, right| left.canonical.cmp(&right.canonical));
@@ -760,7 +770,9 @@ fn scan_windows_opened(
     let mut descriptor_bytes = None;
     let mut runtime_manifest = None;
     let mut instructions_file = None;
+    let mut file_paths = BTreeSet::new();
     for file in files {
+        file_paths.insert(file.relative);
         hasher.update([TREE_HASH_FILE_ENTRY]);
         hasher.update(u64::try_from(file.canonical.len())?.to_be_bytes());
         hasher.update(&file.canonical);
@@ -778,6 +790,7 @@ fn scan_windows_opened(
         descriptor_bytes,
         runtime_manifest,
         instructions_file,
+        file_paths,
     })
 }
 
@@ -795,6 +808,7 @@ fn snapshot_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<Secur
         content_hash: scanned.content_hash,
         runtime_manifest: scanned.runtime_manifest,
         instructions_file: scanned.instructions_file,
+        file_paths: scanned.file_paths,
     })
 }
 
@@ -884,7 +898,9 @@ fn scan_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureTre
     let mut descriptor_bytes = None;
     let mut runtime_manifest = None;
     let mut instructions_file = None;
+    let mut file_paths = BTreeSet::new();
     for entry in files {
+        file_paths.insert(entry.relative.clone());
         let mut file = File::open(&entry.path)?;
         let opened_metadata = file.metadata()?;
         let opened_path = std::fs::canonicalize(&entry.path)?;
@@ -936,5 +952,6 @@ fn scan_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureTre
         descriptor_bytes,
         runtime_manifest,
         instructions_file,
+        file_paths,
     })
 }

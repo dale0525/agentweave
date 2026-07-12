@@ -6,7 +6,51 @@ use agent_runtime::{
     skill_source::{DirectorySkillSource, DiscoveredSkillPackage, SkillLayer},
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
+
+#[cfg(test)]
+use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::time::Duration;
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ReleaseValidationGate {
+    entered: Arc<tokio::sync::Barrier>,
+    release: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+impl ReleaseValidationGate {
+    pub(crate) async fn wait_entered(&self) {
+        wait_release_gate(&self.entered, "release validation entry").await;
+    }
+
+    pub(crate) async fn release(&self) {
+        wait_release_gate(&self.release, "release validation release").await;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn gate_release_validation_after_discovery(path: &Path) -> ReleaseValidationGate {
+    let gate = ReleaseValidationGate {
+        entered: Arc::new(tokio::sync::Barrier::new(2)),
+        release: Arc::new(tokio::sync::Barrier::new(2)),
+    };
+    release_validation_gates()
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), gate.clone());
+    gate
+}
+
+#[cfg(test)]
+fn release_validation_gates() -> &'static Mutex<BTreeMap<PathBuf, ReleaseValidationGate>> {
+    static GATES: OnceLock<Mutex<BTreeMap<PathBuf, ReleaseValidationGate>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillReleaseDiagnostic {
@@ -75,6 +119,7 @@ pub async fn validate_skill_roots(roots: &[PathBuf]) -> SkillReleaseReport {
             .cmp(&right.descriptor.id)
             .then_with(|| left.root.cmp(&right.root))
     });
+    checkpoint_release_validation_after_discovery(&packages).await;
     let package_count = packages.len();
     let mut warnings = legacy_warnings(&packages);
     validate_duplicate_ids(&packages, &mut errors);
@@ -145,7 +190,14 @@ async fn collect_runtime_tools(
 ) -> BTreeSet<String> {
     let mut tools = BTreeSet::new();
     for package in packages {
-        let has_runtime = regular_file_exists(&package.root.join("skill.json")).await;
+        let Some(verified) = package.verified_content.as_ref() else {
+            errors.push(package_error(
+                package,
+                "release package is missing its secure discovery snapshot",
+            ));
+            continue;
+        };
+        let has_runtime = verified.runtime_manifest.is_some();
         if has_runtime != package.descriptor.package.include_runtime {
             errors.push(package_error(
                 package,
@@ -156,7 +208,15 @@ async fn collect_runtime_tools(
         if !has_runtime {
             continue;
         }
-        match SkillRegistry::load_development_skill(&package.root).await {
+        let bytes = verified
+            .runtime_manifest
+            .as_deref()
+            .expect("runtime presence checked above");
+        match SkillRegistry::load_verified_release_skill(
+            package.root.clone(),
+            bytes,
+            verified.file_paths.as_ref(),
+        ) {
             Ok(skill) => {
                 for tool in &skill.manifest().tools {
                     tools.insert(format!("{}/{}", package.descriptor.id.as_str(), tool.name));
@@ -177,7 +237,14 @@ async fn validate_instruction_packages(
 ) {
     let mut entries = Vec::new();
     for package in packages {
-        let has_instructions = regular_file_exists(&package.root.join("SKILL.md")).await;
+        let Some(verified) = package.verified_content.as_ref() else {
+            errors.push(package_error(
+                package,
+                "release package is missing its secure discovery snapshot",
+            ));
+            continue;
+        };
+        let has_instructions = verified.instructions_file.is_some();
         if has_instructions != package.descriptor.package.include_instructions {
             errors.push(package_error(
                 package,
@@ -188,7 +255,11 @@ async fn validate_instruction_packages(
         if !has_instructions {
             continue;
         }
-        match SkillCatalog::read_package_entry(&package.root).await {
+        let bytes = verified
+            .instructions_file
+            .as_deref()
+            .expect("instruction presence checked above");
+        match SkillCatalog::read_verified_package_entry(PathBuf::from("SKILL.md"), bytes) {
             Ok(entry) => entries.push(entry),
             Err(error) => errors.push(package_error(
                 package,
@@ -270,13 +341,6 @@ fn canonical_tool_identity_is_valid(value: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
-async fn regular_file_exists(path: &Path) -> bool {
-    tokio::fs::symlink_metadata(path)
-        .await
-        .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-        .unwrap_or(false)
-}
-
 fn package_error(
     package: &DiscoveredSkillPackage,
     message: impl Into<String>,
@@ -286,6 +350,30 @@ fn package_error(
         package.root.clone(),
         message,
     )
+}
+
+#[cfg(test)]
+async fn checkpoint_release_validation_after_discovery(packages: &[DiscoveredSkillPackage]) {
+    let gate = {
+        let mut gates = release_validation_gates().lock().unwrap();
+        packages
+            .iter()
+            .find_map(|package| gates.remove(&package.root))
+    };
+    if let Some(gate) = gate {
+        wait_release_gate(&gate.entered, "release validation checkpoint entry").await;
+        wait_release_gate(&gate.release, "release validation checkpoint release").await;
+    }
+}
+
+#[cfg(not(test))]
+async fn checkpoint_release_validation_after_discovery(_packages: &[DiscoveredSkillPackage]) {}
+
+#[cfg(test)]
+async fn wait_release_gate(barrier: &tokio::sync::Barrier, label: &str) {
+    tokio::time::timeout(Duration::from_secs(10), barrier.wait())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {label}"));
 }
 
 fn diagnostic(

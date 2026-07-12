@@ -174,7 +174,7 @@ impl SkillCatalog {
         .await
     }
 
-    pub(crate) fn read_verified_package_entry(
+    pub fn read_verified_package_entry(
         source: PathBuf,
         bytes: &[u8],
     ) -> anyhow::Result<SkillCatalogEntry> {

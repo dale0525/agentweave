@@ -285,6 +285,24 @@ pub(crate) async fn make_tree_writable(
     Ok(())
 }
 
+pub(crate) async fn make_tree_deletable(
+    root: &PreparedStoreDirectory,
+    limits: PackageLimits,
+) -> anyhow::Result<()> {
+    root.verify()?;
+    let entries = collect_entries(root.path(), limits).await?;
+    root.verify()?;
+    crate::skill_store_prepared_fs::set_deletable(root, None, true).await?;
+    for directory in &entries.directories {
+        crate::skill_store_prepared_fs::set_deletable(root, Some(&directory.relative), true)
+            .await?;
+    }
+    for file in entries.files {
+        crate::skill_store_prepared_fs::set_deletable(root, Some(&file.relative), false).await?;
+    }
+    Ok(())
+}
+
 async fn collect_entries(root: &Path, limits: PackageLimits) -> anyhow::Result<PackageEntries> {
     let metadata = tokio::fs::symlink_metadata(root)
         .await

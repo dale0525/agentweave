@@ -10,11 +10,16 @@ use agent_runtime::{
     skill_store::{SkillRevisionStore, SkillStorePaths},
     storage::Storage,
 };
-use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const BUNDLE_SOURCE_MODE: &[u8] = b"bundle-v1\n";
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum BuiltinSkillsMode {
+    #[default]
+    Auto,
+    Directory,
+    Bundle,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ManagedSkillsConfig {
@@ -53,16 +58,60 @@ where
     }))
 }
 
+pub(super) fn builtin_skills_mode_from_lookup<F>(lookup: F) -> anyhow::Result<BuiltinSkillsMode>
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    let Some(value) = lookup("GENERAL_AGENT_BUILTIN_SKILLS_MODE") else {
+        return Ok(BuiltinSkillsMode::Auto);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("GENERAL_AGENT_BUILTIN_SKILLS_MODE must be valid UTF-8"))?;
+    match value.as_str() {
+        "auto" => Ok(BuiltinSkillsMode::Auto),
+        "directory" => Ok(BuiltinSkillsMode::Directory),
+        "bundle" => Ok(BuiltinSkillsMode::Bundle),
+        _ => anyhow::bail!("GENERAL_AGENT_BUILTIN_SKILLS_MODE must be auto, directory, or bundle"),
+    }
+}
+
+#[cfg(test)]
 pub(super) async fn load_skill_manager(
     root: &Path,
     storage: Storage,
     managed_config: Option<ManagedSkillsConfig>,
 ) -> anyhow::Result<LoadedSkillManager> {
+    load_skill_manager_with_mode(root, storage, managed_config, BuiltinSkillsMode::Auto).await
+}
+
+pub(super) async fn load_skill_manager_with_mode(
+    root: &Path,
+    storage: Storage,
+    managed_config: Option<ManagedSkillsConfig>,
+    builtin_mode: BuiltinSkillsMode,
+) -> anyhow::Result<LoadedSkillManager> {
     let deferred_managed_startup = managed_config.is_some();
-    let builtin: Arc<dyn SkillSource> = if has_bundle_evidence(root).await? {
-        let source = BundleSkillSource::open(root).await?;
-        persist_bundle_source_mode(root).await?;
-        Arc::new(source)
+    let evidence = bundle_evidence(root).await?;
+    let use_bundle = match builtin_mode {
+        BuiltinSkillsMode::Bundle => true,
+        BuiltinSkillsMode::Directory => {
+            anyhow::ensure!(
+                !evidence.any(),
+                "builtin directory mode rejects bundle layout evidence"
+            );
+            false
+        }
+        BuiltinSkillsMode::Auto if evidence.generation_container => true,
+        BuiltinSkillsMode::Auto if evidence.direct_metadata => {
+            anyhow::bail!(
+                "direct bundle startup requires GENERAL_AGENT_BUILTIN_SKILLS_MODE=bundle"
+            );
+        }
+        BuiltinSkillsMode::Auto => false,
+    };
+    let builtin: Arc<dyn SkillSource> = if use_bundle {
+        Arc::new(BundleSkillSource::open(root).await?)
     } else {
         Arc::new(DirectorySkillSource::new(SkillLayer::Builtin, root))
     };
@@ -102,87 +151,32 @@ pub(super) async fn load_skill_manager(
     })
 }
 
-async fn has_bundle_evidence(root: &Path) -> anyhow::Result<bool> {
-    if has_persisted_bundle_source_mode(root).await? {
-        return Ok(true);
+#[derive(Clone, Copy, Debug, Default)]
+struct BundleEvidence {
+    direct_metadata: bool,
+    generation_container: bool,
+}
+
+impl BundleEvidence {
+    fn any(self) -> bool {
+        self.direct_metadata || self.generation_container
     }
-    for entry in [
-        SKILL_BUNDLE_MANIFEST_FILE,
-        SKILL_BUNDLE_LOCK_FILE,
-        SKILL_BUNDLE_CURRENT_FILE,
-        SKILL_BUNDLE_GENERATIONS_DIR,
+}
+
+async fn bundle_evidence(root: &Path) -> anyhow::Result<BundleEvidence> {
+    let mut evidence = BundleEvidence::default();
+    for (entry, direct) in [
+        (SKILL_BUNDLE_MANIFEST_FILE, true),
+        (SKILL_BUNDLE_LOCK_FILE, true),
+        (SKILL_BUNDLE_CURRENT_FILE, false),
+        (SKILL_BUNDLE_GENERATIONS_DIR, false),
     ] {
         match tokio::fs::symlink_metadata(root.join(entry)).await {
-            Ok(_) => return Ok(true),
+            Ok(_) if direct => evidence.direct_metadata = true,
+            Ok(_) => evidence.generation_container = true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(false)
-}
-
-async fn has_persisted_bundle_source_mode(root: &Path) -> anyhow::Result<bool> {
-    let marker = bundle_source_mode_path(root)?;
-    match tokio::fs::symlink_metadata(&marker).await {
-        Ok(metadata) => {
-            anyhow::ensure!(
-                metadata.is_file() && !metadata.file_type().is_symlink(),
-                "builtin skill source mode marker must be a regular file: {}",
-                marker.display()
-            );
-            let bytes = tokio::fs::read(&marker).await?;
-            anyhow::ensure!(
-                bytes == BUNDLE_SOURCE_MODE,
-                "unsupported builtin skill source mode marker: {}",
-                marker.display()
-            );
-            Ok(true)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
-async fn persist_bundle_source_mode(root: &Path) -> anyhow::Result<()> {
-    let marker = bundle_source_mode_path(root)?;
-    if has_persisted_bundle_source_mode(root).await? {
-        return Ok(());
-    }
-    let temporary = marker.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
-    let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .await?;
-        use tokio::io::AsyncWriteExt;
-        file.write_all(BUNDLE_SOURCE_MODE).await?;
-        file.sync_all().await?;
-        drop(file);
-        if let Err(error) = tokio::fs::rename(&temporary, &marker).await
-            && !has_persisted_bundle_source_mode(root).await?
-        {
-            return Err(error.into());
-        }
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-    let _ = tokio::fs::remove_file(&temporary).await;
-    result
-}
-
-fn bundle_source_mode_path(root: &Path) -> anyhow::Result<PathBuf> {
-    let absolute = if root.is_absolute() {
-        root.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(root)
-    };
-    let name = absolute
-        .file_name()
-        .context("builtin skills root has no file name")?
-        .to_string_lossy();
-    let parent = absolute
-        .parent()
-        .context("builtin skills root has no parent")?;
-    Ok(parent.join(format!(".{name}.general-agent-source-mode")))
+    Ok(evidence)
 }

@@ -24,11 +24,11 @@ pub(crate) struct BundleExecutionGate {
 #[cfg(test)]
 impl BundleExecutionGate {
     pub(crate) async fn wait_entered(&self) {
-        self.entered.wait().await;
+        wait_bundle_gate(&self.entered, "bundle execution entry").await;
     }
 
     pub(crate) async fn release(&self) {
-        self.release.wait().await;
+        wait_bundle_gate(&self.release, "bundle execution release").await;
     }
 }
 
@@ -53,9 +53,16 @@ fn bundle_execution_gate() -> &'static std::sync::Mutex<Option<BundleExecutionGa
 async fn checkpoint_bundle_execution_after_snapshot() {
     let gate = bundle_execution_gate().lock().unwrap().take();
     if let Some(gate) = gate {
-        gate.entered.wait().await;
-        gate.release.wait().await;
+        wait_bundle_gate(&gate.entered, "bundle execution checkpoint entry").await;
+        wait_bundle_gate(&gate.release, "bundle execution checkpoint release").await;
     }
+}
+
+#[cfg(test)]
+async fn wait_bundle_gate(barrier: &tokio::sync::Barrier, label: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), barrier.wait())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {label}"));
 }
 
 #[cfg(not(test))]

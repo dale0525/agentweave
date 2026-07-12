@@ -25,8 +25,11 @@ mod server_skill_startup;
 mod server_skill_startup_tests;
 #[cfg(test)]
 use server_skill_startup::ManagedSkillsConfig;
+#[cfg(test)]
+use server_skill_startup::load_skill_manager;
 use server_skill_startup::{
-    LoadedSkillManager, load_skill_manager, managed_skills_config_from_lookup,
+    LoadedSkillManager, builtin_skills_mode_from_lookup, load_skill_manager_with_mode,
+    managed_skills_config_from_lookup,
 };
 
 #[tokio::main]
@@ -40,7 +43,10 @@ async fn main() -> anyhow::Result<()> {
     let storage = Storage::connect(&database_url).await?;
     let skills_root = skills_root_from_env();
     let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
-    let loaded = load_skill_manager(&skills_root, storage.clone(), managed_skills).await?;
+    let builtin_mode = builtin_skills_mode_from_lookup(|name| std::env::var_os(name))?;
+    let loaded =
+        load_skill_manager_with_mode(&skills_root, storage.clone(), managed_skills, builtin_mode)
+            .await?;
     let owner_host = owner_host_config_from_lookup(|name| std::env::var_os(name))?;
     if owner_host.is_none() {
         reconcile_managed_startup(&loaded, storage.clone()).await?;
@@ -376,6 +382,26 @@ mod tests {
     }
 
     #[test]
+    fn builtin_skills_mode_requires_a_closed_authoritative_value() {
+        use server_skill_startup::{BuiltinSkillsMode, builtin_skills_mode_from_lookup};
+
+        assert_eq!(
+            builtin_skills_mode_from_lookup(|_| None).unwrap(),
+            BuiltinSkillsMode::Auto
+        );
+        assert_eq!(
+            builtin_skills_mode_from_lookup(|_| Some("bundle".into())).unwrap(),
+            BuiltinSkillsMode::Bundle
+        );
+        assert!(
+            builtin_skills_mode_from_lookup(|_| Some("direct".into()))
+                .unwrap_err()
+                .to_string()
+                .contains("auto, directory, or bundle")
+        );
+    }
+
+    #[test]
     fn owner_management_policy_is_not_enabled_by_a_token_alone() {
         let config = owner_host_config_from_lookup(|name| match name {
             "GENERAL_AGENT_OWNER_TOKEN" => Some("secret-token".into()),
@@ -616,7 +642,7 @@ mod tests {
             .err()
             .unwrap();
 
-        assert!(format!("{error:#}").contains("bundle metadata"));
+        assert!(format!("{error:#}").contains("requires GENERAL_AGENT_BUILTIN_SKILLS_MODE=bundle"));
         tokio::fs::remove_file(root.join("skill-bundle.json"))
             .await
             .unwrap();

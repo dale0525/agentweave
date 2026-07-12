@@ -146,6 +146,31 @@ impl SkillRegistry {
         Self::load_skill(root.as_ref().to_path_buf()).await
     }
 
+    pub fn load_verified_release_skill(
+        root: PathBuf,
+        manifest_bytes: &[u8],
+        file_paths: &std::collections::BTreeSet<PathBuf>,
+    ) -> anyhow::Result<InstalledSkill> {
+        let manifest: SkillManifest =
+            serde_json::from_slice(manifest_bytes).with_context(|| {
+                format!("failed to parse verified skill manifest {}", root.display())
+            })?;
+        validate_manifest_semantics(&manifest)?;
+        for resource in manifest_entry_resources(&manifest) {
+            anyhow::ensure!(
+                file_paths.contains(&resource),
+                "skill manifest entry resource does not exist in verified snapshot: {}",
+                resource.display()
+            );
+        }
+        Ok(InstalledSkill {
+            root,
+            manifest,
+            verification: None,
+            development_package_id: None,
+        })
+    }
+
     pub(crate) async fn load_development_skill_for_package(
         root: impl AsRef<Path>,
         package_id: &crate::skill_package::SkillPackageId,

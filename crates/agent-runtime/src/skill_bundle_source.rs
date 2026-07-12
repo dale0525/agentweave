@@ -1,7 +1,7 @@
 use super::{
-    SKILL_BUNDLE_CURRENT_FILE, SKILL_BUNDLE_GENERATIONS_DIR, SKILL_BUNDLE_LOCK_FILE,
-    SKILL_BUNDLE_MANIFEST_FILE, SKILL_BUNDLE_SCHEMA_VERSION, SkillBundleCurrent, SkillBundleLock,
-    SkillBundleManifest,
+    SKILL_BUNDLE_CURRENT_FILE, SKILL_BUNDLE_CURRENT_SCHEMA_VERSION, SKILL_BUNDLE_GENERATIONS_DIR,
+    SKILL_BUNDLE_LOCK_FILE, SKILL_BUNDLE_MANIFEST_FILE, SKILL_BUNDLE_SCHEMA_VERSION,
+    SkillBundleCurrent, SkillBundleGeneration, SkillBundleLock, SkillBundleManifest,
 };
 use crate::skill_package::{DescriptorSource, SkillCompatibility, SkillPackageDescriptor};
 use crate::skill_source::{
@@ -18,9 +18,12 @@ use crate::skill_store_secure_roots::{
 };
 use anyhow::Context;
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 #[cfg(test)]
@@ -29,64 +32,49 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(all(test, unix))]
 #[derive(Clone)]
 pub(crate) struct BundleMetadataGate {
-    path: PathBuf,
-    entered: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
+    entered: Arc<tokio::sync::Barrier>,
+    release: Arc<tokio::sync::Barrier>,
 }
 
 #[cfg(all(test, unix))]
 impl BundleMetadataGate {
     pub(crate) async fn wait_entered(&self) {
-        let barrier = self.entered.clone();
-        tokio::task::spawn_blocking(move || barrier.wait())
-            .await
-            .unwrap();
+        wait_test_gate(&self.entered, "bundle metadata entry").await;
     }
 
     pub(crate) async fn release(&self) {
-        let barrier = self.release.clone();
-        tokio::task::spawn_blocking(move || barrier.wait())
-            .await
-            .unwrap();
+        wait_test_gate(&self.release, "bundle metadata release").await;
     }
 }
 
 #[cfg(all(test, unix))]
 pub(crate) fn gate_bundle_metadata_after_inspection(path: &Path) -> BundleMetadataGate {
     let gate = BundleMetadataGate {
-        path: path.to_path_buf(),
-        entered: Arc::new(std::sync::Barrier::new(2)),
-        release: Arc::new(std::sync::Barrier::new(2)),
+        entered: Arc::new(tokio::sync::Barrier::new(2)),
+        release: Arc::new(tokio::sync::Barrier::new(2)),
     };
-    *metadata_gate().lock().unwrap() = Some(gate.clone());
+    metadata_gates()
+        .lock()
+        .unwrap()
+        .insert(canonical_test_path(path), gate.clone());
     gate
 }
 
 #[cfg(all(test, unix))]
-fn metadata_gate() -> &'static Mutex<Option<BundleMetadataGate>> {
-    static GATE: OnceLock<Mutex<Option<BundleMetadataGate>>> = OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(None))
+fn metadata_gates() -> &'static Mutex<BTreeMap<PathBuf, BundleMetadataGate>> {
+    static GATES: OnceLock<Mutex<BTreeMap<PathBuf, BundleMetadataGate>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 #[cfg(all(test, unix))]
 async fn checkpoint_metadata_after_inspection(path: &Path) {
-    let gate = {
-        let mut slot = metadata_gate().lock().unwrap();
-        if slot.as_ref().is_some_and(|gate| gate.path == path) {
-            slot.take()
-        } else {
-            None
-        }
-    };
+    let gate = metadata_gates()
+        .lock()
+        .unwrap()
+        .remove(&canonical_test_path(path));
     if let Some(gate) = gate {
-        let entered = gate.entered.clone();
-        tokio::task::spawn_blocking(move || entered.wait())
-            .await
-            .unwrap();
-        let release = gate.release.clone();
-        tokio::task::spawn_blocking(move || release.wait())
-            .await
-            .unwrap();
+        wait_test_gate(&gate.entered, "bundle metadata checkpoint entry").await;
+        wait_test_gate(&gate.release, "bundle metadata checkpoint release").await;
     }
 }
 
@@ -103,11 +91,11 @@ pub(crate) struct BundleCurrentReadGate {
 #[cfg(all(test, windows))]
 impl BundleCurrentReadGate {
     pub(crate) async fn wait_entered(&self) {
-        self.entered.wait().await;
+        wait_test_gate(&self.entered, "bundle current read entry").await;
     }
 
     pub(crate) async fn release(&self) {
-        self.release.wait().await;
+        wait_test_gate(&self.release, "bundle current read release").await;
     }
 }
 
@@ -130,7 +118,7 @@ fn current_read_gates() -> &'static Mutex<BTreeMap<PathBuf, BundleCurrentReadGat
     GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 fn canonical_test_path(path: &Path) -> PathBuf {
     let Some(parent) = path.parent() else {
         return path.to_path_buf();
@@ -147,8 +135,8 @@ async fn checkpoint_current_after_open(path: &Path) {
         .unwrap()
         .remove(&canonical_test_path(path));
     if let Some(gate) = gate {
-        gate.entered.wait().await;
-        gate.release.wait().await;
+        wait_test_gate(&gate.entered, "bundle current checkpoint entry").await;
+        wait_test_gate(&gate.release, "bundle current checkpoint release").await;
     }
 }
 
@@ -158,7 +146,6 @@ async fn checkpoint_current_after_open(_path: &Path) {}
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct BundleDiscoveryGate {
-    generation: PathBuf,
     entered: Arc<tokio::sync::Barrier>,
     release: Arc<tokio::sync::Barrier>,
 }
@@ -166,52 +153,54 @@ pub(crate) struct BundleDiscoveryGate {
 #[cfg(test)]
 impl BundleDiscoveryGate {
     pub(crate) async fn wait_entered(&self) {
-        self.entered.wait().await;
+        wait_test_gate(&self.entered, "bundle discovery entry").await;
     }
 
     pub(crate) async fn release(&self) {
-        self.release.wait().await;
+        wait_test_gate(&self.release, "bundle discovery release").await;
     }
 }
 
 #[cfg(test)]
 pub(crate) fn gate_bundle_discovery_after_layout(generation: &Path) -> BundleDiscoveryGate {
     let gate = BundleDiscoveryGate {
-        generation: generation.to_path_buf(),
         entered: Arc::new(tokio::sync::Barrier::new(2)),
         release: Arc::new(tokio::sync::Barrier::new(2)),
     };
-    *discovery_gate().lock().unwrap() = Some(gate.clone());
+    discovery_gates()
+        .lock()
+        .unwrap()
+        .insert(canonical_test_path(generation), gate.clone());
     gate
 }
 
 #[cfg(test)]
-fn discovery_gate() -> &'static Mutex<Option<BundleDiscoveryGate>> {
-    static GATE: OnceLock<Mutex<Option<BundleDiscoveryGate>>> = OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(None))
+fn discovery_gates() -> &'static Mutex<BTreeMap<PathBuf, BundleDiscoveryGate>> {
+    static GATES: OnceLock<Mutex<BTreeMap<PathBuf, BundleDiscoveryGate>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 #[cfg(test)]
 async fn checkpoint_discovery_after_layout(generation: &Path) {
-    let gate = {
-        let mut slot = discovery_gate().lock().unwrap();
-        if slot
-            .as_ref()
-            .is_some_and(|gate| gate.generation == generation)
-        {
-            slot.take()
-        } else {
-            None
-        }
-    };
+    let gate = discovery_gates()
+        .lock()
+        .unwrap()
+        .remove(&canonical_test_path(generation));
     if let Some(gate) = gate {
-        gate.entered.wait().await;
-        gate.release.wait().await;
+        wait_test_gate(&gate.entered, "bundle discovery checkpoint entry").await;
+        wait_test_gate(&gate.release, "bundle discovery checkpoint release").await;
     }
 }
 
 #[cfg(not(test))]
 async fn checkpoint_discovery_after_layout(_generation: &Path) {}
+
+#[cfg(test)]
+async fn wait_test_gate(barrier: &tokio::sync::Barrier, label: &str) {
+    tokio::time::timeout(Duration::from_secs(10), barrier.wait())
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {label}"));
+}
 
 #[derive(Clone, Debug)]
 pub struct BundleSkillSource {
@@ -248,9 +237,23 @@ impl BundleSkillSource {
     }
 
     async fn load_current_packages(&self) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
+        self.load_current_selection()
+            .await
+            .map(|(packages, _)| packages)
+    }
+
+    pub(crate) async fn current_generation(&self) -> anyhow::Result<Option<SkillBundleGeneration>> {
+        self.load_current_selection()
+            .await
+            .map(|(_, generation)| generation)
+    }
+
+    async fn load_current_selection(
+        &self,
+    ) -> anyhow::Result<(Vec<DiscoveredSkillPackage>, Option<SkillBundleGeneration>)> {
         self.root_identity.verify("bundle")?;
         self.prepared_root.verify()?;
-        let generation = match read_json::<SkillBundleCurrent>(
+        let selection = match read_json::<SkillBundleCurrent>(
             &self.prepared_root,
             Path::new(SKILL_BUNDLE_CURRENT_FILE),
         )
@@ -258,35 +261,68 @@ impl BundleSkillSource {
         {
             Ok(current) => {
                 anyhow::ensure!(
-                    current.schema_version == SKILL_BUNDLE_SCHEMA_VERSION,
+                    current.schema_version == SKILL_BUNDLE_CURRENT_SCHEMA_VERSION,
                     "unsupported skill bundle current schema version: {}",
                     current.schema_version
                 );
-                validate_generation_id(&current.generation)?;
                 verify_generation_container(&self.prepared_root).await?;
-                let relative =
-                    PathBuf::from(SKILL_BUNDLE_GENERATIONS_DIR).join(&current.generation);
-                open_prepared_directory(&self.root_identity, &relative)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to open current bundle generation {}",
-                            current.generation
-                        )
-                    })?
+                validate_generation_commitment(&current.active)?;
+                if let Some(previous) = &current.previous {
+                    validate_generation_commitment(previous)?;
+                    anyhow::ensure!(
+                        previous.generation != current.active.generation,
+                        "bundle current active and previous generations must be distinct"
+                    );
+                }
+                match self.load_committed_generation(&current.active).await {
+                    Ok(packages) => (packages, Some(current.active)),
+                    Err(active_error) => {
+                        let previous = current.previous.context(format!(
+                            "active bundle generation failed commitment validation: {active_error:#}; no last-known-good generation is recorded"
+                        ))?;
+                        let packages = self
+                            .load_committed_generation(&previous)
+                            .await
+                            .map_err(|previous_error| {
+                                anyhow::anyhow!(
+                                    "active bundle generation failed commitment validation: {active_error:#}; previous last-known-good generation also failed validation: {previous_error:#}"
+                                )
+                            })?;
+                        (packages, Some(previous))
+                    }
+                }
             }
             Err(error) if error_is_not_found(&error) => {
                 if has_direct_bundle_evidence(&self.prepared_root).await? {
-                    self.prepared_root.clone()
+                    (
+                        load_generation(&self.prepared_root, &self.root, None).await?,
+                        None,
+                    )
                 } else {
                     return Err(error).context("bundle current marker is missing");
                 }
             }
             Err(error) => return Err(error),
         };
-        let packages = load_generation(&generation, &self.root).await?;
-        generation.verify()?;
         self.root_identity.verify("bundle")?;
+        Ok(selection)
+    }
+
+    async fn load_committed_generation(
+        &self,
+        commitment: &SkillBundleGeneration,
+    ) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
+        let relative = PathBuf::from(SKILL_BUNDLE_GENERATIONS_DIR).join(&commitment.generation);
+        let generation = open_prepared_directory(&self.root_identity, &relative)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to open committed bundle generation {}",
+                    commitment.generation
+                )
+            })?;
+        let packages = load_generation(&generation, &self.root, Some(commitment)).await?;
+        generation.verify()?;
         Ok(packages)
     }
 }
@@ -294,11 +330,24 @@ impl BundleSkillSource {
 async fn load_generation(
     generation: &PreparedStoreDirectory,
     bundle_root: &Path,
+    commitment: Option<&SkillBundleGeneration>,
 ) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
     let (manifest, manifest_bytes, manifest_identity): (SkillBundleManifest, _, _) =
         read_json_with_bytes(generation, Path::new(SKILL_BUNDLE_MANIFEST_FILE)).await?;
     let (lock, lock_bytes, lock_identity): (SkillBundleLock, _, _) =
         read_json_with_bytes(generation, Path::new(SKILL_BUNDLE_LOCK_FILE)).await?;
+    if let Some(commitment) = commitment {
+        anyhow::ensure!(
+            metadata_sha256(&manifest_bytes) == commitment.manifest_sha256,
+            "bundle manifest commitment mismatch for generation {}",
+            commitment.generation
+        );
+        anyhow::ensure!(
+            metadata_sha256(&lock_bytes) == commitment.lock_sha256,
+            "bundle lock commitment mismatch for generation {}",
+            commitment.generation
+        );
+    }
     anyhow::ensure!(
         manifest.schema_version == SKILL_BUNDLE_SCHEMA_VERSION,
         "unsupported skill bundle manifest schema version: {}",
@@ -386,6 +435,7 @@ async fn load_generation(
             verified_content: Some(VerifiedPackageContent {
                 runtime_manifest: snapshot.runtime_manifest.map(Arc::from),
                 instructions_file: snapshot.instructions_file.map(Arc::from),
+                file_paths: Arc::new(snapshot.file_paths),
                 expected_content_hash: locked.content_hash.clone(),
                 limits,
                 execution_binding: None,
@@ -400,6 +450,28 @@ async fn load_generation(
     packages.sort_by(|left, right| left.descriptor.id.cmp(&right.descriptor.id));
     verify_bundle_generation_binding(&generation_binding).await?;
     Ok(packages)
+}
+
+fn validate_generation_commitment(commitment: &SkillBundleGeneration) -> anyhow::Result<()> {
+    validate_generation_id(&commitment.generation)?;
+    for (label, hash) in [
+        ("manifest", commitment.manifest_sha256.as_str()),
+        ("lock", commitment.lock_sha256.as_str()),
+    ] {
+        anyhow::ensure!(
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "bundle current {label} commitment must be a SHA-256 hex digest"
+        );
+        anyhow::ensure!(
+            hash.bytes().all(|byte| !byte.is_ascii_uppercase()),
+            "bundle current {label} commitment must use canonical lowercase hex"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn metadata_sha256(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn validate_canonical_order(

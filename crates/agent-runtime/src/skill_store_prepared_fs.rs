@@ -298,6 +298,38 @@ pub(crate) async fn set_writable(
     }
 }
 
+pub(crate) async fn set_deletable(
+    root: &PreparedStoreDirectory,
+    relative: Option<&Path>,
+    directory: bool,
+) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, RawMode, fchmod, fstat};
+        let descriptor = open_mode_target(root, relative, directory)?;
+        if directory {
+            let mode = (u32::from(fstat(&descriptor)?.st_mode) | 0o300) & 0o777;
+            fchmod(descriptor, Mode::from_raw_mode(RawMode::try_from(mode)?))?;
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        let (descriptor, target) = windows_attribute_target(root, relative);
+        crate::skill_store_windows::set_readonly_beneath(descriptor, target, directory, false)
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        root.verify()?;
+        let path =
+            relative.map_or_else(|| root.path().to_path_buf(), |path| root.path().join(path));
+        let mut permissions = tokio::fs::metadata(&path).await?.permissions();
+        permissions.set_readonly(false);
+        tokio::fs::set_permissions(path, permissions).await?;
+        root.verify()
+    }
+}
+
 #[cfg(windows)]
 fn windows_attribute_target<'a>(
     root: &'a PreparedStoreDirectory,

@@ -9,13 +9,18 @@ use std::path::PathBuf;
 
 #[path = "skill_bundle_builder.rs"]
 mod builder;
+#[cfg(test)]
+#[path = "skill_bundle_builder_gates.rs"]
+mod builder_gates;
 #[path = "skill_bundle_source.rs"]
 mod source;
 
 pub use builder::build_skill_bundle;
 #[cfg(test)]
-pub(crate) use builder::{
-    build_skill_bundle_with_faults, gate_bundle_after_inspection, gate_bundle_before_publish,
+pub(crate) use builder::build_skill_bundle_with_faults;
+#[cfg(test)]
+pub(crate) use builder_gates::{
+    gate_bundle_after_final_validation, gate_bundle_after_inspection, gate_bundle_before_publish,
 };
 pub use source::BundleSkillSource;
 #[cfg(all(test, windows))]
@@ -27,6 +32,7 @@ pub(crate) use source::gate_bundle_metadata_after_inspection;
 pub(crate) use source::verify_bundle_generation_binding;
 
 pub const SKILL_BUNDLE_SCHEMA_VERSION: u32 = 1;
+pub(crate) const SKILL_BUNDLE_CURRENT_SCHEMA_VERSION: u32 = 2;
 pub const SKILL_BUNDLE_MANIFEST_FILE: &str = "skill-bundle.json";
 pub const SKILL_BUNDLE_LOCK_FILE: &str = "skill-bundle.lock";
 pub const SKILL_BUNDLE_CURRENT_FILE: &str = "current";
@@ -36,7 +42,16 @@ pub const SKILL_BUNDLE_GENERATIONS_DIR: &str = "generations";
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SkillBundleCurrent {
     pub(crate) schema_version: u32,
+    pub(crate) active: SkillBundleGeneration,
+    pub(crate) previous: Option<SkillBundleGeneration>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SkillBundleGeneration {
     pub(crate) generation: String,
+    pub(crate) manifest_sha256: String,
+    pub(crate) lock_sha256: String,
 }
 
 #[derive(Clone, Debug)]

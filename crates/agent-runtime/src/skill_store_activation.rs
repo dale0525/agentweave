@@ -127,6 +127,7 @@ impl SkillRevisionStore {
                 verified_content: Some(VerifiedPackageContent {
                     runtime_manifest: snapshot.runtime_manifest.map(Arc::from),
                     instructions_file: snapshot.instructions_file.map(Arc::from),
+                    file_paths: Arc::new(snapshot.file_paths),
                     expected_content_hash: snapshot.content_hash,
                     limits: self.limits,
                     execution_binding: Some(ManagedExecutionBinding {

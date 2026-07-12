@@ -194,7 +194,7 @@ async fn active_generation(output: &Path) -> PathBuf {
     .unwrap();
     output
         .join(SKILL_BUNDLE_GENERATIONS_DIR)
-        .join(current["generation"].as_str().unwrap())
+        .join(current["active"]["generation"].as_str().unwrap())
 }
 
 async fn remove_test_dir(path: PathBuf) {

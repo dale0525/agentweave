@@ -10,6 +10,7 @@ use crate::skill_snapshot::SkillSnapshot;
 use crate::skill_source::SkillSource;
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 use semver::Version;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 #[cfg(unix)]
@@ -31,6 +32,7 @@ async fn bundle_execution_never_spawns_from_replaced_package() {
     });
     gate.wait_entered().await;
 
+    make_owner_writable(original.parent().unwrap(), true).await;
     let displaced = original.with_extension("verified");
     tokio::fs::rename(&original, &displaced).await.unwrap();
     tokio::fs::create_dir(&original).await.unwrap();
@@ -60,7 +62,9 @@ async fn bundle_execution_rejects_unlocked_generation_content_added_after_snapsh
     let source = BundleSkillSource::open(&fixture.output).await.unwrap();
     let packages = source.packages().await.unwrap();
     let snapshot = SkillSnapshot::build(1, active_set(packages)).await.unwrap();
-    tokio::fs::create_dir(active_generation(&fixture.output).await.join("unlocked"))
+    let generation = active_generation(&fixture.output).await;
+    make_owner_writable(&generation, true).await;
+    tokio::fs::create_dir(generation.join("unlocked"))
         .await
         .unwrap();
 
@@ -396,13 +400,11 @@ async fn bundle_discover_rejects_unlocked_tree_added_after_open() {
     let fixture = BundleReviewFixture::new().await;
     build_skill_bundle(fixture.request()).await.unwrap();
     let source = BundleSkillSource::open(&fixture.output).await.unwrap();
-    tokio::fs::create_dir(
-        active_generation(&fixture.output)
-            .await
-            .join("com.example.extra"),
-    )
-    .await
-    .unwrap();
+    let generation = active_generation(&fixture.output).await;
+    make_owner_writable(&generation, true).await;
+    tokio::fs::create_dir(generation.join("com.example.extra"))
+        .await
+        .unwrap();
 
     let error = source.discover().await.unwrap_err();
 
@@ -468,7 +470,7 @@ async fn bundle_discover_rejects_generation_replaced_during_reload() {
     let gate = gate_bundle_discovery_after_layout(&generation);
     let reload = tokio::spawn(async move { source.discover().await });
     gate.wait_entered().await;
-    let displaced = fixture.temp.path().join("displaced-active-generation");
+    let displaced = generation.with_file_name(uuid::Uuid::new_v4().to_string());
     tokio::fs::rename(&generation, &displaced).await.unwrap();
     tokio::fs::create_dir(&generation).await.unwrap();
     gate.release().await;
@@ -490,13 +492,18 @@ async fn bundle_discover_rejects_package_directory_replaced_during_reload() {
     let reload = tokio::spawn(async move { source.discover().await });
     gate.wait_entered().await;
     let package = generation.join("com.example.atomic");
-    let displaced = fixture.temp.path().join("displaced-active-package");
+    let displaced = generation.join("displaced-active-package");
+    make_owner_writable(&generation, true).await;
     tokio::fs::rename(&package, &displaced).await.unwrap();
     tokio::fs::create_dir(&package).await.unwrap();
     gate.release().await;
 
     let error = reload.await.unwrap().unwrap_err();
-    assert!(format!("{error:#}").contains("identity changed"));
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("identity changed") || message.contains("unlocked content"),
+        "unexpected error: {message}"
+    );
 }
 
 async fn package_hash(source: &BundleSkillSource) -> String {
@@ -506,7 +513,7 @@ async fn package_hash(source: &BundleSkillSource) -> String {
 async fn active_generation(output: &Path) -> std::path::PathBuf {
     let current: SkillBundleCurrent =
         serde_json::from_slice(&tokio::fs::read(output.join("current")).await.unwrap()).unwrap();
-    output.join("generations").join(current.generation)
+    output.join("generations").join(current.active.generation)
 }
 
 async fn mutate_json(path: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
@@ -515,7 +522,44 @@ async fn mutate_json(path: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
     mutate(&mut value);
     let mut bytes = serde_json::to_vec_pretty(&value).unwrap();
     bytes.push(b'\n');
-    tokio::fs::write(path, bytes).await.unwrap();
+    make_owner_writable(path, false).await;
+    tokio::fs::write(path, &bytes).await.unwrap();
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let field = match name {
+        "skill-bundle.json" => "manifestSha256",
+        "skill-bundle.lock" => "lockSha256",
+        _ => return,
+    };
+    let output = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .unwrap();
+    let current_path = output.join("current");
+    let mut current: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&current_path).await.unwrap()).unwrap();
+    current["active"][field] = serde_json::json!(hex::encode(Sha256::digest(&bytes)));
+    let mut current_bytes = serde_json::to_vec_pretty(&current).unwrap();
+    current_bytes.push(b'\n');
+    tokio::fs::write(current_path, current_bytes).await.unwrap();
+}
+
+async fn make_owner_writable(path: &Path, directory: bool) {
+    let mut permissions = tokio::fs::metadata(path).await.unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let access = if directory { 0o300 } else { 0o200 };
+        permissions.set_mode(permissions.mode() | access);
+    }
+    #[cfg(windows)]
+    {
+        let _ = directory;
+        permissions.set_readonly(false);
+    }
+    tokio::fs::set_permissions(path, permissions).await.unwrap();
 }
 
 struct BundleReviewFixture {

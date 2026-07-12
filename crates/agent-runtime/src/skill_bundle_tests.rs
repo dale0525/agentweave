@@ -6,6 +6,7 @@ use crate::skill_bundle::{
     build_skill_bundle, gate_bundle_after_inspection,
 };
 use semver::Version;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 struct BundleFixture {
@@ -85,9 +86,9 @@ async fn packaged_source_rejects_modified_content() {
     let fixture = BundleFixture::with_packages(&["com.example.alpha"]).await;
     let output = build_skill_bundle(fixture.request()).await.unwrap();
     let generation = active_generation(&output.root).await;
-    tokio::fs::write(generation.join("com.example.alpha/skill.json"), "changed")
-        .await
-        .unwrap();
+    let manifest = generation.join("com.example.alpha/skill.json");
+    make_owner_writable(&manifest, false).await;
+    tokio::fs::write(manifest, "changed").await.unwrap();
 
     let error = BundleSkillSource::open(output.root).await.unwrap_err();
 
@@ -106,6 +107,7 @@ async fn bundle_open_rejects_manifest_replaced_by_symlink_after_inspection() {
         .join("skill-bundle.json");
     let inspected_path = tokio::fs::canonicalize(&manifest).await.unwrap();
     let outside = fixture.temp.path().join("outside-manifest.json");
+    make_owner_writable(manifest.parent().unwrap(), true).await;
     let gate = gate_bundle_metadata_after_inspection(&inspected_path);
     let bundle_root = fixture.output_root.clone();
     let opening = tokio::spawn(async move { BundleSkillSource::open(bundle_root).await });
@@ -380,13 +382,11 @@ async fn bundle_open_rejects_schema_set_path_descriptor_and_hash_mismatches() {
 async fn bundle_open_rejects_extra_unlocked_trees() {
     let fixture = BundleFixture::with_packages(&["com.example.alpha"]).await;
     build_skill_bundle(fixture.request()).await.unwrap();
-    tokio::fs::create_dir(
-        active_generation(&fixture.output_root)
-            .await
-            .join("com.example.extra"),
-    )
-    .await
-    .unwrap();
+    let generation = active_generation(&fixture.output_root).await;
+    make_owner_writable(&generation, true).await;
+    tokio::fs::create_dir(generation.join("com.example.extra"))
+        .await
+        .unwrap();
 
     let error = BundleSkillSource::open(&fixture.output_root)
         .await
@@ -422,13 +422,47 @@ async fn mutate_json(path: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
     mutate(&mut value);
     let mut bytes = serde_json::to_vec_pretty(&value).unwrap();
     bytes.push(b'\n');
-    tokio::fs::write(path, bytes).await.unwrap();
+    make_owner_writable(path, false).await;
+    tokio::fs::write(path, &bytes).await.unwrap();
+    let output = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .unwrap();
+    let current_path = output.join("current");
+    let mut current: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&current_path).await.unwrap()).unwrap();
+    let field = if path.file_name().unwrap() == "skill-bundle.json" {
+        "manifestSha256"
+    } else {
+        "lockSha256"
+    };
+    current["active"][field] = serde_json::json!(hex::encode(Sha256::digest(&bytes)));
+    let mut current_bytes = serde_json::to_vec_pretty(&current).unwrap();
+    current_bytes.push(b'\n');
+    tokio::fs::write(current_path, current_bytes).await.unwrap();
+}
+
+async fn make_owner_writable(path: &Path, directory: bool) {
+    let mut permissions = tokio::fs::metadata(path).await.unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let access = if directory { 0o300 } else { 0o200 };
+        permissions.set_mode(permissions.mode() | access);
+    }
+    #[cfg(windows)]
+    {
+        let _ = directory;
+        permissions.set_readonly(false);
+    }
+    tokio::fs::set_permissions(path, permissions).await.unwrap();
 }
 
 async fn active_generation(output: &Path) -> PathBuf {
     let current: SkillBundleCurrent =
         serde_json::from_slice(&tokio::fs::read(output.join("current")).await.unwrap()).unwrap();
-    output.join("generations").join(current.generation)
+    output.join("generations").join(current.active.generation)
 }
 
 async fn write_runtime_package(root: &Path, id: &str) {

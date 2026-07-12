@@ -41,6 +41,8 @@ pub struct VerifiedPackageContent {
     pub runtime_manifest: Option<Arc<[u8]>>,
     /// Verified `SKILL.md` bytes, when instruction content is declared.
     pub instructions_file: Option<Arc<[u8]>>,
+    /// Canonical relative regular-file paths observed in the same secure snapshot.
+    pub file_paths: Arc<std::collections::BTreeSet<PathBuf>>,
     /// Hash of the complete package tree observed with these bytes.
     pub expected_content_hash: String,
     /// Bounds that must also be applied when rechecking before execution.
@@ -165,13 +167,22 @@ impl DirectorySkillSource {
             {
                 Ok(snapshot) => {
                     let loaded = snapshot.descriptor;
+                    let content_hash = snapshot.content_hash.clone();
                     packages.push(DiscoveredSkillPackage {
                         layer: self.layer,
                         root: loaded.root,
                         descriptor: loaded.descriptor,
-                        content_hash: snapshot.content_hash,
+                        content_hash: content_hash.clone(),
                         warnings: loaded.warnings,
-                        verified_content: None,
+                        verified_content: Some(VerifiedPackageContent {
+                            runtime_manifest: snapshot.runtime_manifest.map(Arc::from),
+                            instructions_file: snapshot.instructions_file.map(Arc::from),
+                            file_paths: Arc::new(snapshot.file_paths),
+                            expected_content_hash: content_hash,
+                            limits: SkillStoreLimits::default(),
+                            execution_binding: None,
+                            bundle_execution_binding: None,
+                        }),
                     });
                 }
                 Err(error) => issues.push(DirectorySkillDiscoveryIssue {
@@ -407,6 +418,7 @@ impl ManagedSkillSource {
             verified_content: Some(VerifiedPackageContent {
                 runtime_manifest: snapshot.runtime_manifest.map(Arc::from),
                 instructions_file: snapshot.instructions_file.map(Arc::from),
+                file_paths: Arc::new(snapshot.file_paths),
                 expected_content_hash: content_hash,
                 limits: self.store.limits,
                 execution_binding: Some(ManagedExecutionBinding {

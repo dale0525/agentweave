@@ -9,6 +9,7 @@ use crate::skill_source::{
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 struct DraftTestEvaluation {
     candidate: crate::skill_store_draft::StagingPackageSnapshot,
@@ -572,6 +573,7 @@ fn discovered_candidate(
         verified_content: Some(VerifiedPackageContent {
             runtime_manifest: candidate.runtime_manifest.clone().map(Into::into),
             instructions_file: candidate.instructions_file.clone().map(Into::into),
+            file_paths: Arc::new(BTreeSet::new()),
             expected_content_hash: candidate.content_hash.clone(),
             limits,
             execution_binding: Some(ManagedExecutionBinding {
