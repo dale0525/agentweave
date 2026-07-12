@@ -18,6 +18,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -231,6 +233,42 @@ class SkillManagementStateTest {
   }
 
   @Test
+  fun ownerInventoryPreservesAuthoritativeBuiltinCollisionFacts() {
+    val builtin = runtimeSkill(activeRevisionId = "revision-builtin").copy(
+      sourceLayer = "builtin",
+      activeRevisionId = null,
+      builtInCollision = false,
+    )
+    val staging = RuntimeSkillPackageSummary(
+      packageId = builtin.packageId,
+      displayName = builtin.displayName,
+      version = "1.1.0",
+      sourceLayer = "managed",
+      status = "draft",
+      reason = "editable staging draft",
+      activeRevisionId = null,
+    )
+    val activeOverride = runtimeSkill(activeRevisionId = "revision-active").copy(
+      builtInCollision = true,
+    )
+
+    assertTrue(ownerSkillInventory(listOf(builtin), listOf(staging)).single().builtInCollision)
+    assertTrue(ownerSkillInventory(listOf(activeOverride), listOf(staging)).single().builtInCollision)
+  }
+
+  @Test
+  fun detailInheritsBuiltinCollisionFromOwnerInventory() {
+    val inventory = runtimeSkill(activeRevisionId = "revision-active").copy(builtInCollision = true)
+
+    val detail = skillDetailWithInventoryFacts(
+      skillDetail(activeRevisionId = "revision-active"),
+      inventory,
+    )
+
+    assertTrue(detail.builtInCollision)
+  }
+
+  @Test
   fun activationRevisionUsesTheLatestValidationResult() {
     val revision = skillDetail(activeRevisionId = "revision-active").editableDraft!!
     val validation = RuntimeSkillValidation(
@@ -296,9 +334,12 @@ class SkillManagementStateTest {
       allowedKinds = setOf("instruction_only"),
       agentAuthoring = true,
     )
-    val unmanaged = skillDetail(activeRevisionId = "revision-active").copy(sourceLayer = "builtin")
+    val unmanaged = skillDetail(activeRevisionId = "revision-active").copy(
+      sourceLayer = "builtin",
+      builtInCollision = true,
+    )
     assertEquals(
-      setOf(SkillAction.Edit, SkillAction.Validate, SkillAction.Activate),
+      setOf(SkillAction.Edit),
       skillTargetActions(access, unmanaged, manageable = false),
     )
 
@@ -330,7 +371,7 @@ class SkillManagementStateTest {
       RuntimeActorContext(role = "owner", grants = listOf("inspect") + allSkillGrants()),
     )
     assertTrue(detail.packageId in access.allowedOverrides)
-    assertTrue(skillTargetActions(access, detail, manageable = true).isEmpty())
+    assertEquals(setOf(SkillAction.Edit), skillTargetActions(access, detail, manageable = true))
 
     val disallowed = detail.copy(
       packageId = "com.example.host-tools",
@@ -450,6 +491,57 @@ class SkillManagementStateTest {
   }
 
   @Test
+  fun builtinCollisionRequiresOverrideOnlyForValidationAndActivation() {
+    val detail = skillDetailWithHistory().copy(builtInCollision = true)
+    val policy = RuntimeSkillPolicy(
+      mode = "owner_only",
+      agentAuthoring = true,
+      allowedKinds = listOf("instruction_only"),
+      allowedOverrides = listOf(detail.packageId),
+    )
+    val grants = listOf("inspect", "edit_draft", "validate", "activate")
+    val withoutOverride = skillAccessState(
+      policy,
+      RuntimeActorContext(role = "owner", grants = grants),
+    )
+    val withOverride = skillAccessState(
+      policy,
+      RuntimeActorContext(role = "owner", grants = grants + "override_builtin"),
+    )
+
+    assertEquals(
+      setOf(SkillAction.Edit),
+      skillTargetActions(withoutOverride, detail, manageable = false),
+    )
+    assertEquals(
+      setOf(SkillAction.Edit, SkillAction.Validate, SkillAction.Activate),
+      skillTargetActions(withOverride, detail, manageable = false),
+    )
+  }
+
+  @Test
+  fun protectedEditDoesNotRequireOverrideAuthority() {
+    val detail = skillDetailWithHistory()
+    val access = skillAccessState(
+      RuntimeSkillPolicy(
+        mode = "owner_only",
+        agentAuthoring = true,
+        allowedKinds = listOf("instruction_only"),
+        protectedPackages = listOf(detail.packageId),
+      ),
+      RuntimeActorContext(
+        role = "owner",
+        grants = listOf("inspect", "edit_draft", "validate", "activate"),
+      ),
+    )
+
+    assertEquals(
+      setOf(SkillAction.Edit),
+      skillTargetActions(access, detail, manageable = false),
+    )
+  }
+
+  @Test
   fun synchronizationRetryFailureRetainsPublishedWarning() {
     val state = SkillManagementUiState(
       inventory = listOf(runtimeSkill(activeRevisionId = "revision-active")),
@@ -461,6 +553,55 @@ class SkillManagementStateTest {
 
     assertEquals(null, failed.busyOperation)
     assertTrue(failed.inlineError?.startsWith("Published, refresh required") == true)
+  }
+
+  @Test
+  fun productionSynchronizationRetryCallbackSynchronizesBeforeRefresh() = runBlocking {
+    val calls = mutableListOf<String>()
+    var failedState: SkillManagementUiState? = null
+    val initial = SkillManagementUiState(
+      inventory = listOf(runtimeSkill(activeRevisionId = "revision-active")),
+      diagnostics = diagnostics(generation = 7),
+      inlineError = publicationSynchronizationWarning("requester stale"),
+    )
+    val retry = skillSynchronizationRetryCallback(
+      scope = this,
+      synchronize = { calls += "synchronize" },
+      refresh = { calls += "refresh" },
+      onFailure = { failedState = publicationSynchronizationRetryFailed(initial, it.message.orEmpty()) },
+    )
+
+    retry()
+    yield()
+
+    assertEquals(listOf("synchronize", "refresh"), calls)
+    assertEquals(null, failedState)
+  }
+
+  @Test
+  fun productionSynchronizationRetryCallbackRetainsWarningOnFailure() = runBlocking {
+    val calls = mutableListOf<String>()
+    val initial = SkillManagementUiState(
+      inventory = listOf(runtimeSkill(activeRevisionId = "revision-active")),
+      diagnostics = diagnostics(generation = 7),
+      inlineError = publicationSynchronizationWarning("requester stale"),
+    )
+    var failedState = initial
+    val retry = skillSynchronizationRetryCallback(
+      scope = this,
+      synchronize = {
+        calls += "synchronize"
+        error("requester still stale")
+      },
+      refresh = { calls += "refresh" },
+      onFailure = { failedState = publicationSynchronizationRetryFailed(initial, it.message.orEmpty()) },
+    )
+
+    retry()
+    yield()
+
+    assertEquals(listOf("synchronize"), calls)
+    assertTrue(failedState.inlineError?.startsWith("Published, refresh required") == true)
   }
 
   @Test

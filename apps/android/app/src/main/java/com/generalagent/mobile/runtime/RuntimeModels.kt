@@ -71,6 +71,7 @@ data class RuntimeSkill(
   val activeRevisionId: String?,
   val manageable: Boolean,
   val description: String = "",
+  val builtInCollision: Boolean = false,
 ) {
   val id: String get() = packageId
   val label: String get() = displayName
@@ -144,6 +145,7 @@ data class RuntimeSkillDetail(
   val activeRevisionId: String?,
   val revisions: List<RuntimeSkillRevision>,
   val editableDraft: RuntimeSkillRevision?,
+  val builtInCollision: Boolean = false,
 )
 
 data class RuntimeSkillDraftRequest(

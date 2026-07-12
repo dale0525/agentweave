@@ -24,7 +24,7 @@ use agent_runtime::storage::Storage;
 use agent_runtime::tools::RuntimeConfig;
 use anyhow::{Context, Result};
 use model_gateway::provider::EndpointType;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -251,6 +251,19 @@ impl MobileRuntime {
                 ),
             }
         }
+        let mut builtin_ids = BTreeSet::new();
+        let mut managed_ids = BTreeSet::new();
+        for resolved in snapshot.inactive().iter().chain(snapshot.packages()) {
+            match resolved.package.layer {
+                SkillLayer::Builtin => {
+                    builtin_ids.insert(resolved.package.descriptor.id.clone());
+                }
+                SkillLayer::Managed => {
+                    managed_ids.insert(resolved.package.descriptor.id.clone());
+                }
+                SkillLayer::Session => {}
+            }
+        }
         let mut inventory = BTreeMap::new();
         for resolved in snapshot.inactive() {
             let descriptor = &resolved.package.descriptor;
@@ -268,6 +281,8 @@ impl MobileRuntime {
                 reason: resolved.reason.clone(),
                 active_revision_id,
                 manageable: self.skill_manageable(resolved),
+                built_in_collision: builtin_ids.contains(&descriptor.id)
+                    && managed_ids.contains(&descriptor.id),
             };
             let key = descriptor.id.as_str().to_string();
             if dto.source_layer == "managed"
@@ -294,6 +309,8 @@ impl MobileRuntime {
                     reason: resolved.reason.clone(),
                     active_revision_id,
                     manageable: self.skill_manageable(resolved),
+                    built_in_collision: builtin_ids.contains(&descriptor.id)
+                        && managed_ids.contains(&descriptor.id),
                 },
             );
         }

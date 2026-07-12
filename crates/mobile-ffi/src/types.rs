@@ -58,6 +58,7 @@ pub struct MobileSkillDto {
     pub reason: String,
     pub active_revision_id: Option<String>,
     pub manageable: bool,
+    pub built_in_collision: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

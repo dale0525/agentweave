@@ -8,6 +8,9 @@ import com.generalagent.mobile.runtime.RuntimeSkillDraftFile
 import com.generalagent.mobile.runtime.RuntimeSkillPolicy
 import com.generalagent.mobile.runtime.RuntimeSkillRevision
 import com.generalagent.mobile.runtime.RuntimeSkillValidation
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -60,14 +63,14 @@ fun skillTargetActions(
   if (access.mode != SkillScreenMode.OwnerManage) return emptySet()
   val draft = detail.editableDraft
   val protected = detail.packageId in access.protectedPackages
-  val protectedDraftAllowed = !protected || (
+  val overrideRequired = protected || detail.builtInCollision
+  val overrideAllowed = !overrideRequired || (
     detail.packageId in access.allowedOverrides && access.canOverrideProtected
   )
   val draftAllowed = draft != null &&
     draft.editable &&
     draft.status == "staging" &&
-    draft.kind in access.allowedKinds &&
-    protectedDraftAllowed
+    draft.kind in access.allowedKinds
   val active = detail.activeRevisionId?.let { activeId ->
     detail.revisions.find { it.revisionId == activeId && !it.editable && it.status == "managed" }
   }
@@ -81,10 +84,35 @@ fun skillTargetActions(
     when (action) {
       SkillAction.Create -> false
       SkillAction.Edit -> draftAllowed && access.agentAuthoring
-      SkillAction.Validate, SkillAction.Activate -> draftAllowed
+      SkillAction.Validate, SkillAction.Activate -> draftAllowed && overrideAllowed
       SkillAction.Disable -> lifecycleAllowed
       SkillAction.Rollback -> rollbackAvailable
       SkillAction.Delete -> lifecycleAllowed
+    }
+  }
+}
+
+fun skillDetailWithInventoryFacts(
+  detail: RuntimeSkillDetail,
+  inventorySkill: RuntimeSkill?,
+): RuntimeSkillDetail =
+  detail.copy(builtInCollision = detail.builtInCollision || inventorySkill?.builtInCollision == true)
+
+internal fun skillSynchronizationRetryCallback(
+  scope: CoroutineScope,
+  onStart: () -> Unit = {},
+  synchronize: suspend () -> Unit,
+  refresh: () -> Unit,
+  onFailure: (Throwable) -> Unit,
+): () -> Unit = {
+  onStart()
+  scope.launch {
+    try {
+      synchronize()
+      refresh()
+    } catch (error: Throwable) {
+      if (error is CancellationException) throw error
+      onFailure(error)
     }
   }
 }

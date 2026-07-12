@@ -171,10 +171,13 @@ fun SkillsScreen(
 
   fun openDetail(packageId: String) {
     val generation = operationGeneration.begin()
+    val inventorySkill = state.inventory.find { it.packageId == packageId }
     state = state.copy(busyOperation = "detail", inlineError = null)
     scope.launch {
       try {
-        val detail = withContext(Dispatchers.IO) { runtimeClient.getSkillDetail(packageId) }
+        val detail = withContext(Dispatchers.IO) {
+          skillDetailWithInventoryFacts(runtimeClient.getSkillDetail(packageId), inventorySkill)
+        }
         if (!operationGeneration.accepts(generation)) return@launch
         state = state.copy(detail = detail, busyOperation = null)
         draftValidation = null
@@ -203,7 +206,10 @@ fun SkillsScreen(
           val detail = if (
             returnToDetail && packageId != null && skills.any { it.packageId == packageId }
           ) {
-            runtimeClient.getSkillDetail(packageId)
+            skillDetailWithInventoryFacts(
+              runtimeClient.getSkillDetail(packageId),
+              skills.find { it.packageId == packageId },
+            )
           } else {
             null
           }
@@ -227,24 +233,30 @@ fun SkillsScreen(
     }
   }
 
-  fun recoverSynchronization(returnToDetail: Boolean) {
-    state = state.copy(busyOperation = "synchronize")
-    val generation = operationGeneration.begin()
-    scope.launch {
-      try {
-        withContext(Dispatchers.IO) { runtimeClient.synchronizeSkills() }
-        if (!operationGeneration.accepts(generation)) return@launch
-        synchronizationRecoveryPending = false
-        refresh(returnToDetail)
-      } catch (error: Throwable) {
-        if (!operationGeneration.accepts(generation)) return@launch
-        if (error is CancellationException) throw error
-        state = publicationSynchronizationRetryFailed(
-          state,
-          error.message ?: "Requester synchronization failed",
-        )
-      }
-    }
+  fun synchronizationRetryAction(returnToDetail: Boolean): () -> Unit {
+    var generation = 0L
+    return skillSynchronizationRetryCallback(
+      scope = scope,
+      onStart = {
+        state = state.copy(busyOperation = "synchronize")
+        generation = operationGeneration.begin()
+      },
+      synchronize = { withContext(Dispatchers.IO) { runtimeClient.synchronizeSkills() } },
+      refresh = {
+        if (operationGeneration.accepts(generation)) {
+          synchronizationRecoveryPending = false
+          refresh(returnToDetail)
+        }
+      },
+      onFailure = { error ->
+        if (operationGeneration.accepts(generation)) {
+          state = publicationSynchronizationRetryFailed(
+            state,
+            error.message ?: "Requester synchronization failed",
+          )
+        }
+      },
+    )
   }
 
   fun requestApproval(operation: SkillApprovalOperation, revision: RuntimeSkillRevision) {
@@ -356,8 +368,10 @@ fun SkillsScreen(
       actions = actions,
       state = state,
       onBack = onBack,
-      onRefresh = {
-        if (synchronizationRecoveryPending) recoverSynchronization(returnToDetail = false) else refresh()
+      onRefresh = if (synchronizationRecoveryPending) {
+        synchronizationRetryAction(returnToDetail = false)
+      } else {
+        { refresh() }
       },
       onCreate = { navigate(SkillRoute.Draft(packageId = null, creating = true)) },
       onSelect = { skill -> openDetail(skill.packageId) },
@@ -382,10 +396,10 @@ fun SkillsScreen(
         actions = targetActions,
         busyOperation = state.busyOperation,
         inlineError = state.inlineError,
-        onRetry = {
-          if (synchronizationRecoveryPending) recoverSynchronization(returnToDetail = true) else {
-            refresh(returnToDetail = true)
-          }
+        onRetry = if (synchronizationRecoveryPending) {
+          synchronizationRetryAction(returnToDetail = true)
+        } else {
+          { refresh(returnToDetail = true) }
         },
         onBack = {
           navigate(SkillRoute.ListRoute)
@@ -423,7 +437,12 @@ fun SkillsScreen(
       onBusy = { operation -> state = state.copy(busyOperation = operation, inlineError = null) },
       onFailure = { error, fallback -> fail(error, fallback) },
       onSaved = { detail ->
-        state = state.copy(detail = detail, busyOperation = null, inlineError = null)
+        val inventorySkill = state.inventory.find { it.packageId == detail.packageId }
+        state = state.copy(
+          detail = skillDetailWithInventoryFacts(detail, inventorySkill),
+          busyOperation = null,
+          inlineError = null,
+        )
         navigate(SkillRoute.Detail(detail.packageId))
         refresh(returnToDetail = true)
       },

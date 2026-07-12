@@ -162,6 +162,7 @@ fn android_init_uses_separate_skill_roots_and_disabled_policy_by_default() {
     );
     assert_eq!(runtime.list_skills().unwrap().len(), 1);
     assert_eq!(runtime.list_skills().unwrap()[0].source_layer, "builtin");
+    assert!(!runtime.list_skills().unwrap()[0].built_in_collision);
 }
 
 #[test]
@@ -184,6 +185,7 @@ fn inventory_prefers_allowed_managed_override_as_active_winner() {
     assert_eq!(skills[0].source_layer, "managed");
     assert_eq!(skills[0].status, "active");
     assert!(skills[0].available);
+    assert!(skills[0].built_in_collision);
     assert_eq!(
         skills[0].active_revision_id.as_deref(),
         Some(seeded.revision_id.as_str())
@@ -216,6 +218,7 @@ fn inventory_prefers_builtin_when_managed_override_is_denied() {
     assert_eq!(skills[0].display_name, "Built-in Winner");
     assert_eq!(skills[0].status, "active");
     assert!(skills[0].available);
+    assert!(skills[0].built_in_collision);
     assert_eq!(skills[0].active_revision_id, None);
 }
 

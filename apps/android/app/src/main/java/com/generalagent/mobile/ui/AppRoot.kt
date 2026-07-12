@@ -167,6 +167,7 @@ fun ownerSkillInventory(
       reason = summary.reason,
       activeRevisionId = summary.activeRevisionId,
       manageable = effectiveSkill?.manageable ?: summary.manageable,
+      builtInCollision = effectiveSkill?.builtInCollision == true || effectiveSkill?.sourceLayer == "builtin",
     )
   }
   return inventory.values.sortedBy(RuntimeSkill::packageId)

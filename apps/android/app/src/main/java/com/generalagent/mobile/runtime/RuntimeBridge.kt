@@ -369,6 +369,7 @@ private fun JSONObject.toSkill(): RuntimeSkill =
     activeRevisionId = if (isNull("active_revision_id")) null else getString("active_revision_id"),
     manageable = getBoolean("manageable"),
     description = optString("description"),
+    builtInCollision = optBoolean("built_in_collision", false),
   )
 
 private fun JSONObject.toSkillPackageSummary(): RuntimeSkillPackageSummary =
@@ -394,6 +395,7 @@ private fun JSONObject.toSkillDetail(): RuntimeSkillDetail =
     activeRevisionId = nullableString("active_revision_id"),
     revisions = getJSONArray("revisions").objects().map { it.toSkillRevision() },
     editableDraft = optJSONObject("editable_draft")?.toSkillRevision(),
+    builtInCollision = optBoolean("built_in_collision", false),
   )
 
 private fun JSONObject.toSkillRevision(): RuntimeSkillRevision {
