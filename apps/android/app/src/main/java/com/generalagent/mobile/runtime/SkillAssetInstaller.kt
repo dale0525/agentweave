@@ -86,12 +86,24 @@ class SkillAssetInstaller internal constructor(
     require(HASH_PATTERN.matches(expectedHash)) { "Built-in skill bundle hash is invalid" }
     val entries = validateEntries(assets.entries())
     val privateRoot = preparePrivateRoot(filesDir.toPath())
-    val bundleRoot = prepareRealDirectory(privateRoot.resolve("builtin-skills"), privateRoot)
-    val lockPath = bundleRoot.resolve(".install.lock")
+    val bundleRootKey = privateRoot.resolve("builtin-skills")
 
-    return processLocks.computeIfAbsent(bundleRoot) { ReentrantLock() }.withLock {
-      fileSystem.withExclusiveLock(lockPath) {
-        installLocked(bundleRoot, expectedHash, entries)
+    return processLocks.computeIfAbsent(bundleRootKey) { ReentrantLock() }.withLock {
+      if (fileSystem is DirectoryBoundSkillPublication) {
+        fileSystem.installDirectoryBound(
+          DirectoryBoundSkillPublicationRequest(
+            privateRoot = privateRoot,
+            expectedHash = expectedHash,
+            entries = entries,
+            assets = assets,
+            faults = faults,
+          ),
+        )
+      } else {
+        val bundleRoot = prepareRealDirectory(bundleRootKey, privateRoot)
+        fileSystem.withExclusiveLock(bundleRoot.resolve(".install.lock")) {
+          installLocked(bundleRoot, expectedHash, entries)
+        }
       }
     }
   }
@@ -107,6 +119,10 @@ class SkillAssetInstaller internal constructor(
     val currentHash = readCurrentHash(currentFile)
     if (currentHash == expectedHash && Files.isDirectory(revision, LinkOption.NOFOLLOW_LINKS)) {
       check(hashPublishedTree(revision) == expectedHash) { "Published built-in skill revision failed verification" }
+      check(readCurrentHash(currentFile, sync = true) == expectedHash) {
+        "Built-in skill current pointer changed during durability recovery"
+      }
+      fileSystem.syncDirectory(bundleRoot)
       return InstalledSkillBundle(revision.toFile(), expectedHash, false)
     }
 
@@ -249,12 +265,12 @@ class SkillAssetInstaller internal constructor(
     return digest.digest().toHex()
   }
 
-  private fun readCurrentHash(currentFile: Path): String? {
+  private fun readCurrentHash(currentFile: Path, sync: Boolean = false): String? {
     if (!Files.exists(currentFile, LinkOption.NOFOLLOW_LINKS)) return null
     check(Files.isRegularFile(currentFile, LinkOption.NOFOLLOW_LINKS)) {
       "Built-in skill current pointer is not a regular file"
     }
-    return fileSystem.readVerifiedFile(currentFile).toString(StandardCharsets.UTF_8).trim()
+    return fileSystem.readVerifiedFile(currentFile, sync).toString(StandardCharsets.UTF_8).trim()
   }
 
   private fun preparePrivateRoot(path: Path): Path {

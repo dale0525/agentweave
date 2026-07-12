@@ -227,44 +227,100 @@ impl MobileRuntime {
             snapshot.generation()
         );
         let active_revisions = managed_revision_ids(&snapshot_record.members_json)?;
+        let mut managed_revisions = BTreeMap::new();
+        for row in self
+            .tokio
+            .block_on(self.skill_state.list_managed_installations_with_revisions())?
+        {
+            let installation = row.installation;
+            match (
+                installation.active_revision_id,
+                row.active_version,
+                row.active_content_hash,
+            ) {
+                (Some(revision_id), Some(version), Some(content_hash)) => {
+                    managed_revisions.insert(
+                        installation.package_id,
+                        (revision_id, version, content_hash),
+                    );
+                }
+                (None, None, None) => {}
+                _ => anyhow::bail!(
+                    "managed installation revision state is inconsistent for {}",
+                    installation.package_id.as_str()
+                ),
+            }
+        }
         let mut inventory = BTreeMap::new();
-        for resolved in snapshot.packages().iter().chain(snapshot.inactive()) {
+        for resolved in snapshot.inactive() {
             let descriptor = &resolved.package.descriptor;
             let source_layer = layer_name(resolved.package.layer);
             let status = resolution_status_name(resolved.status);
-            let active_revision_id = active_revisions.get(&descriptor.id).cloned();
-            let manageable = match resolved.package.layer {
-                SkillLayer::Builtin => self
-                    .skill_policy
-                    .can_override(&self.actor_context, &descriptor.id),
-                SkillLayer::Managed => [
-                    SkillOperation::Disable,
-                    SkillOperation::DeleteManaged,
-                    SkillOperation::Rollback,
-                ]
-                .into_iter()
-                .any(|operation| {
-                    self.skill_policy
-                        .allows(&self.actor_context, operation, descriptor.kind)
-                }),
-                SkillLayer::Session => false,
+            let active_revision_id =
+                managed_inventory_revision(resolved, false, &active_revisions, &managed_revisions)?;
+            let dto = MobileSkillDto {
+                package_id: descriptor.id.as_str().to_string(),
+                display_name: descriptor.display_name.clone(),
+                version: descriptor.version.to_string(),
+                source_layer: source_layer.into(),
+                status: status.into(),
+                available: false,
+                reason: resolved.reason.clone(),
+                active_revision_id,
+                manageable: self.skill_manageable(resolved),
             };
+            let key = descriptor.id.as_str().to_string();
+            if dto.source_layer == "managed"
+                || inventory
+                    .get(&key)
+                    .is_none_or(|existing: &MobileSkillDto| existing.source_layer != "managed")
+            {
+                inventory.insert(key, dto);
+            }
+        }
+        for resolved in snapshot.packages() {
+            let descriptor = &resolved.package.descriptor;
+            let active_revision_id =
+                managed_inventory_revision(resolved, true, &active_revisions, &managed_revisions)?;
             inventory.insert(
                 descriptor.id.as_str().to_string(),
                 MobileSkillDto {
                     package_id: descriptor.id.as_str().to_string(),
                     display_name: descriptor.display_name.clone(),
                     version: descriptor.version.to_string(),
-                    source_layer: source_layer.into(),
-                    status: status.into(),
-                    available: resolved.status == SkillResolutionStatus::Active,
+                    source_layer: layer_name(resolved.package.layer).into(),
+                    status: resolution_status_name(resolved.status).into(),
+                    available: true,
                     reason: resolved.reason.clone(),
                     active_revision_id,
-                    manageable,
+                    manageable: self.skill_manageable(resolved),
                 },
             );
         }
         Ok(inventory.into_values().collect())
+    }
+
+    fn skill_manageable(
+        &self,
+        resolved: &agent_runtime::skill_resolver::ResolvedSkillPackage,
+    ) -> bool {
+        let descriptor = &resolved.package.descriptor;
+        match resolved.package.layer {
+            SkillLayer::Builtin => self
+                .skill_policy
+                .can_override(&self.actor_context, &descriptor.id),
+            SkillLayer::Managed => [
+                SkillOperation::Disable,
+                SkillOperation::DeleteManaged,
+                SkillOperation::Rollback,
+            ]
+            .into_iter()
+            .any(|operation| {
+                self.skill_policy
+                    .allows(&self.actor_context, operation, descriptor.kind)
+            }),
+            SkillLayer::Session => false,
+        }
     }
 
     pub fn list_managed_skills(&self) -> Result<Vec<SkillPackageStatus>> {
@@ -738,6 +794,49 @@ fn managed_revision_ids(value: &serde_json::Value) -> Result<BTreeMap<SkillPacka
         revisions.insert(SkillPackageId::parse(package_id)?, revision_id.to_string());
     }
     Ok(revisions)
+}
+
+fn managed_inventory_revision(
+    resolved: &agent_runtime::skill_resolver::ResolvedSkillPackage,
+    active: bool,
+    active_revisions: &BTreeMap<SkillPackageId, String>,
+    managed_revisions: &BTreeMap<SkillPackageId, (String, String, String)>,
+) -> Result<Option<String>> {
+    if resolved.package.layer != SkillLayer::Managed {
+        return Ok(None);
+    }
+    let package_id = &resolved.package.descriptor.id;
+    let (authoritative_revision, authoritative_version, authoritative_content_hash) =
+        managed_revisions.get(package_id).with_context(|| {
+            format!(
+                "managed inventory state is missing for {}",
+                package_id.as_str()
+            )
+        })?;
+    anyhow::ensure!(
+        authoritative_version == &resolved.package.descriptor.version.to_string(),
+        "managed inventory version is inconsistent for {}",
+        package_id.as_str()
+    );
+    anyhow::ensure!(
+        authoritative_content_hash == &resolved.package.content_hash,
+        "managed inventory content hash is inconsistent for {}",
+        package_id.as_str()
+    );
+    if active {
+        let generation_revision = active_revisions.get(package_id).with_context(|| {
+            format!(
+                "active snapshot revision is missing for {}",
+                package_id.as_str()
+            )
+        })?;
+        anyhow::ensure!(
+            generation_revision == authoritative_revision,
+            "active snapshot revision is stale for {}",
+            package_id.as_str()
+        );
+    }
+    Ok(Some(authoritative_revision.clone()))
 }
 
 fn ensure_configured_store_root(configured: &Path, prepared: &Path, label: &str) -> Result<()> {

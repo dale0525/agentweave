@@ -1,7 +1,8 @@
 use agent_runtime::platform::PlatformId;
 use agent_runtime::skill_bundle::{BuildSkillBundleRequest, build_skill_bundle};
-use agent_runtime::skill_package::SkillPackageId;
-use agent_runtime::skill_policy::{ActorContext, SkillManagementPolicy};
+use agent_runtime::skill_management::{CreateSkillDraftRequest, DraftFileUpdate};
+use agent_runtime::skill_package::{SkillPackageId, SkillPackageKind};
+use agent_runtime::skill_policy::{ActorContext, SkillGrant, SkillManagementPolicy};
 use agent_runtime::skill_state::{NewSkillRevision, SkillStateStore};
 use agent_runtime::storage::Storage;
 use mobile_ffi::{MobileInitConfig, MobileRuntime};
@@ -164,6 +165,124 @@ fn android_init_uses_separate_skill_roots_and_disabled_policy_by_default() {
 }
 
 #[test]
+fn inventory_prefers_allowed_managed_override_as_active_winner() {
+    let dir = tempdir().unwrap();
+    let package_id = SkillPackageId::parse("com.example.layered").unwrap();
+    write_instruction_package(
+        &dir.path().join("source-skills"),
+        "layered",
+        package_id.as_str(),
+        "Built-in Layer",
+        "android",
+    );
+    let mut config = android_config(dir.path());
+    config.skill_policy = SkillManagementPolicy::owner_only().allow_override(package_id.clone());
+    let seeded = seed_managed_skill(&config, package_id.clone(), None);
+    let skills = seeded.published_inventory;
+
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].source_layer, "managed");
+    assert_eq!(skills[0].status, "active");
+    assert!(skills[0].available);
+    assert_eq!(
+        skills[0].active_revision_id.as_deref(),
+        Some(seeded.revision_id.as_str())
+    );
+}
+
+#[test]
+fn inventory_prefers_builtin_when_managed_override_is_denied() {
+    let dir = tempdir().unwrap();
+    let package_id = SkillPackageId::parse("com.example.denied-layered").unwrap();
+    write_instruction_package(
+        &dir.path().join("source-skills"),
+        "denied-layered",
+        package_id.as_str(),
+        "Built-in Winner",
+        "android",
+    );
+    let mut allowed = android_config(dir.path());
+    allowed.skill_policy = SkillManagementPolicy::owner_only().allow_override(package_id.clone());
+    seed_managed_skill(&allowed, package_id, None);
+    clear_skill_snapshots(&allowed);
+    let mut denied = allowed;
+    denied.skill_policy = SkillManagementPolicy::owner_only();
+
+    let runtime = MobileRuntime::initialize(denied).unwrap();
+    let skills = runtime.list_skills().unwrap();
+
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].source_layer, "builtin");
+    assert_eq!(skills[0].display_name, "Built-in Winner");
+    assert_eq!(skills[0].status, "active");
+    assert!(skills[0].available);
+    assert_eq!(skills[0].active_revision_id, None);
+}
+
+#[test]
+fn inventory_reports_authoritative_revision_for_inactive_managed_skill() {
+    let dir = tempdir().unwrap();
+    let package_id = SkillPackageId::parse("com.example.desktop-managed").unwrap();
+    build_bundle(dir.path(), PlatformId::Desktop);
+    let mut desktop = mobile_config(dir.path());
+    desktop.platform = "desktop".into();
+    desktop.skill_policy = SkillManagementPolicy::owner_only();
+    let descriptor = serde_json::json!({
+        "schemaVersion": 1,
+        "id": package_id.as_str(),
+        "version": "0.1.0",
+        "displayName": "Desktop Managed",
+        "kind": "instruction_only",
+        "package": {"includeInstructions": true, "includeRuntime": false},
+        "compatibility": {"platforms": ["desktop"]}
+    })
+    .to_string();
+    let seeded = seed_managed_skill(&desktop, package_id, Some(descriptor));
+    clear_skill_snapshots(&desktop);
+    let mut android = desktop;
+    android.platform = "android".into();
+
+    let runtime = MobileRuntime::initialize(android.clone()).unwrap();
+    let skills = runtime.list_skills().unwrap();
+
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].source_layer, "managed");
+    assert_eq!(skills[0].status, "platform_unsupported");
+    assert!(!skills[0].available);
+    assert_eq!(
+        skills[0].active_revision_id.as_deref(),
+        Some(seeded.revision_id.as_str())
+    );
+
+    let replacement = uuid::Uuid::new_v4().to_string();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", android.database_path))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO skill_revisions (revision_id, package_id, version, content_hash, storage_path, descriptor_json, validation_json, created_by, created_at, lifecycle_status) SELECT ?, package_id, version, 'different-content-hash', ?, descriptor_json, validation_json, created_by, created_at, lifecycle_status FROM skill_revisions WHERE revision_id = ?",
+        )
+        .bind(&replacement)
+        .bind(format!("managed/{replacement}"))
+        .bind(&seeded.revision_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE skill_installations SET active_revision_id = ? WHERE package_id = ?")
+            .bind(&replacement)
+            .bind("com.example.desktop-managed")
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+
+    let error = runtime
+        .list_skills()
+        .expect_err("inventory must reject a revision changed after the captured snapshot");
+    assert!(error.to_string().contains("content"));
+}
+
+#[test]
 fn quarantine_count_uses_authoritative_revision_rows_with_internal_directories_present() {
     let dir = tempdir().unwrap();
     let config = android_config(dir.path());
@@ -277,6 +396,74 @@ fn generated_bundle_round_trips_from_installed_revision_layout() {
 
     assert!(runtime.list_skills().unwrap().is_empty());
     assert!(runtime.diagnostics().unwrap().skills_ready);
+}
+
+fn seed_managed_skill(
+    config: &MobileInitConfig,
+    package_id: SkillPackageId,
+    descriptor: Option<String>,
+) -> SeededManagedSkill {
+    let grants = [
+        SkillGrant::Inspect,
+        SkillGrant::CreateDraft,
+        SkillGrant::EditDraft,
+        SkillGrant::Validate,
+        SkillGrant::Activate,
+        SkillGrant::OverrideBuiltin,
+    ];
+    let mut requester_config = config.clone();
+    requester_config.actor_context = ActorContext::owner("inventory-requester", grants);
+    let requester = MobileRuntime::initialize(requester_config).unwrap();
+    let draft = requester
+        .create_skill_draft(CreateSkillDraftRequest {
+            package_id,
+            display_name: "Managed Layer".into(),
+            description: "Managed inventory layer.".into(),
+            kind: SkillPackageKind::InstructionOnly,
+            required_tools: Vec::new(),
+        })
+        .unwrap();
+    if let Some(descriptor) = descriptor {
+        requester
+            .update_skill_draft(
+                &draft.revision_id,
+                vec![DraftFileUpdate {
+                    path: "general-agent.json".into(),
+                    content: descriptor,
+                }],
+            )
+            .unwrap();
+    }
+    requester.validate_skill_draft(&draft.revision_id).unwrap();
+    let approval = requester
+        .request_skill_activation(&draft.revision_id)
+        .unwrap();
+    let approval_id = approval["approval_id"].as_str().unwrap();
+    let mut approver_config = config.clone();
+    approver_config.actor_context = ActorContext::owner("inventory-approver", grants);
+    let approver = MobileRuntime::initialize(approver_config).unwrap();
+    approver.resolve_skill_approval(approval_id, true).unwrap();
+    SeededManagedSkill {
+        revision_id: draft.revision_id,
+        published_inventory: approver.list_skills().unwrap(),
+    }
+}
+
+struct SeededManagedSkill {
+    revision_id: String,
+    published_inventory: Vec<mobile_ffi::MobileSkillDto>,
+}
+
+fn clear_skill_snapshots(config: &MobileInitConfig) {
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", config.database_path))
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM skill_snapshots")
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
 }
 
 #[test]

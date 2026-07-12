@@ -7,12 +7,13 @@ use crate::skill_state_rows::{
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-const MANAGED_INSTALLATION_VIEW_COLUMNS: &str = "i.package_id AS package_id, i.source_layer AS source_layer, i.active_revision_id AS active_revision_id, i.enabled AS enabled, i.trust_level AS trust_level, i.install_status AS install_status, i.installed_at AS installed_at, i.updated_at AS updated_at, r.revision_id AS joined_revision_id, r.package_id AS active_revision_package_id, r.version AS active_version, r.lifecycle_status AS active_revision_lifecycle";
+const MANAGED_INSTALLATION_VIEW_COLUMNS: &str = "i.package_id AS package_id, i.source_layer AS source_layer, i.active_revision_id AS active_revision_id, i.enabled AS enabled, i.trust_level AS trust_level, i.install_status AS install_status, i.installed_at AS installed_at, i.updated_at AS updated_at, r.revision_id AS joined_revision_id, r.package_id AS active_revision_package_id, r.version AS active_version, r.content_hash AS active_content_hash, r.lifecycle_status AS active_revision_lifecycle";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManagedSkillInstallationView {
     pub installation: SkillInstallationRecord,
     pub active_version: Option<String>,
+    pub active_content_hash: Option<String>,
 }
 
 impl SkillStateStore {
@@ -112,12 +113,14 @@ fn managed_installation_view_from_row(
     let joined_revision_id: Option<String> = row.try_get("joined_revision_id")?;
     let revision_package_id: Option<String> = row.try_get("active_revision_package_id")?;
     let active_version: Option<String> = row.try_get("active_version")?;
+    let active_content_hash: Option<String> = row.try_get("active_content_hash")?;
     let lifecycle: Option<String> = row.try_get("active_revision_lifecycle")?;
     match installation.active_revision_id.as_deref() {
         None => {
             if joined_revision_id.is_some()
                 || revision_package_id.is_some()
                 || active_version.is_some()
+                || active_content_hash.is_some()
                 || lifecycle.is_some()
             {
                 anyhow::bail!(
@@ -130,6 +133,7 @@ fn managed_installation_view_from_row(
             if joined_revision_id.as_deref() != Some(active_revision_id)
                 || revision_package_id.as_deref() != Some(installation.package_id.as_str())
                 || active_version.is_none()
+                || active_content_hash.is_none()
             {
                 anyhow::bail!(
                     "managed installation consistency error for {}: active revision {} is missing or belongs to another package",
@@ -149,5 +153,6 @@ fn managed_installation_view_from_row(
     Ok(ManagedSkillInstallationView {
         installation,
         active_version,
+        active_content_hash,
     })
 }

@@ -1,9 +1,6 @@
 package com.generalagent.mobile.runtime
 
-import android.system.Os
-import android.system.OsConstants
 import java.io.ByteArrayOutputStream
-import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
@@ -40,6 +37,18 @@ internal data class SkillFileIdentity(
   val size: Long,
   val links: Long,
 )
+
+internal data class DirectoryBoundSkillPublicationRequest(
+  val privateRoot: Path,
+  val expectedHash: String,
+  val entries: List<SkillAssetEntry>,
+  val assets: SkillAssetSource,
+  val faults: SkillPublicationFaults,
+)
+
+internal interface DirectoryBoundSkillPublication {
+  fun installDirectoryBound(request: DirectoryBoundSkillPublicationRequest): InstalledSkillBundle
+}
 
 interface SkillPublicationFileSystem {
   fun <T> withExclusiveLock(path: Path, block: () -> T): T
@@ -195,105 +204,24 @@ internal open class JvmSkillPublicationFileSystem(
   }
 }
 
-internal class AndroidSkillPublicationFileSystem : JvmSkillPublicationFileSystem() {
-  override fun <T> withExclusiveLock(path: Path, block: () -> T): T {
-    val descriptor = Os.open(
-      path.toString(),
-      OsConstants.O_RDWR or OsConstants.O_CREAT or OsConstants.O_NOFOLLOW,
-      0x180,
-    )
-    return FileOutputStream(descriptor).use { stream ->
-      val handle = Os.fstat(descriptor)
-      val pathStat = Os.lstat(path.toString())
-      requireSameRegularFile(handle, pathStat, handle.st_size)
-      stream.channel.lock().use {
-        requireSameRegularFile(handle, Os.lstat(path.toString()), handle.st_size)
-        val result = block()
-        requireSameRegularFile(handle, Os.lstat(path.toString()), handle.st_size)
-        result
-      }
-    }
-  }
+internal class AndroidSkillPublicationFileSystem(
+  private val hooks: AndroidSkillPublicationHooks = AndroidSkillPublicationHooks.NONE,
+) : SkillPublicationFileSystem, DirectoryBoundSkillPublication {
+  override fun installDirectoryBound(request: DirectoryBoundSkillPublicationRequest): InstalledSkillBundle =
+    AndroidDirectoryBoundSkillPublisher(request, hooks).install()
 
-  override fun writeNewFile(path: Path, bytes: ByteArray) {
-    val descriptor = Os.open(
-      path.toString(),
-      OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_NOFOLLOW,
-      0x180,
-    )
-    try {
-      var offset = 0
-      while (offset < bytes.size) {
-        offset += Os.write(descriptor, bytes, offset, bytes.size - offset)
-      }
-      Os.fsync(descriptor)
-      val handle = Os.fstat(descriptor)
-      val pathStat = Os.lstat(path.toString())
-      requireSameRegularFile(handle, pathStat, bytes.size.toLong())
-    } finally {
-      Os.close(descriptor)
-    }
-  }
+  override fun <T> withExclusiveLock(path: Path, block: () -> T): T = pathApiUnavailable()
 
-  override fun readVerifiedFile(path: Path, sync: Boolean): ByteArray {
-    val access = if (sync) OsConstants.O_RDWR else OsConstants.O_RDONLY
-    val descriptor = Os.open(path.toString(), access or OsConstants.O_NOFOLLOW, 0)
-    try {
-      val before = Os.fstat(descriptor)
-      requireRegularSingleLink(before)
-      val output = ByteArrayOutputStream()
-      val buffer = ByteArray(8192)
-      while (true) {
-        val read = Os.read(descriptor, buffer, 0, buffer.size)
-        if (read == 0) break
-        output.write(buffer, 0, read)
-      }
-      if (sync) Os.fsync(descriptor)
-      val after = Os.fstat(descriptor)
-      val pathStat = Os.lstat(path.toString())
-      requireSameRegularFile(before, after, output.size().toLong())
-      requireSameRegularFile(after, pathStat, output.size().toLong())
-      return output.toByteArray()
-    } finally {
-      Os.close(descriptor)
-    }
-  }
+  override fun writeNewFile(path: Path, bytes: ByteArray): Unit = pathApiUnavailable()
 
-  override fun directoryIdentity(path: Path): String {
-    val stat = Os.lstat(path.toString())
-    check(OsConstants.S_ISDIR(stat.st_mode)) { "Skill publication directory must be a real directory" }
-    return "${stat.st_dev}:${stat.st_ino}"
-  }
+  override fun readVerifiedFile(path: Path, sync: Boolean): ByteArray = pathApiUnavailable()
 
-  override fun syncDirectory(path: Path) {
-    val descriptor = Os.open(
-      path.toString(),
-      OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,
-      0,
-    )
-    try {
-      Os.fsync(descriptor)
-    } finally {
-      Os.close(descriptor)
-    }
-  }
+  override fun directoryIdentity(path: Path): String = pathApiUnavailable()
 
-  private fun requireRegularSingleLink(stat: android.system.StructStat) {
-    check(OsConstants.S_ISREG(stat.st_mode)) { "Skill publication file must be a regular file" }
-    check(stat.st_nlink == 1L) { "Skill publication file must have exactly one link" }
-  }
+  override fun syncDirectory(path: Path): Unit = pathApiUnavailable()
 
-  private fun requireSameRegularFile(
-    expected: android.system.StructStat,
-    actual: android.system.StructStat,
-    size: Long,
-  ) {
-    requireRegularSingleLink(expected)
-    requireRegularSingleLink(actual)
-    check(
-      expected.st_dev == actual.st_dev &&
-        expected.st_ino == actual.st_ino &&
-        actual.st_size == size
-    ) { "Skill publication file identity changed" }
-  }
+  override fun atomicMove(source: Path, target: Path, replace: Boolean): Unit = pathApiUnavailable()
+
+  private fun <T> pathApiUnavailable(): T =
+    throw IllegalStateException("Android skill publication requires directory-bound operations")
 }

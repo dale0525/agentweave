@@ -36,6 +36,21 @@ class SkillAssetInstallerTest {
   }
 
   @Test
+  fun directoryBoundProductionContractBypassesPathPublicationApis() {
+    val files = validBundleFiles("bound-contract")
+    val fileSystem = RecordingDirectoryBoundFileSystem()
+
+    val installed = SkillAssetInstaller(
+      temporaryFolder.root,
+      FakeSkillAssets(files),
+      fileSystem,
+    ).installVerifiedBundle()
+
+    assertTrue(fileSystem.called)
+    assertEquals(bundleHash(files), installed.contentHash)
+  }
+
+  @Test
   fun retainsPublishedRevisionsWhenHashChanges() {
     val firstFiles = validBundleFiles("v1")
     val secondFiles = validBundleFiles("v2")
@@ -248,6 +263,62 @@ class SkillAssetInstallerTest {
   }
 
   @Test
+  fun retryAfterCurrentRenameFaultResyncsCurrentAndBundleRoot() {
+    val stableFiles = validBundleFiles("stable-current-retry")
+    testInstaller(temporaryFolder.root, FakeSkillAssets(stableFiles)).installVerifiedBundle()
+    val nextFiles = validBundleFiles("next-current-retry")
+    val interrupted = SkillAssetInstaller(
+      temporaryFolder.root,
+      FakeSkillAssets(nextFiles),
+      JvmSkillPublicationFileSystem(),
+      SkillPublicationFaults { point ->
+        if (point == SkillPublicationFaultPoint.CURRENT_RENAMED) {
+          throw IllegalStateException("injected interruption after current rename")
+        }
+      },
+    )
+    assertThrows(IllegalStateException::class.java) {
+      interrupted.installVerifiedBundle()
+    }
+
+    val retryFileSystem = RequireNoOpDurabilitySync()
+    val retried = SkillAssetInstaller(
+      temporaryFolder.root,
+      FakeSkillAssets(nextFiles),
+      retryFileSystem,
+    ).installVerifiedBundle()
+
+    assertFalse(retried.changed)
+    assertTrue(retryFileSystem.currentSynced)
+    assertTrue(retryFileSystem.bundleRootSynced)
+  }
+
+  @Test
+  fun retryAfterBundleRootSyncFailureRepeatsCurrentAndRootSync() {
+    val stableFiles = validBundleFiles("stable-root-retry")
+    testInstaller(temporaryFolder.root, FakeSkillAssets(stableFiles)).installVerifiedBundle()
+    val nextFiles = validBundleFiles("next-root-retry")
+    assertThrows(IllegalStateException::class.java) {
+      SkillAssetInstaller(
+        temporaryFolder.root,
+        FakeSkillAssets(nextFiles),
+        FailBundleRootSyncFileSystem(),
+      ).installVerifiedBundle()
+    }
+
+    val retryFileSystem = RequireNoOpDurabilitySync()
+    val retried = SkillAssetInstaller(
+      temporaryFolder.root,
+      FakeSkillAssets(nextFiles),
+      retryFileSystem,
+    ).installVerifiedBundle()
+
+    assertFalse(retried.changed)
+    assertTrue(retryFileSystem.currentSynced)
+    assertTrue(retryFileSystem.bundleRootSynced)
+  }
+
+  @Test
   fun rejectsHardLinkedPublishedRevisionFile() {
     val files = validBundleFiles("hardlink")
     val installed = SkillAssetInstaller(
@@ -330,6 +401,48 @@ private class RequireRevisionSyncBeforeCurrentMove : JvmSkillPublicationFileSyst
       }
     }
     super.atomicMove(source, target, replace)
+  }
+}
+
+private class RecordingDirectoryBoundFileSystem :
+  JvmSkillPublicationFileSystem(),
+  DirectoryBoundSkillPublication {
+  var called = false
+
+  override fun installDirectoryBound(request: DirectoryBoundSkillPublicationRequest): InstalledSkillBundle {
+    called = true
+    return InstalledSkillBundle(
+      request.privateRoot.resolve("builtin-skills/revisions/${request.expectedHash}").toFile(),
+      request.expectedHash,
+      true,
+    )
+  }
+
+  override fun <T> withExclusiveLock(path: java.nio.file.Path, block: () -> T): T =
+    error("path publication API must not run for a directory-bound backend")
+}
+
+private class RequireNoOpDurabilitySync : JvmSkillPublicationFileSystem() {
+  var currentSynced = false
+  var bundleRootSynced = false
+
+  override fun readVerifiedFile(path: java.nio.file.Path, sync: Boolean): ByteArray {
+    if (path.fileName.toString() == "current" && sync) currentSynced = true
+    return super.readVerifiedFile(path, sync)
+  }
+
+  override fun syncDirectory(path: java.nio.file.Path) {
+    if (path.fileName.toString() == "builtin-skills") bundleRootSynced = true
+    super.syncDirectory(path)
+  }
+}
+
+private class FailBundleRootSyncFileSystem : JvmSkillPublicationFileSystem() {
+  override fun syncDirectory(path: java.nio.file.Path) {
+    if (path.fileName.toString() == "builtin-skills") {
+      throw IllegalStateException("injected bundle root sync failure")
+    }
+    super.syncDirectory(path)
   }
 }
 
