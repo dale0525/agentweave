@@ -64,7 +64,7 @@ pub struct InstalledSkill {
 pub(crate) struct InstalledSkillVerification {
     pub(crate) expected_content_hash: String,
     pub(crate) limits: PackageLimits,
-    pub(crate) execution_binding: Option<crate::skill_source::ManagedExecutionBinding>,
+    pub(crate) execution_binding: Option<crate::skill_verified::VerifiedExecutionBinding>,
 }
 
 impl InstalledSkill {

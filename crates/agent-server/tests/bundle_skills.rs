@@ -1,6 +1,9 @@
 use agent_runtime::{
     platform::{CapabilitySet, PlatformId},
-    skill_bundle::{BundleSkillSource, SKILL_BUNDLE_LOCK_FILE, SKILL_BUNDLE_MANIFEST_FILE},
+    skill_bundle::{
+        BundleSkillSource, SKILL_BUNDLE_CURRENT_FILE, SKILL_BUNDLE_GENERATIONS_DIR,
+        SKILL_BUNDLE_LOCK_FILE, SKILL_BUNDLE_MANIFEST_FILE,
+    },
     skill_manager::{SkillManager, SkillManagerConfig},
     skill_source::SkillSource,
 };
@@ -77,11 +80,17 @@ async fn cli_builds_exact_verified_package_and_canonical_runtime_tool_loads() {
         String::from_utf8(result.stdout).unwrap(),
         format!("bundled 1 package(s) into {}\n", output.display())
     );
-    assert!(output.join(SKILL_BUNDLE_MANIFEST_FILE).is_file());
-    assert!(output.join(SKILL_BUNDLE_LOCK_FILE).is_file());
-    assert!(output.join("com.example.echo/general-agent.json").is_file());
-    assert!(output.join("com.example.echo/skill.json").is_file());
-    assert!(output.join("com.example.echo/index.js").is_file());
+    assert!(output.join(SKILL_BUNDLE_CURRENT_FILE).is_file());
+    let generation = active_generation(&output).await;
+    assert!(generation.join(SKILL_BUNDLE_MANIFEST_FILE).is_file());
+    assert!(generation.join(SKILL_BUNDLE_LOCK_FILE).is_file());
+    assert!(
+        generation
+            .join("com.example.echo/general-agent.json")
+            .is_file()
+    );
+    assert!(generation.join("com.example.echo/skill.json").is_file());
+    assert!(generation.join("com.example.echo/index.js").is_file());
     let source = Arc::new(BundleSkillSource::open(&output).await.unwrap());
     assert_eq!(
         source.layer(),
@@ -174,6 +183,18 @@ async fn write_runtime_package(root: &Path, id: &str) {
 
 fn unique_test_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("general-agent-{name}-{}", uuid::Uuid::new_v4()))
+}
+
+async fn active_generation(output: &Path) -> PathBuf {
+    let current: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(output.join(SKILL_BUNDLE_CURRENT_FILE))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    output
+        .join(SKILL_BUNDLE_GENERATIONS_DIR)
+        .join(current["generation"].as_str().unwrap())
 }
 
 async fn remove_test_dir(path: PathBuf) {

@@ -135,6 +135,7 @@ impl SkillRevisionStore {
                         revision_id: record.revision_id.clone(),
                         storage_path: destination_path.clone(),
                     }),
+                    bundle_execution_binding: None,
                 }),
             };
             Ok(candidate)

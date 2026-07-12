@@ -46,6 +46,13 @@ pub struct VerifiedPackageContent {
     /// Bounds that must also be applied when rechecking before execution.
     pub limits: SkillStoreLimits,
     pub(crate) execution_binding: Option<ManagedExecutionBinding>,
+    pub(crate) bundle_execution_binding: Option<BundleExecutionBinding>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BundleExecutionBinding {
+    pub(crate) directory: crate::skill_store_secure_roots::PreparedStoreDirectory,
+    pub(crate) bundle_root: PathBuf,
 }
 
 #[derive(Clone)]
@@ -82,12 +89,98 @@ pub struct DirectorySkillSource {
     root: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectorySkillDiscoveryIssue {
+    pub package_id: Option<String>,
+    pub path: PathBuf,
+    pub message: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct DirectorySkillDiscoveryReport {
+    pub packages: Vec<DiscoveredSkillPackage>,
+    pub issues: Vec<DirectorySkillDiscoveryIssue>,
+}
+
 impl DirectorySkillSource {
     pub fn new(layer: SkillLayer, root: impl Into<PathBuf>) -> Self {
         Self {
             layer,
             root: root.into(),
         }
+    }
+
+    pub async fn discover_release(&self) -> anyhow::Result<DirectorySkillDiscoveryReport> {
+        let metadata = tokio::fs::symlink_metadata(&self.root)
+            .await
+            .with_context(|| format!("failed to inspect skill source {}", self.root.display()))?;
+        anyhow::ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "release skill source must be a real directory: {}",
+            self.root.display()
+        );
+        let mut entries = tokio::fs::read_dir(&self.root)
+            .await
+            .with_context(|| format!("failed to read skill source {}", self.root.display()))?;
+        let maximum = usize::try_from(SkillStoreLimits::default().max_entries)?;
+        let mut paths = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            anyhow::ensure!(
+                paths.len() < maximum,
+                "release skill source exceeds {maximum} entry limit: {}",
+                self.root.display()
+            );
+            paths.push((entry.path(), entry.file_type().await?));
+        }
+        paths.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut packages = Vec::new();
+        let mut issues = Vec::new();
+        for (path, file_type) in paths {
+            if file_type.is_symlink() {
+                issues.push(DirectorySkillDiscoveryIssue {
+                    package_id: None,
+                    path,
+                    message: "release package path must be a real directory".into(),
+                });
+                continue;
+            }
+            if !file_type.is_dir() {
+                continue;
+            }
+            match secure_package_snapshot(&path, SkillStoreLimits::default().package_limits()).await
+            {
+                Ok(snapshot) => {
+                    let loaded = snapshot.descriptor;
+                    packages.push(DiscoveredSkillPackage {
+                        layer: self.layer,
+                        root: loaded.root,
+                        descriptor: loaded.descriptor,
+                        content_hash: snapshot.content_hash,
+                        warnings: loaded.warnings,
+                        verified_content: None,
+                    });
+                }
+                Err(error) => issues.push(DirectorySkillDiscoveryIssue {
+                    package_id: None,
+                    path,
+                    message: format!("package discovery failed: {error:#}"),
+                }),
+            }
+        }
+        packages.sort_by(|left, right| {
+            left.descriptor
+                .id
+                .cmp(&right.descriptor.id)
+                .then_with(|| left.root.cmp(&right.root))
+        });
+        issues.sort_by(|left, right| {
+            left.package_id
+                .cmp(&right.package_id)
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.message.cmp(&right.message))
+        });
+        Ok(DirectorySkillDiscoveryReport { packages, issues })
     }
 }
 
@@ -309,6 +402,7 @@ impl ManagedSkillSource {
                     revision_id: revision.revision_id,
                     storage_path: stored_path.clone(),
                 }),
+                bundle_execution_binding: None,
             }),
         })
     }

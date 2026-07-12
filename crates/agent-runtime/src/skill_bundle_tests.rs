@@ -2,8 +2,8 @@ use crate::platform::PlatformId;
 #[cfg(unix)]
 use crate::skill_bundle::gate_bundle_metadata_after_inspection;
 use crate::skill_bundle::{
-    BuildSkillBundleRequest, BundleSkillSource, SkillBundleLock, build_skill_bundle,
-    gate_bundle_after_inspection,
+    BuildSkillBundleRequest, BundleSkillSource, SkillBundleCurrent, SkillBundleLock,
+    build_skill_bundle, gate_bundle_after_inspection,
 };
 use semver::Version;
 use std::path::{Path, PathBuf};
@@ -84,7 +84,8 @@ async fn source_root_order_does_not_change_bundle_bytes() {
 async fn packaged_source_rejects_modified_content() {
     let fixture = BundleFixture::with_packages(&["com.example.alpha"]).await;
     let output = build_skill_bundle(fixture.request()).await.unwrap();
-    tokio::fs::write(output.root.join("com.example.alpha/skill.json"), "changed")
+    let generation = active_generation(&output.root).await;
+    tokio::fs::write(generation.join("com.example.alpha/skill.json"), "changed")
         .await
         .unwrap();
 
@@ -100,7 +101,9 @@ async fn bundle_open_rejects_manifest_replaced_by_symlink_after_inspection() {
 
     let fixture = BundleFixture::with_packages(&["com.example.alpha"]).await;
     build_skill_bundle(fixture.request()).await.unwrap();
-    let manifest = fixture.output_root.join("skill-bundle.json");
+    let manifest = active_generation(&fixture.output_root)
+        .await
+        .join("skill-bundle.json");
     let inspected_path = tokio::fs::canonicalize(&manifest).await.unwrap();
     let outside = fixture.temp.path().join("outside-manifest.json");
     let gate = gate_bundle_metadata_after_inspection(&inspected_path);
@@ -266,7 +269,7 @@ async fn builder_rejects_symlinks_hardlinks_and_special_files() {
 async fn source_mutation_aborts_without_replacing_previous_output() {
     let fixture = BundleFixture::with_packages(&["com.example.alpha"]).await;
     build_skill_bundle(fixture.request()).await.unwrap();
-    tokio::fs::write(fixture.output_root.join("previous-marker"), "old")
+    let previous_current = tokio::fs::read(fixture.output_root.join("current"))
         .await
         .unwrap();
     let gate = gate_bundle_after_inspection(&fixture.output_root);
@@ -288,10 +291,10 @@ async fn source_mutation_aborts_without_replacing_previous_output() {
         "unexpected error: {error:#}"
     );
     assert_eq!(
-        tokio::fs::read_to_string(fixture.output_root.join("previous-marker"))
+        tokio::fs::read(fixture.output_root.join("current"))
             .await
             .unwrap(),
-        "old"
+        previous_current
     );
 }
 
@@ -299,7 +302,8 @@ async fn source_mutation_aborts_without_replacing_previous_output() {
 async fn bundle_open_rejects_schema_set_path_descriptor_and_hash_mismatches() {
     let schema = BundleFixture::with_packages(&["com.example.alpha"]).await;
     build_skill_bundle(schema.request()).await.unwrap();
-    mutate_json(&schema.output_root.join("skill-bundle.json"), |value| {
+    let schema_generation = active_generation(&schema.output_root).await;
+    mutate_json(&schema_generation.join("skill-bundle.json"), |value| {
         value["schemaVersion"] = serde_json::json!(99);
     })
     .await;
@@ -313,7 +317,8 @@ async fn bundle_open_rejects_schema_set_path_descriptor_and_hash_mismatches() {
 
     let set = BundleFixture::with_packages(&["com.example.alpha"]).await;
     build_skill_bundle(set.request()).await.unwrap();
-    mutate_json(&set.output_root.join("skill-bundle.lock"), |value| {
+    let set_generation = active_generation(&set.output_root).await;
+    mutate_json(&set_generation.join("skill-bundle.lock"), |value| {
         value["packages"] = serde_json::json!([]);
     })
     .await;
@@ -327,7 +332,8 @@ async fn bundle_open_rejects_schema_set_path_descriptor_and_hash_mismatches() {
 
     let path = BundleFixture::with_packages(&["com.example.alpha"]).await;
     build_skill_bundle(path.request()).await.unwrap();
-    mutate_json(&path.output_root.join("skill-bundle.json"), |value| {
+    let path_generation = active_generation(&path.output_root).await;
+    mutate_json(&path_generation.join("skill-bundle.json"), |value| {
         value["packages"][0]["path"] = serde_json::json!("../outside");
     })
     .await;
@@ -341,7 +347,8 @@ async fn bundle_open_rejects_schema_set_path_descriptor_and_hash_mismatches() {
 
     let descriptor = BundleFixture::with_packages(&["com.example.alpha"]).await;
     build_skill_bundle(descriptor.request()).await.unwrap();
-    mutate_json(&descriptor.output_root.join("skill-bundle.json"), |value| {
+    let descriptor_generation = active_generation(&descriptor.output_root).await;
+    mutate_json(&descriptor_generation.join("skill-bundle.json"), |value| {
         value["packages"][0]["displayName"] = serde_json::json!("wrong")
     })
     .await;
@@ -355,7 +362,8 @@ async fn bundle_open_rejects_schema_set_path_descriptor_and_hash_mismatches() {
 
     let hash = BundleFixture::with_packages(&["com.example.alpha"]).await;
     build_skill_bundle(hash.request()).await.unwrap();
-    mutate_json(&hash.output_root.join("skill-bundle.lock"), |value| {
+    let hash_generation = active_generation(&hash.output_root).await;
+    mutate_json(&hash_generation.join("skill-bundle.lock"), |value| {
         value["packages"][0]["contentHash"] = serde_json::json!("00");
     })
     .await;
@@ -372,9 +380,13 @@ async fn bundle_open_rejects_schema_set_path_descriptor_and_hash_mismatches() {
 async fn bundle_open_rejects_extra_unlocked_trees() {
     let fixture = BundleFixture::with_packages(&["com.example.alpha"]).await;
     build_skill_bundle(fixture.request()).await.unwrap();
-    tokio::fs::create_dir(fixture.output_root.join("com.example.extra"))
-        .await
-        .unwrap();
+    tokio::fs::create_dir(
+        active_generation(&fixture.output_root)
+            .await
+            .join("com.example.extra"),
+    )
+    .await
+    .unwrap();
 
     let error = BundleSkillSource::open(&fixture.output_root)
         .await
@@ -387,11 +399,12 @@ async fn bundle_open_rejects_extra_unlocked_trees() {
 async fn bundle_open_rejects_noncanonical_package_order() {
     let fixture = BundleFixture::with_packages(&["com.example.alpha", "com.example.beta"]).await;
     build_skill_bundle(fixture.request()).await.unwrap();
-    mutate_json(&fixture.output_root.join("skill-bundle.json"), |value| {
+    let generation = active_generation(&fixture.output_root).await;
+    mutate_json(&generation.join("skill-bundle.json"), |value| {
         value["packages"].as_array_mut().unwrap().reverse();
     })
     .await;
-    mutate_json(&fixture.output_root.join("skill-bundle.lock"), |value| {
+    mutate_json(&generation.join("skill-bundle.lock"), |value| {
         value["packages"].as_array_mut().unwrap().reverse();
     })
     .await;
@@ -410,6 +423,12 @@ async fn mutate_json(path: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
     let mut bytes = serde_json::to_vec_pretty(&value).unwrap();
     bytes.push(b'\n');
     tokio::fs::write(path, bytes).await.unwrap();
+}
+
+async fn active_generation(output: &Path) -> PathBuf {
+    let current: SkillBundleCurrent =
+        serde_json::from_slice(&tokio::fs::read(output.join("current")).await.unwrap()).unwrap();
+    output.join("generations").join(current.generation)
 }
 
 async fn write_runtime_package(root: &Path, id: &str) {

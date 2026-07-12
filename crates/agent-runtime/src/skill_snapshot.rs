@@ -111,7 +111,16 @@ async fn build_registry(packages: &[ResolvedSkillPackage]) -> anyhow::Result<Ski
                             &resolved.package.descriptor.id,
                             verified.expected_content_hash.clone(),
                             verified.limits.package_limits(),
-                            verified.execution_binding.clone(),
+                            verified
+                                .execution_binding
+                                .clone()
+                                .map(Box::new)
+                                .map(crate::skill_verified::VerifiedExecutionBinding::Managed)
+                                .or_else(|| {
+                                    verified.bundle_execution_binding.clone().map(Box::new).map(
+                                        crate::skill_verified::VerifiedExecutionBinding::Bundle,
+                                    )
+                                }),
                         )
                         .await?,
                     );

@@ -104,7 +104,7 @@ fn runtime_identity(skill: &InstalledSkill) -> RuntimeIdentity {
         .verification
         .as_ref()
         .and_then(|verification| verification.execution_binding.as_ref());
-    if let Some(binding) = binding {
+    if let Some(crate::skill_verified::VerifiedExecutionBinding::Managed(binding)) = binding {
         return RuntimeIdentity {
             package_id: binding.package_id.as_str().to_string(),
             revision_id: Some(binding.revision_id.clone()),

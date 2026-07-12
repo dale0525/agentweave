@@ -14,14 +14,27 @@ mod source;
 
 pub use builder::build_skill_bundle;
 #[cfg(test)]
-pub(crate) use builder::gate_bundle_after_inspection;
+pub(crate) use builder::{
+    build_skill_bundle_with_faults, gate_bundle_after_inspection, gate_bundle_before_publish,
+};
 pub use source::BundleSkillSource;
+#[cfg(test)]
+pub(crate) use source::gate_bundle_discovery_after_layout;
 #[cfg(all(test, unix))]
 pub(crate) use source::gate_bundle_metadata_after_inspection;
 
 pub const SKILL_BUNDLE_SCHEMA_VERSION: u32 = 1;
 pub const SKILL_BUNDLE_MANIFEST_FILE: &str = "skill-bundle.json";
 pub const SKILL_BUNDLE_LOCK_FILE: &str = "skill-bundle.lock";
+pub const SKILL_BUNDLE_CURRENT_FILE: &str = "current";
+pub const SKILL_BUNDLE_GENERATIONS_DIR: &str = "generations";
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SkillBundleCurrent {
+    pub(crate) schema_version: u32,
+    pub(crate) generation: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct BuildSkillBundleRequest {

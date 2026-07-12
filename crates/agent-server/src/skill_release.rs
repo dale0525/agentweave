@@ -3,7 +3,7 @@ use agent_runtime::{
     skill::SkillRegistry,
     skill_catalog::SkillCatalog,
     skill_package::SkillPackageId,
-    skill_source::{DirectorySkillSource, DiscoveredSkillPackage, SkillLayer, SkillSource},
+    skill_source::{DirectorySkillSource, DiscoveredSkillPackage, SkillLayer},
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -48,8 +48,20 @@ pub async fn validate_skill_roots(roots: &[PathBuf]) -> SkillReleaseReport {
     let mut packages = Vec::new();
     for root in &roots {
         let source = DirectorySkillSource::new(SkillLayer::Builtin, root);
-        match source.discover_read_only().await {
-            Ok(mut discovered) => packages.append(&mut discovered),
+        match source.discover_release().await {
+            Ok(mut discovered) => {
+                packages.append(&mut discovered.packages);
+                errors.extend(
+                    discovered
+                        .issues
+                        .into_iter()
+                        .map(|issue| SkillReleaseDiagnostic {
+                            package_id: issue.package_id,
+                            path: issue.path,
+                            message: issue.message,
+                        }),
+                );
+            }
             Err(error) => errors.push(diagnostic(
                 None,
                 root.clone(),

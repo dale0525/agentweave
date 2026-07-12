@@ -69,6 +69,59 @@ async fn release_check_aggregates_dependency_capability_connector_and_tool_error
 }
 
 #[tokio::test]
+async fn release_check_aggregates_bad_siblings_and_cross_root_requirements() {
+    let root = unique_test_dir("check-package-aggregation");
+    let first = root.join("first");
+    let second = root.join("second");
+    tokio::fs::create_dir_all(first.join("bad-a"))
+        .await
+        .unwrap();
+    tokio::fs::write(first.join("bad-a/general-agent.json"), "{")
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(first.join("bad-b"))
+        .await
+        .unwrap();
+    tokio::fs::write(first.join("bad-b/general-agent.json"), "[]")
+        .await
+        .unwrap();
+    write_runtime_package(&second.join("provider"), "com.example.provider", "read").await;
+    write_instruction_package(
+        &first.join("consumer"),
+        "com.example.consumer",
+        &["com.example.provider", "com.example.missing"],
+        &["com.example.provider/read"],
+        &[],
+    )
+    .await;
+    let args = [
+        "--root",
+        first.to_str().unwrap(),
+        "--root",
+        second.to_str().unwrap(),
+    ];
+
+    let first_run = run_check(&args);
+    let second_run = run_check(&args);
+    let stderr = String::from_utf8(first_run.stderr).unwrap();
+
+    assert_eq!(first_run.status.code(), Some(1));
+    assert_eq!(second_run.status.code(), Some(1));
+    assert_eq!(stderr, String::from_utf8(second_run.stderr).unwrap());
+    assert!(stderr.contains("bad-a"), "{stderr}");
+    assert!(stderr.contains("bad-b"), "{stderr}");
+    assert!(
+        stderr.contains("missing dependency: com.example.missing"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("missing dependency: com.example.provider"),
+        "{stderr}"
+    );
+    remove_test_dir(root).await;
+}
+
+#[tokio::test]
 async fn legacy_synthesis_is_a_warning_not_a_release_error() {
     let root = unique_test_dir("check-legacy");
     write_legacy_runtime_package(&root.join("legacy"), "echo").await;

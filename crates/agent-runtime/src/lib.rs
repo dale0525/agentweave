@@ -72,6 +72,9 @@ mod skill_package_tests;
 mod skill_bundle_tests;
 
 #[cfg(test)]
+mod skill_bundle_review_tests;
+
+#[cfg(test)]
 mod skill_policy_tests;
 
 #[cfg(test)]

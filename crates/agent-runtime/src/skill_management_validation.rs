@@ -580,6 +580,7 @@ fn discovered_candidate(
                 revision_id: candidate.record.revision_id.clone(),
                 storage_path: PathBuf::from(&candidate.record.storage_path),
             }),
+            bundle_execution_binding: None,
         }),
     }
 }

@@ -1,6 +1,9 @@
 use agent_runtime::{
     platform::{CapabilitySet, PlatformId},
-    skill_bundle::{BundleSkillSource, SKILL_BUNDLE_MANIFEST_FILE},
+    skill_bundle::{
+        BundleSkillSource, SKILL_BUNDLE_CURRENT_FILE, SKILL_BUNDLE_GENERATIONS_DIR,
+        SKILL_BUNDLE_LOCK_FILE, SKILL_BUNDLE_MANIFEST_FILE,
+    },
     skill_manager::{SkillManager, SkillManagerConfig},
     skill_source::{DirectorySkillSource, ManagedSkillSource, SkillLayer, SkillSource},
     skill_state::SkillStateStore,
@@ -53,13 +56,7 @@ pub(super) async fn load_skill_manager(
     managed_config: Option<ManagedSkillsConfig>,
 ) -> anyhow::Result<LoadedSkillManager> {
     let deferred_managed_startup = managed_config.is_some();
-    let manifest = root.join(SKILL_BUNDLE_MANIFEST_FILE);
-    let has_bundle_manifest = match tokio::fs::symlink_metadata(&manifest).await {
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error.into()),
-    };
-    let builtin: Arc<dyn SkillSource> = if has_bundle_manifest {
+    let builtin: Arc<dyn SkillSource> = if has_bundle_evidence(root).await? {
         Arc::new(BundleSkillSource::open(root).await?)
     } else {
         Arc::new(DirectorySkillSource::new(SkillLayer::Builtin, root))
@@ -98,4 +95,20 @@ pub(super) async fn load_skill_manager(
         #[cfg(test)]
         managed_source,
     })
+}
+
+async fn has_bundle_evidence(root: &Path) -> anyhow::Result<bool> {
+    for entry in [
+        SKILL_BUNDLE_MANIFEST_FILE,
+        SKILL_BUNDLE_LOCK_FILE,
+        SKILL_BUNDLE_CURRENT_FILE,
+        SKILL_BUNDLE_GENERATIONS_DIR,
+    ] {
+        match tokio::fs::symlink_metadata(root.join(entry)).await {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(false)
 }

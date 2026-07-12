@@ -3,7 +3,7 @@ use crate::skill_package::SkillPackageId;
 use crate::skill_source::canonical_relative_path;
 use crate::skill_state::{SkillInstallStatus, SkillLayerRecord, SkillRevisionStatus};
 use crate::skill_store::SkillRevisionStore;
-use crate::skill_store_faults::StoreFaultPoint;
+use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 use crate::skill_store_fs::open_regular_file_nofollow;
 use crate::skill_store_fs::{PackageLimits, copy_prepared_package_tree_into_reserved};
 use crate::skill_store_locks::acquire_revision_lock;
@@ -268,6 +268,122 @@ impl SkillRevisionStore {
             current_dir,
             _temporary: temporary,
         })
+    }
+}
+
+pub(crate) async fn prepare_bundle_execution(
+    binding: &crate::skill_source::BundleExecutionBinding,
+    expected_hash: &str,
+    limits: PackageLimits,
+    manifest: &SkillManifest,
+) -> anyhow::Result<PreparedSkillExecution> {
+    binding.directory.verify()?;
+    let temporary = tempfile::Builder::new()
+        .prefix("general-agent-bundle-execution-")
+        .tempdir()?;
+    copy_prepared_package_tree_into_reserved(
+        &binding.directory,
+        temporary.path(),
+        limits,
+        &StoreFaults::default(),
+        StoreFaultPoint::ExecutionCopyFile,
+    )
+    .await?;
+    let actual = secure_package_hash(temporary.path(), limits).await?;
+    anyhow::ensure!(
+        actual == expected_hash,
+        "bundle execution snapshot hash mismatch"
+    );
+    let command = prepare_bundle_execution_command(
+        &manifest.entry.command,
+        temporary.path(),
+        &binding.bundle_root,
+    )
+    .await?;
+    validate_private_entry_resources(temporary.path(), manifest).await?;
+    let current_dir = temporary.path().to_path_buf();
+    Ok(PreparedSkillExecution {
+        command,
+        args: manifest.entry.args.clone(),
+        current_dir,
+        _temporary: temporary,
+    })
+}
+
+async fn prepare_bundle_execution_command(
+    command: &str,
+    private_root: &Path,
+    bundle_root: &Path,
+) -> anyhow::Result<String> {
+    match classify_execution_command(command, cfg!(windows))? {
+        ExecutionCommandKind::Bare => Ok(command.to_string()),
+        ExecutionCommandKind::PackagedRelative(relative) => {
+            require_private_regular_file(private_root, &relative, "command").await?;
+            Ok(private_root.join(relative).to_string_lossy().into_owned())
+        }
+        ExecutionCommandKind::Absolute => {
+            reject_absolute_bundle_command(command, bundle_root).await?;
+            Ok(command.to_string())
+        }
+    }
+}
+
+async fn reject_absolute_bundle_command(command: &str, bundle_root: &Path) -> anyhow::Result<()> {
+    if absolute_execution_command_is_within(command, &bundle_root.to_string_lossy(), cfg!(windows))
+    {
+        anyhow::bail!("absolute bundle command bypasses private execution snapshot: {command}");
+    }
+    let Ok(resolved) = tokio::fs::canonicalize(command).await else {
+        return Ok(());
+    };
+    let resolved_root = tokio::fs::canonicalize(bundle_root)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to resolve bundle command boundary: {}",
+                bundle_root.display()
+            )
+        })?;
+    anyhow::ensure!(
+        !absolute_execution_command_is_within(
+            &resolved.to_string_lossy(),
+            &resolved_root.to_string_lossy(),
+            cfg!(windows),
+        ),
+        "absolute bundle command bypasses private execution snapshot: {command}"
+    );
+    Ok(())
+}
+
+async fn validate_private_entry_resources(
+    private_root: &Path,
+    manifest: &SkillManifest,
+) -> anyhow::Result<()> {
+    for resource in manifest_entry_resources(manifest) {
+        require_private_regular_file(private_root, &resource, "entry resource").await?;
+    }
+    Ok(())
+}
+
+async fn require_private_regular_file(
+    private_root: &Path,
+    relative: &Path,
+    label: &str,
+) -> anyhow::Result<()> {
+    match open_regular_file_nofollow(private_root, relative).await {
+        Ok(_) => Ok(()),
+        Err(error) if error_is_not_found(&error) => {
+            anyhow::bail!(
+                "private execution {label} does not exist: {}",
+                relative.display()
+            )
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "private execution {label} is not a contained regular file: {}",
+                relative.display()
+            )
+        }),
     }
 }
 

@@ -21,6 +21,9 @@ const DEFAULT_MODEL_NAME: &str = "local-agent-model";
 #[path = "server_skill_startup.rs"]
 mod server_skill_startup;
 #[cfg(test)]
+#[path = "server_skill_startup_tests.rs"]
+mod server_skill_startup_tests;
+#[cfg(test)]
 use server_skill_startup::ManagedSkillsConfig;
 use server_skill_startup::{
     LoadedSkillManager, load_skill_manager, managed_skills_config_from_lookup,
