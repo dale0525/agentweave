@@ -31,6 +31,7 @@ fn new_approval(package_id: SkillPackageId, requested_by: &str) -> NewSkillAppro
         operation: "activate".into(),
         requested_by: requested_by.into(),
         permission_diff: json!([]),
+        binding: None,
     }
 }
 
@@ -512,7 +513,7 @@ async fn skill_state_migration_is_idempotent_with_foreign_keys_enabled() {
             .fetch_all(storage.pool())
             .await
             .unwrap();
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 7);
 }
 
 async fn snapshot_status(storage: &Storage, generation: u64) -> String {

@@ -35,6 +35,7 @@ fn approval_input(package_id: SkillPackageId) -> NewSkillApproval {
         operation: "activate".into(),
         requested_by: "owner-1".into(),
         permission_diff: json!([]),
+        binding: None,
     }
 }
 

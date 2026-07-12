@@ -100,6 +100,11 @@ async fn create_supporting_tables(tx: &mut Transaction<'_, Sqlite>) -> anyhow::R
           metadata_json TEXT NOT NULL,
           created_at TEXT NOT NULL
         )"#,
+        r#"CREATE TABLE IF NOT EXISTS skill_approval_bindings (
+          approval_id TEXT PRIMARY KEY,
+          binding_json TEXT NOT NULL,
+          FOREIGN KEY(approval_id) REFERENCES skill_approvals(approval_id) ON DELETE CASCADE
+        )"#,
         r#"CREATE TABLE IF NOT EXISTS skill_circuit_state (
           revision_id TEXT PRIMARY KEY,
           consecutive_failures INTEGER NOT NULL CHECK(consecutive_failures >= 0),

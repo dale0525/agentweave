@@ -289,3 +289,65 @@ async fn publication_audit_failure_keeps_the_old_snapshot_and_installation() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn cancelled_activation_waiter_finishes_detached_publication() {
+    let faults = SkillStoreTestFaults::default();
+    let gate = faults.gate_once(SkillStoreFaultPoint::ActivationAfterPrepare);
+    let (service, state, draft, manager) = fixture(faults).await;
+    service
+        .validate_draft(
+            &ActorContext::owner("validator", [SkillGrant::Validate]),
+            &draft.revision_id,
+        )
+        .await
+        .unwrap();
+    let approval = service
+        .request_activation(
+            &ActorContext::owner("requester", [SkillGrant::Activate]),
+            &draft.revision_id,
+        )
+        .await
+        .unwrap();
+    let worker = service.clone();
+    let approval_id = approval.approval_id.clone();
+    let waiter = tokio::spawn(async move {
+        worker
+            .approve_activation(
+                &approval_id,
+                &ActorContext::owner("approver", [SkillGrant::Activate]),
+            )
+            .await
+    });
+    gate.wait_entered().await;
+    waiter.abort();
+    gate.release().await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let current = state
+                .get_approval(&approval.approval_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if current.status == crate::skill_state::SkillApprovalStatus::Approved
+                && manager.current_snapshot().generation() == 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(manager.current_snapshot().generation(), 2);
+    assert_eq!(
+        state
+            .get_revision(&draft.revision_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        crate::skill_state::SkillRevisionStatus::Managed
+    );
+}

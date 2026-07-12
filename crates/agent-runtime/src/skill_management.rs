@@ -1,20 +1,25 @@
 use crate::events::RuntimeEvent;
 use crate::skill_authoring::build_package_draft;
 use crate::skill_manager::SkillManager;
-use crate::skill_package::{SkillPackageDescriptor, SkillPackageId, SkillPackageKind};
+use crate::skill_package::{SkillPackageId, SkillPackageKind};
 use crate::skill_policy::{ActorContext, SkillManagementPolicy, SkillOperation};
 use crate::skill_resolver::SkillResolutionStatus;
 use crate::skill_source::SkillLayer;
-use crate::skill_state::{
-    NewSkillApproval, SkillApprovalRecord, SkillApprovalStatus, SkillAuditRecord,
-    SkillInstallStatus, SkillStateStore,
-};
+use crate::skill_state::{SkillAuditRecord, SkillInstallStatus, SkillStateStore};
 use crate::skill_store::SkillRevisionStore;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::broadcast;
+
+#[path = "skill_management_activation.rs"]
+mod activation;
+#[path = "skill_management_transfer.rs"]
+mod transfer;
+#[path = "skill_management_validation.rs"]
+mod validation;
 
 #[derive(Clone)]
 struct SkillTransferRoots {
@@ -29,7 +34,8 @@ pub struct OwnerSkillManagementService {
     state: SkillStateStore,
     policy: SkillManagementPolicy,
     transfer_roots: Option<SkillTransferRoots>,
-    events: Arc<Mutex<Vec<RuntimeEvent>>>,
+    events: broadcast::Sender<RuntimeEvent>,
+    connector_catalog: Arc<BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -67,8 +73,11 @@ pub struct SkillDraftValidation {
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
     pub required_tools: Vec<String>,
+    pub required_connectors: Vec<String>,
     pub dependencies: Vec<String>,
     pub required_capabilities: Vec<String>,
+    pub resolver_status: String,
+    pub resolver_errors: Vec<String>,
     pub permission_diff: Value,
     pub content_hash: String,
     pub snapshot_generation: u64,
@@ -79,6 +88,24 @@ pub struct SkillDraftValidation {
 pub struct SkillDraftTestResult {
     pub ok: bool,
     pub error_class: Option<String>,
+    pub content_hash: String,
+    pub snapshot_generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SkillApprovalBinding {
+    pub package_id: SkillPackageId,
+    pub revision_id: String,
+    pub revision_version: String,
+    pub revision_storage_path: String,
+    pub content_hash: String,
+    pub descriptor_document: Value,
+    pub validation_digest: String,
+    pub validation_document: Value,
+    pub validation_snapshot_generation: u64,
+    pub permission_diff_digest: String,
+    pub requesting_actor: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -97,6 +124,22 @@ pub enum SkillManagementError {
     Denied { operation: &'static str },
     #[error("{0}")]
     InvalidRequest(String),
+    #[error("{resource} not found")]
+    NotFound { resource: &'static str },
+    #[error("{resource} conflicts with current state")]
+    Conflict { resource: &'static str },
+    #[error("skill management operation failed")]
+    Internal {
+        operation: &'static str,
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl SkillManagementError {
+    pub(crate) fn internal(operation: &'static str, source: anyhow::Error) -> Self {
+        Self::Internal { operation, source }
+    }
 }
 
 impl OwnerSkillManagementService {
@@ -106,13 +149,15 @@ impl OwnerSkillManagementService {
         state: SkillStateStore,
         policy: SkillManagementPolicy,
     ) -> Self {
+        let (events, _) = broadcast::channel(64);
         Self {
             manager,
             revisions,
             state,
             policy,
             transfer_roots: None,
-            events: Arc::new(Mutex::new(Vec::new())),
+            events,
+            connector_catalog: Arc::new(BTreeSet::new()),
         }
     }
 
@@ -146,11 +191,23 @@ impl OwnerSkillManagementService {
         &self.policy
     }
 
-    pub fn emitted_events(&self) -> Vec<RuntimeEvent> {
-        self.events
-            .lock()
-            .expect("skill management event lock poisoned")
-            .clone()
+    pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEvent> {
+        self.events.subscribe()
+    }
+
+    pub fn with_connector_catalog<I, S>(mut self, connectors: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.connector_catalog = Arc::new(
+            connectors
+                .into_iter()
+                .map(|connector| connector.as_ref().trim().to_string())
+                .filter(|connector| !connector.is_empty())
+                .collect(),
+        );
+        self
     }
 
     pub async fn create_draft(
@@ -193,8 +250,11 @@ impl OwnerSkillManagementService {
         let record = self
             .state
             .get_revision(revision_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("skill revision not found: {revision_id}"))?;
+            .await
+            .map_err(|error| SkillManagementError::internal("update_draft", error))?
+            .ok_or(SkillManagementError::NotFound {
+                resource: "skill revision",
+            })?;
         let kind = serde_json::from_value::<crate::skill_package::SkillPackageDescriptor>(
             record.descriptor_json,
         )?
@@ -207,8 +267,11 @@ impl OwnerSkillManagementService {
         let record = self
             .state
             .get_revision(revision_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("skill revision not found: {revision_id}"))?;
+            .await
+            .map_err(|error| SkillManagementError::internal("update_draft", error))?
+            .ok_or(SkillManagementError::NotFound {
+                resource: "skill revision",
+            })?;
         Ok(SkillDraftSummary {
             package_id: record.package_id,
             revision_id: record.revision_id,
@@ -217,488 +280,6 @@ impl OwnerSkillManagementService {
             validation: record.validation_json,
             status: "draft".into(),
         })
-    }
-
-    pub async fn validate_draft(
-        &self,
-        actor: &ActorContext,
-        revision_id: &str,
-    ) -> anyhow::Result<SkillDraftValidation> {
-        self.authorize_any_kind(actor, SkillOperation::Validate)?;
-        let runtime_snapshot = self.manager.current_snapshot();
-        let candidate = self
-            .revisions
-            .snapshot_inactive_revision(revision_id)
-            .await?;
-        let descriptor = &candidate.descriptor.descriptor;
-        self.authorize(actor, SkillOperation::Validate, descriptor.kind)?;
-
-        let mut errors = Vec::new();
-        if !self.policy.allowed_kinds.contains(&descriptor.kind) {
-            errors.push(format!(
-                "package kind is not allowed: {:?}",
-                descriptor.kind
-            ));
-        }
-        if descriptor.kind == SkillPackageKind::NativeRuntime
-            || candidate.runtime_manifest.is_some()
-        {
-            errors.push("native runtime payloads are disabled for owner-authored skills".into());
-        }
-        let active_tools = runtime_snapshot
-            .registry()
-            .tools()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<BTreeSet<_>>();
-        for tool in &descriptor.requires.runtime_tools {
-            if !active_tools.contains(tool) {
-                errors.push(format!("unknown required host tool: {tool}"));
-            }
-        }
-        match candidate.instructions_file.as_deref() {
-            Some(bytes) => {
-                if let Err(error) = crate::skill_catalog::SkillCatalog::read_verified_package_entry(
-                    PathBuf::from("SKILL.md"),
-                    bytes,
-                ) {
-                    errors.push(format!("catalog parse failed: {error}"));
-                }
-            }
-            None => errors.push("catalog parse failed: SKILL.md is missing".into()),
-        }
-        let active_ids = runtime_snapshot
-            .packages()
-            .iter()
-            .map(|resolved| resolved.package.descriptor.id.clone())
-            .collect::<BTreeSet<_>>();
-        for dependency in &descriptor.requires.packages {
-            if !active_ids.contains(dependency) && dependency != &descriptor.id {
-                errors.push(format!("missing dependency: {}", dependency.as_str()));
-            }
-        }
-        let (platform, capabilities, runtime_version) = self.manager.validation_runtime();
-        for capability in &descriptor.requires.capabilities {
-            if !capabilities.contains_name(capability) {
-                errors.push(format!("missing capability: {capability}"));
-            }
-        }
-        if descriptor
-            .compatibility
-            .minimum_runtime_version
-            .as_ref()
-            .is_some_and(|minimum| minimum > &runtime_version)
-        {
-            errors.push(format!(
-                "runtime {runtime_version} is below the package minimum"
-            ));
-        }
-        let platform_name = format!("{platform:?}").to_ascii_lowercase();
-        if !descriptor.compatibility.platforms.is_empty()
-            && !descriptor
-                .compatibility
-                .platforms
-                .iter()
-                .any(|item| item.eq_ignore_ascii_case(&platform_name))
-        {
-            errors.push(format!("unsupported platform: {platform_name}"));
-        }
-        if self.policy.protected_packages.contains(&descriptor.id) {
-            errors.push(format!(
-                "protected package policy denies activation: {}",
-                descriptor.id.as_str()
-            ));
-        }
-
-        let active_descriptor = runtime_snapshot
-            .packages()
-            .iter()
-            .find(|resolved| resolved.package.descriptor.id == descriptor.id)
-            .map(|resolved| &resolved.package.descriptor);
-        let permission_diff = permission_diff(descriptor, active_descriptor);
-        errors.sort();
-        errors.dedup();
-        let mut warnings = candidate.descriptor.warnings;
-        warnings.sort();
-        warnings.dedup();
-        let validation = SkillDraftValidation {
-            ok: errors.is_empty(),
-            errors,
-            warnings,
-            required_tools: sorted_strings(&descriptor.requires.runtime_tools),
-            dependencies: descriptor
-                .requires
-                .packages
-                .iter()
-                .map(|id| id.as_str().to_string())
-                .collect(),
-            required_capabilities: sorted_strings(&descriptor.requires.capabilities),
-            permission_diff,
-            content_hash: candidate.content_hash.clone(),
-            snapshot_generation: runtime_snapshot.generation(),
-        };
-        let validation_json = serde_json::to_value(&validation)?;
-        match candidate.record.status {
-            crate::skill_state::SkillRevisionStatus::Staging => {
-                self.state
-                    .refresh_staging_revision_metadata_cas(
-                        revision_id,
-                        crate::skill_state::SkillRevisionExpectation::from(&candidate.record),
-                        crate::skill_state::SkillRevisionMetadata {
-                            version: candidate.record.version,
-                            content_hash: candidate.content_hash,
-                            descriptor_json: serde_json::to_value(descriptor)?,
-                            validation_json,
-                        },
-                    )
-                    .await?;
-            }
-            crate::skill_state::SkillRevisionStatus::Quarantined if validation.ok => {
-                self.revisions
-                    .release_quarantined_revision(candidate.record, validation_json)
-                    .await?;
-            }
-            crate::skill_state::SkillRevisionStatus::Quarantined => {
-                self.state
-                    .refresh_quarantined_revision_validation_cas(
-                        revision_id,
-                        crate::skill_state::SkillRevisionExpectation::from(&candidate.record),
-                        validation_json,
-                    )
-                    .await?;
-            }
-            crate::skill_state::SkillRevisionStatus::Managed => {
-                anyhow::bail!("managed revision cannot be validated as a draft")
-            }
-        }
-        Ok(validation)
-    }
-
-    pub async fn test_draft(
-        &self,
-        actor: &ActorContext,
-        revision_id: &str,
-    ) -> anyhow::Result<SkillDraftTestResult> {
-        self.authorize_any_kind(actor, SkillOperation::Test)?;
-        let candidate = self
-            .revisions
-            .snapshot_staging_revision(revision_id)
-            .await?;
-        let descriptor = &candidate.descriptor.descriptor;
-        self.authorize(actor, SkillOperation::Test, descriptor.kind)?;
-        let validation: SkillDraftValidation =
-            serde_json::from_value(candidate.record.validation_json.clone()).map_err(|_| {
-                SkillManagementError::InvalidRequest(
-                    "draft must have a persisted validation before testing".into(),
-                )
-            })?;
-        if validation.content_hash != candidate.content_hash {
-            return Err(
-                SkillManagementError::InvalidRequest("draft validation is stale".into()).into(),
-            );
-        }
-        let result = SkillDraftTestResult {
-            ok: validation.ok,
-            error_class: (!validation.ok).then(|| "validation_failed".into()),
-        };
-        let mut persisted = serde_json::to_value(&validation)?;
-        persisted["test"] = serde_json::to_value(&result)?;
-        self.state
-            .refresh_staging_revision_metadata_cas(
-                revision_id,
-                crate::skill_state::SkillRevisionExpectation::from(&candidate.record),
-                crate::skill_state::SkillRevisionMetadata {
-                    version: candidate.record.version,
-                    content_hash: candidate.content_hash,
-                    descriptor_json: serde_json::to_value(descriptor)?,
-                    validation_json: persisted,
-                },
-            )
-            .await?;
-        Ok(result)
-    }
-
-    pub async fn import_draft(
-        &self,
-        actor: &ActorContext,
-        import_name: &std::path::Path,
-    ) -> anyhow::Result<SkillDraftSummary> {
-        self.authorize_any_kind(actor, SkillOperation::Import)?;
-        let roots = self
-            .transfer_roots
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("skill transfer roots are not configured"))?;
-        let relative = transfer_name(import_name)
-            .map_err(|error| SkillManagementError::InvalidRequest(error.to_string()))?;
-        let inspected = self
-            .revisions
-            .inspect_transfer_package(&roots.import, &relative)
-            .await?;
-        let descriptor = &inspected.descriptor.descriptor;
-        if descriptor.kind == SkillPackageKind::NativeRuntime || inspected.has_runtime_manifest {
-            return Err(SkillManagementError::InvalidRequest(
-                "native runtime imports are disabled by default".into(),
-            )
-            .into());
-        }
-        self.authorize(actor, SkillOperation::Import, descriptor.kind)?;
-        self.ensure_required_tools_known(&descriptor.requires.runtime_tools)?;
-        let imported = self
-            .revisions
-            .import_quarantined_revision(
-                &roots.import,
-                &relative,
-                &inspected.content_hash,
-                &actor.actor_id,
-            )
-            .await?;
-        Ok(SkillDraftSummary {
-            package_id: descriptor.id.clone(),
-            revision_id: imported.revision_id,
-            version: descriptor.version.to_string(),
-            kind: descriptor.kind,
-            validation: json!({"ok": false, "status": "quarantined"}),
-            status: "quarantined".into(),
-        })
-    }
-
-    pub async fn export_managed_skill(
-        &self,
-        actor: &ActorContext,
-        package_id: &SkillPackageId,
-        export_name: &std::path::Path,
-    ) -> anyhow::Result<PathBuf> {
-        self.authorize_any_kind(actor, SkillOperation::Export)?;
-        let roots = self
-            .transfer_roots
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("skill transfer roots are not configured"))?;
-        let relative = transfer_name(export_name)
-            .map_err(|error| SkillManagementError::InvalidRequest(error.to_string()))?;
-        let installation = self
-            .state
-            .get_installation(package_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("active managed skill not found"))?;
-        if installation.source_layer != crate::skill_state::SkillLayerRecord::Managed
-            || installation.status != SkillInstallStatus::Active
-            || !installation.enabled
-        {
-            anyhow::bail!("skill is not an active managed package");
-        }
-        let revision_id = installation
-            .active_revision_id
-            .ok_or_else(|| anyhow::anyhow!("active managed skill has no revision"))?;
-        let record = self
-            .state
-            .get_revision(&revision_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("active managed revision not found"))?;
-        let descriptor: SkillPackageDescriptor =
-            serde_json::from_value(record.descriptor_json.clone())?;
-        self.authorize(actor, SkillOperation::Export, descriptor.kind)?;
-        if record.validation_json.get("ok").and_then(Value::as_bool) != Some(true) {
-            anyhow::bail!("active managed revision is not verified");
-        }
-        self.revisions
-            .export_managed_revision(&record, &roots.export, &relative)
-            .await
-    }
-
-    pub async fn request_activation(
-        &self,
-        actor: &ActorContext,
-        revision_id: &str,
-    ) -> anyhow::Result<SkillApprovalRecord> {
-        self.authorize_any_kind(actor, SkillOperation::Activate)?;
-        let candidate = self
-            .revisions
-            .snapshot_staging_revision(revision_id)
-            .await?;
-        let descriptor = &candidate.descriptor.descriptor;
-        self.authorize(actor, SkillOperation::Activate, descriptor.kind)?;
-        let validation: SkillDraftValidation =
-            serde_json::from_value(candidate.record.validation_json.clone()).map_err(|_| {
-                SkillManagementError::InvalidRequest(
-                    "draft must have a persisted validation before activation".into(),
-                )
-            })?;
-        if !validation.ok || validation.content_hash != candidate.content_hash {
-            return Err(SkillManagementError::InvalidRequest(
-                "draft validation is not successful or is stale".into(),
-            )
-            .into());
-        }
-        let mut permission_diff = validation.permission_diff.clone();
-        permission_diff["binding"] = json!({
-            "contentHash": candidate.content_hash,
-            "validation": candidate.record.validation_json,
-        });
-        let (approval, created) = self
-            .state
-            .create_activation_approval_unique(NewSkillApproval {
-                package_id: descriptor.id.clone(),
-                revision_id: revision_id.to_string(),
-                operation: SkillOperation::Activate.as_str().into(),
-                requested_by: actor.actor_id.clone(),
-                permission_diff,
-            })
-            .await?;
-        if created {
-            self.events
-                .lock()
-                .expect("skill management event lock poisoned")
-                .push(RuntimeEvent::SkillApprovalRequired {
-                    approval_id: approval.approval_id.clone(),
-                    operation: SkillOperation::Activate,
-                    package_id: approval.package_id.as_str().to_string(),
-                    revision_id: approval.revision_id.clone(),
-                    permission_diff: validation.permission_diff,
-                });
-        }
-        Ok(approval)
-    }
-
-    pub async fn approve_activation(
-        &self,
-        approval_id: &str,
-        approver: &ActorContext,
-    ) -> anyhow::Result<crate::skill_manager::SkillReloadReport> {
-        self.authorize_any_kind(approver, SkillOperation::Activate)?;
-        let approval = self
-            .state
-            .get_approval(approval_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("skill approval not found"))?;
-        if approval.status != SkillApprovalStatus::Pending {
-            anyhow::bail!("skill approval already resolved: {approval_id}");
-        }
-        if approval.requested_by == approver.actor_id {
-            anyhow::bail!("requester cannot approve their own request");
-        }
-        let candidate = self
-            .revisions
-            .snapshot_staging_revision(&approval.revision_id)
-            .await?;
-        let descriptor = &candidate.descriptor.descriptor;
-        self.authorize(approver, SkillOperation::Activate, descriptor.kind)?;
-        let binding = approval
-            .permission_diff
-            .get("binding")
-            .ok_or_else(|| anyhow::anyhow!("activation approval binding is missing"))?;
-        if binding.get("contentHash").and_then(Value::as_str)
-            != Some(candidate.content_hash.as_str())
-            || binding.get("validation") != Some(&candidate.record.validation_json)
-        {
-            anyhow::bail!("activation approval is stale");
-        }
-        let validation: SkillDraftValidation =
-            serde_json::from_value(candidate.record.validation_json.clone())?;
-        if !validation.ok
-            || validation.snapshot_generation != self.manager.current_snapshot().generation()
-        {
-            anyhow::bail!("activation approval validation is stale");
-        }
-        self.ensure_required_tools_known(&descriptor.requires.runtime_tools)?;
-        if candidate.runtime_manifest.is_some()
-            || descriptor.kind == SkillPackageKind::NativeRuntime
-        {
-            anyhow::bail!("native runtime activation is disabled");
-        }
-        crate::skill_catalog::SkillCatalog::read_verified_package_entry(
-            PathBuf::from("SKILL.md"),
-            candidate
-                .instructions_file
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("SKILL.md is missing"))?,
-        )?;
-
-        let previous = self.state.get_installation(&approval.package_id).await?;
-        let promoted = self
-            .revisions
-            .promote_revision(&approval.revision_id)
-            .await?;
-        self.state
-            .switch_revision_for_publication(&approval.package_id, &promoted.revision_id)
-            .await?;
-        let state = self.state.clone();
-        let approval_id_owned = approval_id.to_string();
-        let approver_id = approver.actor_id.clone();
-        let package_id = approval.package_id.clone();
-        let revision_id = promoted.revision_id.clone();
-        let reload = self
-            .manager
-            .reload_with_pre_publish(|snapshot| async move {
-                let members = snapshot_members(&snapshot);
-                state
-                    .commit_activation_publication(
-                        &approval_id_owned,
-                        &approver_id,
-                        &package_id,
-                        &revision_id,
-                        snapshot.generation(),
-                        members,
-                    )
-                    .await?;
-                Ok(())
-            })
-            .await;
-        let (report, ()) = match reload {
-            Ok(value) => value,
-            Err(error) => {
-                if let Err(compensation) = self
-                    .state
-                    .restore_installation_after_failed_publication(
-                        &approval.package_id,
-                        &promoted.revision_id,
-                        previous.as_ref(),
-                    )
-                    .await
-                {
-                    return Err(error.context(format!(
-                        "publication installation compensation failed: {compensation}"
-                    )));
-                }
-                if let Err(rejection) = self
-                    .state
-                    .reject(approval_id, "system-publication-failed")
-                    .await
-                {
-                    return Err(error.context(format!(
-                        "publication approval rejection failed: {rejection}"
-                    )));
-                }
-                return Err(error);
-            }
-        };
-        self.events
-            .lock()
-            .expect("skill management event lock poisoned")
-            .push(RuntimeEvent::SkillSnapshotPublished {
-                generation: report.active_generation,
-            });
-        Ok(report)
-    }
-
-    pub async fn reject_activation(
-        &self,
-        approval_id: &str,
-        actor: &ActorContext,
-    ) -> anyhow::Result<SkillApprovalRecord> {
-        self.authorize_any_kind(actor, SkillOperation::Activate)?;
-        let approval = self
-            .state
-            .get_approval(approval_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("skill approval not found"))?;
-        let record = self
-            .state
-            .get_revision(&approval.revision_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("skill revision not found"))?;
-        let descriptor: SkillPackageDescriptor = serde_json::from_value(record.descriptor_json)?;
-        self.authorize(actor, SkillOperation::Activate, descriptor.kind)?;
-        self.state.reject(approval_id, &actor.actor_id).await
     }
 
     pub async fn list_effective_skills(
@@ -840,69 +421,6 @@ impl OwnerSkillManagementService {
             operation: operation.as_str(),
         })
     }
-}
-
-fn sorted_strings(values: &[String]) -> Vec<String> {
-    let mut values = values.to_vec();
-    values.sort();
-    values.dedup();
-    values
-}
-
-fn permission_diff(
-    candidate: &SkillPackageDescriptor,
-    active: Option<&SkillPackageDescriptor>,
-) -> Value {
-    let active_tools: BTreeSet<String> = active
-        .map(|descriptor| descriptor.requires.runtime_tools.iter().cloned().collect())
-        .unwrap_or_default();
-    let active_capabilities: BTreeSet<String> = active
-        .map(|descriptor| descriptor.requires.capabilities.iter().cloned().collect())
-        .unwrap_or_default();
-    let added_tools = candidate
-        .requires
-        .runtime_tools
-        .iter()
-        .filter(|item| !active_tools.contains(*item))
-        .cloned()
-        .collect::<Vec<_>>();
-    let added_capabilities = candidate
-        .requires
-        .capabilities
-        .iter()
-        .filter(|item| !active_capabilities.contains(*item))
-        .cloned()
-        .collect::<Vec<_>>();
-    json!({
-        "addedCapabilities": sorted_strings(&added_capabilities),
-        "addedTools": sorted_strings(&added_tools),
-    })
-}
-
-fn transfer_name(path: &std::path::Path) -> anyhow::Result<PathBuf> {
-    crate::skill_source::canonical_relative_path(path)?;
-    if path.components().count() != 1 {
-        anyhow::bail!("skill transfer name must be one relative UTF-8 component");
-    }
-    path.to_str()
-        .ok_or_else(|| anyhow::anyhow!("skill transfer name must be UTF-8"))?;
-    Ok(path.to_path_buf())
-}
-
-fn snapshot_members(snapshot: &crate::skill_snapshot::SkillSnapshot) -> Value {
-    let mut members = snapshot
-        .packages()
-        .iter()
-        .map(|resolved| {
-            json!({
-                "contentHash": resolved.package.content_hash,
-                "packageId": resolved.package.descriptor.id.as_str(),
-                "version": resolved.package.descriptor.version.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
-    members.sort_by(|left, right| left["packageId"].as_str().cmp(&right["packageId"].as_str()));
-    Value::Array(members)
 }
 
 fn layer_name(layer: SkillLayer) -> &'static str {

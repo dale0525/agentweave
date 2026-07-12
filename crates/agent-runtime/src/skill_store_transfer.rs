@@ -1,4 +1,4 @@
-use crate::skill_package::{LoadedPackageDescriptor, SkillPackageKind};
+use crate::skill_package::{LoadedPackageDescriptor, SkillPackageId, SkillPackageKind};
 use crate::skill_state::{NewSkillRevision, SkillRevisionRecord, SkillRevisionStatus};
 use crate::skill_store::{SkillRevisionStore, StoredSkillRevision};
 use crate::skill_store_faults::StoreFaultPoint;
@@ -10,6 +10,8 @@ use crate::skill_store_secure_roots::{
 };
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use tokio::sync::Mutex as AsyncMutex;
 
 const IMPORT_MAX_FILE_BYTES: u64 = 256 * 1024;
 
@@ -130,12 +132,32 @@ impl SkillRevisionStore {
         &self,
         root: &StoreRootIdentity,
         relative: &Path,
+        package_id: &SkillPackageId,
         expected_hash: &str,
         actor_id: &str,
     ) -> anyhow::Result<StoredSkillRevision> {
         root.verify("skill import")?;
         self.paths.verify_identity()?;
         let source = open_prepared_directory(root, relative).await?;
+        let source_snapshot = opened_package_snapshot(&source, self.import_limits()).await?;
+        if source_snapshot.content_hash != expected_hash
+            || source_snapshot.descriptor.descriptor.id != *package_id
+        {
+            anyhow::bail!("import package changed after inspection");
+        }
+        let key = format!(
+            "{}\0{}\0{}",
+            self.paths.quarantine.display(),
+            package_id.as_str(),
+            expected_hash
+        );
+        let _import_guard = import_lock(&key).lock_owned().await;
+        if let Some(existing) = self
+            .find_inactive_import_replay(package_id, expected_hash)
+            .await?
+        {
+            return self.verified_inactive_replay(existing).await;
+        }
         let revision_id = crate::skill_state::SkillStateStore::allocate_revision_id();
         let destination = self.paths.quarantine.join(&revision_id);
         let reserved =
@@ -208,7 +230,20 @@ impl SkillRevisionStore {
         if snapshot.content_hash != record.content_hash {
             anyhow::bail!("managed revision bytes do not match recorded content hash");
         }
-        let destination = reserve_opened_directory(root, relative).await?;
+        let destination = match reserve_opened_directory(root, relative).await {
+            Ok(destination) => destination,
+            Err(reserve_error) => match open_prepared_directory(root, relative).await {
+                Ok(existing) => {
+                    let existing_snapshot =
+                        opened_package_snapshot(&existing, self.limits.package_limits()).await?;
+                    if existing_snapshot.content_hash == record.content_hash {
+                        return Ok(root.path().join(relative));
+                    }
+                    anyhow::bail!("export destination conflicts with different content")
+                }
+                Err(_) => return Err(reserve_error),
+            },
+        };
         let result = async {
             copy_prepared_package_tree_into_prepared(
                 &source,
@@ -240,4 +275,69 @@ impl SkillRevisionStore {
         limits.max_file_bytes = limits.max_file_bytes.min(IMPORT_MAX_FILE_BYTES);
         limits
     }
+
+    async fn find_inactive_import_replay(
+        &self,
+        package_id: &SkillPackageId,
+        content_hash: &str,
+    ) -> anyhow::Result<Option<SkillRevisionRecord>> {
+        let query = format!(
+            "SELECT {} FROM skill_revisions WHERE package_id = ? AND content_hash = ? AND lifecycle_status IN ('staging', 'quarantined') ORDER BY created_at, revision_id LIMIT 1",
+            crate::skill_state_rows::REVISION_COLUMNS
+        );
+        sqlx::query(&query)
+            .bind(package_id.as_str())
+            .bind(content_hash)
+            .fetch_optional(self.state.pool())
+            .await?
+            .map(|row| crate::skill_state_rows::revision_from_row(&row))
+            .transpose()
+    }
+
+    async fn verified_inactive_replay(
+        &self,
+        record: SkillRevisionRecord,
+    ) -> anyhow::Result<StoredSkillRevision> {
+        let (identity, relative, path) = match record.status {
+            SkillRevisionStatus::Staging => {
+                let (path, relative) = self.staging_revision_path(&record)?;
+                (self.paths.staging_identity(), relative, path)
+            }
+            SkillRevisionStatus::Quarantined => (
+                self.paths.quarantine_identity(),
+                PathBuf::from(&record.revision_id),
+                self.paths.quarantine.join(&record.revision_id),
+            ),
+            SkillRevisionStatus::Managed => {
+                anyhow::bail!("managed revision is not an inactive import replay")
+            }
+        };
+        let directory = open_prepared_directory(identity, &relative).await?;
+        let snapshot = opened_package_snapshot(&directory, self.import_limits()).await?;
+        if snapshot.content_hash != record.content_hash
+            || snapshot.descriptor.descriptor.id != record.package_id
+        {
+            anyhow::bail!("inactive import replay bytes do not match recorded metadata");
+        }
+        Ok(stored_revision(record, path, Vec::new()))
+    }
+}
+
+fn import_locks() -> &'static Mutex<std::collections::HashMap<String, Weak<AsyncMutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<std::collections::HashMap<String, Weak<AsyncMutex<()>>>>> =
+        OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn import_lock(key: &str) -> Arc<AsyncMutex<()>> {
+    let mut locks = import_locks()
+        .lock()
+        .expect("import lock registry poisoned");
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(AsyncMutex::new(()));
+    locks.insert(key.to_string(), Arc::downgrade(&lock));
+    lock
 }

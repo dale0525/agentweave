@@ -232,6 +232,7 @@ pub struct NewSkillRevision {
     pub created_by: String,
 }
 
+#[derive(Clone, Debug)]
 pub struct SkillRevisionPromotion {
     pub version: String,
     pub content_hash: String,
@@ -277,6 +278,7 @@ pub struct NewSkillApproval {
     pub operation: String,
     pub requested_by: String,
     pub permission_diff: Value,
+    pub binding: Option<Value>,
 }
 
 pub(crate) fn revision_from_row(row: &SqliteRow) -> anyhow::Result<SkillRevisionRecord> {

@@ -1,16 +1,14 @@
-use crate::events::RuntimeEvent;
 use crate::platform::{CapabilitySet, PlatformId};
 use crate::skill_management::{
     CreateSkillDraftRequest, DraftFileUpdate, OwnerSkillManagementService, SkillDraftValidation,
+    SkillManagementError,
 };
 use crate::skill_management_tools::{SkillManagementToolContext, SkillManagementTools};
 use crate::skill_manager::{SkillManager, SkillManagerConfig};
 use crate::skill_package::{SkillPackageId, SkillPackageKind};
 use crate::skill_policy::{ActorContext, SkillGrant, SkillManagementPolicy};
-use crate::skill_source::ManagedSkillSource;
-use crate::skill_state::{
-    SkillApprovalStatus, SkillLayerRecord, SkillRevisionStatus, SkillStateStore,
-};
+use crate::skill_source::{DirectorySkillSource, ManagedSkillSource, SkillLayer};
+use crate::skill_state::{SkillRevisionStatus, SkillStateStore};
 use crate::skill_store::{SkillRevisionStore, SkillStorePaths};
 use crate::storage::Storage;
 use crate::tools::{RuntimeConfig, ToolRegistry};
@@ -19,20 +17,111 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
 
-struct AuthoringFixture {
+pub(crate) struct AuthoringFixture {
     _app: TempDir,
     _cache: TempDir,
-    imports: TempDir,
-    exports: TempDir,
-    state: SkillStateStore,
-    store: SkillRevisionStore,
-    manager: SkillManager,
-    service: OwnerSkillManagementService,
+    _builtin: Option<TempDir>,
+    pub(crate) imports: TempDir,
+    pub(crate) exports: TempDir,
+    pub(crate) state: SkillStateStore,
+    pub(crate) store: SkillRevisionStore,
+    pub(crate) manager: SkillManager,
+    pub(crate) service: OwnerSkillManagementService,
 }
 
 impl AuthoringFixture {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         Self::with_policy(SkillManagementPolicy::owner_only()).await
+    }
+
+    pub(crate) async fn with_connectors(
+        connectors: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        let mut fixture = Self::new().await;
+        fixture.service = fixture.service.clone().with_connector_catalog(connectors);
+        fixture
+    }
+
+    async fn with_known_runtime_tool() -> Self {
+        Self::with_known_runtime_tool_and_policy(SkillManagementPolicy::owner_only()).await
+    }
+
+    async fn with_known_runtime_tool_and_policy(policy: SkillManagementPolicy) -> Self {
+        let builtin = tempdir().unwrap();
+        let package_root = builtin.path().join("host-runtime");
+        tokio::fs::create_dir_all(&package_root).await.unwrap();
+        tokio::fs::write(
+            package_root.join("general-agent.json"),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "id": "com.example.host-runtime",
+                "version": "1.0.0",
+                "displayName": "Host runtime",
+                "kind": "native_runtime",
+                "package": {"includeInstructions": false, "includeRuntime": true}
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            package_root.join("skill.json"),
+            serde_json::json!({
+                "name": "host-runtime",
+                "description": "Known host tools.",
+                "version": "1.0.0",
+                "entry": {"type": "command", "command": "false", "args": []},
+                "tools": [{
+                    "name": "calendar_create",
+                    "description": "Create calendar events.",
+                    "input_schema": {"type": "object"}
+                }]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        let app = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let imports = tempdir().unwrap();
+        let exports = tempdir().unwrap();
+        let paths = SkillStorePaths::prepare(app.path(), cache.path())
+            .await
+            .unwrap();
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let state = SkillStateStore::new(storage);
+        let store = SkillRevisionStore::new(paths, state.clone());
+        let manager = SkillManager::new(SkillManagerConfig {
+            sources: vec![
+                Arc::new(DirectorySkillSource::new(
+                    SkillLayer::Builtin,
+                    builtin.path(),
+                )),
+                Arc::new(ManagedSkillSource::from_store(store.clone())),
+            ],
+            platform: PlatformId::Server,
+            capabilities: CapabilitySet::from_names(Vec::<String>::new()),
+            protected_packages: policy.protected_packages.iter().cloned().collect(),
+            allowed_overrides: policy.allowed_overrides.iter().cloned().collect(),
+            runtime_version: "0.1.0".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+        let service =
+            OwnerSkillManagementService::new(manager.clone(), store.clone(), state.clone(), policy)
+                .with_transfer_roots(imports.path(), exports.path())
+                .unwrap();
+        Self {
+            _app: app,
+            _cache: cache,
+            _builtin: Some(builtin),
+            imports,
+            exports,
+            state,
+            store,
+            manager,
+            service,
+        }
     }
 
     async fn with_policy(policy: SkillManagementPolicy) -> Self {
@@ -63,6 +152,7 @@ impl AuthoringFixture {
         Self {
             _app: app,
             _cache: cache,
+            _builtin: None,
             imports,
             exports,
             state,
@@ -72,11 +162,11 @@ impl AuthoringFixture {
         }
     }
 
-    fn actor(&self, grants: impl IntoIterator<Item = SkillGrant>) -> ActorContext {
+    pub(crate) fn actor(&self, grants: impl IntoIterator<Item = SkillGrant>) -> ActorContext {
         ActorContext::owner("owner-1", grants)
     }
 
-    async fn draft(&self) -> crate::skill_management::SkillDraftSummary {
+    pub(crate) async fn draft(&self) -> crate::skill_management::SkillDraftSummary {
         self.service
             .create_draft(
                 &self.actor([SkillGrant::CreateDraft]),
@@ -93,7 +183,7 @@ impl AuthoringFixture {
     }
 }
 
-async fn write_package(root: &std::path::Path, id: &str, kind: SkillPackageKind) {
+pub(crate) async fn write_package(root: &std::path::Path, id: &str, kind: SkillPackageKind) {
     tokio::fs::create_dir_all(root).await.unwrap();
     let authored = crate::skill_authoring::build_package_draft(&CreateSkillDraftRequest {
         package_id: SkillPackageId::parse(id).unwrap(),
@@ -129,7 +219,7 @@ async fn write_package(root: &std::path::Path, id: &str, kind: SkillPackageKind)
     }
 }
 
-fn update(path: &str, content: impl Into<String>) -> DraftFileUpdate {
+pub(crate) fn update(path: &str, content: impl Into<String>) -> DraftFileUpdate {
     DraftFileUpdate {
         path: PathBuf::from(path),
         content: content.into(),
@@ -272,6 +362,106 @@ async fn host_tools_draft_rejects_unknown_required_tools_before_staging() {
 }
 
 #[tokio::test]
+async fn known_host_tool_draft_creates_and_validates_through_production_registry() {
+    let fixture = AuthoringFixture::with_known_runtime_tool().await;
+    let draft = fixture
+        .service
+        .create_draft(
+            &fixture.actor([SkillGrant::CreateDraft]),
+            CreateSkillDraftRequest {
+                package_id: SkillPackageId::parse("com.example.calendar-host").unwrap(),
+                display_name: "Calendar host".into(),
+                description: "Create calendar events.".into(),
+                kind: SkillPackageKind::HostToolsOnly,
+                required_tools: vec!["calendar_create".into()],
+            },
+        )
+        .await
+        .unwrap();
+    let validation = fixture
+        .service
+        .validate_draft(&fixture.actor([SkillGrant::Validate]), &draft.revision_id)
+        .await
+        .unwrap();
+
+    assert!(validation.ok, "{:?}", validation.errors);
+    assert_eq!(validation.required_tools, ["calendar_create"]);
+    assert_eq!(validation.resolver_status, "active");
+    assert_eq!(
+        fixture
+            .state
+            .get_revision(&draft.revision_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        SkillRevisionStatus::Staging
+    );
+}
+
+#[tokio::test]
+async fn builtin_override_requires_allowlist_and_override_grant_for_all_protection_states() {
+    let package_id = SkillPackageId::parse("com.example.host-runtime").unwrap();
+    for protected in [false, true] {
+        for allowlisted in [false, true] {
+            for granted in [false, true] {
+                let mut policy = SkillManagementPolicy::owner_only();
+                if protected {
+                    policy = policy.protect(package_id.clone());
+                }
+                if allowlisted {
+                    policy = policy.allow_override(package_id.clone());
+                }
+                let fixture = AuthoringFixture::with_known_runtime_tool_and_policy(policy).await;
+                let draft = fixture
+                    .service
+                    .create_draft(
+                        &fixture.actor([SkillGrant::CreateDraft]),
+                        CreateSkillDraftRequest {
+                            package_id: package_id.clone(),
+                            display_name: "Managed override".into(),
+                            description: "Override the builtin instructions.".into(),
+                            kind: SkillPackageKind::InstructionOnly,
+                            required_tools: Vec::new(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let mut grants = vec![SkillGrant::Validate];
+                if granted {
+                    grants.push(SkillGrant::OverrideBuiltin);
+                }
+                let result = fixture
+                    .service
+                    .validate_draft(&fixture.actor(grants), &draft.revision_id)
+                    .await;
+                if allowlisted && granted {
+                    let validation = result.unwrap();
+                    assert!(validation.ok, "{:?}", validation.errors);
+                    assert_eq!(validation.resolver_status, "active");
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(matches!(
+                        error.downcast_ref::<SkillManagementError>(),
+                        Some(SkillManagementError::Denied {
+                            operation: "override_builtin"
+                        })
+                    ));
+                    assert_eq!(
+                        fixture
+                            .state
+                            .revision_validation(&draft.revision_id)
+                            .await
+                            .unwrap(),
+                        json!({"status": "pending"})
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn validation_is_deterministic_persisted_and_bound_to_one_snapshot() {
     let fixture = AuthoringFixture::new().await;
     let draft = fixture.draft().await;
@@ -300,17 +490,20 @@ async fn validation_is_deterministic_persisted_and_bound_to_one_snapshot() {
     assert!(!first.content_hash.is_empty());
     assert_eq!(
         first.permission_diff,
-        json!({"addedCapabilities": [], "addedTools": []})
+        json!({
+            "addedCapabilities": [],
+            "addedConnectors": [],
+            "addedTools": [],
+            "removedCapabilities": [],
+            "removedConnectors": [],
+            "removedTools": []
+        })
     );
 }
 
 #[tokio::test]
 async fn validation_reports_catalog_dependency_capability_and_protected_policy_errors() {
-    let package_id = SkillPackageId::parse("com.example.calendar").unwrap();
-    let fixture = AuthoringFixture::with_policy(
-        SkillManagementPolicy::owner_only().protect(package_id.clone()),
-    )
-    .await;
+    let fixture = AuthoringFixture::new().await;
     let draft = fixture.draft().await;
     let record = fixture
         .state
@@ -350,15 +543,48 @@ async fn validation_reports_catalog_dependency_capability_and_protected_policy_e
         validation.permission_diff,
         json!({
             "addedCapabilities": ["calendar.write"],
-            "addedTools": []
+            "addedConnectors": [],
+            "addedTools": [],
+            "removedCapabilities": [],
+            "removedConnectors": [],
+            "removedTools": []
         })
     );
     let joined = validation.errors.join("\n");
     assert!(joined.contains("catalog"), "{joined}");
     assert!(joined.contains("missing dependency"), "{joined}");
     assert!(joined.contains("missing capability"), "{joined}");
-    assert!(joined.contains("protected package"), "{joined}");
     assert!(validation.errors.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+#[tokio::test]
+async fn protected_validation_denial_preserves_pending_validation() {
+    let package_id = SkillPackageId::parse("com.example.calendar").unwrap();
+    let fixture =
+        AuthoringFixture::with_policy(SkillManagementPolicy::owner_only().protect(package_id))
+            .await;
+    let draft = fixture.draft().await;
+    let before = fixture
+        .state
+        .revision_validation(&draft.revision_id)
+        .await
+        .unwrap();
+
+    let error = fixture
+        .service
+        .validate_draft(&fixture.actor([SkillGrant::Validate]), &draft.revision_id)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("override_builtin denied"));
+    assert_eq!(
+        fixture
+            .state
+            .revision_validation(&draft.revision_id)
+            .await
+            .unwrap(),
+        before
+    );
 }
 
 #[tokio::test]
@@ -391,178 +617,7 @@ async fn testing_a_validated_draft_records_a_bounded_result_without_publication(
 }
 
 #[tokio::test]
-async fn third_party_import_is_bounded_and_stays_quarantined() {
-    let fixture = AuthoringFixture::new().await;
-    write_package(
-        &fixture.imports.path().join("calendar"),
-        "com.example.imported",
-        SkillPackageKind::InstructionOnly,
-    )
-    .await;
-    let generation = fixture.manager.current_snapshot().generation();
-
-    let imported = fixture
-        .service
-        .import_draft(
-            &fixture.actor([SkillGrant::Import]),
-            std::path::Path::new("calendar"),
-        )
-        .await
-        .unwrap();
-    let record = fixture
-        .state
-        .get_revision(&imported.revision_id)
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(imported.status, "quarantined");
-    assert_eq!(record.status, SkillRevisionStatus::Quarantined);
-    assert_eq!(fixture.manager.current_snapshot().generation(), generation);
-    assert!(
-        !fixture
-            .manager
-            .current_snapshot()
-            .packages()
-            .iter()
-            .any(|item| item.package.descriptor.id.as_str() == "com.example.imported")
-    );
-}
-
-#[tokio::test]
-async fn import_rejects_native_payloads_links_and_hard_links_without_rows() {
-    let fixture = AuthoringFixture::new().await;
-    write_package(
-        &fixture.imports.path().join("native"),
-        "com.example.native",
-        SkillPackageKind::NativeRuntime,
-    )
-    .await;
-    let actor = fixture.actor([SkillGrant::Import]);
-    let native = fixture
-        .service
-        .import_draft(&actor, std::path::Path::new("native"))
-        .await
-        .unwrap_err();
-    assert!(native.to_string().contains("native runtime"), "{native:#}");
-
-    #[cfg(unix)]
-    {
-        write_package(
-            &fixture.imports.path().join("linked"),
-            "com.example.linked",
-            SkillPackageKind::InstructionOnly,
-        )
-        .await;
-        std::os::unix::fs::symlink(
-            fixture.imports.path().join("linked/SKILL.md"),
-            fixture.imports.path().join("linked/assets-link"),
-        )
-        .unwrap();
-        let linked = fixture
-            .service
-            .import_draft(&actor, std::path::Path::new("linked"))
-            .await
-            .unwrap_err();
-        assert!(linked.to_string().contains("symlink"), "{linked:#}");
-
-        write_package(
-            &fixture.imports.path().join("hard-linked"),
-            "com.example.hard-linked",
-            SkillPackageKind::InstructionOnly,
-        )
-        .await;
-        std::fs::hard_link(
-            fixture.imports.path().join("hard-linked/SKILL.md"),
-            fixture.imports.path().join("hard-linked/alias.md"),
-        )
-        .unwrap();
-        let hard_linked = fixture
-            .service
-            .import_draft(&actor, std::path::Path::new("hard-linked"))
-            .await
-            .unwrap_err();
-        assert!(
-            hard_linked.to_string().contains("hard link"),
-            "{hard_linked:#}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn imported_revision_leaves_quarantine_only_after_successful_validation() {
-    let fixture = AuthoringFixture::new().await;
-    write_package(
-        &fixture.imports.path().join("valid-import"),
-        "com.example.valid-import",
-        SkillPackageKind::InstructionOnly,
-    )
-    .await;
-    let valid = fixture
-        .service
-        .import_draft(
-            &fixture.actor([SkillGrant::Import]),
-            std::path::Path::new("valid-import"),
-        )
-        .await
-        .unwrap();
-    let validation = fixture
-        .service
-        .validate_draft(&fixture.actor([SkillGrant::Validate]), &valid.revision_id)
-        .await
-        .unwrap();
-    assert!(validation.ok);
-    assert_eq!(
-        fixture
-            .state
-            .get_revision(&valid.revision_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        SkillRevisionStatus::Staging
-    );
-
-    write_package(
-        &fixture.imports.path().join("invalid-import"),
-        "com.example.invalid-import",
-        SkillPackageKind::InstructionOnly,
-    )
-    .await;
-    tokio::fs::write(
-        fixture.imports.path().join("invalid-import/SKILL.md"),
-        "invalid front matter",
-    )
-    .await
-    .unwrap();
-    let invalid = fixture
-        .service
-        .import_draft(
-            &fixture.actor([SkillGrant::Import]),
-            std::path::Path::new("invalid-import"),
-        )
-        .await
-        .unwrap();
-    let validation = fixture
-        .service
-        .validate_draft(&fixture.actor([SkillGrant::Validate]), &invalid.revision_id)
-        .await
-        .unwrap();
-    assert!(!validation.ok);
-    assert_eq!(
-        fixture
-            .state
-            .get_revision(&invalid.revision_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        SkillRevisionStatus::Quarantined
-    );
-}
-
-#[tokio::test]
-async fn export_copies_exact_active_revision_without_mutating_state() {
+async fn draft_test_rejects_stale_snapshot_generation() {
     let fixture = AuthoringFixture::new().await;
     let draft = fixture.draft().await;
     fixture
@@ -570,321 +625,19 @@ async fn export_copies_exact_active_revision_without_mutating_state() {
         .validate_draft(&fixture.actor([SkillGrant::Validate]), &draft.revision_id)
         .await
         .unwrap();
-    let promoted = fixture
-        .store
-        .promote_revision(&draft.revision_id)
-        .await
-        .unwrap();
-    fixture
-        .state
-        .activate_revision(
-            &draft.package_id,
-            &promoted.revision_id,
-            SkillLayerRecord::Managed,
-            "approver-2",
-        )
-        .await
-        .unwrap();
-    let before_revision = fixture
-        .state
-        .get_revision(&promoted.revision_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let before_installation = fixture
-        .state
-        .get_installation(&draft.package_id)
-        .await
-        .unwrap();
+    fixture.manager.reload().await.unwrap();
 
-    let exported = fixture
-        .service
-        .export_managed_skill(
-            &fixture.actor([SkillGrant::Export]),
-            &draft.package_id,
-            std::path::Path::new("calendar"),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(exported, fixture.exports.path().join("calendar"));
-    assert!(exported.join("general-agent.json").is_file());
-    assert_eq!(
-        fixture
-            .state
-            .get_revision(&promoted.revision_id)
-            .await
-            .unwrap()
-            .unwrap(),
-        before_revision
-    );
-    assert_eq!(
-        fixture
-            .state
-            .get_installation(&draft.package_id)
-            .await
-            .unwrap(),
-        before_installation
-    );
-
-    for destination in [
-        std::path::Path::new("../escape"),
-        std::path::Path::new("calendar"),
-    ] {
-        assert!(
-            fixture
-                .service
-                .export_managed_skill(
-                    &fixture.actor([SkillGrant::Export]),
-                    &draft.package_id,
-                    destination,
-                )
-                .await
-                .is_err()
-        );
-    }
-}
-
-async fn validate_for_activation(
-    fixture: &AuthoringFixture,
-) -> crate::skill_management::SkillDraftSummary {
-    let draft = fixture.draft().await;
-    fixture
-        .service
-        .validate_draft(&fixture.actor([SkillGrant::Validate]), &draft.revision_id)
-        .await
-        .unwrap();
-    draft
-}
-
-#[tokio::test]
-async fn activation_request_requires_validation_and_deduplicates_exact_candidate() {
-    let fixture = AuthoringFixture::new().await;
-    let draft = fixture.draft().await;
-    let requester = fixture.actor([SkillGrant::Activate]);
-    assert!(
-        fixture
-            .service
-            .request_activation(&requester, &draft.revision_id)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("validation")
-    );
-    fixture
-        .service
-        .validate_draft(&fixture.actor([SkillGrant::Validate]), &draft.revision_id)
-        .await
-        .unwrap();
-
-    let (first, second) = tokio::join!(
-        fixture
-            .service
-            .request_activation(&requester, &draft.revision_id),
-        fixture
-            .service
-            .request_activation(&requester, &draft.revision_id),
-    );
-    let first = first.unwrap();
-    let second = second.unwrap();
-
-    assert_eq!(first.approval_id, second.approval_id);
-    assert_eq!(first.status, SkillApprovalStatus::Pending);
-    assert_eq!(first.requested_by, "owner-1");
-    assert_eq!(
-        first.permission_diff["binding"]["contentHash"],
-        json!(
-            fixture
-                .state
-                .get_revision(&draft.revision_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .content_hash
-        )
-    );
-    assert_eq!(
-        fixture
-            .service
-            .emitted_events()
-            .iter()
-            .filter(|event| matches!(event, RuntimeEvent::SkillApprovalRequired { .. }))
-            .count(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn approval_requires_different_actor_is_single_use_and_publishes_once() {
-    let fixture = AuthoringFixture::new().await;
-    let draft = validate_for_activation(&fixture).await;
-    let requester = fixture.actor([SkillGrant::Activate]);
-    let approval = fixture
-        .service
-        .request_activation(&requester, &draft.revision_id)
-        .await
-        .unwrap();
-    let self_error = fixture
-        .service
-        .approve_activation(&approval.approval_id, &requester)
-        .await
-        .unwrap_err();
-    assert!(self_error.to_string().contains("own request"));
-    let approver = ActorContext::owner("approver-2", [SkillGrant::Activate]);
-
-    let report = fixture
-        .service
-        .approve_activation(&approval.approval_id, &approver)
-        .await
-        .unwrap();
-
-    assert_eq!(report.previous_generation, 1);
-    assert_eq!(report.active_generation, 2);
-    assert!(
-        fixture
-            .manager
-            .current_snapshot()
-            .packages()
-            .iter()
-            .any(|item| { item.package.descriptor.id == draft.package_id })
-    );
-    assert!(
-        fixture
-            .service
-            .approve_activation(&approval.approval_id, &approver)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("already resolved")
-    );
-    assert_eq!(
-        fixture
-            .service
-            .emitted_events()
-            .iter()
-            .filter(|event| matches!(
-                event,
-                RuntimeEvent::SkillSnapshotPublished { generation: 2 }
-            ))
-            .count(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn edit_makes_old_approval_stale_and_new_request_gets_new_binding() {
-    let fixture = AuthoringFixture::new().await;
-    let draft = validate_for_activation(&fixture).await;
-    let requester = fixture.actor([SkillGrant::Activate]);
-    let old = fixture
-        .service
-        .request_activation(&requester, &draft.revision_id)
-        .await
-        .unwrap();
-    fixture
-        .service
-        .update_draft(
-            &fixture.actor([SkillGrant::EditDraft]),
-            &draft.revision_id,
-            vec![update("references/change.md", "changed\n")],
-        )
-        .await
-        .unwrap();
-    let approver = ActorContext::owner("approver-2", [SkillGrant::Activate]);
-    assert!(
-        fixture
-            .service
-            .approve_activation(&old.approval_id, &approver)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("stale")
-    );
-    fixture
-        .service
-        .validate_draft(&fixture.actor([SkillGrant::Validate]), &draft.revision_id)
-        .await
-        .unwrap();
-    let new = fixture
-        .service
-        .request_activation(&requester, &draft.revision_id)
-        .await
-        .unwrap();
-    assert_ne!(new.approval_id, old.approval_id);
-}
-
-#[tokio::test]
-async fn concurrent_approval_publishes_one_generation() {
-    let fixture = AuthoringFixture::new().await;
-    let draft = validate_for_activation(&fixture).await;
-    let approval = fixture
-        .service
-        .request_activation(&fixture.actor([SkillGrant::Activate]), &draft.revision_id)
-        .await
-        .unwrap();
-    let approver = ActorContext::owner("approver-2", [SkillGrant::Activate]);
-    let (left, right) = tokio::join!(
-        fixture
-            .service
-            .approve_activation(&approval.approval_id, &approver),
-        fixture
-            .service
-            .approve_activation(&approval.approval_id, &approver),
-    );
-
-    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
-    assert_eq!(fixture.manager.current_snapshot().generation(), 2);
-}
-
-#[tokio::test]
-async fn reload_failure_keeps_old_snapshot_and_installation() {
-    let fixture = AuthoringFixture::new().await;
-    let draft = validate_for_activation(&fixture).await;
-    let approval = fixture
-        .service
-        .request_activation(&fixture.actor([SkillGrant::Activate]), &draft.revision_id)
-        .await
-        .unwrap();
-    sqlx::query("DROP TABLE skill_snapshots")
-        .execute(fixture.state.pool())
-        .await
-        .unwrap();
     let error = fixture
         .service
-        .approve_activation(
-            &approval.approval_id,
-            &ActorContext::owner("approver-2", [SkillGrant::Activate]),
-        )
+        .test_draft(&fixture.actor([SkillGrant::Test]), &draft.revision_id)
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("skill_snapshots"), "{error:#}");
-    assert_eq!(fixture.manager.current_snapshot().generation(), 1);
-    assert!(
-        fixture
-            .state
-            .get_installation(&draft.package_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        fixture
-            .state
-            .get_approval(&approval.approval_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        SkillApprovalStatus::Rejected
-    );
-    assert!(
-        !fixture
-            .service
-            .emitted_events()
-            .iter()
-            .any(|event| matches!(event, RuntimeEvent::SkillSnapshotPublished { .. }))
-    );
+    assert!(matches!(
+        error.downcast_ref::<crate::skill_management::SkillManagementError>(),
+        Some(crate::skill_management::SkillManagementError::Conflict { .. })
+    ));
+    assert_eq!(fixture.manager.current_snapshot().generation(), 2);
 }
 
 #[tokio::test]

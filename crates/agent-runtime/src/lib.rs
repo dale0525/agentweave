@@ -65,7 +65,11 @@ mod skill_policy_tests;
 mod skill_management_tests;
 
 #[cfg(test)]
+mod skill_authoring_activation_tests;
+#[cfg(test)]
 mod skill_authoring_tests;
+#[cfg(test)]
+mod skill_authoring_transfer_tests;
 
 #[cfg(test)]
 mod skill_authoring_atomicity_tests;

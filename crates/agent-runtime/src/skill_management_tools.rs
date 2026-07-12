@@ -286,8 +286,23 @@ fn update_draft_schema() -> Value {
 
 fn classify_error(error: &anyhow::Error) -> (&'static str, String) {
     match error.downcast_ref::<SkillManagementError>() {
-        Some(SkillManagementError::Denied { .. }) => ("permission_denied", error.to_string()),
-        Some(SkillManagementError::InvalidRequest(_)) => ("invalid_arguments", error.to_string()),
+        Some(SkillManagementError::Denied { .. }) => (
+            "permission_denied",
+            "skill management operation denied".into(),
+        ),
+        Some(SkillManagementError::InvalidRequest(_)) => (
+            "invalid_arguments",
+            "invalid skill management request".into(),
+        ),
+        Some(SkillManagementError::NotFound { .. }) => {
+            ("not_found", "skill management resource not found".into())
+        }
+        Some(SkillManagementError::Conflict { .. }) => {
+            ("conflict", "skill management state conflict".into())
+        }
+        Some(SkillManagementError::Internal { .. }) => {
+            ("internal_error", "skill management operation failed".into())
+        }
         None => ("internal_error", "skill management operation failed".into()),
     }
 }

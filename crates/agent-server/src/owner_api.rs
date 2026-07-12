@@ -20,19 +20,48 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct OwnerAuth {
-    bearer_token: Arc<[u8]>,
+    principals: Arc<[OwnerPrincipal]>,
+}
+
+#[derive(Clone)]
+struct OwnerPrincipal {
+    authorization: Arc<[u8]>,
     actor: ActorContext,
 }
 
 impl OwnerAuth {
     pub fn new(token: impl AsRef<[u8]>, actor: ActorContext) -> anyhow::Result<Self> {
-        let token = token.as_ref();
-        if token.is_empty() {
-            anyhow::bail!("owner bearer token cannot be empty");
+        Self::from_principals([(token, actor)])
+    }
+
+    pub fn from_principals<T, I>(principals: I) -> anyhow::Result<Self>
+    where
+        T: AsRef<[u8]>,
+        I: IntoIterator<Item = (T, ActorContext)>,
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut resolved = Vec::new();
+        for (token, actor) in principals {
+            let token = token.as_ref();
+            if token.is_empty() {
+                anyhow::bail!("owner bearer token cannot be empty");
+            }
+            if !seen.insert(token.to_vec()) {
+                anyhow::bail!("owner bearer tokens must be distinct");
+            }
+            let mut authorization = Vec::with_capacity(7 + token.len());
+            authorization.extend_from_slice(b"Bearer ");
+            authorization.extend_from_slice(token);
+            resolved.push(OwnerPrincipal {
+                authorization: Arc::from(authorization),
+                actor,
+            });
+        }
+        if resolved.is_empty() {
+            anyhow::bail!("at least one owner bearer principal is required");
         }
         Ok(Self {
-            bearer_token: Arc::from(token),
-            actor,
+            principals: Arc::from(resolved),
         })
     }
 
@@ -41,13 +70,17 @@ impl OwnerAuth {
             .get(header::AUTHORIZATION)
             .map(|value| value.as_bytes())
             .ok_or(OwnerApiError::Unauthorized)?;
-        let mut expected = Vec::with_capacity(7 + self.bearer_token.len());
-        expected.extend_from_slice(b"Bearer ");
-        expected.extend_from_slice(&self.bearer_token);
-        if !constant_time_eq(&expected, supplied) {
-            return Err(OwnerApiError::Unauthorized);
+        let mut matched = None;
+        for principal in self.principals.iter() {
+            if constant_time_eq(&principal.authorization, supplied) {
+                matched = Some(principal.actor.clone());
+            }
         }
-        Ok(self.actor.clone())
+        matched.ok_or(OwnerApiError::Unauthorized)
+    }
+
+    fn actors(&self) -> impl Iterator<Item = &ActorContext> {
+        self.principals.iter().map(|principal| &principal.actor)
     }
 }
 
@@ -151,12 +184,14 @@ pub(crate) fn router(state: &Arc<AppState>) -> Option<Router<Arc<AppState>>> {
 }
 
 fn allows_route(owner: &OwnerApiConfig, operation: SkillOperation) -> bool {
-    owner
-        .policy()
-        .allowed_kinds
-        .iter()
-        .copied()
-        .any(|kind| owner.policy().allows(&owner.auth.actor, operation, kind))
+    owner.auth.actors().any(|actor| {
+        owner
+            .policy()
+            .allowed_kinds
+            .iter()
+            .copied()
+            .any(|kind| owner.policy().allows(actor, operation, kind))
+    })
 }
 
 async fn owner_policy(
@@ -391,16 +426,12 @@ fn owner_config(state: &AppState) -> Result<&OwnerApiConfig, OwnerApiError> {
 }
 
 fn constant_time_eq(expected: &[u8], supplied: &[u8]) -> bool {
-    if expected.len() != supplied.len() {
-        return false;
+    let mut difference = expected.len() ^ supplied.len();
+    for (index, expected_byte) in expected.iter().enumerate() {
+        let supplied_byte = supplied.get(index).copied().unwrap_or_default();
+        difference |= usize::from(expected_byte ^ supplied_byte);
     }
-    expected
-        .iter()
-        .zip(supplied)
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
+    difference == 0
 }
 
 #[derive(Debug)]
@@ -408,6 +439,8 @@ enum OwnerApiError {
     Unauthorized,
     Forbidden,
     BadRequest,
+    NotFound,
+    Conflict,
     Internal(anyhow::Error),
 }
 
@@ -416,6 +449,9 @@ impl OwnerApiError {
         match error.downcast_ref::<SkillManagementError>() {
             Some(SkillManagementError::Denied { .. }) => Self::Forbidden,
             Some(SkillManagementError::InvalidRequest(_)) => Self::BadRequest,
+            Some(SkillManagementError::NotFound { .. }) => Self::NotFound,
+            Some(SkillManagementError::Conflict { .. }) => Self::Conflict,
+            Some(SkillManagementError::Internal { .. }) => Self::Internal(error),
             None => Self::Internal(error),
         }
     }
@@ -427,6 +463,8 @@ impl IntoResponse for OwnerApiError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "authentication required"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "operation forbidden"),
             Self::BadRequest => (StatusCode::BAD_REQUEST, "invalid request"),
+            Self::NotFound => (StatusCode::NOT_FOUND, "resource not found"),
+            Self::Conflict => (StatusCode::CONFLICT, "resource conflict"),
             Self::Internal(error) => {
                 tracing::error!(?error, "owner skill management request failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal server error")

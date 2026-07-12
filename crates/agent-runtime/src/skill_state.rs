@@ -337,6 +337,7 @@ impl SkillStateStore {
         let approval_id = Uuid::new_v4().to_string();
         let created_at = Utc::now();
         let permission_diff = serde_json::to_string(&input.permission_diff)?;
+        let mut tx = self.storage.pool().begin().await?;
         sqlx::query(
             r#"INSERT INTO skill_approvals
                (approval_id, package_id, revision_id, operation, requested_by, approved_by,
@@ -350,8 +351,18 @@ impl SkillStateStore {
         .bind(&input.requested_by)
         .bind(permission_diff)
         .bind(created_at.to_rfc3339())
-        .execute(self.storage.pool())
+        .execute(&mut *tx)
         .await?;
+        if let Some(binding) = &input.binding {
+            sqlx::query(
+                "INSERT INTO skill_approval_bindings (approval_id, binding_json) VALUES (?, ?)",
+            )
+            .bind(&approval_id)
+            .bind(serde_json::to_string(binding)?)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
 
         Ok(SkillApprovalRecord {
             approval_id,

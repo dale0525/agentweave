@@ -171,7 +171,6 @@ impl SkillManagementPolicy {
     pub fn can_override(&self, actor: &ActorContext, id: &SkillPackageId) -> bool {
         self.mode == SkillManagementMode::OwnerOnly
             && actor.role == "owner"
-            && self.protected_packages.contains(id)
             && self.allowed_overrides.contains(id)
             && actor.grants.contains(&SkillGrant::OverrideBuiltin)
     }

@@ -183,12 +183,12 @@ fn protected_override_denies_packages_missing_from_allowlist() {
 }
 
 #[test]
-fn override_denies_unprotected_packages_and_non_owner_actors() {
+fn allowlisted_unprotected_override_accepts_owner_grant_and_denies_non_owner() {
     let package = SkillPackageId::parse("generalagent.core.runtime").unwrap();
     let policy = SkillManagementPolicy::owner_only().allow_override(package.clone());
     let non_owner = ActorContext::anonymous().with_grants([SkillGrant::OverrideBuiltin]);
 
-    assert!(!policy.can_override(
+    assert!(policy.can_override(
         &ActorContext::owner("owner-1", [SkillGrant::OverrideBuiltin]),
         &package
     ));

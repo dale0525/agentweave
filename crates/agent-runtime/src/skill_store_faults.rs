@@ -46,6 +46,7 @@ pub(crate) enum StoreFaultPoint {
     PromoteSourceCleanup,
     PromoteSourceCleanupBeforeApply,
     PromoteSourceCleanupAfter,
+    ActivationAfterPrepare,
     QuarantineDestinationCleanup,
     QuarantineDestinationCleanupAfter,
     QuarantineSourceCleanup,

@@ -55,9 +55,15 @@ async fn main() -> anyhow::Result<()> {
     let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
     let loaded = load_skill_manager(&skills_root, storage.clone(), managed_skills).await?;
     let owner_host = owner_host_config_from_lookup(|name| std::env::var_os(name))?;
-    let owner_management = build_owner_api_config(owner_host, &loaded, storage.clone()).await?;
-    let model = GatewayHttpClient::new(model_profile_from_env());
     let runtime_config = runtime_config_from_env();
+    let connector_catalog = runtime_config
+        .connectors
+        .iter()
+        .map(|connector| connector.id.clone())
+        .collect::<Vec<_>>();
+    let owner_management =
+        build_owner_api_config(owner_host, &loaded, storage.clone(), connector_catalog).await?;
+    let model = GatewayHttpClient::new(model_profile_from_env());
     let state = if let Some(owner_management) = owner_management {
         api::AppState::new_with_model_skill_manager_and_owner(
             storage,
@@ -133,6 +139,8 @@ struct OwnerHostConfig {
     policy: SkillManagementPolicy,
     token: Arc<[u8]>,
     actor: ActorContext,
+    approver_token: Option<Arc<[u8]>>,
+    approver_actor: Option<ActorContext>,
 }
 
 fn owner_host_config_from_lookup<F>(lookup: F) -> anyhow::Result<Option<OwnerHostConfig>>
@@ -193,10 +201,36 @@ where
         }
         SkillManagementMode::Disabled => unreachable!("disabled mode returned above"),
     };
+    let (approver_token, approver_actor) = if policy.mode == SkillManagementMode::OwnerOnly {
+        let approver_token = lookup("GENERAL_AGENT_APPROVER_TOKEN")
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "GENERAL_AGENT_APPROVER_TOKEN is required when owner activation approval is enabled"
+                )
+            })?
+            .into_encoded_bytes();
+        if approver_token.is_empty() {
+            anyhow::bail!("GENERAL_AGENT_APPROVER_TOKEN cannot be empty");
+        }
+        if token == approver_token {
+            anyhow::bail!("owner and approver bearer tokens must be distinct");
+        }
+        (
+            Some(Arc::from(approver_token)),
+            Some(ActorContext::owner(
+                "local-approver",
+                [SkillGrant::Inspect, SkillGrant::Activate],
+            )),
+        )
+    } else {
+        (None, None)
+    };
     Ok(Some(OwnerHostConfig {
         policy,
         token: Arc::from(token),
         actor,
+        approver_token,
+        approver_actor,
     }))
 }
 
@@ -204,6 +238,7 @@ async fn build_owner_api_config(
     host: Option<OwnerHostConfig>,
     loaded: &LoadedSkillManager,
     storage: Storage,
+    connector_catalog: Vec<String>,
 ) -> anyhow::Result<Option<OwnerApiConfig>> {
     let Some(host) = host else {
         return Ok(None);
@@ -224,8 +259,13 @@ async fn build_owner_api_config(
     let service =
         OwnerSkillManagementService::new(loaded.manager.clone(), revisions, state, host.policy)
             .with_prepared_transfer_roots(import_root, export_root)
-            .await?;
-    let auth = OwnerAuth::new(host.token.as_ref(), host.actor)?;
+            .await?
+            .with_connector_catalog(connector_catalog);
+    let mut principals = vec![(host.token, host.actor)];
+    if let (Some(token), Some(actor)) = (host.approver_token, host.approver_actor) {
+        principals.push((token, actor));
+    }
+    let auth = OwnerAuth::from_principals(principals)?;
     Ok(Some(OwnerApiConfig::new(service, auth)))
 }
 
@@ -368,7 +408,8 @@ mod tests {
             "GENERAL_AGENT_APP_DATA_ROOT" => Some("/tmp/app".into()),
             _ => None,
         })
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert!(error.to_string().contains("GENERAL_AGENT_CACHE_ROOT"));
 
         let config = managed_skills_config_from_lookup(|name| match name {
@@ -419,6 +460,7 @@ mod tests {
         let config = owner_host_config_from_lookup(|name| match name {
             "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
             "GENERAL_AGENT_OWNER_TOKEN" => Some("secret-token".into()),
+            "GENERAL_AGENT_APPROVER_TOKEN" => Some("approver-token".into()),
             _ => None,
         })
         .unwrap()
@@ -443,6 +485,41 @@ mod tests {
             .collect()
         );
         assert_eq!(config.token.as_ref(), b"secret-token");
+        assert_eq!(
+            config.approver_token.as_deref(),
+            Some(b"approver-token".as_slice())
+        );
+        let approver = config.approver_actor.as_ref().unwrap();
+        assert_eq!(approver.actor_id, "local-approver");
+        assert_eq!(
+            approver.grants,
+            [SkillGrant::Inspect, SkillGrant::Activate]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn owner_only_requires_a_distinct_approver_token() {
+        let missing = owner_host_config_from_lookup(|name| match name {
+            "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
+            "GENERAL_AGENT_OWNER_TOKEN" => Some("owner-token".into()),
+            _ => None,
+        })
+        .err()
+        .unwrap();
+        assert!(missing.to_string().contains("GENERAL_AGENT_APPROVER_TOKEN"));
+
+        let duplicate = owner_host_config_from_lookup(|name| match name {
+            "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
+            "GENERAL_AGENT_OWNER_TOKEN" | "GENERAL_AGENT_APPROVER_TOKEN" => {
+                Some("same-token".into())
+            }
+            _ => None,
+        })
+        .err()
+        .unwrap();
+        assert!(duplicate.to_string().contains("distinct"));
     }
 
     #[tokio::test]

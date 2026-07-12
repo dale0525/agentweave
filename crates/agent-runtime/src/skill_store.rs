@@ -25,6 +25,9 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+#[path = "skill_store_activation.rs"]
+mod activation;
+
 pub use crate::skill_store_public_types::{
     DEFAULT_MAX_SKILL_DEPTH, DEFAULT_MAX_SKILL_DIRECTORIES, DEFAULT_MAX_SKILL_ENTRIES,
     DEFAULT_MAX_SKILL_FILE_BYTES, DEFAULT_MAX_SKILL_FILES, DEFAULT_MAX_SKILL_PACKAGE_BYTES,
@@ -165,6 +168,10 @@ impl SkillRevisionStore {
 
     pub(crate) fn package_limits(&self) -> PackageLimits {
         self.limits.package_limits()
+    }
+
+    pub(crate) fn store_limits(&self) -> SkillStoreLimits {
+        self.limits
     }
 
     pub(crate) fn check_managed_discovery_io(&self) -> anyhow::Result<()> {

@@ -263,7 +263,7 @@ fn three_layer_dependency_fallback_reports_each_candidate_once() {
 }
 
 #[test]
-fn protected_builtin_rejects_allowed_managed_override() {
+fn explicitly_allowed_protected_builtin_accepts_managed_override() {
     let id = SkillPackageId::parse("com.example.calendar").unwrap();
     let mut resolution_input = input(vec![
         package(id.as_str(), SkillLayer::Managed),
@@ -274,10 +274,10 @@ fn protected_builtin_rejects_allowed_managed_override() {
 
     let resolved = SkillResolver::resolve(resolution_input).unwrap();
 
-    assert_eq!(resolved.active[0].package.layer, SkillLayer::Builtin);
+    assert_eq!(resolved.active[0].package.layer, SkillLayer::Managed);
     assert_eq!(
         resolved.inactive[0].status,
-        SkillResolutionStatus::ProtectedPackage
+        SkillResolutionStatus::Overridden
     );
 }
 

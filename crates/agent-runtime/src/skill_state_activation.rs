@@ -1,21 +1,44 @@
 use crate::skill_package::SkillPackageId;
 use crate::skill_state::{
-    NewSkillApproval, SkillApprovalRecord, SkillInstallationRecord, SkillStateStore,
+    NewSkillApproval, SkillApprovalRecord, SkillInstallationRecord, SkillRevisionExpectation,
+    SkillRevisionPromotion, SkillStateStore,
 };
-use crate::skill_state_rows::{APPROVAL_COLUMNS, approval_from_row};
+use crate::skill_state_rows::{
+    APPROVAL_COLUMNS, INSTALLATION_COLUMNS, approval_from_row, installation_from_row,
+};
 use anyhow::Context;
 use chrono::Utc;
 
+pub(crate) struct ExactActivationPublication<'a> {
+    pub approval_id: &'a str,
+    pub approver_id: &'a str,
+    pub expected_binding: &'a serde_json::Value,
+    pub package_id: &'a SkillPackageId,
+    pub revision_id: &'a str,
+    pub expectation: &'a SkillRevisionExpectation,
+    pub promotion: &'a SkillRevisionPromotion,
+    pub previous_installation: Option<&'a SkillInstallationRecord>,
+    pub generation: u64,
+    pub members: serde_json::Value,
+}
+
 impl SkillStateStore {
-    pub(crate) async fn commit_activation_publication(
+    pub(crate) async fn commit_exact_activation_publication(
         &self,
-        approval_id: &str,
-        approver_id: &str,
-        package_id: &SkillPackageId,
-        revision_id: &str,
-        generation: u64,
-        members: serde_json::Value,
+        input: ExactActivationPublication<'_>,
     ) -> anyhow::Result<()> {
+        let ExactActivationPublication {
+            approval_id,
+            approver_id,
+            expected_binding,
+            package_id,
+            revision_id,
+            expectation,
+            promotion,
+            previous_installation,
+            generation,
+            members,
+        } = input;
         crate::skill_state_rows::validate_uuid_v4("approval_id", approval_id)?;
         let generation =
             i64::try_from(generation).context("snapshot generation exceeds SQLite range")?;
@@ -23,6 +46,88 @@ impl SkillStateStore {
         let now = Utc::now().to_rfc3339();
         let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
         let result = async {
+            let approval_query = format!(
+                "SELECT {APPROVAL_COLUMNS} FROM skill_approvals WHERE approval_id = ?"
+            );
+            let approval_row = sqlx::query(&approval_query)
+                .bind(approval_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .context("skill approval not found")?;
+            let approval = approval_from_row(&approval_row)?;
+            if approval.status != crate::skill_state::SkillApprovalStatus::Pending
+                || approval.requested_by == approver_id
+                || approval.package_id != *package_id
+                || approval.revision_id != revision_id
+            {
+                anyhow::bail!("skill approval conflicts with current state");
+            }
+            let binding_json: String = sqlx::query_scalar(
+                "SELECT binding_json FROM skill_approval_bindings WHERE approval_id = ?",
+            )
+            .bind(approval_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .context("activation approval binding is missing")?;
+            if serde_json::from_str::<serde_json::Value>(&binding_json)? != *expected_binding {
+                anyhow::bail!("activation approval binding is stale");
+            }
+
+            let installation_query = format!(
+                "SELECT {INSTALLATION_COLUMNS} FROM skill_installations WHERE package_id = ?"
+            );
+            let current_installation = sqlx::query(&installation_query)
+                .bind(package_id.as_str())
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|row| installation_from_row(&row))
+                .transpose()?;
+            if current_installation.as_ref() != previous_installation {
+                anyhow::bail!("skill installation changed during activation");
+            }
+
+            let changed = sqlx::query(
+                r#"UPDATE skill_revisions SET version = ?, content_hash = ?, storage_path = ?,
+                   descriptor_json = ?, validation_json = ?, lifecycle_status = 'managed'
+                   WHERE revision_id = ? AND package_id = ? AND version = ? AND content_hash = ?
+                     AND storage_path = ? AND descriptor_json = ? AND validation_json = ?
+                     AND lifecycle_status = 'staging'"#,
+            )
+            .bind(&promotion.version)
+            .bind(&promotion.content_hash)
+            .bind(&promotion.storage_path)
+            .bind(serde_json::to_string(&promotion.descriptor_json)?)
+            .bind(serde_json::to_string(&promotion.validation_json)?)
+            .bind(revision_id)
+            .bind(package_id.as_str())
+            .bind(&expectation.version)
+            .bind(&expectation.content_hash)
+            .bind(&expectation.storage_path)
+            .bind(serde_json::to_string(&expectation.descriptor_json)?)
+            .bind(serde_json::to_string(&expectation.validation_json)?)
+            .execute(&mut *tx)
+            .await?;
+            if changed.rows_affected() != 1 {
+                anyhow::bail!("skill revision changed during activation");
+            }
+
+            sqlx::query(
+                r#"INSERT INTO skill_installations
+                   (package_id, source_layer, active_revision_id, enabled, trust_level,
+                    install_status, installed_at, updated_at)
+                   VALUES (?, 'managed', ?, 1, 'approved', 'active', ?, ?)
+                   ON CONFLICT(package_id) DO UPDATE SET source_layer = 'managed',
+                     active_revision_id = excluded.active_revision_id, enabled = 1,
+                     trust_level = 'approved', install_status = 'active',
+                     updated_at = excluded.updated_at"#,
+            )
+            .bind(package_id.as_str())
+            .bind(revision_id)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+
             let resolved = sqlx::query(
                 r#"UPDATE skill_approvals SET approved_by = ?, status = 'approved', resolved_at = ?
                    WHERE approval_id = ? AND status = 'pending' AND requested_by != ?"#,
@@ -34,8 +139,9 @@ impl SkillStateStore {
             .execute(&mut *tx)
             .await?;
             if resolved.rows_affected() != 1 {
-                anyhow::bail!("skill approval could not be resolved: {approval_id}");
+                anyhow::bail!("skill approval could not be resolved");
             }
+
             sqlx::query(
                 r#"INSERT INTO skill_snapshots
                    (generation, status, members_json, created_at, activated_at)
@@ -94,8 +200,19 @@ impl SkillStateStore {
                 .await?
             {
                 let existing = approval_from_row(&row)?;
+                let existing_binding: Option<String> = sqlx::query_scalar(
+                    "SELECT binding_json FROM skill_approval_bindings WHERE approval_id = ?",
+                )
+                .bind(&existing.approval_id)
+                .fetch_optional(&mut *tx)
+                .await?;
                 if existing.requested_by == input.requested_by
                     && existing.permission_diff == input.permission_diff
+                    && existing_binding
+                        .as_deref()
+                        .map(serde_json::from_str::<serde_json::Value>)
+                        .transpose()?
+                        == input.binding
                 {
                     return Ok((existing, false));
                 }
@@ -128,6 +245,15 @@ impl SkillStateStore {
                 .fetch_one(&mut *tx)
                 .await?;
             let approval = approval_from_row(&row)?;
+            if let Some(binding) = input.binding {
+                sqlx::query(
+                    "INSERT INTO skill_approval_bindings (approval_id, binding_json) VALUES (?, ?)",
+                )
+                .bind(&approval.approval_id)
+                .bind(serde_json::to_string(&binding)?)
+                .execute(&mut *tx)
+                .await?;
+            }
             super::skill_state::insert_audit(
                 &mut *tx,
                 &input.requested_by,
@@ -144,86 +270,20 @@ impl SkillStateStore {
         crate::skill_state_transactions::finish(tx, result).await
     }
 
-    pub(crate) async fn switch_revision_for_publication(
+    pub(crate) async fn activation_approval_binding(
         &self,
-        package_id: &SkillPackageId,
-        revision_id: &str,
-    ) -> anyhow::Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let changed = sqlx::query(
-            r#"INSERT INTO skill_installations
-               (package_id, source_layer, active_revision_id, enabled, trust_level,
-                install_status, installed_at, updated_at)
-               SELECT package_id, 'managed', revision_id, 1, 'approved', 'active', ?, ?
-               FROM skill_revisions
-               WHERE revision_id = ? AND package_id = ? AND lifecycle_status = 'managed'
-               ON CONFLICT(package_id) DO UPDATE SET
-                 source_layer = 'managed', active_revision_id = excluded.active_revision_id,
-                 enabled = 1, trust_level = 'approved', install_status = 'active',
-                 updated_at = excluded.updated_at"#,
+        approval_id: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        crate::skill_state_rows::validate_uuid_v4("approval_id", approval_id)?;
+        let binding: Option<String> = sqlx::query_scalar(
+            "SELECT binding_json FROM skill_approval_bindings WHERE approval_id = ?",
         )
-        .bind(&now)
-        .bind(&now)
-        .bind(revision_id)
-        .bind(package_id.as_str())
-        .execute(self.pool())
+        .bind(approval_id)
+        .fetch_optional(self.pool())
         .await?;
-        if changed.rows_affected() == 0 {
-            anyhow::bail!("managed revision cannot be activated");
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn restore_installation_after_failed_publication(
-        &self,
-        package_id: &SkillPackageId,
-        failed_revision_id: &str,
-        previous: Option<&SkillInstallationRecord>,
-    ) -> anyhow::Result<()> {
-        let mut tx = crate::skill_state_transactions::begin_immediate(self.pool()).await?;
-        let result = async {
-            let current: Option<String> = sqlx::query_scalar(
-                "SELECT active_revision_id FROM skill_installations WHERE package_id = ?",
-            )
-            .bind(package_id.as_str())
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten();
-            if current.as_deref() != Some(failed_revision_id) {
-                anyhow::bail!("installation changed during publication compensation");
-            }
-            match previous {
-                None => {
-                    sqlx::query(
-                        "DELETE FROM skill_installations WHERE package_id = ? AND active_revision_id = ?",
-                    )
-                    .bind(package_id.as_str())
-                    .bind(failed_revision_id)
-                    .execute(&mut *tx)
-                    .await?;
-                }
-                Some(previous) => {
-                    sqlx::query(
-                        r#"UPDATE skill_installations SET source_layer = ?, active_revision_id = ?,
-                           enabled = ?, trust_level = ?, install_status = ?, installed_at = ?,
-                           updated_at = ? WHERE package_id = ? AND active_revision_id = ?"#,
-                    )
-                    .bind(previous.source_layer.as_str())
-                    .bind(&previous.active_revision_id)
-                    .bind(previous.enabled)
-                    .bind(&previous.trust_level)
-                    .bind(previous.status.as_str())
-                    .bind(previous.installed_at.to_rfc3339())
-                    .bind(previous.updated_at.to_rfc3339())
-                    .bind(package_id.as_str())
-                    .bind(failed_revision_id)
-                    .execute(&mut *tx)
-                    .await?;
-                }
-            }
-            Ok(())
-        }
-        .await;
-        crate::skill_state_transactions::finish(tx, result).await
+        binding
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(Into::into)
     }
 }
