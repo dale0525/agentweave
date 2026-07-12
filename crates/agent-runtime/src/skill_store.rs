@@ -186,6 +186,10 @@ impl SkillRevisionStore {
             })
     }
 
+    pub(crate) async fn checkpoint(&self, point: StoreFaultPoint) {
+        self.faults.checkpoint(point).await;
+    }
+
     pub async fn create_staging_revision(
         &self,
         source: &Path,

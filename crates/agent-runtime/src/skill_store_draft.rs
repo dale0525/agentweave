@@ -9,6 +9,7 @@ use crate::skill_store_fs::{
 use crate::skill_store_locks::acquire_revision_lock;
 use crate::skill_store_operations::{error_is_not_found, storage_path};
 use crate::skill_store_prepared_fs::open_regular_file;
+use crate::skill_store_public_types::SkillStoreBoundaryError;
 use crate::skill_store_secure_roots::{
     ensure_opened_child_directory, open_prepared_directory, opened_package_snapshot,
     remove_opened_tree, reserve_opened_directory,
@@ -31,7 +32,10 @@ impl SkillRevisionStore {
     ) -> anyhow::Result<StagingPackageSnapshot> {
         let snapshot = self.snapshot_inactive_revision(revision_id).await?;
         if snapshot.record.status != crate::skill_state::SkillRevisionStatus::Staging {
-            anyhow::bail!("revision is not an editable staging revision: {revision_id}");
+            return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                "revision is not an editable staging revision"
+            ))
+            .into());
         }
         Ok(snapshot)
     }
@@ -40,20 +44,19 @@ impl SkillRevisionStore {
         &self,
         revision_id: &str,
     ) -> anyhow::Result<StagingPackageSnapshot> {
-        let observed = self
-            .state
-            .get_revision(revision_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("skill revision not found: {revision_id}"))?;
+        let observed = self.state.get_revision(revision_id).await?.ok_or_else(|| {
+            SkillStoreBoundaryError::NotFound(anyhow::anyhow!("skill revision not found"))
+        })?;
         let _revision_guard =
             acquire_revision_lock(&self.paths.identity, revision_id, &self.faults).await?;
-        let record = self
-            .state
-            .get_revision(revision_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("skill revision not found: {revision_id}"))?;
+        let record = self.state.get_revision(revision_id).await?.ok_or_else(|| {
+            SkillStoreBoundaryError::NotFound(anyhow::anyhow!("skill revision not found"))
+        })?;
         if record != observed {
-            anyhow::bail!("skill revision changed while waiting for revision lock: {revision_id}");
+            return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                "skill revision changed while waiting for revision lock"
+            ))
+            .into());
         }
         self.paths.verify_identity()?;
         let (identity, relative) = match record.status {
@@ -69,7 +72,10 @@ impl SkillRevisionStore {
                 (self.paths.quarantine_identity(), PathBuf::from(revision_id))
             }
             crate::skill_state::SkillRevisionStatus::Managed => {
-                anyhow::bail!("managed revision is not an inactive draft: {revision_id}")
+                return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                    "managed revision is not an inactive draft"
+                ))
+                .into());
             }
         };
         let directory = open_prepared_directory(identity, &relative).await?;
@@ -186,16 +192,26 @@ impl SkillRevisionStore {
                 }
             }
             let snapshot =
-                opened_package_snapshot(&candidate_directory, self.limits.package_limits()).await?;
+                opened_package_snapshot(&candidate_directory, self.limits.package_limits())
+                    .await
+                    .map_err(SkillStoreBoundaryError::InvalidInput)?;
             let descriptor = snapshot.descriptor.descriptor;
-            descriptor.validate()?;
+            descriptor
+                .validate()
+                .map_err(SkillStoreBoundaryError::InvalidInput)?;
             if descriptor.id != record.package_id {
-                anyhow::bail!("draft package id changed during update");
+                return Err(SkillStoreBoundaryError::InvalidInput(anyhow::anyhow!(
+                    "draft package id changed during update"
+                ))
+                .into());
             }
             let recorded_descriptor: crate::skill_package::SkillPackageDescriptor =
                 serde_json::from_value(record.descriptor_json.clone())?;
             if descriptor.kind != recorded_descriptor.kind {
-                anyhow::bail!("draft package kind cannot be changed during update");
+                return Err(SkillStoreBoundaryError::InvalidInput(anyhow::anyhow!(
+                    "draft package kind cannot be changed during update"
+                ))
+                .into());
             }
             let metadata = SkillRevisionMetadata {
                 version: descriptor.version.to_string(),

@@ -869,6 +869,64 @@ async fn task10_service_errors_map_to_stable_http_boundaries_without_leaks() {
         .as_str()
         .unwrap()
         .to_string();
+    let invalid_update = test
+        .app
+        .clone()
+        .oneshot(request(
+            "PUT",
+            &format!("/owner/skills/drafts/{revision_id}"),
+            token,
+            Some(json!({"files": [{
+                "path": "general-agent.json",
+                "content": "{ private malformed descriptor"
+            }]})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid_update.status(), StatusCode::BAD_REQUEST);
+    let invalid_body = response_json(invalid_update).await.to_string();
+    assert!(!invalid_body.contains("private malformed descriptor"));
+    assert!(!invalid_body.contains(test.roots.app_root.to_string_lossy().as_ref()));
+
+    let malformed_import_root = test.roots.import_root.join("malformed");
+    std::fs::create_dir_all(&malformed_import_root).unwrap();
+    std::fs::write(malformed_import_root.join("general-agent.json"), "{ bad").unwrap();
+    std::fs::write(malformed_import_root.join("SKILL.md"), "# Bad").unwrap();
+    let invalid_import = test
+        .app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/owner/skills/drafts/import",
+            token,
+            Some(json!({"name": "malformed"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid_import.status(), StatusCode::BAD_REQUEST);
+
+    test.store.promote_revision(&revision_id).await.unwrap();
+    let wrong_lifecycle = test
+        .app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/owner/skills/drafts/{revision_id}/test"),
+            token,
+            Some(json!({})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_lifecycle.status(), StatusCode::CONFLICT);
+
+    let internal_draft = test
+        .service
+        .create_draft(
+            &task10_actor("owner-1"),
+            serde_json::from_value(draft_body("com.example.internal-boundary")).unwrap(),
+        )
+        .await
+        .unwrap();
     let staging = test.store.paths().staging.clone();
     std::fs::rename(&staging, staging.with_extension("moved")).unwrap();
     std::fs::create_dir(&staging).unwrap();
@@ -876,7 +934,10 @@ async fn task10_service_errors_map_to_stable_http_boundaries_without_leaks() {
         .app
         .oneshot(request(
             "POST",
-            &format!("/owner/skills/drafts/{revision_id}/validate"),
+            &format!(
+                "/owner/skills/drafts/{}/validate",
+                internal_draft.revision_id
+            ),
             token,
             Some(json!({})),
         ))

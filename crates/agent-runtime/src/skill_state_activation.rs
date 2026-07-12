@@ -39,7 +39,8 @@ impl SkillStateStore {
             generation,
             members,
         } = input;
-        crate::skill_state_rows::validate_uuid_v4("approval_id", approval_id)?;
+        crate::skill_state_rows::validate_uuid_v4("approval_id", approval_id)
+            .map_err(crate::skill_state::SkillStateBoundaryError::InvalidInput)?;
         let generation =
             i64::try_from(generation).context("snapshot generation exceeds SQLite range")?;
         let members = serde_json::to_string(&members)?;
@@ -53,14 +54,14 @@ impl SkillStateStore {
                 .bind(approval_id)
                 .fetch_optional(&mut *tx)
                 .await?
-                .context("skill approval not found")?;
+                .ok_or_else(|| state_not_found("skill approval not found"))?;
             let approval = approval_from_row(&approval_row)?;
             if approval.status != crate::skill_state::SkillApprovalStatus::Pending
                 || approval.requested_by == approver_id
                 || approval.package_id != *package_id
                 || approval.revision_id != revision_id
             {
-                anyhow::bail!("skill approval conflicts with current state");
+                return Err(state_conflict("skill approval conflicts with current state"));
             }
             let binding_json: String = sqlx::query_scalar(
                 "SELECT binding_json FROM skill_approval_bindings WHERE approval_id = ?",
@@ -68,9 +69,9 @@ impl SkillStateStore {
             .bind(approval_id)
             .fetch_optional(&mut *tx)
             .await?
-            .context("activation approval binding is missing")?;
+            .ok_or_else(|| state_conflict("activation approval binding is missing"))?;
             if serde_json::from_str::<serde_json::Value>(&binding_json)? != *expected_binding {
-                anyhow::bail!("activation approval binding is stale");
+                return Err(state_conflict("activation approval binding is stale"));
             }
 
             let installation_query = format!(
@@ -83,7 +84,7 @@ impl SkillStateStore {
                 .map(|row| installation_from_row(&row))
                 .transpose()?;
             if current_installation.as_ref() != previous_installation {
-                anyhow::bail!("skill installation changed during activation");
+                return Err(state_conflict("skill installation changed during activation"));
             }
 
             let changed = sqlx::query(
@@ -108,7 +109,7 @@ impl SkillStateStore {
             .execute(&mut *tx)
             .await?;
             if changed.rows_affected() != 1 {
-                anyhow::bail!("skill revision changed during activation");
+                return Err(state_conflict("skill revision changed during activation"));
             }
 
             sqlx::query(
@@ -139,7 +140,7 @@ impl SkillStateStore {
             .execute(&mut *tx)
             .await?;
             if resolved.rows_affected() != 1 {
-                anyhow::bail!("skill approval could not be resolved");
+                return Err(state_conflict("skill approval could not be resolved"));
             }
 
             sqlx::query(
@@ -166,7 +167,9 @@ impl SkillStateStore {
             .execute(&mut *tx)
             .await?;
             if activated.rows_affected() != 1 {
-                anyhow::bail!("snapshot publication state could not be activated");
+                return Err(state_conflict(
+                    "snapshot publication state could not be activated",
+                ));
             }
             super::skill_state::insert_audit(
                 &mut *tx,
@@ -274,7 +277,8 @@ impl SkillStateStore {
         &self,
         approval_id: &str,
     ) -> anyhow::Result<Option<serde_json::Value>> {
-        crate::skill_state_rows::validate_uuid_v4("approval_id", approval_id)?;
+        crate::skill_state_rows::validate_uuid_v4("approval_id", approval_id)
+            .map_err(crate::skill_state::SkillStateBoundaryError::InvalidInput)?;
         let binding: Option<String> = sqlx::query_scalar(
             "SELECT binding_json FROM skill_approval_bindings WHERE approval_id = ?",
         )
@@ -286,4 +290,12 @@ impl SkillStateStore {
             .transpose()
             .map_err(Into::into)
     }
+}
+
+fn state_conflict(message: &'static str) -> anyhow::Error {
+    crate::skill_state::SkillStateBoundaryError::Conflict(anyhow::anyhow!(message)).into()
+}
+
+fn state_not_found(message: &'static str) -> anyhow::Error {
+    crate::skill_state::SkillStateBoundaryError::NotFound(anyhow::anyhow!(message)).into()
 }

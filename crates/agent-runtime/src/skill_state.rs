@@ -19,6 +19,16 @@ pub use crate::skill_state_rows::{
     SkillRevisionStatus, SkillSnapshotRecord, SkillSnapshotStatus,
 };
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SkillStateBoundaryError {
+    #[error("invalid skill state request")]
+    InvalidInput(#[source] anyhow::Error),
+    #[error("skill state resource not found")]
+    NotFound(#[source] anyhow::Error),
+    #[error("skill state conflicts with current state")]
+    Conflict(#[source] anyhow::Error),
+}
+
 #[derive(Clone)]
 pub struct SkillStateStore {
     storage: Storage,
@@ -382,7 +392,8 @@ impl SkillStateStore {
         &self,
         approval_id: &str,
     ) -> anyhow::Result<Option<SkillApprovalRecord>> {
-        validate_uuid_v4("approval_id", approval_id)?;
+        validate_uuid_v4("approval_id", approval_id)
+            .map_err(SkillStateBoundaryError::InvalidInput)?;
         let query = format!("SELECT {APPROVAL_COLUMNS} FROM skill_approvals WHERE approval_id = ?");
         sqlx::query(&query)
             .bind(approval_id)
@@ -416,7 +427,8 @@ impl SkillStateStore {
         actor_id: &str,
         target: SkillApprovalStatus,
     ) -> anyhow::Result<SkillApprovalRecord> {
-        validate_uuid_v4("approval_id", approval_id)?;
+        validate_uuid_v4("approval_id", approval_id)
+            .map_err(SkillStateBoundaryError::InvalidInput)?;
         let mut tx = self.storage.pool().begin().await?;
         let result = async {
             let resolved_at = Utc::now().to_rfc3339();
@@ -464,15 +476,26 @@ impl SkillStateStore {
                 .bind(approval_id)
                 .fetch_optional(&mut *tx)
                 .await?
-                .with_context(|| format!("skill approval not found: {approval_id}"))?;
+                .ok_or_else(|| {
+                    SkillStateBoundaryError::NotFound(anyhow::anyhow!("skill approval not found"))
+                })?;
             let approval = approval_from_row(&row)?;
             if approval.status != SkillApprovalStatus::Pending {
-                anyhow::bail!("skill approval already resolved: {approval_id}");
+                return Err(SkillStateBoundaryError::Conflict(anyhow::anyhow!(
+                    "skill approval already resolved"
+                ))
+                .into());
             }
             if target == SkillApprovalStatus::Approved && approval.requested_by == actor_id {
-                anyhow::bail!("requester cannot approve their own request");
+                return Err(SkillStateBoundaryError::Conflict(anyhow::anyhow!(
+                    "requester cannot approve their own request"
+                ))
+                .into());
             }
-            anyhow::bail!("skill approval could not be resolved: {approval_id}")
+            Err(SkillStateBoundaryError::Conflict(anyhow::anyhow!(
+                "skill approval could not be resolved"
+            ))
+            .into())
         }
         .await;
         crate::skill_state_transactions::finish(tx, result).await

@@ -586,12 +586,12 @@ async fn concurrent_approval_resolution_has_one_winner_and_business_loser() {
     let reject = await_task(reject).await;
 
     assert_eq!(approve.is_ok() as u8 + reject.is_ok() as u8, 1);
-    let loser = approve.err().or_else(|| reject.err()).unwrap().to_string();
-    assert!(
-        loser.contains("already resolved"),
-        "unexpected loser error: {loser}"
-    );
-    assert!(!loser.contains("database is locked"));
+    let loser = approve.err().or_else(|| reject.err()).unwrap();
+    assert!(matches!(
+        loser.downcast_ref::<crate::skill_state::SkillStateBoundaryError>(),
+        Some(crate::skill_state::SkillStateBoundaryError::Conflict(_))
+    ));
+    assert!(!format!("{loser:#}").contains("database is locked"));
     let resolved = SkillStateStore::new(first_storage)
         .get_approval(&approval.approval_id)
         .await

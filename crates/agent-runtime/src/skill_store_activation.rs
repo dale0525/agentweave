@@ -7,6 +7,7 @@ use crate::skill_store_faults::StoreFaultPoint;
 use crate::skill_store_fs::{copy_prepared_package_tree_into_prepared, make_tree_readonly};
 use crate::skill_store_locks::{RevisionOperationGuard, acquire_revision_lock};
 use crate::skill_store_operations::{combine_operation_errors, storage_path};
+use crate::skill_store_public_types::SkillStoreBoundaryError;
 use crate::skill_store_secure_roots::{
     PreparedStoreDirectory, ensure_directory, open_prepared_directory, opened_package_snapshot,
     reserve_opened_directory,
@@ -27,6 +28,38 @@ pub(crate) struct PreparedManagedActivation {
 }
 
 impl SkillRevisionStore {
+    pub(crate) async fn verify_managed_binding(
+        &self,
+        package_id: &crate::skill_package::SkillPackageId,
+        revision_id: &str,
+        storage_path: &std::path::Path,
+        expected_hash: &str,
+    ) -> anyhow::Result<()> {
+        self.paths.verify_identity()?;
+        let record = self
+            .state
+            .get_revision(revision_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("managed revision not found"))?;
+        if record.status != crate::skill_state::SkillRevisionStatus::Managed
+            || record.package_id != *package_id
+            || record.content_hash != expected_hash
+            || std::path::Path::new(&record.storage_path) != storage_path
+        {
+            anyhow::bail!("managed revision binding changed");
+        }
+        let relative = PathBuf::from(package_id.as_str())
+            .join("revisions")
+            .join(revision_id);
+        let directory = open_prepared_directory(self.paths.managed_identity(), &relative).await?;
+        let snapshot = opened_package_snapshot(&directory, self.limits.package_limits()).await?;
+        directory.verify()?;
+        if snapshot.content_hash != expected_hash {
+            anyhow::bail!("managed revision content changed");
+        }
+        Ok(())
+    }
+
     pub(crate) async fn prepare_managed_activation(
         &self,
         revision_id: &str,
@@ -34,11 +67,9 @@ impl SkillRevisionStore {
     ) -> anyhow::Result<PreparedManagedActivation> {
         let revision_lock =
             acquire_revision_lock(&self.paths.identity, revision_id, &self.faults).await?;
-        let record = self
-            .state
-            .get_revision(revision_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("skill revision not found"))?;
+        let record = self.state.get_revision(revision_id).await?.ok_or_else(|| {
+            SkillStoreBoundaryError::NotFound(anyhow::anyhow!("skill revision not found"))
+        })?;
         expectation_record(revision_id, &record, &expectation)?;
         self.paths.verify_identity()?;
         let (_, source_relative) = self.staging_revision_path(&record)?;
@@ -50,7 +81,10 @@ impl SkillRevisionStore {
             || metadata.validation_json != expectation.validation_json
             || metadata.version != expectation.version
         {
-            anyhow::bail!("activation approval is stale");
+            return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                "activation approval is stale"
+            ))
+            .into());
         }
 
         let package_relative = PathBuf::from(record.package_id.as_str()).join("revisions");
@@ -59,7 +93,15 @@ impl SkillRevisionStore {
         let destination_path = self.paths.managed.join(&destination_relative);
         let destination_storage = storage_path(&destination_path)?;
         let destination =
-            reserve_opened_directory(self.paths.managed_identity(), &destination_relative).await?;
+            reserve_opened_directory(self.paths.managed_identity(), &destination_relative)
+                .await
+                .map_err(|error| {
+                    if is_already_exists(&error) {
+                        SkillStoreBoundaryError::Conflict(error).into()
+                    } else {
+                        error
+                    }
+                })?;
         let prepare_result = async {
             copy_prepared_package_tree_into_prepared(
                 &source,
@@ -175,7 +217,21 @@ fn expectation_record<'a>(
         || SkillRevisionExpectation::from(record) != *expectation
         || expectation.status != crate::skill_state::SkillRevisionStatus::Staging
     {
-        anyhow::bail!("activation approval is stale");
+        return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+            "activation approval is stale"
+        ))
+        .into());
     }
     Ok(record)
+}
+
+fn is_already_exists(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists)
+            || cause
+                .downcast_ref::<rustix::io::Errno>()
+                .is_some_and(|error| *error == rustix::io::Errno::EXIST)
+    })
 }

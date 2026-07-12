@@ -223,7 +223,10 @@ async fn approval_cannot_be_approved_by_requesting_actor() {
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("requester cannot approve"));
+    assert!(matches!(
+        error.downcast_ref::<crate::skill_state::SkillStateBoundaryError>(),
+        Some(crate::skill_state::SkillStateBoundaryError::Conflict(_))
+    ));
     let loaded = state
         .get_approval(&approval.approval_id)
         .await

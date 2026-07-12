@@ -11,6 +11,16 @@ pub const DEFAULT_MAX_SKILL_DIRECTORIES: u64 = 2048;
 pub const DEFAULT_MAX_SKILL_DEPTH: u64 = 32;
 pub const DEFAULT_MAX_SKILL_RELATIVE_PATH_BYTES: u64 = 4096;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SkillStoreBoundaryError {
+    #[error("invalid skill package input")]
+    InvalidInput(#[source] anyhow::Error),
+    #[error("skill resource not found")]
+    NotFound(#[source] anyhow::Error),
+    #[error("skill resource conflicts with current state")]
+    Conflict(#[source] anyhow::Error),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SkillStoreLimits {
     pub max_file_bytes: u64,

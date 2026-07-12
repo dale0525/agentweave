@@ -71,6 +71,10 @@ impl std::fmt::Debug for ManagedExecutionBinding {
 pub trait SkillSource: Send + Sync {
     fn layer(&self) -> SkillLayer;
     async fn discover(&self) -> anyhow::Result<Vec<DiscoveredSkillPackage>>;
+
+    async fn discover_read_only(&self) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
+        self.discover().await
+    }
 }
 
 pub struct DirectorySkillSource {
@@ -293,19 +297,8 @@ impl ManagedSkillSource {
             }),
         })
     }
-}
 
-#[async_trait]
-impl SkillSource for ManagedSkillSource {
-    fn layer(&self) -> SkillLayer {
-        SkillLayer::Managed
-    }
-
-    async fn discover(&self) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
-        self.issues
-            .write()
-            .expect("managed skill issue lock poisoned")
-            .clear();
+    async fn inspect_active_installations(&self) -> anyhow::Result<ManagedDiscoveryInspection> {
         self.paths.verify_identity()?;
         let root_metadata = tokio::fs::symlink_metadata(&self.paths.managed)
             .await
@@ -322,8 +315,7 @@ impl SkillSource for ManagedSkillSource {
             );
         }
         let installations = self.state.list_active_installations().await?;
-        let mut discovered = Vec::new();
-        let mut issues = Vec::new();
+        let mut inspection = ManagedDiscoveryInspection::default();
         for installation in installations {
             if installation.source_layer != SkillLayerRecord::Managed {
                 continue;
@@ -340,63 +332,111 @@ impl SkillSource for ManagedSkillSource {
                 )
                 .await
             {
-                Ok(package) => discovered.push(package),
-                Err(error) => {
-                    let transient = is_transient_discovery_error(&error);
-                    let reason = format!("{error:#}");
-                    let quarantine_error = if transient {
-                        None
-                    } else {
-                        self.store
-                            .quarantine_revision(revision_id, &reason)
-                            .await
-                            .err()
-                            .map(|error| format!("{error:#}"))
-                    };
-                    let diagnostic_error = if let Some(quarantine_error) = &quarantine_error {
-                        self.state
-                            .record_revision_diagnostic(
-                                &installation.package_id,
-                                revision_id,
-                                "managed_discovery_quarantine_failed",
-                                json!({
-                                    "reason": reason,
-                                    "quarantine_error": quarantine_error,
-                                }),
-                            )
-                            .await
-                            .err()
-                            .map(|error| format!("{error:#}"))
-                    } else {
-                        None
-                    };
-                    issues.push(ManagedSkillIssue {
-                        package_id: installation.package_id.as_str().to_string(),
-                        revision_id: revision_id.to_string(),
-                        reason,
-                        quarantine_error,
-                        diagnostic_error,
-                        recorded_at: chrono::Utc::now(),
-                    });
-                }
+                Ok(package) => inspection.discovered.push(package),
+                Err(error) => inspection.failures.push(ManagedDiscoveryFailure {
+                    package_id: installation.package_id.as_str().to_string(),
+                    revision_id: revision_id.to_string(),
+                    transient: is_transient_discovery_error(&error),
+                    reason: format!("{error:#}"),
+                }),
             }
         }
-        discovered.sort_by(|left, right| {
+        inspection.discovered.sort_by(|left, right| {
             left.descriptor
                 .id
                 .cmp(&right.descriptor.id)
                 .then_with(|| left.root.cmp(&right.root))
         });
-        issues.sort_by(|left, right| {
+        inspection.failures.sort_by(|left, right| {
             left.package_id
                 .cmp(&right.package_id)
                 .then_with(|| left.revision_id.cmp(&right.revision_id))
         });
+        Ok(inspection)
+    }
+}
+
+#[derive(Default)]
+struct ManagedDiscoveryInspection {
+    discovered: Vec<DiscoveredSkillPackage>,
+    failures: Vec<ManagedDiscoveryFailure>,
+}
+
+struct ManagedDiscoveryFailure {
+    package_id: String,
+    revision_id: String,
+    transient: bool,
+    reason: String,
+}
+
+#[async_trait]
+impl SkillSource for ManagedSkillSource {
+    fn layer(&self) -> SkillLayer {
+        SkillLayer::Managed
+    }
+
+    async fn discover(&self) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
+        self.issues
+            .write()
+            .expect("managed skill issue lock poisoned")
+            .clear();
+        let inspection = self.inspect_active_installations().await?;
+        let mut issues = Vec::new();
+        for failure in inspection.failures {
+            let quarantine_error = if failure.transient {
+                None
+            } else {
+                self.store
+                    .quarantine_revision(&failure.revision_id, &failure.reason)
+                    .await
+                    .err()
+                    .map(|error| format!("{error:#}"))
+            };
+            let diagnostic_error = if let Some(quarantine_error) = &quarantine_error {
+                let package_id = crate::skill_package::SkillPackageId::parse(&failure.package_id)
+                    .expect("managed installation package id must remain valid");
+                self.state
+                    .record_revision_diagnostic(
+                        &package_id,
+                        &failure.revision_id,
+                        "managed_discovery_quarantine_failed",
+                        json!({
+                            "reason": failure.reason,
+                            "quarantine_error": quarantine_error,
+                        }),
+                    )
+                    .await
+                    .err()
+                    .map(|error| format!("{error:#}"))
+            } else {
+                None
+            };
+            issues.push(ManagedSkillIssue {
+                package_id: failure.package_id,
+                revision_id: failure.revision_id,
+                reason: failure.reason,
+                quarantine_error,
+                diagnostic_error,
+                recorded_at: chrono::Utc::now(),
+            });
+        }
         *self
             .issues
             .write()
             .expect("managed skill issue lock poisoned") = issues;
-        Ok(discovered)
+        Ok(inspection.discovered)
+    }
+
+    async fn discover_read_only(&self) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
+        let inspection = self.inspect_active_installations().await?;
+        if let Some(failure) = inspection.failures.first() {
+            anyhow::bail!(
+                "managed source inspection failed for package {} revision {}",
+                failure.package_id,
+                failure.revision_id
+            );
+        }
+        Ok(inspection.discovered)
     }
 }
 

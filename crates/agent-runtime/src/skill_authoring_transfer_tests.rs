@@ -113,7 +113,11 @@ async fn import_rejects_native_payloads_links_and_hard_links_without_rows() {
             .import_draft(&actor, std::path::Path::new("linked"))
             .await
             .unwrap_err();
-        assert!(linked.to_string().contains("symlink"), "{linked:#}");
+        assert!(matches!(
+            linked.downcast_ref::<crate::skill_management::SkillManagementError>(),
+            Some(crate::skill_management::SkillManagementError::InvalidRequest(_))
+        ));
+        assert!(!linked.to_string().contains("linked"));
 
         write_package(
             &fixture.imports.path().join("hard-linked"),
@@ -131,10 +135,11 @@ async fn import_rejects_native_payloads_links_and_hard_links_without_rows() {
             .import_draft(&actor, std::path::Path::new("hard-linked"))
             .await
             .unwrap_err();
-        assert!(
-            hard_linked.to_string().contains("hard link"),
-            "{hard_linked:#}"
-        );
+        assert!(matches!(
+            hard_linked.downcast_ref::<crate::skill_management::SkillManagementError>(),
+            Some(crate::skill_management::SkillManagementError::InvalidRequest(_))
+        ));
+        assert!(!hard_linked.to_string().contains("hard-linked"));
     }
 }
 

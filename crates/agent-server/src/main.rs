@@ -260,7 +260,7 @@ async fn build_owner_api_config(
         OwnerSkillManagementService::new(loaded.manager.clone(), revisions, state, host.policy)
             .with_prepared_transfer_roots(import_root, export_root)
             .await?
-            .with_connector_catalog(connector_catalog);
+            .with_connector_catalog(connector_catalog)?;
     let mut principals = vec![(host.token, host.actor)];
     if let (Some(token), Some(actor)) = (host.approver_token, host.approver_actor) {
         principals.push((token, actor));

@@ -82,6 +82,10 @@ pub(crate) struct SkillPublicationGuard {
     _lock: OwnedMutexGuard<()>,
 }
 
+pub(crate) struct SkillPublicationSourceView {
+    packages: Vec<DiscoveredSkillPackage>,
+}
+
 impl SkillManager {
     pub async fn new(config: SkillManagerConfig) -> anyhow::Result<Self> {
         let initial = Arc::new(build_snapshot(&config, 1).await?);
@@ -168,8 +172,10 @@ impl SkillManager {
             anyhow::bail!("skill preview candidate must use the managed layer");
         }
         let base = self.current_snapshot();
-        let candidate_snapshot =
-            Arc::new(build_snapshot_with_candidate(config, base.generation(), candidate).await?);
+        let packages = discover_packages_read_only(config).await?;
+        let candidate_snapshot = Arc::new(
+            build_snapshot_with_candidate(config, base.generation(), packages, candidate).await?,
+        );
         Ok(SkillSnapshotPreview {
             base,
             candidate: candidate_snapshot,
@@ -244,8 +250,18 @@ impl SkillPublicationGuard {
         self.previous.generation()
     }
 
+    pub(crate) async fn inspect_sources(&self) -> anyhow::Result<SkillPublicationSourceView> {
+        let SkillManagerMode::Dynamic(config) = &self.manager.inner.mode else {
+            anyhow::bail!("static skill manager cannot inspect publication sources");
+        };
+        Ok(SkillPublicationSourceView {
+            packages: discover_packages_read_only(config).await?,
+        })
+    }
+
     pub(crate) async fn build_candidate(
         &self,
+        sources: &SkillPublicationSourceView,
         candidate: DiscoveredSkillPackage,
     ) -> anyhow::Result<Arc<SkillSnapshot>> {
         let SkillManagerMode::Dynamic(config) = &self.manager.inner.mode else {
@@ -257,17 +273,9 @@ impl SkillPublicationGuard {
             .checked_add(1)
             .context("skill snapshot generation overflow")?;
         Ok(Arc::new(
-            build_snapshot_with_candidate(config, generation, candidate).await?,
+            build_snapshot_with_candidate(config, generation, sources.packages.clone(), candidate)
+                .await?,
         ))
-    }
-
-    pub(crate) async fn has_builtin(&self, package_id: &SkillPackageId) -> anyhow::Result<bool> {
-        let SkillManagerMode::Dynamic(config) = &self.manager.inner.mode else {
-            anyhow::bail!("static skill manager cannot inspect publication sources");
-        };
-        Ok(discover_packages(config).await?.into_iter().any(|package| {
-            package.layer == SkillLayer::Builtin && package.descriptor.id == *package_id
-        }))
     }
 
     pub(crate) fn publish(self, candidate: Arc<SkillSnapshot>) -> SkillReloadReport {
@@ -307,15 +315,46 @@ async fn build_snapshot(
 async fn build_snapshot_with_candidate(
     config: &SkillManagerConfig,
     generation: u64,
+    mut packages: Vec<DiscoveredSkillPackage>,
     candidate: DiscoveredSkillPackage,
 ) -> anyhow::Result<SkillSnapshot> {
     let candidate_id = candidate.descriptor.id.clone();
-    let mut packages = discover_packages(config).await?;
     packages.retain(|package| {
         !(package.layer == SkillLayer::Managed && package.descriptor.id == candidate_id)
     });
     packages.push(candidate);
     build_snapshot_from_packages(config, generation, packages).await
+}
+
+impl SkillPublicationSourceView {
+    pub(crate) fn has_builtin(&self, package_id: &SkillPackageId) -> bool {
+        self.packages.iter().any(|package| {
+            package.layer == SkillLayer::Builtin && package.descriptor.id == *package_id
+        })
+    }
+
+    pub(crate) async fn verify_managed_bindings(&self) -> anyhow::Result<()> {
+        for package in &self.packages {
+            if package.layer != SkillLayer::Managed {
+                continue;
+            }
+            let binding = package
+                .verified_content
+                .as_ref()
+                .and_then(|content| content.execution_binding.as_ref())
+                .context("managed publication source has no execution binding")?;
+            binding
+                .store
+                .verify_managed_binding(
+                    &binding.package_id,
+                    &binding.revision_id,
+                    &binding.storage_path,
+                    &package.content_hash,
+                )
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 async fn discover_packages(
@@ -325,6 +364,26 @@ async fn discover_packages(
     for source in &config.sources {
         let layer = source.layer();
         let discovered = source.discover().await?;
+        if let Some(package) = discovered.iter().find(|package| package.layer != layer) {
+            anyhow::bail!(
+                "skill source layer {:?} returned package {} with source layer {:?}",
+                layer,
+                package.descriptor.id.as_str(),
+                package.layer
+            );
+        }
+        packages.extend(discovered);
+    }
+    Ok(packages)
+}
+
+async fn discover_packages_read_only(
+    config: &SkillManagerConfig,
+) -> anyhow::Result<Vec<DiscoveredSkillPackage>> {
+    let mut packages = Vec::new();
+    for source in &config.sources {
+        let layer = source.layer();
+        let discovered = source.discover_read_only().await?;
         if let Some(package) = discovered.iter().find(|package| package.layer != layer) {
             anyhow::bail!(
                 "skill source layer {:?} returned package {} with source layer {:?}",

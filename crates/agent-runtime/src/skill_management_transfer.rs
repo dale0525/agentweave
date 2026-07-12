@@ -2,7 +2,7 @@ use super::{OwnerSkillManagementService, SkillDraftSummary, SkillManagementError
 use crate::skill_package::{SkillPackageDescriptor, SkillPackageId, SkillPackageKind};
 use crate::skill_policy::{ActorContext, SkillOperation};
 use crate::skill_state::SkillInstallStatus;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 impl OwnerSkillManagementService {
@@ -37,7 +37,10 @@ impl OwnerSkillManagementService {
         let inspected = self
             .revisions
             .inspect_transfer_package(&roots.import, &relative)
-            .await?;
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_store("import_draft", "skill import source", error)
+            })?;
         let descriptor = &inspected.descriptor.descriptor;
         if descriptor.kind == SkillPackageKind::NativeRuntime || inspected.has_runtime_manifest {
             return Err(SkillManagementError::InvalidRequest(
@@ -46,7 +49,6 @@ impl OwnerSkillManagementService {
             .into());
         }
         self.authorize(actor, SkillOperation::Import, descriptor.kind)?;
-        self.ensure_required_tools_known(&descriptor.requires.runtime_tools)?;
         let imported = self
             .revisions
             .import_quarantined_revision(
@@ -56,14 +58,21 @@ impl OwnerSkillManagementService {
                 &inspected.content_hash,
                 &actor.actor_id,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_store("import_draft", "skill import", error)
+            })?;
+        let imported_descriptor: SkillPackageDescriptor =
+            serde_json::from_value(imported.descriptor_json.clone()).map_err(|error| {
+                SkillManagementError::internal("import_draft", anyhow::Error::new(error))
+            })?;
         Ok(SkillDraftSummary {
-            package_id: descriptor.id.clone(),
+            package_id: imported.package_id,
             revision_id: imported.revision_id,
-            version: descriptor.version.to_string(),
-            kind: descriptor.kind,
-            validation: json!({"ok": false, "status": "quarantined"}),
-            status: "quarantined".into(),
+            version: imported.version,
+            kind: imported_descriptor.kind,
+            validation: imported.validation_json,
+            status: imported.status.as_str().into(),
         })
     }
 
@@ -114,11 +123,17 @@ impl OwnerSkillManagementService {
             || installation.status != SkillInstallStatus::Active
             || !installation.enabled
         {
-            anyhow::bail!("skill is not an active managed package");
+            return Err(SkillManagementError::Conflict {
+                resource: "active managed skill",
+            }
+            .into());
         }
-        let revision_id = installation
-            .active_revision_id
-            .ok_or_else(|| anyhow::anyhow!("active managed skill has no revision"))?;
+        let revision_id =
+            installation
+                .active_revision_id
+                .ok_or(SkillManagementError::Conflict {
+                    resource: "active managed skill",
+                })?;
         let record = self
             .state
             .get_revision(&revision_id)
@@ -131,24 +146,22 @@ impl OwnerSkillManagementService {
             serde_json::from_value(record.descriptor_json.clone())?;
         self.authorize(actor, SkillOperation::Export, descriptor.kind)?;
         if record.validation_json.get("ok").and_then(Value::as_bool) != Some(true) {
-            anyhow::bail!("active managed revision is not verified");
+            return Err(SkillManagementError::Conflict {
+                resource: "active managed revision validation",
+            }
+            .into());
         }
-        self.revisions
+        Ok(self
+            .revisions
             .export_managed_revision(&record, &roots.export, &relative)
             .await
             .map_err(|error| {
-                if error
-                    .to_string()
-                    .contains("conflicts with different content")
-                {
-                    SkillManagementError::Conflict {
-                        resource: "skill export destination",
-                    }
-                    .into()
-                } else {
-                    error
-                }
-            })
+                SkillManagementError::from_store(
+                    "export_managed_skill",
+                    "skill export destination",
+                    error,
+                )
+            })?)
     }
 }
 

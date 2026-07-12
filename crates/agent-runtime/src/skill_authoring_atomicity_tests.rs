@@ -101,7 +101,10 @@ async fn disallowed_kind_change_preserves_original_tree_and_row() {
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("kind cannot be changed"));
+    assert!(matches!(
+        error.downcast_ref::<crate::skill_management::SkillManagementError>(),
+        Some(crate::skill_management::SkillManagementError::InvalidRequest(_))
+    ));
     assert_eq!(
         state
             .get_revision(&draft.revision_id)
@@ -212,6 +215,7 @@ async fn outer_cancellation_finishes_one_consistent_multi_file_commit() {
 #[tokio::test]
 async fn approval_audit_failure_does_not_leave_a_pending_request() {
     let (service, state, draft, _) = fixture(SkillStoreTestFaults::default()).await;
+    let mut events = service.subscribe_events();
     service
         .validate_draft(
             &ActorContext::owner("validator", [SkillGrant::Validate]),
@@ -228,13 +232,17 @@ async fn approval_audit_failure_does_not_leave_a_pending_request() {
     .await
     .unwrap();
 
-    service
+    let error = service
         .request_activation(
             &ActorContext::owner("requester", [SkillGrant::Activate]),
             &draft.revision_id,
         )
         .await
         .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<crate::skill_management::SkillManagementError>(),
+        Some(crate::skill_management::SkillManagementError::Internal { .. })
+    ));
 
     let pending: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM skill_approvals WHERE revision_id = ? AND status = 'pending'",
@@ -244,6 +252,11 @@ async fn approval_audit_failure_does_not_leave_a_pending_request() {
     .await
     .unwrap();
     assert_eq!(pending, 0);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), events.recv())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

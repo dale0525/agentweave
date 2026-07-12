@@ -1,10 +1,11 @@
 use crate::skill_package::{LoadedPackageDescriptor, SkillPackageId, SkillPackageKind};
 use crate::skill_state::{NewSkillRevision, SkillRevisionRecord, SkillRevisionStatus};
-use crate::skill_store::{SkillRevisionStore, StoredSkillRevision};
+use crate::skill_store::SkillRevisionStore;
 use crate::skill_store_faults::StoreFaultPoint;
 use crate::skill_store_fs::copy_prepared_package_tree_into_prepared;
 use crate::skill_store_locks::StoreRootIdentity;
-use crate::skill_store_operations::{storage_path, stored_revision, with_compensation};
+use crate::skill_store_operations::{error_is_not_found, storage_path, with_compensation};
+use crate::skill_store_public_types::SkillStoreBoundaryError;
 use crate::skill_store_secure_roots::{
     open_prepared_directory, opened_package_snapshot, remove_opened_tree, reserve_opened_directory,
 };
@@ -118,9 +119,21 @@ impl SkillRevisionStore {
         relative: &Path,
     ) -> anyhow::Result<TransferPackageSnapshot> {
         root.verify("skill import")?;
-        let directory = open_prepared_directory(root, relative).await?;
-        let snapshot = opened_package_snapshot(&directory, self.import_limits()).await?;
-        directory.verify()?;
+        let directory = open_prepared_directory(root, relative)
+            .await
+            .map_err(|error| {
+                if error_is_not_found(&error) {
+                    SkillStoreBoundaryError::NotFound(error)
+                } else {
+                    SkillStoreBoundaryError::InvalidInput(error)
+                }
+            })?;
+        let snapshot = opened_package_snapshot(&directory, self.import_limits())
+            .await
+            .map_err(SkillStoreBoundaryError::InvalidInput)?;
+        directory
+            .verify()
+            .map_err(SkillStoreBoundaryError::Conflict)?;
         Ok(TransferPackageSnapshot {
             descriptor: snapshot.descriptor,
             content_hash: snapshot.content_hash,
@@ -135,7 +148,7 @@ impl SkillRevisionStore {
         package_id: &SkillPackageId,
         expected_hash: &str,
         actor_id: &str,
-    ) -> anyhow::Result<StoredSkillRevision> {
+    ) -> anyhow::Result<SkillRevisionRecord> {
         root.verify("skill import")?;
         self.paths.verify_identity()?;
         let source = open_prepared_directory(root, relative).await?;
@@ -163,6 +176,9 @@ impl SkillRevisionStore {
         let reserved =
             reserve_opened_directory(self.paths.quarantine_identity(), Path::new(&revision_id))
                 .await?;
+        self.faults
+            .checkpoint(StoreFaultPoint::ImportAfterReserve)
+            .await;
         let result = async {
             copy_prepared_package_tree_into_prepared(
                 &source,
@@ -172,6 +188,9 @@ impl SkillRevisionStore {
                 StoreFaultPoint::IncomingCopyFile,
             )
             .await?;
+            self.faults
+                .checkpoint(StoreFaultPoint::ImportAfterCopy)
+                .await;
             let snapshot = opened_package_snapshot(&reserved, self.import_limits()).await?;
             if snapshot.content_hash != expected_hash {
                 anyhow::bail!("import package changed after inspection");
@@ -182,6 +201,10 @@ impl SkillRevisionStore {
                 anyhow::bail!("native runtime imports are disabled by default");
             }
             let descriptor = snapshot.descriptor.descriptor;
+            self.faults
+                .checkpoint(StoreFaultPoint::ImportBeforeRow)
+                .await;
+            self.faults.check(StoreFaultPoint::ImportBeforeRow)?;
             let record = self
                 .state
                 .create_quarantined_revision_record(
@@ -197,16 +220,33 @@ impl SkillRevisionStore {
                     },
                 )
                 .await?;
-            Ok(stored_revision(record, destination.clone(), Vec::new()))
+            self.faults
+                .checkpoint(StoreFaultPoint::ImportAfterRow)
+                .await;
+            self.faults
+                .checkpoint(StoreFaultPoint::ImportBeforeFinalize)
+                .await;
+            Ok(record)
         }
         .await;
-        match result {
+        let result = match result {
             Ok(revision) => Ok(revision),
-            Err(error) => match remove_opened_tree(&reserved).await {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(with_compensation(error, cleanup)),
-            },
-        }
+            Err(error) => {
+                let cleanup = remove_opened_tree(&reserved).await;
+                let injected_cleanup = self.faults.check(StoreFaultPoint::TransferCleanup);
+                match (cleanup, injected_cleanup) {
+                    (Ok(()), Ok(())) => Err(error),
+                    (Err(cleanup), Ok(())) => Err(with_compensation(error, cleanup)),
+                    (Ok(()), Err(cleanup)) | (Err(_), Err(cleanup)) => {
+                        Err(with_compensation(error, cleanup))
+                    }
+                }
+            }
+        };
+        self.faults
+            .checkpoint(StoreFaultPoint::ImportTerminal)
+            .await;
+        result
     }
 
     pub(crate) async fn export_managed_revision(
@@ -216,7 +256,10 @@ impl SkillRevisionStore {
         relative: &Path,
     ) -> anyhow::Result<PathBuf> {
         if record.status != SkillRevisionStatus::Managed {
-            anyhow::bail!("only managed revisions can be exported");
+            return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                "only managed revisions can be exported"
+            ))
+            .into());
         }
         root.verify("skill export")?;
         self.paths.verify_identity()?;
@@ -239,7 +282,10 @@ impl SkillRevisionStore {
                     if existing_snapshot.content_hash == record.content_hash {
                         return Ok(root.path().join(relative));
                     }
-                    anyhow::bail!("export destination conflicts with different content")
+                    return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                        "export destination conflicts with different content"
+                    ))
+                    .into());
                 }
                 Err(_) => return Err(reserve_error),
             },
@@ -297,7 +343,7 @@ impl SkillRevisionStore {
     async fn verified_inactive_replay(
         &self,
         record: SkillRevisionRecord,
-    ) -> anyhow::Result<StoredSkillRevision> {
+    ) -> anyhow::Result<SkillRevisionRecord> {
         let (identity, relative, path) = match record.status {
             SkillRevisionStatus::Staging => {
                 let (path, relative) = self.staging_revision_path(&record)?;
@@ -319,7 +365,8 @@ impl SkillRevisionStore {
         {
             anyhow::bail!("inactive import replay bytes do not match recorded metadata");
         }
-        Ok(stored_revision(record, path, Vec::new()))
+        let _ = path;
+        Ok(record)
     }
 }
 

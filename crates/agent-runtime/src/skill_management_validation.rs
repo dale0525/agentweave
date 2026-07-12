@@ -10,6 +10,14 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+const DRAFT_TEST_TERMINAL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+
+struct DraftTestEvaluation {
+    candidate: crate::skill_store_draft::StagingPackageSnapshot,
+    validation: SkillDraftValidation,
+    result: SkillDraftTestResult,
+}
+
 impl OwnerSkillManagementService {
     pub async fn validate_draft(
         &self,
@@ -32,7 +40,10 @@ impl OwnerSkillManagementService {
         let candidate = self
             .revisions
             .snapshot_inactive_revision(revision_id)
-            .await?;
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_store("validate_draft", "skill revision", error)
+            })?;
         let descriptor = &candidate.descriptor.descriptor;
         self.authorize(actor, SkillOperation::Validate, descriptor.kind)?;
         if self.policy.protected_packages.contains(&descriptor.id)
@@ -103,7 +114,11 @@ impl OwnerSkillManagementService {
                 errors.push(format!("unknown required host tool: {tool}"));
             }
         }
-        for connector in &descriptor.requires.connectors {
+        let parsed_connectors = super::parse_connector_ids(&descriptor.requires.connectors);
+        for error in &parsed_connectors.errors {
+            errors.push(format!("invalid required connector: {error}"));
+        }
+        for connector in &parsed_connectors.canonical {
             if !self.connector_catalog.contains(connector) {
                 errors.push(format!("unknown required connector: {connector}"));
             }
@@ -160,21 +175,28 @@ impl OwnerSkillManagementService {
             .iter()
             .find(|resolved| resolved.package.descriptor.id == descriptor.id)
             .map(|resolved| &resolved.package.descriptor);
-        let permission_diff = permission_diff(descriptor, active_descriptor);
+        let permission_diff =
+            permission_diff(descriptor, active_descriptor, &parsed_connectors.canonical);
         let (resolver_status, resolver_errors) = match preview {
             Ok(preview) => {
                 let exact_active = preview.candidate.packages().iter().any(|resolved| {
-                    resolved.package.layer == SkillLayer::Managed
-                        && resolved.package.descriptor.id == descriptor.id
-                        && resolved.package.content_hash == candidate.content_hash
+                    super::is_exact_managed_candidate(
+                        resolved,
+                        &descriptor.id,
+                        &candidate.record.revision_id,
+                        &candidate.content_hash,
+                    )
                 });
                 if exact_active {
                     ("active".to_string(), Vec::new())
                 } else if let Some(inactive) =
                     preview.candidate.inactive().iter().find(|resolved| {
-                        resolved.package.layer == SkillLayer::Managed
-                            && resolved.package.descriptor.id == descriptor.id
-                            && resolved.package.content_hash == candidate.content_hash
+                        super::is_exact_managed_candidate(
+                            resolved,
+                            &descriptor.id,
+                            &candidate.record.revision_id,
+                            &candidate.content_hash,
+                        )
                     })
                 {
                     let message = format!(
@@ -209,7 +231,7 @@ impl OwnerSkillManagementService {
             errors,
             warnings,
             required_tools: sorted_strings(&descriptor.requires.runtime_tools),
-            required_connectors: sorted_strings(&descriptor.requires.connectors),
+            required_connectors: parsed_connectors.canonical,
             dependencies: descriptor
                 .requires
                 .packages
@@ -220,6 +242,7 @@ impl OwnerSkillManagementService {
             resolver_status,
             resolver_errors,
             permission_diff,
+            revision_id: candidate.record.revision_id.clone(),
             content_hash: candidate.content_hash.clone(),
             snapshot_generation: runtime_snapshot.generation(),
         };
@@ -265,7 +288,110 @@ impl OwnerSkillManagementService {
         actor: &crate::skill_policy::ActorContext,
         revision_id: &str,
     ) -> anyhow::Result<SkillDraftTestResult> {
+        let deadline = tokio::time::Instant::now() + self.draft_test_deadline;
+        let service = self.clone();
+        let actor = actor.clone();
+        let revision_id = revision_id.to_string();
+        tokio::spawn(async move {
+            service
+                .test_draft_detached(&actor, &revision_id, deadline)
+                .await
+        })
+        .await
+        .map_err(|error| SkillManagementError::internal("test_draft", anyhow::Error::new(error)))?
+    }
+
+    async fn test_draft_detached(
+        &self,
+        actor: &crate::skill_policy::ActorContext,
+        revision_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> anyhow::Result<SkillDraftTestResult> {
+        let evaluation =
+            match tokio::time::timeout_at(deadline, self.evaluate_draft_test(actor, revision_id))
+                .await
+            {
+                Ok(result) => result?,
+                Err(_) => tokio::time::timeout(
+                    DRAFT_TEST_TERMINAL_DEADLINE,
+                    self.timeout_draft_test(actor, revision_id),
+                )
+                .await
+                .map_err(|_| {
+                    SkillManagementError::internal(
+                        "test_draft",
+                        anyhow::anyhow!("draft test timeout state could not be loaded"),
+                    )
+                })??,
+            };
+        let result = evaluation.result.clone();
+        self.persist_draft_test_owned(evaluation).await?;
+        Ok(result)
+    }
+
+    async fn evaluate_draft_test(
+        &self,
+        actor: &crate::skill_policy::ActorContext,
+        revision_id: &str,
+    ) -> anyhow::Result<DraftTestEvaluation> {
         self.authorize_any_kind(actor, SkillOperation::Test)?;
+        self.revisions
+            .checkpoint(crate::skill_store_faults::StoreFaultPoint::DraftTestBeforeSnapshot)
+            .await;
+        let (candidate, validation) = self.load_draft_test(actor, revision_id).await?;
+        let descriptor = &candidate.descriptor.descriptor;
+        self.revisions
+            .checkpoint(crate::skill_store_faults::StoreFaultPoint::DraftTestBeforePreview)
+            .await;
+        let preview = self
+            .manager
+            .preview_candidate(discovered_candidate(
+                &candidate,
+                self.revisions.clone(),
+                self.revisions.store_limits(),
+            ))
+            .await;
+        let preview_ok = match preview {
+            Ok(preview) => {
+                let active = preview.candidate.packages().iter().any(|resolved| {
+                    super::is_exact_managed_candidate(
+                        resolved,
+                        &descriptor.id,
+                        &candidate.record.revision_id,
+                        &candidate.content_hash,
+                    )
+                });
+                active && preview.base.generation() == validation.snapshot_generation
+            }
+            Err(_) => false,
+        };
+        if validation.snapshot_generation != self.manager.current_snapshot().generation() {
+            return Err(SkillManagementError::Conflict {
+                resource: "draft validation generation",
+            }
+            .into());
+        }
+        let error_class = validation_error_class(&validation, preview_ok);
+        Ok(DraftTestEvaluation {
+            result: SkillDraftTestResult {
+                ok: validation.ok && preview_ok,
+                error_class,
+                content_hash: candidate.content_hash.clone(),
+                snapshot_generation: validation.snapshot_generation,
+            },
+            candidate,
+            validation,
+        })
+    }
+
+    async fn load_draft_test(
+        &self,
+        actor: &crate::skill_policy::ActorContext,
+        revision_id: &str,
+    ) -> anyhow::Result<(
+        crate::skill_store_draft::StagingPackageSnapshot,
+        SkillDraftValidation,
+    )> {
         if self
             .state
             .get_revision(revision_id)
@@ -281,7 +407,10 @@ impl OwnerSkillManagementService {
         let candidate = self
             .revisions
             .snapshot_staging_revision(revision_id)
-            .await?;
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_store("test_draft", "skill revision", error)
+            })?;
         let descriptor = &candidate.descriptor.descriptor;
         self.authorize(actor, SkillOperation::Test, descriptor.kind)?;
         let validation: SkillDraftValidation =
@@ -290,7 +419,9 @@ impl OwnerSkillManagementService {
                     "draft must have a persisted validation before testing".into(),
                 )
             })?;
-        if validation.content_hash != candidate.content_hash {
+        if validation.revision_id != candidate.record.revision_id
+            || validation.content_hash != candidate.content_hash
+        {
             return Err(SkillManagementError::Conflict {
                 resource: "draft validation",
             }
@@ -302,84 +433,103 @@ impl OwnerSkillManagementService {
             }
             .into());
         }
-        let preview = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            self.manager.preview_candidate(discovered_candidate(
-                &candidate,
-                self.revisions.clone(),
-                self.revisions.store_limits(),
-            )),
-        )
-        .await;
-        let (preview_ok, timeout) = match preview {
-            Ok(Ok(preview)) => {
-                let active = preview.candidate.packages().iter().any(|resolved| {
-                    resolved.package.layer == SkillLayer::Managed
-                        && resolved.package.descriptor.id == descriptor.id
-                        && resolved.package.content_hash == candidate.content_hash
-                });
-                (
-                    active && preview.base.generation() == validation.snapshot_generation,
-                    false,
+        Ok((candidate, validation))
+    }
+
+    async fn timeout_draft_test(
+        &self,
+        actor: &crate::skill_policy::ActorContext,
+        revision_id: &str,
+    ) -> anyhow::Result<DraftTestEvaluation> {
+        let (candidate, validation) = self.load_draft_test(actor, revision_id).await?;
+        Ok(DraftTestEvaluation {
+            result: SkillDraftTestResult {
+                ok: false,
+                error_class: Some("timeout".into()),
+                content_hash: candidate.content_hash.clone(),
+                snapshot_generation: validation.snapshot_generation,
+            },
+            candidate,
+            validation,
+        })
+    }
+
+    async fn persist_draft_test_owned(
+        &self,
+        evaluation: DraftTestEvaluation,
+    ) -> anyhow::Result<()> {
+        let service = self.clone();
+        let task = tokio::spawn(async move { service.persist_draft_test(evaluation).await });
+        tokio::time::timeout(DRAFT_TEST_TERMINAL_DEADLINE, task)
+            .await
+            .map_err(|_| {
+                SkillManagementError::internal(
+                    "test_draft",
+                    anyhow::anyhow!("draft test terminal persistence timed out"),
                 )
-            }
-            Ok(Err(_)) => (false, false),
-            Err(_) => (false, true),
-        };
-        if validation.snapshot_generation != self.manager.current_snapshot().generation() {
-            return Err(SkillManagementError::Conflict {
-                resource: "draft validation generation",
-            }
-            .into());
-        }
-        let error_class = if timeout {
-            Some("timeout".to_string())
-        } else if validation
-            .errors
-            .iter()
-            .any(|error| error.starts_with("unknown required host tool"))
-        {
-            Some("unknown_tool".to_string())
-        } else if validation
-            .errors
-            .iter()
-            .any(|error| error.starts_with("unknown required connector"))
-        {
-            Some("unknown_connector".to_string())
-        } else if validation
-            .errors
-            .iter()
-            .any(|error| error.starts_with("missing capability"))
-        {
-            Some("forbidden_capability".to_string())
-        } else if !preview_ok {
-            Some("resolver_inactive".to_string())
-        } else if !validation.ok {
-            Some("validation_failed".to_string())
-        } else {
-            None
-        };
-        let result = SkillDraftTestResult {
-            ok: validation.ok && preview_ok && !timeout,
-            error_class,
-            content_hash: candidate.content_hash.clone(),
-            snapshot_generation: validation.snapshot_generation,
-        };
+            })?
+            .map_err(|error| {
+                SkillManagementError::internal("test_draft", anyhow::Error::new(error))
+            })??;
+        Ok(())
+    }
+
+    async fn persist_draft_test(&self, evaluation: DraftTestEvaluation) -> anyhow::Result<()> {
+        let DraftTestEvaluation {
+            candidate,
+            validation,
+            result,
+        } = evaluation;
         let mut persisted = serde_json::to_value(&validation)?;
         persisted["test"] = serde_json::to_value(&result)?;
+        self.revisions
+            .checkpoint(crate::skill_store_faults::StoreFaultPoint::DraftTestBeforePersist)
+            .await;
+        let descriptor_json = serde_json::to_value(&candidate.descriptor.descriptor)?;
         self.state
             .refresh_staging_revision_metadata_cas(
-                revision_id,
+                &candidate.record.revision_id,
                 crate::skill_state::SkillRevisionExpectation::from(&candidate.record),
                 crate::skill_state::SkillRevisionMetadata {
                     version: candidate.record.version,
                     content_hash: candidate.content_hash,
-                    descriptor_json: serde_json::to_value(descriptor)?,
+                    descriptor_json,
                     validation_json: persisted,
                 },
             )
             .await?;
-        Ok(result)
+        self.revisions
+            .checkpoint(crate::skill_store_faults::StoreFaultPoint::DraftTestAfterPersist)
+            .await;
+        Ok(())
+    }
+}
+
+fn validation_error_class(validation: &SkillDraftValidation, preview_ok: bool) -> Option<String> {
+    if validation
+        .errors
+        .iter()
+        .any(|error| error.starts_with("unknown required host tool"))
+    {
+        Some("unknown_tool".to_string())
+    } else if validation
+        .errors
+        .iter()
+        .any(|error| error.starts_with("unknown required connector"))
+    {
+        Some("unknown_connector".to_string())
+    } else if validation
+        .errors
+        .iter()
+        .any(|error| error.starts_with("missing capability"))
+    {
+        Some("forbidden_capability".to_string())
+    } else if !preview_ok {
+        Some("resolver_inactive".to_string())
+    } else if !validation.ok {
+        Some("validation_failed".to_string())
+    } else {
+        None
     }
 }
 
@@ -419,6 +569,7 @@ fn sorted_strings(values: &[String]) -> Vec<String> {
 fn permission_diff(
     candidate: &SkillPackageDescriptor,
     active: Option<&SkillPackageDescriptor>,
+    candidate_connectors: &[String],
 ) -> Value {
     let active_tools: BTreeSet<String> = active
         .map(|descriptor| descriptor.requires.runtime_tools.iter().cloned().collect())
@@ -443,9 +594,7 @@ fn permission_diff(
         .filter(|item| !active_capabilities.contains(*item))
         .cloned()
         .collect::<Vec<_>>();
-    let added_connectors = candidate
-        .requires
-        .connectors
+    let added_connectors = candidate_connectors
         .iter()
         .filter(|item| !active_connectors.contains(*item))
         .cloned()
@@ -462,9 +611,7 @@ fn permission_diff(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let candidate_connectors = candidate
-        .requires
-        .connectors
+    let candidate_connectors = candidate_connectors
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();

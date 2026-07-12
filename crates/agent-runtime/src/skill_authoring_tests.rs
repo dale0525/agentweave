@@ -34,15 +34,63 @@ impl AuthoringFixture {
         Self::with_policy(SkillManagementPolicy::owner_only()).await
     }
 
+    pub(crate) async fn with_faults(faults: crate::skill_store::SkillStoreTestFaults) -> Self {
+        let app = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let imports = tempdir().unwrap();
+        let exports = tempdir().unwrap();
+        let paths = SkillStorePaths::prepare(app.path(), cache.path())
+            .await
+            .unwrap();
+        let storage = Storage::connect("sqlite::memory:").await.unwrap();
+        let state = SkillStateStore::new(storage);
+        let store = SkillRevisionStore::with_test_faults(
+            paths,
+            state.clone(),
+            crate::skill_store::SkillStoreLimits::default(),
+            faults,
+        );
+        let policy = SkillManagementPolicy::owner_only();
+        let manager = SkillManager::new(SkillManagerConfig {
+            sources: vec![Arc::new(ManagedSkillSource::from_store(store.clone()))],
+            platform: PlatformId::Server,
+            capabilities: CapabilitySet::from_names(Vec::<String>::new()),
+            protected_packages: Vec::new(),
+            allowed_overrides: Vec::new(),
+            runtime_version: "0.1.0".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+        let service =
+            OwnerSkillManagementService::new(manager.clone(), store.clone(), state.clone(), policy)
+                .with_transfer_roots(imports.path(), exports.path())
+                .unwrap();
+        Self {
+            _app: app,
+            _cache: cache,
+            _builtin: None,
+            imports,
+            exports,
+            state,
+            store,
+            manager,
+            service,
+        }
+    }
+
     pub(crate) async fn with_connectors(
         connectors: impl IntoIterator<Item = &'static str>,
     ) -> Self {
         let mut fixture = Self::new().await;
-        fixture.service = fixture.service.clone().with_connector_catalog(connectors);
+        fixture.service = fixture
+            .service
+            .clone()
+            .with_connector_catalog(connectors)
+            .unwrap();
         fixture
     }
 
-    async fn with_known_runtime_tool() -> Self {
+    pub(crate) async fn with_known_runtime_tool() -> Self {
         Self::with_known_runtime_tool_and_policy(SkillManagementPolicy::owner_only()).await
     }
 
@@ -700,6 +748,25 @@ async fn side_effecting_management_tool_uses_host_actor_and_bypasses_post_commit
     .await;
     assert!(!spoofed.ok);
     assert_eq!(spoofed.error.unwrap().code, "invalid_arguments");
+
+    let malformed = SkillManagementTools::execute(
+        &context,
+        "update_skill_draft",
+        "malformed",
+        json!({
+            "revision_id": draft.revision_id,
+            "files": [{
+                "path": "general-agent.json",
+                "content": "{ private malformed descriptor"
+            }]
+        }),
+    )
+    .await;
+    assert!(!malformed.ok);
+    let error = malformed.error.unwrap();
+    assert_eq!(error.code, "invalid_arguments");
+    assert!(!error.message.contains("private malformed descriptor"));
+    assert!(!error.message.contains("staging"));
 
     let mut config = RuntimeConfig::read_only(".", ".").without_builtin_tools();
     config.output_limit_bytes = 1;

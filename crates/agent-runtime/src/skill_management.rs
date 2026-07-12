@@ -36,6 +36,7 @@ pub struct OwnerSkillManagementService {
     transfer_roots: Option<SkillTransferRoots>,
     events: broadcast::Sender<RuntimeEvent>,
     connector_catalog: Arc<BTreeSet<String>>,
+    draft_test_deadline: std::time::Duration,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -79,6 +80,7 @@ pub struct SkillDraftValidation {
     pub resolver_status: String,
     pub resolver_errors: Vec<String>,
     pub permission_diff: Value,
+    pub revision_id: String,
     pub content_hash: String,
     pub snapshot_generation: u64,
 }
@@ -140,6 +142,44 @@ impl SkillManagementError {
     pub(crate) fn internal(operation: &'static str, source: anyhow::Error) -> Self {
         Self::Internal { operation, source }
     }
+
+    pub(crate) fn from_store(
+        operation: &'static str,
+        resource: &'static str,
+        error: anyhow::Error,
+    ) -> Self {
+        match error.downcast::<crate::skill_store_public_types::SkillStoreBoundaryError>() {
+            Ok(crate::skill_store_public_types::SkillStoreBoundaryError::InvalidInput(_)) => {
+                Self::InvalidRequest("invalid skill package input".into())
+            }
+            Ok(crate::skill_store_public_types::SkillStoreBoundaryError::NotFound(_)) => {
+                Self::NotFound { resource }
+            }
+            Ok(crate::skill_store_public_types::SkillStoreBoundaryError::Conflict(_)) => {
+                Self::Conflict { resource }
+            }
+            Err(error) => Self::internal(operation, error),
+        }
+    }
+
+    pub(crate) fn from_state(
+        operation: &'static str,
+        resource: &'static str,
+        error: anyhow::Error,
+    ) -> Self {
+        match error.downcast::<crate::skill_state::SkillStateBoundaryError>() {
+            Ok(crate::skill_state::SkillStateBoundaryError::InvalidInput(_)) => {
+                Self::InvalidRequest("invalid skill state request".into())
+            }
+            Ok(crate::skill_state::SkillStateBoundaryError::NotFound(_)) => {
+                Self::NotFound { resource }
+            }
+            Ok(crate::skill_state::SkillStateBoundaryError::Conflict(_)) => {
+                Self::Conflict { resource }
+            }
+            Err(error) => Self::internal(operation, error),
+        }
+    }
 }
 
 impl OwnerSkillManagementService {
@@ -158,6 +198,7 @@ impl OwnerSkillManagementService {
             transfer_roots: None,
             events,
             connector_catalog: Arc::new(BTreeSet::new()),
+            draft_test_deadline: std::time::Duration::from_secs(2),
         }
     }
 
@@ -195,19 +236,30 @@ impl OwnerSkillManagementService {
         self.events.subscribe()
     }
 
-    pub fn with_connector_catalog<I, S>(mut self, connectors: I) -> Self
+    #[cfg(test)]
+    pub(crate) fn with_draft_test_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.draft_test_deadline = deadline;
+        self
+    }
+
+    pub fn with_connector_catalog<I, S>(mut self, connectors: I) -> anyhow::Result<Self>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.connector_catalog = Arc::new(
-            connectors
-                .into_iter()
-                .map(|connector| connector.as_ref().trim().to_string())
-                .filter(|connector| !connector.is_empty())
-                .collect(),
-        );
-        self
+        let values = connectors
+            .into_iter()
+            .map(|connector| connector.as_ref().to_string())
+            .collect::<Vec<_>>();
+        let parsed = parse_connector_ids(&values);
+        if let Some(error) = parsed.errors.first() {
+            return Err(SkillManagementError::InvalidRequest(format!(
+                "invalid host connector catalog: {error}"
+            ))
+            .into());
+        }
+        self.connector_catalog = Arc::new(parsed.canonical.into_iter().collect());
+        Ok(self)
     }
 
     pub async fn create_draft(
@@ -263,7 +315,10 @@ impl OwnerSkillManagementService {
         let authored = crate::skill_authoring::validate_draft_updates(files)?;
         self.revisions
             .write_staging_files(revision_id, authored)
-            .await?;
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_store("update_draft", "skill revision", error)
+            })?;
         let record = self
             .state
             .get_revision(revision_id)
@@ -423,6 +478,55 @@ impl OwnerSkillManagementService {
     }
 }
 
+pub(crate) struct ParsedConnectorIds {
+    pub(crate) canonical: Vec<String>,
+    pub(crate) errors: Vec<&'static str>,
+}
+
+pub(crate) fn parse_connector_ids(values: &[String]) -> ParsedConnectorIds {
+    let mut canonical = Vec::new();
+    let mut errors = Vec::new();
+    let mut seen = BTreeSet::new();
+    for value in values {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            errors.push("connector id must not be empty");
+            continue;
+        }
+        if !is_valid_connector_id(&normalized) {
+            errors.push("connector id contains invalid characters");
+            continue;
+        }
+        if !seen.insert(normalized.clone()) {
+            errors.push("duplicate connector id after normalization");
+        }
+        if value != &normalized {
+            errors.push("connector id must use canonical lowercase ASCII");
+            continue;
+        }
+        canonical.push(normalized);
+    }
+    canonical.sort();
+    canonical.dedup();
+    errors.sort_unstable();
+    errors.dedup();
+    ParsedConnectorIds { canonical, errors }
+}
+
+fn is_valid_connector_id(value: &str) -> bool {
+    let mut previous_separator = true;
+    for byte in value.bytes() {
+        let separator = matches!(byte, b'.' | b'-' | b'_');
+        if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || separator)
+            || (separator && previous_separator)
+        {
+            return false;
+        }
+        previous_separator = separator;
+    }
+    !previous_separator
+}
+
 fn layer_name(layer: SkillLayer) -> &'static str {
     match layer {
         SkillLayer::Builtin => "builtin",
@@ -439,6 +543,18 @@ fn resolved_revision_id(resolved: &crate::skill_resolver::ResolvedSkillPackage) 
         .execution_binding
         .as_ref()
         .map(|binding| binding.revision_id.clone())
+}
+
+pub(crate) fn is_exact_managed_candidate(
+    resolved: &crate::skill_resolver::ResolvedSkillPackage,
+    package_id: &SkillPackageId,
+    revision_id: &str,
+    content_hash: &str,
+) -> bool {
+    resolved.package.layer == SkillLayer::Managed
+        && resolved.package.descriptor.id == *package_id
+        && resolved.package.content_hash == content_hash
+        && resolved_revision_id(resolved).as_deref() == Some(revision_id)
 }
 
 fn resolution_status_name(status: SkillResolutionStatus) -> &'static str {
