@@ -123,6 +123,7 @@ pub struct SkillPackageStatus {
     pub status: String,
     pub reason: String,
     pub active_revision_id: Option<String>,
+    pub manageable: bool,
 }
 
 pub use read::{SkillPackageDetail, SkillRevisionDetail, SkillRevisionRequirements};
@@ -397,6 +398,7 @@ impl OwnerSkillManagementService {
                 status: "active".into(),
                 reason: resolved.reason.clone(),
                 active_revision_id: resolved_revision_id(resolved),
+                manageable: self.resolved_manageable(actor, resolved),
             })
             .chain(
                 snapshot
@@ -410,6 +412,7 @@ impl OwnerSkillManagementService {
                         status: resolution_status_name(resolved.status).into(),
                         reason: resolved.reason.clone(),
                         active_revision_id: resolved_revision_id(resolved),
+                        manageable: self.resolved_manageable(actor, resolved),
                     }),
             )
             .collect::<Vec<_>>();
@@ -429,21 +432,22 @@ impl OwnerSkillManagementService {
             .await?
         {
             let installation = row.installation;
-            let display_name = match installation.active_revision_id.as_deref() {
-                Some(revision_id) => self
-                    .state
-                    .get_revision(revision_id)
-                    .await?
-                    .and_then(|record| {
-                        serde_json::from_value::<crate::skill_package::SkillPackageDescriptor>(
-                            record.descriptor_json,
-                        )
-                        .ok()
-                    })
-                    .map(|descriptor| descriptor.display_name)
-                    .unwrap_or_else(|| display_name(installation.package_id.as_str())),
-                None => display_name(installation.package_id.as_str()),
-            };
+            let descriptor =
+                match installation.active_revision_id.as_deref() {
+                    Some(revision_id) => self.state.get_revision(revision_id).await?.and_then(
+                        |record| {
+                            serde_json::from_value::<crate::skill_package::SkillPackageDescriptor>(
+                                record.descriptor_json,
+                            )
+                            .ok()
+                        },
+                    ),
+                    None => None,
+                };
+            let display_name = descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.display_name.clone())
+                .unwrap_or_else(|| display_name(installation.package_id.as_str()));
             let version = match (&installation.active_revision_id, row.active_version) {
                 (Some(_), Some(version)) => version,
                 (None, None) => String::new(),
@@ -452,6 +456,20 @@ impl OwnerSkillManagementService {
                     installation.package_id.as_str()
                 ),
             };
+            let manageable = descriptor.as_ref().is_some_and(|descriptor| {
+                installation.status.as_str() == "active"
+                    && !self
+                        .policy
+                        .protected_packages
+                        .contains(&installation.package_id)
+                    && [
+                        SkillOperation::Disable,
+                        SkillOperation::DeleteManaged,
+                        SkillOperation::Rollback,
+                    ]
+                    .into_iter()
+                    .any(|operation| self.policy.allows(actor, operation, descriptor.kind))
+            });
             statuses.push(SkillPackageStatus {
                 package_id: installation.package_id,
                 display_name,
@@ -460,6 +478,7 @@ impl OwnerSkillManagementService {
                 status: installation.status.as_str().into(),
                 reason: installation_reason(installation.status, installation.enabled).into(),
                 active_revision_id: installation.active_revision_id,
+                manageable,
             });
         }
         for revision in self.state.list_staging_revisions().await? {
@@ -469,19 +488,35 @@ impl OwnerSkillManagementService {
             {
                 continue;
             }
+            let descriptor =
+                serde_json::from_value::<crate::skill_package::SkillPackageDescriptor>(
+                    revision.descriptor_json.clone(),
+                )
+                .ok();
+            let manageable = descriptor.as_ref().is_some_and(|descriptor| {
+                !self
+                    .policy
+                    .protected_packages
+                    .contains(&revision.package_id)
+                    && [
+                        SkillOperation::EditDraft,
+                        SkillOperation::Validate,
+                        SkillOperation::Activate,
+                    ]
+                    .into_iter()
+                    .any(|operation| self.policy.allows(actor, operation, descriptor.kind))
+            });
             statuses.push(SkillPackageStatus {
-                display_name:
-                    serde_json::from_value::<crate::skill_package::SkillPackageDescriptor>(
-                        revision.descriptor_json.clone(),
-                    )
+                display_name: descriptor
                     .map(|descriptor| descriptor.display_name)
-                    .unwrap_or_else(|_| display_name(revision.package_id.as_str())),
+                    .unwrap_or_else(|| display_name(revision.package_id.as_str())),
                 package_id: revision.package_id,
                 version: revision.version,
                 source_layer: "managed".into(),
                 status: "draft".into(),
                 reason: "editable staging draft".into(),
                 active_revision_id: None,
+                manageable,
             });
         }
         sort_statuses(&mut statuses);
@@ -509,6 +544,28 @@ impl OwnerSkillManagementService {
             });
         }
         Ok(())
+    }
+
+    fn resolved_manageable(
+        &self,
+        actor: &ActorContext,
+        resolved: &crate::skill_resolver::ResolvedSkillPackage,
+    ) -> bool {
+        resolved.package.layer == SkillLayer::Managed
+            && !self
+                .policy
+                .protected_packages
+                .contains(&resolved.package.descriptor.id)
+            && [
+                SkillOperation::Disable,
+                SkillOperation::DeleteManaged,
+                SkillOperation::Rollback,
+            ]
+            .into_iter()
+            .any(|operation| {
+                self.policy
+                    .allows(actor, operation, resolved.package.descriptor.kind)
+            })
     }
 
     fn ensure_required_tools_known(&self, required_tools: &[String]) -> anyhow::Result<()> {

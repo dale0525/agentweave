@@ -56,6 +56,8 @@ class RuntimeBridgeTest {
       mode = "owner_only",
       agentAuthoring = true,
       allowedKinds = listOf("instruction_only"),
+      protectedPackages = listOf("com.example.protected"),
+      allowedOverrides = listOf("com.example.override"),
       activationApprovalRequired = false,
     )
     val actor = RuntimeActorContext(
@@ -77,6 +79,8 @@ class RuntimeBridgeTest {
     val request = JSONObject(native.initializeRequest)
 
     assertEquals("owner_only", request.getJSONObject("skill_policy").getString("mode"))
+    assertEquals("com.example.protected", request.getJSONObject("skill_policy").getJSONArray("protected_packages").getString(0))
+    assertEquals("com.example.override", request.getJSONObject("skill_policy").getJSONArray("allowed_overrides").getString(0))
     assertEquals("android-owner", request.getJSONObject("actor_context").getString("actor_id"))
     assertFalse(native.initializeRequest.contains("actor_override"))
   }
@@ -110,12 +114,13 @@ class RuntimeBridgeTest {
       configuredApproverContext = approver,
       publicationFileSystem = JvmSkillPublicationFileSystem(),
     ).load()
-    client.resolveSkillApproval("approval-1", approve = true)
+    val resolution = client.resolveSkillApproval("approval-1", approve = true)
 
     assertEquals(listOf("android-requester", "android-approver"), native.initializeActors)
     assertEquals(listOf(102L, 101L), native.invokeHandles)
     assertEquals("android-approver", client.approverActorId)
     assertTrue(client.approvalAvailable)
+    assertNull(resolution.synchronizationWarning)
   }
 
   @Test
@@ -164,7 +169,28 @@ class RuntimeBridgeTest {
 
     val approval = (outcome as RuntimeSkillRollbackOutcome.ApprovalRequired).approval
     assertEquals("mobile-requester", approval.requestedBy)
-    assertTrue(approval.permissionDiffJson.contains("secure_storage"))
+    assertEquals("{}", approval.permissionDiffJson)
+  }
+
+  @Test
+  fun approvalPublicationSurvivesRequesterSynchronizationFailure() {
+    val native = SynchronizationFailureNativeRuntime()
+    val client = RuntimeClient(
+      handle = 9L,
+      native = native,
+      actorContext = RuntimeActorContext(actorId = "requester", role = "owner"),
+      approverClient = RuntimeApprovalClient(10L, native, "approver"),
+    )
+
+    val resolution = client.resolveSkillApproval("approval-1", approve = true)
+    val refreshed = client.listSkills()
+
+    assertEquals("approved", resolution.mutation.status)
+    assertEquals(8L, resolution.mutation.activeGeneration)
+    assertTrue(resolution.synchronizationWarning?.contains("synchronization failed") == true)
+    assertTrue(refreshed.isEmpty())
+    assertEquals(1, native.operations.count { it == "resolve_skill_approval" })
+    assertEquals(listOf("resolve_skill_approval", "synchronize_skills", "list_skills"), native.operations)
   }
 
   @Test
@@ -245,12 +271,14 @@ class RuntimeBridgeTest {
 
     assertEquals(setOf("inspect", "activate"), client.skillGrants)
     assertEquals("managed", managed.sourceLayer)
+    assertTrue(managed.manageable)
     assertEquals("host_tools_only", detail.revisions.first().kind)
     assertEquals("Draft instructions", detail.editableDraft?.instructions)
     assertTrue(validation.ok)
     assertEquals(listOf("host/search"), validation.requiredTools)
     assertEquals("approval-1", approval.approvalId)
-    assertEquals(8L, reload.activeGeneration)
+    assertEquals(8L, reload.mutation.activeGeneration)
+    assertNull(reload.synchronizationWarning)
     assertTrue(native.requests.none { request ->
       request.has("actor") || request.has("actor_context") || request.has("principal")
     })
@@ -327,6 +355,23 @@ class RuntimeBridgeTest {
 
     assertEquals(listOf(41L), native.closedHandles)
   }
+
+  @Test
+  fun runtimeClientCloseAttemptsBothHandlesAndAggregatesErrors() {
+    val native = FailingCloseNativeRuntime()
+    val client = RuntimeClient(
+      handle = 9L,
+      native = native,
+      approverClient = RuntimeApprovalClient(10L, native, "approver"),
+    )
+
+    val error = assertThrows(RuntimeBridgeException::class.java) { client.close() }
+    client.close()
+
+    assertEquals(listOf(10L, 9L), native.closedHandles)
+    assertTrue(error.message?.contains("approver close failed") == true)
+    assertTrue(error.message?.contains("requester close failed") == true)
+  }
 }
 
 private class BridgeSkillAssets : SkillAssetSource {
@@ -392,7 +437,7 @@ private class OwnerNativeRuntime : NativeRuntimeApi {
     val request = JSONObject(requestJson)
     requests += request
     val data = when (request.getString("operation")) {
-      "list_managed_skills" -> """[{"package_id":"com.example.owner","display_name":"Owner skill","version":"1.0.0","source_layer":"managed","status":"active","reason":"","active_revision_id":"revision-active"}]"""
+      "list_managed_skills" -> """[{"package_id":"com.example.owner","display_name":"Owner skill","version":"1.0.0","source_layer":"managed","status":"active","reason":"","active_revision_id":"revision-active","manageable":true}]"""
       "get_skill_detail" -> """{"package_id":"com.example.owner","display_name":"Owner skill","version":"1.0.0","source_layer":"managed","status":"active","reason":"","active_revision_id":"revision-active","revisions":[{"revision_id":"revision-draft","version":"1.1.0","status":"staging","editable":true,"created_by":"owner","created_at":"2026-07-13T00:00:00Z","kind":"host_tools_only","instructions":"Draft instructions","validation":{"ok":true,"errors":[],"warnings":[]},"requirements":{"runtime_tools":["host/search"],"capabilities":["network.http"],"connectors":[],"packages":[]},"permission_diff":{"capabilities":{"added":["network.http"]}}},{"revision_id":"revision-active","version":"1.0.0","status":"managed","editable":false,"created_by":"owner","created_at":"2026-07-12T00:00:00Z","kind":"host_tools_only","instructions":"Active instructions","validation":{"ok":true,"errors":[],"warnings":[]},"requirements":{"runtime_tools":["host/search"],"capabilities":[],"connectors":[],"packages":[]},"permission_diff":{}}],"editable_draft":{"revision_id":"revision-draft","version":"1.1.0","status":"staging","editable":true,"created_by":"owner","created_at":"2026-07-13T00:00:00Z","kind":"host_tools_only","instructions":"Draft instructions","validation":{"ok":true,"errors":[],"warnings":[]},"requirements":{"runtime_tools":["host/search"],"capabilities":["network.http"],"connectors":[],"packages":[]},"permission_diff":{}}}"""
       "create_skill_draft", "update_skill_draft" -> """{"package_id":"com.example.new-skill","revision_id":"revision-draft","version":"0.1.0","kind":"instruction_only","validation":{"status":"pending"},"status":"draft"}"""
       "validate_skill_draft" -> """{"ok":true,"errors":[],"warnings":[],"requiredTools":["host/search"],"requiredConnectors":[],"dependencies":[],"requiredCapabilities":["network.http"],"resolverStatus":"active","resolverErrors":[],"permissionDiff":{"capabilities":{"added":["network.http"]}},"revisionId":"revision-draft","contentHash":"hash","snapshotGeneration":7}"""
@@ -401,7 +446,7 @@ private class OwnerNativeRuntime : NativeRuntimeApi {
       "synchronize_skills" -> """{"platform":"android","capabilities":[],"database_ready":true,"skills_ready":true,"model_configured":false,"skill_management_mode":"owner_only","active_snapshot_generation":8,"quarantined_count":0,"last_reload_status":"generation:8"}"""
       "disable_managed_skill" -> """{"previous_generation":8,"active_generation":9,"active_packages":0,"inactive_packages":1}"""
       "rollback_managed_skill" -> if (rollbackApproval) {
-        """{"approval_id":"approval-rollback","package_id":"com.example.owner","permission_diff":{"capabilities":{"added":["secure_storage"]}},"requested_by":"mobile-requester","revision_id":"revision-old","status":"pending"}"""
+        """{"approval_id":"approval-rollback","package_id":"com.example.owner","permission_diff":{},"requested_by":"mobile-requester","revision_id":"revision-old","status":"pending"}"""
       } else {
         """{"package_id":"com.example.owner","active_revision_id":"revision-active","replaced_revision_id":"revision-new","generation":10}"""
       }
@@ -435,4 +480,43 @@ private class MultiHandleNativeRuntime : NativeRuntimeApi {
   override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String = error("not used")
 
   override fun close(handle: Long): String = """{"ok":true,"data":null}"""
+}
+
+private class SynchronizationFailureNativeRuntime : NativeRuntimeApi {
+  val operations = mutableListOf<String>()
+
+  override fun initialize(requestJson: String): String = error("not used")
+
+  override fun invoke(handle: Long, requestJson: String): String {
+    val operation = JSONObject(requestJson).getString("operation")
+    operations += operation
+    return when (operation) {
+      "resolve_skill_approval" ->
+        """{"ok":true,"data":{"active_generation":8,"status":"approved"}}"""
+      "synchronize_skills" ->
+        """{"ok":false,"error":{"code":"runtime_error","message":"requester synchronization failed"}}"""
+      "list_skills" -> """{"ok":true,"data":[]}"""
+      else -> error("unexpected operation: $operation")
+    }
+  }
+
+  override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String = error("not used")
+
+  override fun close(handle: Long): String = """{"ok":true,"data":null}"""
+}
+
+private class FailingCloseNativeRuntime : NativeRuntimeApi {
+  val closedHandles = mutableListOf<Long>()
+
+  override fun initialize(requestJson: String): String = error("not used")
+
+  override fun invoke(handle: Long, requestJson: String): String = error("not used")
+
+  override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String = error("not used")
+
+  override fun close(handle: Long): String {
+    closedHandles += handle
+    val actor = if (handle == 10L) "approver" else "requester"
+    return """{"ok":false,"error":{"code":"close_failed","message":"$actor close failed"}}"""
+  }
 }

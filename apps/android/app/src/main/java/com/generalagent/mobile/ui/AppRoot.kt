@@ -70,6 +70,9 @@ data class SkillAccessState(
   val visibleTabs: List<AppTab>,
   val actions: Set<SkillAction>,
   val allowedKinds: Set<String> = emptySet(),
+  val protectedPackages: Set<String> = emptySet(),
+  val allowedOverrides: Set<String> = emptySet(),
+  val agentAuthoring: Boolean = false,
 )
 
 fun skillScreenMode(mode: String, grants: Set<String>): SkillScreenMode =
@@ -147,6 +150,7 @@ fun ownerSkillInventory(
 ): List<RuntimeSkill> {
   val inventory = effective.associateByTo(linkedMapOf(), RuntimeSkill::packageId)
   managed.forEach { summary ->
+    val effectiveSkill = inventory[summary.packageId]
     inventory[summary.packageId] = RuntimeSkill(
       packageId = summary.packageId,
       displayName = summary.displayName,
@@ -156,7 +160,7 @@ fun ownerSkillInventory(
       available = summary.status == "active",
       reason = summary.reason,
       activeRevisionId = summary.activeRevisionId,
-      manageable = true,
+      manageable = effectiveSkill?.manageable ?: summary.manageable,
     )
   }
   return inventory.values.sortedBy(RuntimeSkill::packageId)
@@ -271,6 +275,9 @@ fun AppRoot(
               mode = skillAccess.mode,
               actions = skillAccess.actions,
               allowedKinds = skillAccess.allowedKinds,
+              protectedPackages = skillAccess.protectedPackages,
+              allowedOverrides = skillAccess.allowedOverrides,
+              agentAuthoring = skillAccess.agentAuthoring,
               inventory = skills,
               diagnostics = diagnostics,
               initialError = skillLoadError,

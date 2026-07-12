@@ -10,6 +10,7 @@ import com.generalagent.mobile.runtime.RuntimeSkillRevision
 import com.generalagent.mobile.runtime.RuntimeSkillPackageSummary
 import com.generalagent.mobile.runtime.RuntimeSkillValidationSummary
 import com.generalagent.mobile.runtime.RuntimeSkillValidation
+import com.generalagent.mobile.runtime.RuntimeSkillApproval
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -149,6 +150,14 @@ class SkillManagementStateTest {
   }
 
   @Test
+  fun publishedSynchronizationWarningIsRetryableWithoutClaimingApprovalFailure() {
+    val message = publicationSynchronizationWarning("requester synchronization failed")
+
+    assertTrue(message.startsWith("Published, refresh required"))
+    assertFalse(message.contains("Approval failed"))
+  }
+
+  @Test
   fun draftSaveWritesInstructionsAndDescriptorWithoutActor() {
     val detail = skillDetail(activeRevisionId = "revision-active")
     val revision = detail.editableDraft!!
@@ -167,18 +176,22 @@ class SkillManagementStateTest {
   }
 
   @Test
-  fun approvalCapabilitiesPreferAddedPermissionDiff() {
+  fun permissionChangesUseTheAuthoritativeTopLevelSchemaWithoutFallback() {
     assertEquals(
-      listOf("secure_storage", "network.http"),
-      approvalCapabilities(
-        permissionDiffJson = """{"capabilities":{"added":["secure_storage","network.http"]}}""",
-        fallback = listOf("filesystem.app_data"),
+      listOf(
+        "+ capability: network.http",
+        "- capability: filesystem.app_data",
+        "+ tool: host/search",
+        "- tool: host/write",
+        "+ connector: com.example.calendar",
+        "- connector: com.example.legacy",
+      ),
+      permissionChanges(
+        """{"addedCapabilities":["network.http"],"removedCapabilities":["filesystem.app_data"],"addedTools":["host/search"],"removedTools":["host/write"],"addedConnectors":["com.example.calendar"],"removedConnectors":["com.example.legacy"]}""",
       ),
     )
-    assertEquals(
-      listOf("filesystem.app_data"),
-      approvalCapabilities(permissionDiffJson = "{}", fallback = listOf("filesystem.app_data")),
-    )
+    assertEquals(emptyList<String>(), permissionChanges("{}"))
+    assertEquals(emptyList<String>(), permissionChanges("not-json"))
   }
 
   @Test
@@ -198,7 +211,23 @@ class SkillManagementStateTest {
 
     assertEquals(listOf("com.example.draft", "com.example.owner"), inventory.map { it.packageId })
     assertFalse(inventory.first().available)
-    assertTrue(inventory.first().manageable)
+    assertFalse(inventory.first().manageable)
+  }
+
+  @Test
+  fun ownerInventoryPreservesRuntimeManageability() {
+    val immutable = runtimeSkill(activeRevisionId = "revision-active").copy(manageable = false)
+    val summary = RuntimeSkillPackageSummary(
+      packageId = immutable.packageId,
+      displayName = immutable.displayName,
+      version = immutable.version,
+      sourceLayer = "managed",
+      status = "active",
+      reason = "",
+      activeRevisionId = immutable.activeRevisionId,
+    )
+
+    assertFalse(ownerSkillInventory(listOf(immutable), listOf(summary)).single().manageable)
   }
 
   @Test
@@ -220,13 +249,35 @@ class SkillManagementStateTest {
       snapshotGeneration = 7,
     )
 
-    val merged = revisionAfterValidation(revision, validation)
+    val merged = revisionAfterValidation(
+      revision,
+      validation,
+      savedInstructions = "B instructions",
+      savedTools = listOf("host/search", "host/read"),
+    )
 
     assertTrue(merged.validation.ok)
     assertEquals(emptyList<String>(), merged.validation.errors)
     assertEquals(listOf("host/search", "host/read"), merged.requirements.runtimeTools)
     assertEquals(listOf("network.http", "filesystem.app_data"), merged.requirements.capabilities)
     assertEquals(validation.permissionDiffJson, merged.permissionDiffJson)
+    assertEquals("B instructions", merged.instructions)
+    assertEquals("hash", merged.contentHash)
+    val approvalState = SkillApprovalUiState(
+      operation = SkillApprovalOperation.Activation,
+      approval = RuntimeSkillApproval(
+        approvalId = "approval-1",
+        packageId = "com.example.owner",
+        permissionDiffJson = validation.permissionDiffJson,
+        requestedBy = "requester",
+        revisionId = merged.revisionId,
+        status = "pending",
+      ),
+      detail = skillDetail(activeRevisionId = "revision-active"),
+      revision = merged,
+    )
+    assertEquals("B instructions", approvalState.revision.instructions)
+    assertEquals(validation.contentHash, approvalState.revision.contentHash)
   }
 
   @Test
@@ -245,17 +296,65 @@ class SkillManagementStateTest {
       allowedKinds = setOf("instruction_only"),
     )
     val unmanaged = skillDetail(activeRevisionId = "revision-active").copy(sourceLayer = "builtin")
-    assertTrue(skillTargetActions(access, unmanaged).isEmpty())
+    assertTrue(skillTargetActions(access, unmanaged, manageable = false).isEmpty())
 
     val removed = skillDetail(activeRevisionId = "revision-active").copy(status = "removed")
-    assertTrue(skillTargetActions(access, removed).isEmpty())
+    assertTrue(skillTargetActions(access, removed, manageable = true).isEmpty())
 
-    val managed = skillDetail(activeRevisionId = "revision-active")
-    val actions = skillTargetActions(access, managed)
+    val managed = skillDetailWithHistory()
+    val actions = skillTargetActions(access, managed, manageable = true)
     assertTrue(SkillAction.Edit in actions)
     assertTrue(SkillAction.Validate in actions)
     assertTrue(SkillAction.Disable in actions)
     assertTrue(SkillAction.Delete in actions)
+  }
+
+  @Test
+  fun targetActionsRejectProtectedDisallowedAndDraftOnlyLifecycle() {
+    val detail = skillDetailWithHistory()
+    val access = skillAccessState(
+      RuntimeSkillPolicy(
+        mode = "owner_only",
+        agentAuthoring = true,
+        allowedKinds = listOf("instruction_only"),
+        protectedPackages = listOf(detail.packageId),
+        allowedOverrides = listOf(detail.packageId),
+      ),
+      RuntimeActorContext(role = "owner", grants = listOf("inspect") + allSkillGrants()),
+    )
+    assertTrue(detail.packageId in access.allowedOverrides)
+    assertTrue(skillTargetActions(access, detail, manageable = true).isEmpty())
+
+    val disallowed = detail.copy(
+      packageId = "com.example.host-tools",
+      revisions = detail.revisions.map { it.copy(kind = "host_tools_only") },
+      editableDraft = detail.editableDraft?.copy(kind = "host_tools_only"),
+    )
+    assertTrue(skillTargetActions(access.copy(protectedPackages = emptySet()), disallowed, true).isEmpty())
+
+    val draftOnly = detail.copy(
+      packageId = "com.example.draft-only",
+      status = "draft",
+      activeRevisionId = null,
+      revisions = listOf(checkNotNull(detail.editableDraft)),
+    )
+    val draftActions = skillTargetActions(
+      access.copy(protectedPackages = emptySet()),
+      draftOnly,
+      manageable = true,
+    )
+    assertFalse(SkillAction.Delete in draftActions)
+    assertFalse(SkillAction.Disable in draftActions)
+    assertFalse(SkillAction.Rollback in draftActions)
+  }
+
+  @Test
+  fun hostToolsOnlyPolicyIsTheCreateDefaultAndRejectsOutOfPolicyKinds() {
+    val allowed = linkedSetOf("host_tools_only")
+
+    assertEquals("host_tools_only", initialDraftKind(allowed))
+    assertTrue(admitDraftKind("host_tools_only", allowed))
+    assertFalse(admitDraftKind("instruction_only", allowed))
   }
 
   @Test

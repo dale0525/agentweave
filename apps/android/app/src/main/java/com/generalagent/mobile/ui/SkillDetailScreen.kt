@@ -54,6 +54,7 @@ fun SkillDetailScreen(
   actions: Set<SkillAction>,
   busyOperation: String?,
   inlineError: String?,
+  onRetry: () -> Unit,
   onBack: () -> Unit,
   onEdit: () -> Unit,
   onActivate: (RuntimeSkillRevision) -> Unit,
@@ -62,8 +63,9 @@ fun SkillDetailScreen(
   onRemove: (RuntimeSkillRevision) -> Unit,
 ) {
   val draft = detail.editableDraft
-  val active = detail.revisions.find { it.revisionId == detail.activeRevisionId }
-    ?: detail.revisions.firstOrNull()
+  val active = detail.activeRevisionId?.let { activeId ->
+    detail.revisions.find { it.revisionId == activeId && !it.editable && it.status == "managed" }
+  }
   var selectedRollbackId by remember(detail.packageId, detail.activeRevisionId) {
     mutableStateOf<String?>(null)
   }
@@ -76,7 +78,7 @@ fun SkillDetailScreen(
 
   Column(modifier = Modifier.fillMaxSize().background(GaSurface)) {
     DetailTopBar(detail.displayName, onBack)
-    inlineError?.let { InlineSkillError(it) }
+    inlineError?.let { InlineSkillError(it, onRetry) }
     Column(
       modifier = Modifier
         .weight(1f)
@@ -113,7 +115,7 @@ fun SkillDetailScreen(
         )
       }
     }
-    if (detail.sourceLayer == "managed") {
+    if (detail.sourceLayer == "managed" && actions.isNotEmpty()) {
       DetailActionBar(
         actions = actions,
         draft = draft,

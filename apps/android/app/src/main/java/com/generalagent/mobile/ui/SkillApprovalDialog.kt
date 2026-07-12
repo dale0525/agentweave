@@ -35,10 +35,7 @@ internal fun SkillApprovalDialog(
   onConfirm: () -> Unit,
 ) {
   val revision = state.revision
-  val capabilities = approvalCapabilities(
-    state.approval.permissionDiffJson,
-    revision.requirements.capabilities,
-  )
+  val changes = permissionChanges(state.approval.permissionDiffJson)
   val title = when (state.operation) {
     SkillApprovalOperation.Activation -> "Approve activation"
     SkillApprovalOperation.Rollback -> "Approve rollback"
@@ -76,7 +73,7 @@ internal fun SkillApprovalDialog(
           if (revision.validation.ok) "Passed" else revision.validation.errors.joinToString("; ").ifBlank { "Required" },
         )
         ApprovalList("Required tools", revision.requirements.runtimeTools)
-        ApprovalList("Capability changes", capabilities)
+        ApprovalList("Permission changes", changes)
         Text(consequence, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
         Text(
           "Requested by ${state.approval.requestedBy}",

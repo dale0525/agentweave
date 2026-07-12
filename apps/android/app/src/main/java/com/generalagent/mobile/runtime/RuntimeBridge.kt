@@ -150,7 +150,7 @@ class RuntimeClient internal constructor(
         .put("revision_id", revisionId),
     ).toSkillApproval()
 
-  fun resolveSkillApproval(approvalId: String, approve: Boolean): RuntimeSkillMutation {
+  fun resolveSkillApproval(approvalId: String, approve: Boolean): RuntimeSkillApprovalResolution {
     val approval = if (approvalAvailable) approverClient else null
     if (approval == null) {
       throw RuntimeBridgeException(approvalUnavailableReason ?: "Approval resolution is unavailable")
@@ -161,8 +161,12 @@ class RuntimeClient internal constructor(
         .put("approval_id", approvalId)
         .put("approve", approve),
     ).toSkillMutation()
-    invoke(JSONObject().put("operation", "synchronize_skills"))
-    return mutation
+    val synchronizationWarning = runCatching {
+      invoke(JSONObject().put("operation", "synchronize_skills"))
+    }.exceptionOrNull()?.let { error ->
+      error.message ?: "Requester synchronization failed"
+    }
+    return RuntimeSkillApprovalResolution(mutation, synchronizationWarning)
   }
 
   fun disableManagedSkill(packageId: String): RuntimeSkillMutation =
@@ -222,8 +226,18 @@ class RuntimeClient internal constructor(
 
   override fun close() {
     if (closed.compareAndSet(false, true)) {
-      approverClient?.close()
-      responseEnvelope(native.close(handle))
+      val errors = mutableListOf<String>()
+      approverClient?.let { approver ->
+        runCatching { approver.close() }
+          .exceptionOrNull()
+          ?.let { errors += it.message ?: "approver close failed" }
+      }
+      runCatching { responseEnvelope(native.close(handle)) }
+        .exceptionOrNull()
+        ?.let { errors += it.message ?: "requester close failed" }
+      if (errors.isNotEmpty()) {
+        throw RuntimeBridgeException("Runtime close failed: ${errors.joinToString("; ")}")
+      }
     }
   }
 
@@ -364,6 +378,7 @@ private fun JSONObject.toSkillPackageSummary(): RuntimeSkillPackageSummary =
     status = getString("status"),
     reason = getString("reason"),
     activeRevisionId = nullableString("active_revision_id"),
+    manageable = optBoolean("manageable", false),
   )
 
 private fun JSONObject.toSkillDetail(): RuntimeSkillDetail =
@@ -403,6 +418,7 @@ private fun JSONObject.toSkillRevision(): RuntimeSkillRevision {
       packages = requirements.stringList("packages"),
     ),
     permissionDiffJson = optJSONObject("permission_diff")?.toString() ?: "{}",
+    contentHash = optString("content_hash"),
   )
 }
 

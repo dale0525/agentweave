@@ -26,6 +26,7 @@ pub struct SkillRevisionDetail {
     pub validation: Value,
     pub requirements: SkillRevisionRequirements,
     pub permission_diff: Value,
+    pub content_hash: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -134,6 +135,7 @@ impl OwnerSkillManagementService {
                 packages: descriptor.requires.packages.iter().map(|item| item.as_str().to_string()).collect(),
             },
             permission_diff: json!({}),
+            content_hash: resolved.package.content_hash.clone(),
         }))
     }
 
@@ -177,6 +179,7 @@ impl OwnerSkillManagementService {
             validation: record.validation_json,
             requirements,
             permission_diff,
+            content_hash: record.content_hash,
         })
     }
 }

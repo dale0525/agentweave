@@ -11,6 +11,12 @@ import com.generalagent.mobile.runtime.RuntimeSkillValidation
 import org.json.JSONArray
 import org.json.JSONObject
 
+sealed interface SkillRoute {
+  data object ListRoute : SkillRoute
+  data class Detail(val packageId: String) : SkillRoute
+  data class Draft(val packageId: String?, val creating: Boolean) : SkillRoute
+}
+
 data class SkillManagementUiState(
   val inventory: List<RuntimeSkill>,
   val diagnostics: RuntimeDiagnostics,
@@ -32,25 +38,77 @@ fun skillAccessState(policy: RuntimeSkillPolicy, actor: RuntimeActorContext): Sk
   }
   val tabs = visibleTabs(policy.mode).filter { it != AppTab.Skills || mode != SkillScreenMode.Hidden }
   val granted = skillActions(mode, actor.grants.toSet()).toMutableSet()
-  val allowedKinds = if (policy.agentAuthoring) policy.allowedKinds.toSet() else emptySet()
-  if (allowedKinds.isEmpty()) granted.remove(SkillAction.Create)
-  return SkillAccessState(mode, tabs, granted, allowedKinds)
+  val allowedKinds = policy.allowedKinds.toSet()
+  if (!policy.agentAuthoring || allowedKinds.isEmpty()) granted.remove(SkillAction.Create)
+  return SkillAccessState(
+    mode = mode,
+    visibleTabs = tabs,
+    actions = granted,
+    allowedKinds = allowedKinds,
+    protectedPackages = policy.protectedPackages.toSet(),
+    allowedOverrides = policy.allowedOverrides.toSet(),
+    agentAuthoring = policy.agentAuthoring,
+  )
 }
 
-fun skillTargetActions(access: SkillAccessState, detail: RuntimeSkillDetail): Set<SkillAction> {
+fun skillTargetActions(
+  access: SkillAccessState,
+  detail: RuntimeSkillDetail,
+  manageable: Boolean,
+): Set<SkillAction> {
   if (access.mode != SkillScreenMode.OwnerManage || detail.sourceLayer != "managed") return emptySet()
-  if (detail.status in setOf("removed", "quarantined")) return emptySet()
+  if (!manageable || detail.packageId in access.protectedPackages) return emptySet()
+  if (detail.status in setOf("removed", "quarantined", "inactive")) return emptySet()
   val draft = detail.editableDraft
   val draftAllowed = draft != null && draft.kind in access.allowedKinds
+  val active = detail.activeRevisionId?.let { activeId ->
+    detail.revisions.find { it.revisionId == activeId && !it.editable && it.status == "managed" }
+  }
+  val activeInstallation = detail.status == "active" && active != null
+  val activeKindAllowed = active?.kind in access.allowedKinds
+  val rollbackAvailable = activeInstallation && detail.revisions.any { revision ->
+    revision.kind in access.allowedKinds && selectRollbackTarget(detail, revision) != null
+  }
   return access.actions.filterTo(mutableSetOf()) { action ->
     when (action) {
       SkillAction.Create -> false
       SkillAction.Edit, SkillAction.Validate, SkillAction.Activate -> draftAllowed
-      SkillAction.Disable -> detail.activeRevisionId != null && detail.status == "active"
-      SkillAction.Rollback -> detail.revisions.any { selectRollbackTarget(detail, it) != null }
-      SkillAction.Delete -> detail.activeRevisionId != null || draft != null
+      SkillAction.Disable -> activeInstallation && activeKindAllowed
+      SkillAction.Rollback -> rollbackAvailable && activeKindAllowed
+      SkillAction.Delete -> activeInstallation && activeKindAllowed
     }
   }
+}
+
+fun initialDraftKind(allowedKinds: Set<String>): String = allowedKinds.firstOrNull().orEmpty()
+
+fun admitDraftKind(kind: String, allowedKinds: Set<String>): Boolean = kind in allowedKinds
+
+fun parentSkillSnapshotUpdated(
+  state: SkillManagementUiState,
+  inventory: List<RuntimeSkill>,
+  diagnostics: RuntimeDiagnostics,
+  initialError: String?,
+): SkillManagementUiState =
+  state.copy(
+    inventory = inventory,
+    diagnostics = diagnostics,
+    inlineError = initialError ?: state.inlineError,
+  )
+
+class SkillOperationGeneration {
+  private var generation = 0L
+
+  fun begin(): Long {
+    generation += 1
+    return generation
+  }
+
+  fun invalidate() {
+    generation += 1
+  }
+
+  fun accepts(token: Long): Boolean = token == generation
 }
 
 data class SkillDraftContentState(

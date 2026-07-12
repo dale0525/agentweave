@@ -35,7 +35,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -94,14 +93,27 @@ fun draftUpdateFiles(
   )
 }
 
-fun approvalCapabilities(permissionDiffJson: String, fallback: List<String>): List<String> =
+fun permissionChanges(permissionDiffJson: String): List<String> =
   runCatching {
-    val added = JSONObject(permissionDiffJson)
-      .optJSONObject("capabilities")
-      ?.optJSONArray("added")
-      ?: return@runCatching fallback
-    List(added.length()) { index -> added.getString(index) }
-  }.getOrDefault(fallback)
+    val diff = JSONObject(permissionDiffJson)
+    buildList {
+      addPermissionChanges(diff, "addedCapabilities", "+ capability: ")
+      addPermissionChanges(diff, "removedCapabilities", "- capability: ")
+      addPermissionChanges(diff, "addedTools", "+ tool: ")
+      addPermissionChanges(diff, "removedTools", "- tool: ")
+      addPermissionChanges(diff, "addedConnectors", "+ connector: ")
+      addPermissionChanges(diff, "removedConnectors", "- connector: ")
+    }
+  }.getOrDefault(emptyList())
+
+private fun MutableList<String>.addPermissionChanges(
+  diff: JSONObject,
+  field: String,
+  prefix: String,
+) {
+  val values = diff.optJSONArray(field) ?: return
+  repeat(values.length()) { index -> add(prefix + values.getString(index)) }
+}
 
 internal enum class SkillApprovalOperation { Activation, Rollback, Removal }
 
@@ -117,6 +129,9 @@ fun SkillsScreen(
   mode: SkillScreenMode,
   actions: Set<SkillAction>,
   allowedKinds: Set<String>,
+  protectedPackages: Set<String>,
+  allowedOverrides: Set<String>,
+  agentAuthoring: Boolean,
   inventory: List<RuntimeSkill>,
   diagnostics: RuntimeDiagnostics,
   initialError: String?,
@@ -127,7 +142,7 @@ fun SkillsScreen(
 ) {
   val scope = rememberCoroutineScope()
   var route by remember { mutableStateOf<SkillRoute>(SkillRoute.ListRoute) }
-  var operationGeneration by remember { mutableLongStateOf(0L) }
+  val operationGeneration = remember { SkillOperationGeneration() }
   var state by remember {
     mutableStateOf(SkillManagementUiState(inventory, diagnostics, inlineError = initialError))
   }
@@ -135,11 +150,7 @@ fun SkillsScreen(
   var approval by remember { mutableStateOf<SkillApprovalUiState?>(null) }
 
   LaunchedEffect(inventory, diagnostics, initialError) {
-    state = state.copy(
-      inventory = inventory,
-      diagnostics = diagnostics,
-      inlineError = initialError ?: state.inlineError,
-    )
+    state = parentSkillSnapshotUpdated(state, inventory, diagnostics, initialError)
   }
   LaunchedEffect(route) {
     onImmersiveChanged(route !is SkillRoute.ListRoute)
@@ -151,24 +162,23 @@ fun SkillsScreen(
   }
 
   fun navigate(next: SkillRoute) {
-    operationGeneration += 1
+    operationGeneration.invalidate()
     route = next
     draftValidation = null
   }
 
   fun openDetail(packageId: String) {
-    operationGeneration += 1
-    val generation = operationGeneration
+    val generation = operationGeneration.begin()
     state = state.copy(busyOperation = "detail", inlineError = null)
     scope.launch {
       try {
         val detail = withContext(Dispatchers.IO) { runtimeClient.getSkillDetail(packageId) }
-        if (generation != operationGeneration) return@launch
+        if (!operationGeneration.accepts(generation)) return@launch
         state = state.copy(detail = detail, busyOperation = null)
         draftValidation = null
         route = SkillRoute.Detail(packageId)
       } catch (error: Throwable) {
-        if (generation != operationGeneration) return@launch
+        if (!operationGeneration.accepts(generation)) return@launch
         fail(error, "Unable to load skill detail")
       }
     }
@@ -176,7 +186,7 @@ fun SkillsScreen(
 
   fun refresh(returnToDetail: Boolean = false) {
     state = state.copy(busyOperation = "refresh", inlineError = null)
-    val generation = operationGeneration
+    val generation = operationGeneration.begin()
     scope.launch {
       try {
         val packageId = state.detail?.packageId
@@ -197,7 +207,7 @@ fun SkillsScreen(
           }
           Triple(skills, nextDiagnostics, detail)
         }
-        if (generation != operationGeneration) return@launch
+        if (!operationGeneration.accepts(generation)) return@launch
         if (returnToDetail && result.third == null) {
           navigate(SkillRoute.ListRoute)
         }
@@ -209,7 +219,7 @@ fun SkillsScreen(
         )
         onSnapshotChanged(result.first, result.second)
       } catch (error: Throwable) {
-        if (generation != operationGeneration) return@launch
+        if (!operationGeneration.accepts(generation)) return@launch
         fail(error, "Unable to refresh skills")
       }
     }
@@ -218,7 +228,7 @@ fun SkillsScreen(
   fun requestApproval(operation: SkillApprovalOperation, revision: RuntimeSkillRevision) {
     val detail = state.detail ?: return
     state = state.copy(busyOperation = operation.name.lowercase(), inlineError = null)
-    val generation = operationGeneration
+    val generation = operationGeneration.begin()
     scope.launch {
       try {
         val requested = withContext(Dispatchers.IO) {
@@ -228,11 +238,11 @@ fun SkillsScreen(
             SkillApprovalOperation.Rollback -> error("Rollback uses its dedicated flow")
           }
         }
-        if (generation != operationGeneration) return@launch
+        if (!operationGeneration.accepts(generation)) return@launch
         state = state.copy(busyOperation = null)
         approval = SkillApprovalUiState(operation, requested, detail, revision)
       } catch (error: Throwable) {
-        if (generation != operationGeneration) return@launch
+        if (!operationGeneration.accepts(generation)) return@launch
         fail(error, "Unable to request approval")
       }
     }
@@ -241,13 +251,13 @@ fun SkillsScreen(
   fun rollback(revision: RuntimeSkillRevision) {
     val detail = state.detail ?: return
     state = state.copy(busyOperation = "rollback", inlineError = null)
-    val generation = operationGeneration
+    val generation = operationGeneration.begin()
     scope.launch {
       try {
         val result = withContext(Dispatchers.IO) {
           runtimeClient.rollbackManagedSkill(detail.packageId, revision.revisionId)
         }
-        if (generation != operationGeneration) return@launch
+        if (!operationGeneration.accepts(generation)) return@launch
         when (result) {
           is RuntimeSkillRollbackOutcome.ApprovalRequired -> {
             approval = SkillApprovalUiState(
@@ -261,7 +271,7 @@ fun SkillsScreen(
           is RuntimeSkillRollbackOutcome.Published -> refresh(returnToDetail = true)
         }
       } catch (error: Throwable) {
-        if (generation != operationGeneration) return@launch
+        if (!operationGeneration.accepts(generation)) return@launch
         fail(error, "Rollback failed")
       }
     }
@@ -272,16 +282,25 @@ fun SkillsScreen(
     state = state.copy(busyOperation = "approval", inlineError = null)
     scope.launch {
       try {
-        withContext(Dispatchers.IO) {
+        val resolution = withContext(Dispatchers.IO) {
           runtimeClient.resolveSkillApproval(pending.approval.approvalId, approve = true)
         }
         approval = null
+        val warning = resolution.synchronizationWarning
         if (pending.operation == SkillApprovalOperation.Removal) {
           navigate(SkillRoute.ListRoute)
           state = state.copy(detail = null)
-          refresh()
         } else {
           navigate(SkillRoute.Detail(pending.detail.packageId))
+        }
+        if (warning != null) {
+          state = state.copy(
+            busyOperation = null,
+            inlineError = publicationSynchronizationWarning(warning),
+          )
+        } else if (pending.operation == SkillApprovalOperation.Removal) {
+          refresh()
+        } else {
           refresh(returnToDetail = true)
         }
       } catch (error: Throwable) {
@@ -318,14 +337,24 @@ fun SkillsScreen(
     )
     is SkillRoute.Detail -> state.detail?.let { detail ->
       val targetActions = skillTargetActions(
-        SkillAccessState(mode, emptyList(), actions, allowedKinds),
+        SkillAccessState(
+          mode = mode,
+          visibleTabs = emptyList(),
+          actions = actions,
+          allowedKinds = allowedKinds,
+          protectedPackages = protectedPackages,
+          allowedOverrides = allowedOverrides,
+          agentAuthoring = agentAuthoring,
+        ),
         detail,
+        manageable = state.inventory.find { it.packageId == detail.packageId }?.manageable == true,
       )
       SkillDetailScreen(
         detail = detail,
         actions = targetActions,
         busyOperation = state.busyOperation,
         inlineError = state.inlineError,
+        onRetry = { refresh(returnToDetail = true) },
         onBack = {
           navigate(SkillRoute.ListRoute)
           state = state.copy(detail = null, inlineError = null)
@@ -334,14 +363,14 @@ fun SkillsScreen(
         onActivate = { revision -> requestApproval(SkillApprovalOperation.Activation, revision) },
         onDisable = {
           state = state.copy(busyOperation = "disable", inlineError = null)
-          val generation = operationGeneration
+          val generation = operationGeneration.begin()
           scope.launch {
             try {
               withContext(Dispatchers.IO) { runtimeClient.disableManagedSkill(detail.packageId) }
-              if (generation != operationGeneration) return@launch
+              if (!operationGeneration.accepts(generation)) return@launch
               refresh(returnToDetail = true)
             } catch (error: Throwable) {
-              if (generation != operationGeneration) return@launch
+              if (!operationGeneration.accepts(generation)) return@launch
               fail(error, "Disable failed")
             }
           }
@@ -366,12 +395,12 @@ fun SkillsScreen(
         navigate(SkillRoute.Detail(detail.packageId))
         refresh(returnToDetail = true)
       },
-      onValidated = { validation ->
+      onValidated = { validation, savedInstructions, savedTools ->
         draftValidation = validation
         val detail = state.detail
         val draft = detail?.editableDraft
         val merged = if (draft != null && validation.revisionId == draft.revisionId) {
-          revisionAfterValidation(draft, validation)
+          revisionAfterValidation(draft, validation, savedInstructions, savedTools)
         } else {
           null
         }
@@ -409,6 +438,9 @@ fun SkillsScreen(
     )
   }
 }
+
+fun publicationSynchronizationWarning(message: String): String =
+  "Published, refresh required: $message"
 
 @Composable
 internal fun SourceLabel(source: String) {

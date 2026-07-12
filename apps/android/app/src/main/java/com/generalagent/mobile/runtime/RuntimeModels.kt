@@ -103,6 +103,7 @@ data class RuntimeSkillPackageSummary(
   val status: String,
   val reason: String,
   val activeRevisionId: String?,
+  val manageable: Boolean = false,
 )
 
 data class RuntimeSkillRequirements(
@@ -130,6 +131,7 @@ data class RuntimeSkillRevision(
   val validation: RuntimeSkillValidationSummary,
   val requirements: RuntimeSkillRequirements,
   val permissionDiffJson: String,
+  val contentHash: String = "",
 )
 
 data class RuntimeSkillDetail(
@@ -200,6 +202,11 @@ data class RuntimeSkillMutation(
 ) {
   val approvalRequired: Boolean get() = approvalId != null && status == "pending"
 }
+
+data class RuntimeSkillApprovalResolution(
+  val mutation: RuntimeSkillMutation,
+  val synchronizationWarning: String? = null,
+)
 
 sealed interface RuntimeSkillRollbackOutcome {
   data class Published(val mutation: RuntimeSkillMutation) : RuntimeSkillRollbackOutcome

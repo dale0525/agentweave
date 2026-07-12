@@ -63,19 +63,23 @@ import kotlinx.coroutines.withContext
 fun revisionAfterValidation(
   revision: RuntimeSkillRevision,
   validation: RuntimeSkillValidation,
+  savedInstructions: String,
+  savedTools: List<String>,
 ): RuntimeSkillRevision = revision.copy(
+  instructions = savedInstructions,
   validation = RuntimeSkillValidationSummary(
     ok = validation.ok,
     errors = validation.errors,
     warnings = validation.warnings,
   ),
   requirements = RuntimeSkillRequirements(
-    runtimeTools = validation.requiredTools,
+    runtimeTools = savedTools,
     capabilities = validation.requiredCapabilities,
     connectors = validation.requiredConnectors,
     packages = validation.dependencies,
   ),
   permissionDiffJson = validation.permissionDiffJson,
+  contentHash = validation.contentHash,
 )
 
 @Composable
@@ -91,7 +95,7 @@ internal fun SkillDraftRoute(
   onBusy: (String) -> Unit,
   onFailure: (Throwable, String) -> Unit,
   onSaved: (RuntimeSkillDetail) -> Unit,
-  onValidated: (RuntimeSkillValidation) -> Unit,
+  onValidated: (RuntimeSkillValidation, String, List<String>) -> Unit,
   onDraftChanged: () -> Unit,
   onActivate: (RuntimeSkillRevision) -> Unit,
   onBack: () -> Unit,
@@ -102,7 +106,7 @@ internal fun SkillDraftRoute(
   var displayName by remember(detail, creating) { mutableStateOf(if (creating) "" else detail?.displayName.orEmpty()) }
   var description by remember(detail, creating) { mutableStateOf("") }
   var kind by remember(existingDraft, creating) {
-    mutableStateOf(if (creating) "instruction_only" else existingDraft?.kind ?: "instruction_only")
+    mutableStateOf(if (creating) initialDraftKind(allowedKinds) else existingDraft?.kind.orEmpty())
   }
   var instructions by remember(existingDraft, creating) { mutableStateOf(existingDraft?.instructions.orEmpty()) }
   var requiredTools by remember(existingDraft, creating) {
@@ -114,12 +118,23 @@ internal fun SkillDraftRoute(
   val activationRevision = existingDraft?.let { revision ->
     validation
       ?.takeIf { !dirty && it.ok && it.revisionId == revision.revisionId }
-      ?.let { revisionAfterValidation(revision, it) }
+      ?.let {
+        revisionAfterValidation(
+          revision,
+          it,
+          savedInstructions = revision.instructions,
+          savedTools = revision.requirements.runtimeTools,
+        )
+      }
   }
 
   fun save() {
     val normalizedId = packageId.trim()
     val normalizedName = displayName.trim()
+    if (!admitDraftKind(kind, allowedKinds)) {
+      localError = "Package kind is not allowed by policy"
+      return
+    }
     if (normalizedId.isEmpty() || normalizedName.isEmpty() || (creating && description.isBlank())) {
       localError = "Package ID, display name, and description are required"
       return
@@ -174,17 +189,19 @@ internal fun SkillDraftRoute(
     }
     localError = null
     onBusy("validate")
+    val savedInstructions = instructions
+    val savedTools = splitTools(requiredTools)
     scope.launch {
       try {
         val result = withContext(Dispatchers.IO) {
           runtimeClient.updateSkillDraft(
             revision.revisionId,
-            draftUpdateFiles(checkNotNull(detail), revision, instructions, splitTools(requiredTools)),
+            draftUpdateFiles(checkNotNull(detail), revision, savedInstructions, savedTools),
           )
           runtimeClient.validateSkillDraft(revision.revisionId)
         }
         dirty = false
-        onValidated(result)
+        onValidated(result, savedInstructions, savedTools)
       } catch (error: Throwable) {
         onFailure(error, "Validation failed")
       }

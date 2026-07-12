@@ -79,6 +79,7 @@ class MainActivityInstrumentedTest {
     val native = VisualNativeRuntime(
       mode = mode,
       failInitialLoad = arguments.getString("skill_initial_error") == "true",
+      failSynchronization = arguments.getString("skill_sync_warning") == "true",
     )
     val client = RuntimeClient(
       handle = 77L,
@@ -88,7 +89,10 @@ class MainActivityInstrumentedTest {
       skillPolicy = RuntimeSkillPolicy(
         mode = mode,
         agentAuthoring = mode == "owner_only",
-        allowedKinds = listOf("instruction_only", "host_tools_only"),
+        allowedKinds = arguments.getString("skill_allowed_kinds")
+          ?.split(',')
+          ?.filter(String::isNotBlank)
+          ?: listOf("instruction_only", "host_tools_only"),
       ),
       approverClient = RuntimeApprovalClient(78L, native, "android-approver"),
     )
@@ -167,10 +171,13 @@ private fun visualDiagnostics(mode: String) = RuntimeDiagnostics(
 private class VisualNativeRuntime(
   private val mode: String,
   private val failInitialLoad: Boolean = false,
+  private val failSynchronization: Boolean = false,
 ) : NativeRuntimeApi {
   private var validationCount = 0
   private var initialLoadFailed = false
   private var activated = false
+  private var synchronizationFailed = false
+  private var savedInstructions = "Summarize trusted sources and cite every factual claim."
   private var pendingOperation: String? = null
   val calls = mutableListOf<Pair<Long, String>>()
 
@@ -186,6 +193,17 @@ private class VisualNativeRuntime(
     if (operation == "list_skills" && failInitialLoad && !initialLoadFailed) {
       initialLoadFailed = true
       return """{"ok":false,"error":{"code":"runtime_error","message":"Managed inventory unavailable"}}"""
+    }
+    if (operation == "synchronize_skills" && failSynchronization && !synchronizationFailed) {
+      synchronizationFailed = true
+      return """{"ok":false,"error":{"code":"runtime_error","message":"requester synchronization failed"}}"""
+    }
+    if (operation == "update_skill_draft") {
+      val files = request.getJSONArray("files")
+      repeat(files.length()) { index ->
+        val file = files.getJSONObject(index)
+        if (file.getString("path") == "SKILL.md") savedInstructions = file.getString("content")
+      }
     }
     val data = when (operation) {
       "diagnostics" -> diagnosticsJson()
@@ -224,7 +242,7 @@ private class VisualNativeRuntime(
   ]"""
 
   private fun managedInventoryJson(): String = """[
-    {"package_id":"com.generalagent.research","display_name":"Research assistant","version":"${if (activated) "1.5.0" else "1.4.0"}","source_layer":"managed","status":"active","reason":"","active_revision_id":"${if (activated) "b71c6c72-8893-49f4-b593-111111111111" else "8a41912f-a83c-4fd8-a3b4-123456789abc"}"}
+    {"package_id":"com.generalagent.research","display_name":"Research assistant","version":"${if (activated) "1.5.0" else "1.4.0"}","source_layer":"managed","status":"active","reason":"","active_revision_id":"${if (activated) "b71c6c72-8893-49f4-b593-111111111111" else "8a41912f-a83c-4fd8-a3b4-123456789abc"}","manageable":true}
   ]"""
 
   private fun detailJson(packageId: String): String {
@@ -236,7 +254,7 @@ private class VisualNativeRuntime(
       version = "1.5.0",
       status = if (activated) "managed" else "staging",
       editable = !activated,
-      instructions = "Summarize trusted sources and cite every factual claim.",
+      instructions = savedInstructions,
       valid = activated,
     )
     val active = revisionJson(
@@ -265,23 +283,28 @@ private class VisualNativeRuntime(
     editable: Boolean,
     instructions: String,
     valid: Boolean,
-  ): String = """{"revision_id":"$id","version":"$version","status":"$status","editable":$editable,"created_by":"android-owner","created_at":"2026-07-13T09:30:00Z","kind":"host_tools_only","instructions":"$instructions","validation":{"ok":$valid,"errors":${if (valid) "[]" else "[\"Tool host/search is unavailable in this snapshot\"]"},"warnings":[]},"requirements":{"runtime_tools":["host/search","host/read"],"capabilities":["network.http","filesystem.app_data"],"connectors":[],"packages":[]},"permission_diff":{"capabilities":{"added":["network.http"]}}}"""
+  ): String = """{"revision_id":"$id","version":"$version","status":"$status","editable":$editable,"created_by":"android-owner","created_at":"2026-07-13T09:30:00Z","kind":"host_tools_only","instructions":"$instructions","validation":{"ok":$valid,"errors":${if (valid) "[]" else "[\"Tool host/search is unavailable in this snapshot\"]"},"warnings":[]},"requirements":{"runtime_tools":["host/search","host/read"],"capabilities":["network.http","filesystem.app_data"],"connectors":[],"packages":[]},"permission_diff":{},"content_hash":"visual-detail-hash"}"""
 
   private fun draftSummaryJson(): String =
     """{"package_id":"com.generalagent.research","revision_id":"b71c6c72-8893-49f4-b593-111111111111","version":"1.5.0","kind":"host_tools_only","validation":{"status":"pending"},"status":"draft"}"""
 
   private fun validationJson(valid: Boolean): String =
-    """{"ok":$valid,"errors":${if (valid) "[]" else "[\"Tool host/search is unavailable in this snapshot\"]"},"warnings":[],"requiredTools":["host/search","host/read"],"requiredConnectors":[],"dependencies":[],"requiredCapabilities":["network.http","filesystem.app_data"],"resolverStatus":"${if (valid) "active" else "capability_missing"}","resolverErrors":[],"permissionDiff":{"capabilities":{"added":["network.http"]}},"revisionId":"b71c6c72-8893-49f4-b593-111111111111","contentHash":"visual-hash","snapshotGeneration":7}"""
+    """{"ok":$valid,"errors":${if (valid) "[]" else "[\"Tool host/search is unavailable in this snapshot\"]"},"warnings":[],"requiredTools":["host/search","host/read"],"requiredConnectors":[],"dependencies":[],"requiredCapabilities":["network.http","filesystem.app_data"],"resolverStatus":"${if (valid) "active" else "capability_missing"}","resolverErrors":[],"permissionDiff":{"addedCapabilities":["network.http"],"removedCapabilities":[],"addedTools":[],"removedTools":[],"addedConnectors":[],"removedConnectors":[]},"revisionId":"b71c6c72-8893-49f4-b593-111111111111","contentHash":"visual-hash","snapshotGeneration":7}"""
 
   private fun approvalJson(operation: String, request: JSONObject): String {
     pendingOperation = operation
     val revision = request.optString("revision_id", "8a41912f-a83c-4fd8-a3b4-123456789abc")
-    return """{"approval_id":"a9cb37b2-40d0-46d5-8fb2-333333333333","package_id":"com.generalagent.research","permission_diff":{"capabilities":{"added":["network.http"]}},"requested_by":"android-requester","revision_id":"$revision","status":"pending"}"""
+    val diff = if (operation == "request_skill_activation") {
+      """{"addedCapabilities":["network.http"],"removedCapabilities":[],"addedTools":[],"removedTools":[],"addedConnectors":[],"removedConnectors":[]}"""
+    } else {
+      "{}"
+    }
+    return """{"approval_id":"a9cb37b2-40d0-46d5-8fb2-333333333333","package_id":"com.generalagent.research","permission_diff":$diff,"requested_by":"android-requester","revision_id":"$revision","status":"pending"}"""
   }
 
   private fun rollbackApprovalJson(request: JSONObject): String {
     pendingOperation = "rollback_managed_skill"
-    return """{"approval_id":"d83a3886-dffd-48f8-bd52-444444444444","package_id":"${request.getString("package_id")}","permission_diff":{"capabilities":{"added":["secure_storage"]}},"requested_by":"android-requester","revision_id":"${request.getString("revision_id")}","status":"pending"}"""
+    return """{"approval_id":"d83a3886-dffd-48f8-bd52-444444444444","package_id":"${request.getString("package_id")}","permission_diff":{},"requested_by":"android-requester","revision_id":"${request.getString("revision_id")}","status":"pending"}"""
   }
 
   private fun resolveApproval(): String {

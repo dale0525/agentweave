@@ -122,6 +122,7 @@ fn mobile_owner_bridge_exposes_real_revision_detail() {
     assert_eq!(detail["package_id"], "com.example.mobile-detail");
     assert_eq!(detail["revisions"].as_array().unwrap().len(), 1);
     assert_eq!(detail["editable_draft"]["editable"], true);
+    assert!(detail["editable_draft"]["content_hash"].as_str().is_some());
     close_runtime(handle);
 }
 
@@ -236,6 +237,17 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
         json!({"operation": "request_skill_activation", "revision_id": revision_id}),
     );
     assert_eq!(approval["requested_by"], "mobile-requester");
+    assert_eq!(approval["permission_diff"], validation["permissionDiff"]);
+    for field in [
+        "addedCapabilities",
+        "removedCapabilities",
+        "addedTools",
+        "removedTools",
+        "addedConnectors",
+        "removedConnectors",
+    ] {
+        assert!(approval["permission_diff"][field].is_array(), "{field}");
+    }
     let resolved = invoke_value(
         approver,
         json!({
@@ -288,7 +300,7 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
         }),
     );
     assert_eq!(rollback["requested_by"], "mobile-requester");
-    assert!(rollback["permission_diff"].is_object());
+    assert_eq!(rollback["permission_diff"], json!({}));
     invoke_value(
         approver,
         json!({
@@ -307,6 +319,7 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
         }),
     );
     assert_eq!(removal["requested_by"], "mobile-requester");
+    assert_eq!(removal["permission_diff"], json!({}));
     let removed = invoke_value(
         approver,
         json!({
