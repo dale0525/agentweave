@@ -87,6 +87,8 @@ mod skill_policy_tests;
 #[cfg(test)]
 mod runtime_tool_identity_tests;
 #[cfg(test)]
+mod skill_management_read_rereview_tests;
+#[cfg(test)]
 mod skill_management_tests;
 #[cfg(test)]
 mod skill_recovery_cleanup_tests;

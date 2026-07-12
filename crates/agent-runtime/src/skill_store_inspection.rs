@@ -2,6 +2,7 @@ use crate::skill_state::{SkillRevisionRecord, SkillRevisionStatus};
 use crate::skill_store::SkillRevisionStore;
 use crate::skill_store_locks::acquire_revision_lock;
 use crate::skill_store_prepared_fs::open_regular_file;
+use crate::skill_store_public_types::SkillStoreBoundaryError;
 use crate::skill_store_secure_roots::{open_prepared_directory, opened_package_snapshot};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
@@ -19,7 +20,10 @@ impl SkillRevisionStore {
         let _guard =
             acquire_revision_lock(&self.paths.identity, &record.revision_id, &self.faults).await?;
         if self.state.get_revision(&record.revision_id).await?.as_ref() != Some(record) {
-            anyhow::bail!("skill revision changed while waiting for inspection lock");
+            return Err(SkillStoreBoundaryError::Conflict(anyhow::anyhow!(
+                "skill revision changed while waiting for inspection lock"
+            ))
+            .into());
         }
         let (identity, relative, expected_path) = match record.status {
             SkillRevisionStatus::Staging => {

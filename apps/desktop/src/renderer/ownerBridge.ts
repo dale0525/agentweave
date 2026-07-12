@@ -73,11 +73,16 @@ async function devRequest(actor: "requester" | "approver", path: string, method:
 }
 
 export function canInspectOwnerSkills(policy: OwnerPolicy | null): boolean {
-  return Boolean(policy && policy.mode !== "disabled" && policy.grants?.includes("inspect"));
+  return Boolean(
+    policy
+    && policy.mode !== "disabled"
+    && (policy.mode !== "owner_only" || policy.role === "owner")
+    && policy.grants?.includes("inspect")
+  );
 }
 
 export function canManageOwnerSkills(policy: OwnerPolicy, grant: string): boolean {
-  return policy.mode === "owner_only" && policy.grants.includes(grant);
+  return policy.mode === "owner_only" && policy.role === "owner" && policy.grants.includes(grant);
 }
 
 function principalPolicy(principal: OwnerPrincipalWire): OwnerPolicy {

@@ -14,8 +14,15 @@ import { OwnerApprovalOperation } from "../components/ownerSkills/SkillApprovalD
 
 export type PendingApproval = {
   approval: OwnerSkillApproval;
+  baselineRevision: OwnerSkillRevision | null;
   operation: OwnerApprovalOperation;
   revision: OwnerSkillRevision;
+};
+
+type DraftValidationState = {
+  packageId: string;
+  revisionId: string;
+  validation: OwnerSkillValidation;
 };
 
 export const pendingValidation: OwnerSkillValidation = {
@@ -40,15 +47,26 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
   const [createdPackageId, setCreatedPackageId] = useState<string | null>(null);
   const [draftInstructions, setDraftInstructions] = useState("");
   const [draftRequiredTools, setDraftRequiredTools] = useState("");
-  const [draftValidation, setDraftValidation] = useState<OwnerSkillValidation>(pendingValidation);
+  const [draftValidationState, setDraftValidationState] = useState<DraftValidationState | null>(null);
   const inventoryRequest = useRef(0);
   const detailRequest = useRef(0);
+  const validationGeneration = useRef(0);
   const selected = selectedId ? details[selectedId] ?? null : null;
   const editableDraft = selected?.editable_draft ?? null;
   const selectedRevision = editableDraft
     ?? selected?.revisions.find((revision) => revision.revision_id === selected.active_revision_id)
     ?? selected?.revisions[0]
     ?? null;
+  const draftIdentity = selected && editableDraft
+    ? { packageId: selected.package_id, revisionId: editableDraft.revision_id }
+    : null;
+  const draftIdentityRef = useRef(draftIdentity);
+  draftIdentityRef.current = draftIdentity;
+  const draftValidation = draftIdentity
+    && draftValidationState?.packageId === draftIdentity.packageId
+    && draftValidationState.revisionId === draftIdentity.revisionId
+    ? draftValidationState.validation
+    : pendingValidation;
 
   const packages = useMemo(() => summaries.map((summary) => ({
     ...summary,
@@ -102,16 +120,21 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
     void loadDetail(selectedId);
   }, [loadDetail, selectedId]);
   useEffect(() => {
+    validationGeneration.current += 1;
     if (!editableDraft) {
       setDraftInstructions("");
       setDraftRequiredTools("");
-      setDraftValidation(pendingValidation);
+      setDraftValidationState(null);
       return;
     }
     setDraftInstructions(editableDraft.instructions);
     setDraftRequiredTools(editableDraft.requirements.runtime_tools.join(", "));
-    setDraftValidation(normalizeValidation(editableDraft.validation));
-  }, [editableDraft?.revision_id, editableDraft?.instructions, editableDraft?.validation]);
+    setDraftValidationState({
+      packageId: selected?.package_id ?? "",
+      revisionId: editableDraft.revision_id,
+      validation: normalizeValidation(editableDraft.validation)
+    });
+  }, [selected?.package_id, editableDraft?.revision_id, editableDraft?.instructions, editableDraft?.validation]);
 
   const mutate = async (name: string, operation: () => Promise<void>) => {
     if (busy) return;
@@ -122,7 +145,28 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
     await loadInventory(true);
     setStatus(message);
   };
-  const invalidateDraft = () => setDraftValidation(pendingValidation);
+  const invalidateDraft = (instructions: string, requiredTools: string) => {
+    validationGeneration.current += 1;
+    if (!selected || !editableDraft) {
+      setDraftValidationState(null);
+      return;
+    }
+    setDraftValidationState({
+      packageId: selected.package_id,
+      revisionId: editableDraft.revision_id,
+      validation: pendingValidation
+    });
+    setDetails((current) => ({
+      ...current,
+      [selected.package_id]: mergeValidation(
+        current[selected.package_id] ?? selected,
+        editableDraft.revision_id,
+        pendingValidation,
+        instructions,
+        splitValues(requiredTools)
+      )
+    }));
+  };
 
   return {
     policy, packages, selectedId, selected, selectedRevision, editableDraft, search, status,
@@ -130,17 +174,32 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
     createdPackageId,
     draftInstructions, draftRequiredTools, draftValidation,
     setSearch, setCreateOpen,
-    selectPackage: (item: OwnerSkillPackageSummary) => { setSelectedId(item.package_id); setStatus(null); },
+    selectPackage: (item: OwnerSkillPackageSummary) => {
+      validationGeneration.current += 1;
+      setSelectedId(item.package_id);
+      setStatus(null);
+    },
     refresh: () => loadInventory(true),
-    changeInstructions: (value: string) => { setDraftInstructions(value); invalidateDraft(); },
-    changeRequiredTools: (value: string) => { setDraftRequiredTools(value); invalidateDraft(); },
+    changeInstructions: (value: string) => {
+      setDraftInstructions(value);
+      invalidateDraft(value, draftRequiredTools);
+    },
+    changeRequiredTools: (value: string) => {
+      setDraftRequiredTools(value);
+      invalidateDraft(draftInstructions, value);
+    },
     closeApproval: () => { if (busy !== "approval") setPendingApproval(null); },
     requestActivation: () => void mutate("activation", async () => {
-      if (!editableDraft || !draftValidation.ok) return;
+      if (!selected || !editableDraft || !draftValidation.ok || !sameDraft(draftIdentity, selected, editableDraft)) return;
       try {
         const approval = await ownerClient.requestActivation(editableDraft.revision_id);
         setApprovalError(null);
-        setPendingApproval({ approval, operation: "activation", revision: editableDraft });
+        setPendingApproval({
+          approval,
+          baselineRevision: activeRevisionFor(selected),
+          operation: "activation",
+          revision: editableDraft
+        });
       } catch (error) { setStatus(errorMessage(error, "Activation request failed")); }
     }),
     approvePending: () => void mutate("approval", async () => {
@@ -159,7 +218,12 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
       try {
         const result = await ownerClient.rollback(selected.package_id, revision.revision_id);
         if (result.approval_id) {
-          setPendingApproval({ approval: result as OwnerSkillApproval, operation: "rollback", revision });
+          setPendingApproval({
+            approval: result as OwnerSkillApproval,
+            baselineRevision: activeRevisionFor(selected),
+            operation: "rollback",
+            revision
+          });
         } else await reconcile(`Rolled back to ${revision.version}`);
       } catch { setStatus("Rollback failed. The current revision remains active."); }
     }),
@@ -169,42 +233,64 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
       catch (error) { setStatus(errorMessage(error, "Disable failed. The current revision remains active.")); }
     }),
     requestRemoval: () => void mutate("removal", async () => {
-      if (!selected || !selectedRevision || !selectedRevision.validation.ok) return;
+      const latestValidation = editableDraft ? draftValidation : selectedRevision?.validation;
+      if (!selected || !selectedRevision || !latestValidation?.ok) return;
       try {
         const approval = await ownerClient.requestRemoval(selected.package_id);
-        setPendingApproval({ approval, operation: "removal", revision: selectedRevision });
+        setPendingApproval({
+          approval,
+          baselineRevision: activeRevisionFor(selected),
+          operation: "removal",
+          revision: selectedRevision
+        });
       } catch (error) { setStatus(errorMessage(error, "Removal request failed")); }
     }),
     saveDraft: () => void mutate("save", async () => {
       if (!selected || !editableDraft) return;
       try {
+        validationGeneration.current += 1;
         await ownerClient.updateDraft(editableDraft.revision_id, draftFiles(selected, editableDraft, draftInstructions, draftRequiredTools));
-        setDraftValidation(pendingValidation);
+        setDraftValidationState({
+          packageId: selected.package_id,
+          revisionId: editableDraft.revision_id,
+          validation: pendingValidation
+        });
         await loadDetail(selected.package_id);
         setStatus("Draft saved");
       } catch (error) { setStatus(errorMessage(error, "Draft save failed")); }
     }),
     validateDraft: () => void mutate("validate", async () => {
       if (!selected || !editableDraft) return;
+      const packageId = selected.package_id;
+      const revisionId = editableDraft.revision_id;
+      const instructions = draftInstructions;
+      const requiredTools = draftRequiredTools;
+      const generation = validationGeneration.current;
       try {
         await ownerClient.updateDraft(
-          editableDraft.revision_id,
-          draftFiles(selected, editableDraft, draftInstructions, draftRequiredTools)
+          revisionId,
+          draftFiles(selected, editableDraft, instructions, requiredTools)
         );
-        const validation = normalizeValidation(await ownerClient.validateDraft(editableDraft.revision_id));
-        setDraftValidation(validation);
+        const validation = normalizeValidation(await ownerClient.validateDraft(revisionId));
+        if (!isCurrentDraft(draftIdentityRef.current, packageId, revisionId, generation, validationGeneration.current)) return;
+        setDraftValidationState({ packageId, revisionId, validation });
         setDetails((current) => ({
           ...current,
-          [selected.package_id]: mergeValidation(
-            selected,
-            editableDraft.revision_id,
+          [packageId]: mergeValidation(
+            current[packageId] ?? selected,
+            revisionId,
             validation,
-            draftInstructions,
-            splitValues(draftRequiredTools)
+            instructions,
+            splitValues(requiredTools)
           )
         }));
       } catch (error) {
-        setDraftValidation({ ...draftValidation, ok: false, errors: [errorMessage(error, "Draft validation failed")] });
+        if (!isCurrentDraft(draftIdentityRef.current, packageId, revisionId, generation, validationGeneration.current)) return;
+        setDraftValidationState({
+          packageId,
+          revisionId,
+          validation: { ...draftValidation, ok: false, errors: [errorMessage(error, "Draft validation failed")] }
+        });
       }
     }),
     createDraft: (form: DraftForm) => void mutate("create", async () => {
@@ -231,6 +317,30 @@ function normalizeInventory(items: OwnerSkillPackageSummary[]): OwnerSkillPackag
     if (!current || item.source_layer === "managed") byId.set(item.package_id, item);
   }
   return [...byId.values()].sort((a, b) => a.package_id.localeCompare(b.package_id));
+}
+
+function activeRevisionFor(detail: OwnerSkillPackage): OwnerSkillRevision | null {
+  return detail.revisions.find((revision) => revision.revision_id === detail.active_revision_id) ?? null;
+}
+
+function sameDraft(
+  identity: { packageId: string; revisionId: string } | null,
+  detail: OwnerSkillPackage,
+  revision: OwnerSkillRevision
+): boolean {
+  return identity?.packageId === detail.package_id && identity.revisionId === revision.revision_id;
+}
+
+function isCurrentDraft(
+  identity: { packageId: string; revisionId: string } | null,
+  packageId: string,
+  revisionId: string,
+  startedGeneration: number,
+  currentGeneration: number
+): boolean {
+  return startedGeneration === currentGeneration
+    && identity?.packageId === packageId
+    && identity.revisionId === revisionId;
 }
 
 function normalizeDetail(detail: OwnerSkillPackage): OwnerSkillPackage {

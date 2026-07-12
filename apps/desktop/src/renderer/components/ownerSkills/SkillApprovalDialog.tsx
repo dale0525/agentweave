@@ -1,5 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { Badge, Box, Button, Flex, Heading, IconButton, ScrollArea, Separator, Text, Theme, Tooltip } from "@radix-ui/themes";
+import { diffLines } from "diff";
 import { LoaderCircle, X } from "lucide-react";
 
 import { OwnerSkillApproval, OwnerSkillRevision } from "../../api";
@@ -10,6 +11,7 @@ type SkillApprovalDialogProps = {
   approval: OwnerSkillApproval | null;
   approverActor: string | null;
   approverAvailable: boolean;
+  baselineRevision: OwnerSkillRevision | null;
   busy: boolean;
   error: string | null;
   operation: OwnerApprovalOperation;
@@ -22,6 +24,7 @@ export function SkillApprovalDialog({
   approval,
   approverActor,
   approverAvailable,
+  baselineRevision,
   busy,
   error,
   operation,
@@ -97,7 +100,10 @@ export function SkillApprovalDialog({
                     whiteSpace: "pre-wrap"
                   }}
                 >
-                  <DiffText value={revision?.instructions || "No instruction changes"} />
+                  <InstructionDiff
+                    baseline={baselineRevision?.instructions ?? ""}
+                    candidate={revision?.instructions ?? ""}
+                  />
                 </Box>
               </ApprovalSection>
               <ApprovalSection title="Required tools">
@@ -130,7 +136,7 @@ export function SkillApprovalDialog({
                   ? "Approval removes the managed package from the active inventory."
                   : "Approval publishes a new immutable active snapshot."}
               </Text>
-              {error ? <Text color="red" size="2">{error}</Text> : null}
+              {error ? <Text aria-live="assertive" color="red" role="alert" size="2">{error}</Text> : null}
             </Flex>
           </ScrollArea>
           <Separator size="4" />
@@ -175,8 +181,33 @@ function getAddedCapabilities(
   return revision?.requirements.capabilities ?? [];
 }
 
-function DiffText({ value }: { value: string }): JSX.Element {
-  return <>{value.split("\n").map((line, index) => <Text as="div" color={line.startsWith("+") ? "green" : line.startsWith("-") ? "red" : undefined} key={`${index}-${line}`} size="1">{line || " "}</Text>)}</>;
+function InstructionDiff({ baseline, candidate }: { baseline: string; candidate: string }): JSX.Element {
+  if (!baseline && !candidate) return <Text color="gray" size="1">No instruction changes</Text>;
+  let index = 0;
+  return <>{diffLines(baseline, candidate).flatMap((change) => {
+    const kind = change.added ? "added" : change.removed ? "removed" : "unchanged";
+    const lines = change.value.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    return lines.map((line) => {
+      const key = `${index++}-${kind}`;
+      return (
+        <Text
+          aria-label={`${kind}: ${line || "blank line"}`}
+          as="div"
+          color={kind === "added" ? "green" : kind === "removed" ? "red" : undefined}
+          data-diff-kind={kind}
+          key={key}
+          size="1"
+          style={{ background: kind === "added" ? "var(--green-a3)" : kind === "removed" ? "var(--red-a3)" : undefined }}
+        >
+          <span aria-hidden="true" style={{ display: "inline-block", width: "1.5em", userSelect: "none" }}>
+            {kind === "added" ? "+" : kind === "removed" ? "-" : " "}
+          </span>
+          {line || " "}
+        </Text>
+      );
+    });
+  })}</>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

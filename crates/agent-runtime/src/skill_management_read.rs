@@ -142,7 +142,13 @@ impl OwnerSkillManagementService {
         record: SkillRevisionRecord,
     ) -> anyhow::Result<SkillRevisionDetail> {
         let descriptor = descriptor(&record)?;
-        let content = self.revisions.inspect_revision_content(&record).await?;
+        let content = self
+            .revisions
+            .inspect_revision_content(&record)
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_store("inspect skill revision", "skill revision", error)
+            })?;
         let requirements = SkillRevisionRequirements {
             runtime_tools: descriptor.requires.runtime_tools.clone(),
             capabilities: descriptor.requires.capabilities.clone(),

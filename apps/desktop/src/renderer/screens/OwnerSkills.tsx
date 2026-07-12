@@ -1,8 +1,8 @@
-import { Box, Flex, Text } from "@radix-ui/themes";
+import * as TooltipPrimitive from "@radix-ui/react-tooltip";
+import { Box, Flex, IconButton, Text, Tooltip } from "@radix-ui/themes";
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { AppIconButton } from "../components/AppIconButton";
 import { CreateDraftDialog } from "../components/ownerSkills/CreateDraftDialog";
 import { OwnerSkillDetail } from "../components/ownerSkills/OwnerSkillDetail";
 import { OwnerSkillList } from "../components/ownerSkills/OwnerSkillList";
@@ -28,18 +28,23 @@ export function OwnerSkills({ onBack, policy }: OwnerSkillsProps): JSX.Element {
   };
 
   return (
+    <TooltipPrimitive.Provider delayDuration={350}>
     <main aria-label="Owner Skills" style={{ display: "flex", height: "100%", minHeight: 0, flexDirection: "column", background: "var(--color-background)" }}>
       <header className="top-bar" style={{ justifyContent: "space-between" }}>
-        <AppIconButton label={isMobile && mobileDetail ? "Back to skills list" : "Back to settings"} onClick={back}>
-          <ArrowLeft size={18} aria-hidden="true" />
-        </AppIconButton>
+        <Tooltip content={isMobile && mobileDetail ? "Back to skills list" : "Back to settings"}>
+          <IconButton aria-label={isMobile && mobileDetail ? "Back to skills list" : "Back to settings"} onClick={back} size="2" variant="ghost">
+            <ArrowLeft size={18} aria-hidden="true" />
+          </IconButton>
+        </Tooltip>
         <div className="top-bar-title" style={{ marginRight: "auto", textAlign: "left" }}>
           <h1>Owner Skills</h1>
           <p>{policy.mode.replaceAll("_", " ")} · {policy.actorId}</p>
         </div>
-        <AppIconButton label="Refresh skills" onClick={() => void workflow.refresh()}>
-          <RefreshCw size={17} aria-hidden="true" />
-        </AppIconButton>
+        <Tooltip content="Refresh skills">
+          <IconButton aria-label="Refresh skills" disabled={workflow.busy !== null} onClick={() => void workflow.refresh()} size="2" variant="ghost">
+            <RefreshCw size={17} aria-hidden="true" />
+          </IconButton>
+        </Tooltip>
       </header>
       {workflow.status || workflow.loadError ? (
         <Box aria-live="polite" px="4" py="2" style={{ borderBottom: "1px solid var(--gray-a5)", background: workflow.loadError ? "var(--red-a2)" : "var(--accent-a2)" }}>
@@ -92,6 +97,7 @@ export function OwnerSkills({ onBack, policy }: OwnerSkillsProps): JSX.Element {
         approval={workflow.pendingApproval?.approval ?? null}
         approverActor={workflow.approver?.actorId ?? null}
         approverAvailable={workflow.approver !== null}
+        baselineRevision={workflow.pendingApproval?.baselineRevision ?? null}
         busy={workflow.busy === "approval"}
         error={workflow.approvalError ?? workflow.approverError}
         onApprove={workflow.approvePending}
@@ -100,6 +106,7 @@ export function OwnerSkills({ onBack, policy }: OwnerSkillsProps): JSX.Element {
         revision={workflow.pendingApproval?.revision ?? null}
       />
     </main>
+    </TooltipPrimitive.Provider>
   );
 }
 

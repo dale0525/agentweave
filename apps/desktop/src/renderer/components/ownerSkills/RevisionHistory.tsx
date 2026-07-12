@@ -29,6 +29,10 @@ export function RevisionHistory({
       <Flex aria-label="Revision history" direction="column" gap="2" role="list">
         {revisions.map((revision) => {
           const active = revision.revision_id === activeRevisionId;
+          const rollbackEligible = !active
+            && canRollback
+            && !revision.editable
+            && revision.status === "managed";
           return (
             <Box key={revision.revision_id} role="listitem" style={{ borderBottom: "1px solid var(--gray-a6)", padding: "10px 0" }}>
               <Flex align="center" justify="between" gap="2">
@@ -38,7 +42,7 @@ export function RevisionHistory({
               <Text as="div" color="gray" size="1" mt="1" style={{ overflowWrap: "anywhere" }}>{revision.revision_id}</Text>
               <Flex align="center" justify="between" gap="2" mt="2">
                 <Text color="gray" size="1">{revision.created_by || "Unknown"}</Text>
-                {!active && canRollback ? <Button disabled={busy || !revision.validation.ok} onClick={() => onRollback(revision)} size="1" variant="soft"><RotateCcw size={13} aria-hidden="true" /> Rollback to {revision.version}</Button> : null}
+                {rollbackEligible ? <Button disabled={busy || !revision.validation.ok} onClick={() => onRollback(revision)} size="1" variant="soft"><RotateCcw size={13} aria-hidden="true" /> Rollback to {revision.version}</Button> : null}
               </Flex>
             </Box>
           );
@@ -61,6 +65,10 @@ export function RevisionHistory({
         <Table.Body>
           {revisions.map((revision) => {
             const active = revision.revision_id === activeRevisionId;
+            const rollbackEligible = !active
+              && canRollback
+              && !revision.editable
+              && revision.status === "managed";
             return (
               <Table.Row key={revision.revision_id}>
                 <Table.RowHeaderCell>
@@ -76,7 +84,7 @@ export function RevisionHistory({
                 </Table.Cell>
                 <Table.Cell>{revision.created_by || "Unknown"}</Table.Cell>
                 <Table.Cell justify="end">
-                  {!active && canRollback ? (
+                  {rollbackEligible ? (
                     <Button
                       disabled={busy || !revision.validation.ok}
                       onClick={() => onRollback(revision)}

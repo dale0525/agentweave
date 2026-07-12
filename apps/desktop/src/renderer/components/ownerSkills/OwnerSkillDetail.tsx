@@ -1,4 +1,5 @@
 import * as Tabs from "@radix-ui/react-tabs";
+import { useEffect, useState } from "react";
 import {
   Badge,
   Box,
@@ -56,9 +57,16 @@ export function OwnerSkillDetail({
 }: OwnerSkillDetailProps): JSX.Element {
   const managed = selected.source_layer === "managed";
   const hasGrant = (grant: string) => canManageOwnerSkills(ownerPolicy, grant);
-  const validated = selectedRevision.validation.ok;
   const revisions = selected.revisions;
   const hasDraft = selected.editable_draft !== null;
+  const validated = hasDraft ? draftValidation.ok : selectedRevision.validation.ok;
+  const [tab, setTab] = useState(selected.status === "draft" && hasDraft ? "draft" : "overview");
+  useEffect(() => {
+    setTab(selected.status === "draft" && hasDraft ? "draft" : "overview");
+  }, [selected.package_id]);
+  useEffect(() => {
+    if (tab === "draft" && !hasDraft) setTab("overview");
+  }, [hasDraft, tab]);
   const canDisable = managed
     && selected.status !== "disabled"
     && selected.status !== "removed"
@@ -124,8 +132,9 @@ export function OwnerSkillDetail({
         </Box>
 
         <Tabs.Root
-          defaultValue={selected.status === "draft" ? "draft" : "overview"}
+          onValueChange={setTab}
           style={{ minWidth: 0, maxWidth: "100%" }}
+          value={tab}
         >
           <Tabs.List
             aria-label="Skill details"

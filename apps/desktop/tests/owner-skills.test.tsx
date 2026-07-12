@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "../src/renderer/App";
-import { OwnerSkillPackage } from "../src/renderer/api";
+import { OwnerSkillInventory, OwnerSkillPackage } from "../src/renderer/api";
 import { OwnerPolicy } from "../src/renderer/ownerBridge";
 import { OwnerSkills } from "../src/renderer/screens/OwnerSkills";
 import detailFixture from "./fixtures/owner-package-detail.json";
@@ -60,6 +60,15 @@ describe("owner principal route gating", () => {
     expect(await screen.findByRole("main", { name: "Owner Skills" })).toBeInTheDocument();
     expect(await screen.findAllByText("Calendar Operations")).not.toHaveLength(0);
   });
+
+  it("fails closed for a non-owner principal in owner_only mode", async () => {
+    window.history.replaceState(null, "", "/#owner-skills");
+    installBridge({ policy: { ...ownerPolicy, role: "operator" } });
+    render(<App />);
+    expect(screen.getByRole("main", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Manage skills" })).not.toBeInTheDocument();
+    await waitFor(() => expect(window.location.hash).toBe("#settings"));
+  });
 });
 
 describe("owner workflows", () => {
@@ -99,21 +108,85 @@ describe("owner workflows", () => {
     expect(screen.queryByRole("button", { name: "Request activation" })).not.toBeInTheDocument();
   });
 
-  it("invalidates a passing validation immediately after an edit", async () => {
-    installBridge();
+  it("invalidates activation, removal, and the global validation state after an edit", async () => {
+    const bridge = installBridge();
     renderOwner();
     await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
     expect(screen.getByRole("button", { name: "Request activation" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Remove skill" })).toBeEnabled();
     await userEvent.type(screen.getByRole("textbox", { name: "Instructions" }), " changed");
     expect(screen.getByRole("button", { name: "Request activation" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove skill" })).toBeDisabled();
+    expect(screen.getByText("Validation is required before activation or removal")).toBeInTheDocument();
     expect(screen.getByText("Validation has not run")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Validate draft" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove skill" })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: "Remove skill" }));
+    expect(bridge.updateDraft).toHaveBeenLastCalledWith(
+      "33333333-3333-4333-8333-333333333333",
+      expect.arrayContaining([expect.objectContaining({ path: "SKILL.md", content: expect.stringContaining("changed") })])
+    );
+    expect(bridge.requestRemoval).toHaveBeenCalledWith("com.example.calendar");
+  });
+
+  it("invalidates all publication gates when required tools change", async () => {
+    installBridge();
+    renderOwner();
+    await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Required host tools" }), ", calendar.write");
+    expect(screen.getByRole("button", { name: "Request activation" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove skill" })).toBeDisabled();
+    expect(screen.getByText("Validation is required before activation or removal")).toBeInTheDocument();
   });
 
   it("never offers rollback to an editable staging revision", async () => {
     installBridge();
     renderOwner();
     expect(await screen.findAllByText("Calendar Operations")).not.toHaveLength(0);
+    await userEvent.click(screen.getByRole("tab", { name: "Revisions" }));
     expect(screen.queryByRole("button", { name: "Rollback to 2.1.0" })).not.toBeInTheDocument();
+  });
+
+  it("discards validation for package A after package B is selected", async () => {
+    let resolveValidation!: (value: { ok: boolean; errors: string[]; warnings: string[] }) => void;
+    const validation = new Promise<{ ok: boolean; errors: string[]; warnings: string[] }>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const packageA = packageDetail("com.example.calendar", "Calendar Operations", true);
+    const packageB = packageDetail("com.example.mail", "Mail Operations", true);
+    packageB.editable_draft!.validation = { ok: false, errors: ["Validation has not run"], warnings: [] };
+    packageB.revisions[0].validation = { ok: false, errors: ["Validation has not run"], warnings: [] };
+    const bridge = installBridge({
+      details: { [packageA.package_id]: packageA, [packageB.package_id]: packageB },
+      inventory: inventoryFor(packageA, packageB)
+    });
+    bridge.validateDraft.mockReturnValueOnce(validation);
+    renderOwner();
+    await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
+    await userEvent.click(screen.getByRole("button", { name: "Validate draft" }));
+    await waitFor(() => expect(bridge.validateDraft).toHaveBeenCalled());
+    const list = screen.getByRole("list", { name: "Skill packages" });
+    await userEvent.click(within(list).getByRole("button", { name: /Mail Operations/ }));
+    expect(await screen.findByRole("heading", { name: "Mail Operations" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Draft" }));
+    resolveValidation({ ok: true, errors: [], warnings: [] });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Request activation" })).toBeDisabled());
+    expect(screen.getByText("Validation is required before activation or removal")).toBeInTheDocument();
+  });
+
+  it("shows a real instruction diff with unchanged front matter", async () => {
+    installBridge();
+    renderOwner();
+    await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
+    await userEvent.click(screen.getByRole("button", { name: "Request activation" }));
+    const dialog = await screen.findByRole("dialog", { name: "Approve skill activation" });
+    const unchanged = [...dialog.querySelectorAll('[data-diff-kind="unchanged"]')];
+    const removed = [...dialog.querySelectorAll('[data-diff-kind="removed"]')];
+    const added = [...dialog.querySelectorAll('[data-diff-kind="added"]')];
+    expect(unchanged.some((line) => line.textContent?.endsWith("---"))).toBe(true);
+    expect(removed.some((line) => line.textContent?.endsWith("Review daily calendar."))).toBe(true);
+    expect(added.some((line) => line.textContent?.endsWith("Review calendar and summarize conflicts."))).toBe(true);
+    expect(added.some((line) => line.textContent?.endsWith("Flag overlapping focus blocks."))).toBe(true);
   });
 
   it("merges authoritative validation requirements into approval", async () => {
@@ -177,8 +250,40 @@ describe("owner workflows", () => {
     await userEvent.click(screen.getByRole("button", { name: "Request activation" }));
     const dialog = await screen.findByRole("dialog", { name: "Approve skill activation" });
     await userEvent.click(within(dialog).getByRole("button", { name: "Approve activation" }));
-    expect(await within(dialog).findByText("approver service unavailable")).toBeInTheDocument();
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("approver service unavailable");
     expect(dialog).toBeInTheDocument();
+  });
+
+  it("resets to Overview after activation removes the Draft tab", async () => {
+    let current = packageDetail("com.example.calendar", "Calendar Operations", true);
+    const bridge = installBridge();
+    bridge.skillDetail.mockImplementation(async () => structuredClone(current));
+    renderOwner();
+    await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
+    await userEvent.click(screen.getByRole("button", { name: "Request activation" }));
+    const dialog = await screen.findByRole("dialog", { name: "Approve skill activation" });
+    current = packageDetail("com.example.calendar", "Calendar Operations", false);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Approve activation" }));
+    expect(await screen.findByText("Active snapshot 4")).toBeInTheDocument();
+    const overview = screen.getByRole("tab", { name: "Overview" });
+    await waitFor(() => expect(overview).toHaveAttribute("data-state", "active"));
+    expect(screen.getByText("Package kind")).toBeInTheDocument();
+  });
+
+  it("resets to Overview when switching from Draft to a package without a draft", async () => {
+    const packageA = packageDetail("com.example.calendar", "Calendar Operations", true);
+    const packageB = packageDetail("com.example.mail", "Mail Operations", false);
+    installBridge({
+      details: { [packageA.package_id]: packageA, [packageB.package_id]: packageB },
+      inventory: inventoryFor(packageA, packageB)
+    });
+    renderOwner();
+    await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
+    const list = screen.getByRole("list", { name: "Skill packages" });
+    await userEvent.click(within(list).getByRole("button", { name: /Mail Operations/ }));
+    expect(await screen.findByRole("heading", { name: "Mail Operations" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("data-state", "active"));
+    expect(screen.queryByRole("tab", { name: "Draft" })).not.toBeInTheDocument();
   });
 
   it("resolves approval-required rollback with the approver and reloads", async () => {
@@ -269,6 +374,15 @@ describe("owner workflows", () => {
     await userEvent.click(await screen.findByRole("tab", { name: "Revisions" }));
     expect(screen.queryByRole("table", { name: "Revision history" })).not.toBeInTheDocument();
     expect(screen.getByRole("list", { name: "Revision history" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Rollback to 2.1.0" })).not.toBeInTheDocument();
+  });
+
+  it("uses Radix icon buttons with tooltips for owner navigation actions", async () => {
+    installBridge();
+    renderOwner();
+    expect(await screen.findAllByText("Calendar Operations")).not.toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Back to settings" })).toHaveClass("rt-IconButton");
+    expect(screen.getByRole("button", { name: "Refresh skills" })).toHaveClass("rt-IconButton");
   });
 });
 
@@ -280,6 +394,8 @@ function installBridge(options: {
   policy?: OwnerPolicy;
   approverError?: Error;
   detail?: OwnerSkillPackage;
+  details?: Record<string, OwnerSkillPackage>;
+  inventory?: OwnerSkillInventory;
   validation?: Record<string, unknown>;
 } = {}) {
   const requester = principal(options.policy ?? ownerPolicy);
@@ -288,8 +404,10 @@ function installBridge(options: {
     approverPrincipal: options.approverError
       ? vi.fn(async () => { throw options.approverError; })
       : vi.fn(async () => principal(approverPolicy)),
-    listSkills: vi.fn(async () => inventory),
-    skillDetail: vi.fn(async (_id: string) => options.detail ?? structuredClone(detailFixture)),
+    listSkills: vi.fn(async () => options.inventory ?? inventory),
+    skillDetail: vi.fn(async (id: string) => structuredClone(
+      options.details?.[id] ?? options.detail ?? detailFixture
+    )),
     createDraft: vi.fn(),
     updateDraft: vi.fn(async () => ({})),
     validateDraft: vi.fn(async () => options.validation ?? { ok: true, errors: [], warnings: [] }),
@@ -307,6 +425,30 @@ function installBridge(options: {
   };
   window.generalAgent = { owner: api };
   return api;
+}
+
+function packageDetail(packageId: string, displayName: string, withDraft: boolean): OwnerSkillPackage {
+  const detail = structuredClone(detailFixture) as OwnerSkillPackage;
+  detail.package_id = packageId;
+  detail.display_name = displayName;
+  if (packageId !== "com.example.calendar") {
+    detail.active_revision_id = "44444444-4444-4444-8444-444444444444";
+    detail.revisions[0].revision_id = "55555555-5555-4555-8555-555555555555";
+    detail.revisions[1].revision_id = detail.active_revision_id;
+    detail.editable_draft!.revision_id = detail.revisions[0].revision_id;
+  }
+  if (!withDraft) {
+    detail.revisions = detail.revisions.filter((revision) => !revision.editable);
+    detail.editable_draft = null;
+  }
+  return detail;
+}
+
+function inventoryFor(...details: OwnerSkillPackage[]): OwnerSkillInventory {
+  return {
+    effective: details.map(({ revisions: _revisions, editable_draft: _draft, ...summary }) => summary),
+    managed: []
+  };
 }
 
 function principal(policy: OwnerPolicy) {
