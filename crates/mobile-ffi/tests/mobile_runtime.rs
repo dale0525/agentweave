@@ -1,6 +1,9 @@
 use agent_runtime::platform::PlatformId;
 use agent_runtime::skill_bundle::{BuildSkillBundleRequest, build_skill_bundle};
+use agent_runtime::skill_package::SkillPackageId;
 use agent_runtime::skill_policy::{ActorContext, SkillManagementPolicy};
+use agent_runtime::skill_state::{NewSkillRevision, SkillStateStore};
+use agent_runtime::storage::Storage;
 use mobile_ffi::{MobileInitConfig, MobileRuntime};
 use tempfile::tempdir;
 
@@ -90,7 +93,7 @@ fn initializes_runtime_and_returns_android_capabilities() {
     let dir = tempdir().unwrap();
     let runtime = MobileRuntime::initialize(android_config(dir.path())).unwrap();
 
-    let diagnostics = runtime.diagnostics();
+    let diagnostics = runtime.diagnostics().unwrap();
     assert_eq!(diagnostics.platform, "android");
     assert!(diagnostics.capabilities.contains(&"network.http".into()));
     assert!(diagnostics.database_ready);
@@ -108,7 +111,7 @@ fn lists_instruction_only_skills_from_the_runtime_catalog() {
     );
 
     let runtime = MobileRuntime::initialize(android_config(dir.path())).unwrap();
-    let skills = runtime.list_skills();
+    let skills = runtime.list_skills().unwrap();
 
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].package_id, "com.example.notes");
@@ -131,7 +134,7 @@ fn android_runtime_reports_platform_incompatible_bundle_packages() {
 
     build_bundle(dir.path(), PlatformId::Desktop);
     let runtime = MobileRuntime::initialize(mobile_config(dir.path())).unwrap();
-    let skills = runtime.list_skills();
+    let skills = runtime.list_skills().unwrap();
 
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].package_id, "com.example.desktop");
@@ -152,9 +155,98 @@ fn android_init_uses_separate_skill_roots_and_disabled_policy_by_default() {
 
     let runtime = MobileRuntime::initialize(android_config(dir.path())).unwrap();
 
-    assert_eq!(runtime.diagnostics().skill_management_mode, "disabled");
-    assert_eq!(runtime.list_skills().len(), 1);
-    assert_eq!(runtime.list_skills()[0].source_layer, "builtin");
+    assert_eq!(
+        runtime.diagnostics().unwrap().skill_management_mode,
+        "disabled"
+    );
+    assert_eq!(runtime.list_skills().unwrap().len(), 1);
+    assert_eq!(runtime.list_skills().unwrap()[0].source_layer, "builtin");
+}
+
+#[test]
+fn quarantine_count_uses_authoritative_revision_rows_with_internal_directories_present() {
+    let dir = tempdir().unwrap();
+    let config = android_config(dir.path());
+    let runtime = MobileRuntime::initialize(config.clone()).unwrap();
+    let revision_id = uuid::Uuid::new_v4().to_string();
+    let tokio = tokio::runtime::Runtime::new().unwrap();
+    tokio.block_on(async {
+        let storage = Storage::connect(&format!("sqlite://{}?mode=rwc", config.database_path))
+            .await
+            .unwrap();
+        SkillStateStore::new(storage)
+            .create_quarantined_revision_record(
+                &revision_id,
+                NewSkillRevision {
+                    package_id: SkillPackageId::parse("com.example.quarantined").unwrap(),
+                    version: "1.0.0".into(),
+                    content_hash: "quarantined-hash".into(),
+                    storage_path: format!("quarantine/{revision_id}"),
+                    descriptor_json: serde_json::json!({}),
+                    validation_json: serde_json::json!({"quarantined": true}),
+                    created_by: "recovery".into(),
+                },
+            )
+            .await
+            .unwrap();
+    });
+    let quarantine = std::path::Path::new(&config.quarantine_skills_dir);
+    std::fs::create_dir_all(quarantine.join(".incoming")).unwrap();
+    std::fs::create_dir_all(quarantine.join(".maintenance")).unwrap();
+    std::fs::create_dir_all(quarantine.join(&revision_id)).unwrap();
+
+    assert_eq!(runtime.diagnostics().unwrap().quarantined_count, 1);
+}
+
+#[test]
+fn rejects_database_path_inside_a_skill_root() {
+    let dir = tempdir().unwrap();
+    let mut config = android_config(dir.path());
+    config.database_path = std::path::Path::new(&config.managed_skills_dir)
+        .join("runtime.db")
+        .display()
+        .to_string();
+
+    let error = MobileRuntime::initialize(config)
+        .err()
+        .expect("database inside managed skill root should fail");
+
+    assert!(error.to_string().contains("database path"));
+}
+
+#[test]
+fn rejects_database_path_equal_to_a_skill_root() {
+    let dir = tempdir().unwrap();
+    let mut config = android_config(dir.path());
+    config.database_path = config.quarantine_skills_dir.clone();
+
+    let error = MobileRuntime::initialize(config)
+        .err()
+        .expect("database equal to quarantine root should fail");
+
+    assert!(error.to_string().contains("database path"));
+}
+
+#[test]
+fn inventory_propagates_authoritative_state_read_failures() {
+    let dir = tempdir().unwrap();
+    let config = android_config(dir.path());
+    let runtime = MobileRuntime::initialize(config.clone()).unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", config.database_path))
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE skill_snapshots")
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+
+    let error = runtime
+        .list_skills()
+        .expect_err("inventory state failure should propagate");
+
+    assert!(error.to_string().contains("skill_snapshots"));
 }
 
 #[test]
@@ -166,6 +258,25 @@ fn rejects_unverified_builtin_directory_without_development_fallback() {
     MobileRuntime::initialize(config)
         .err()
         .expect("unverified built-in directory should fail closed");
+}
+
+#[test]
+fn generated_bundle_round_trips_from_installed_revision_layout() {
+    let dir = tempdir().unwrap();
+    build_bundle(dir.path(), PlatformId::Android);
+    let generated = dir.path().join("files/builtin-skills");
+    let installed = dir
+        .path()
+        .join("files/builtin-revisions/revisions/content-hash");
+    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    std::fs::rename(&generated, &installed).unwrap();
+    let mut config = mobile_config(dir.path());
+    config.builtin_skills_dir = installed.display().to_string();
+
+    let runtime = MobileRuntime::initialize(config).unwrap();
+
+    assert!(runtime.list_skills().unwrap().is_empty());
+    assert!(runtime.diagnostics().unwrap().skills_ready);
 }
 
 #[test]

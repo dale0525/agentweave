@@ -1,4 +1,14 @@
 import assert from "node:assert/strict";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -6,6 +16,7 @@ import {
   androidRustLibraryPaths,
   androidNdkHostTag,
   createAndroidRustBuildConfig,
+  prepareAndroidSkillAssetsAt,
   runAndroidBuildSequence,
 } from "./build-android-rust.mjs";
 
@@ -109,3 +120,60 @@ test("Android build stops before Rust when skill bundling fails", () => {
   );
   assert.equal(rustStarted, false);
 });
+
+test("Gradle always regenerates skill assets before native and package tasks", () => {
+  const gradle = readFileSync(
+    new URL("../apps/android/app/build.gradle.kts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(gradle, /outputs\.upToDateWhen\s*\{\s*false\s*\}/);
+  assert.match(gradle, /buildRustNativeDebug[\s\S]*dependsOn\(prepareAndroidSkillAssets\)/);
+  assert.match(gradle, /tasks\.named\("preBuild"\)[\s\S]*dependsOn\(prepareAndroidSkillAssets\)/);
+});
+
+test("Android asset preparation removes stale output and round-trips staged bundle hash", () => {
+  const root = mkdtempSync(join(tmpdir(), "general-agent-android-assets-"));
+  try {
+    const skills = join(root, "skills");
+    writeSkillFixture(skills, "android-skill", ["android"]);
+    writeSkillFixture(skills, "desktop-skill", ["desktop"]);
+    const stale = join(
+      root,
+      "apps/android/app/build/generated/skillAssets/main/builtin-skills/stale.txt",
+    );
+    mkdirSync(join(stale, ".."), { recursive: true });
+    writeFileSync(stale, "stale");
+
+    const result = prepareAndroidSkillAssetsAt(root, ({ sourceRoot, bundleRoot }) => {
+      assert.equal(existsSync(join(sourceRoot, "android-skill/general-agent.json")), true);
+      assert.equal(existsSync(join(sourceRoot, "desktop-skill")), false);
+      const generation = join(bundleRoot, "generations/test-generation");
+      mkdirSync(generation, { recursive: true });
+      writeFileSync(join(bundleRoot, "current"), "current");
+      writeFileSync(join(generation, "skill-bundle.json"), "manifest");
+      writeFileSync(join(generation, "skill-bundle.lock"), "lock");
+    });
+
+    assert.equal(existsSync(stale), false);
+    assert.match(result.contentHash, /^[0-9a-f]{64}$/);
+    assert.equal(readFileSync(result.hashFile, "utf8"), `${result.contentHash}\n`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function writeSkillFixture(skillsRoot, name, platforms) {
+  const root = join(skillsRoot, name);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "general-agent.json"), JSON.stringify({
+    schemaVersion: 1,
+    id: `com.example.${name}`,
+    version: "1.0.0",
+    displayName: name,
+    kind: "instruction_only",
+    package: { includeInstructions: true, includeRuntime: false },
+    compatibility: { platforms },
+  }));
+  writeFileSync(join(root, "SKILL.md"), `# ${name}\n`);
+}

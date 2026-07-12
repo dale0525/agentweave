@@ -89,8 +89,8 @@ pub fn invoke_runtime_json(handle: i64, request_json: &str) -> String {
         let request = parse_runtime_request(request_json)?;
         let runtime = runtime(handle)?;
         match request {
-            RuntimeRequest::Diagnostics => serde_json::to_value(runtime.diagnostics()),
-            RuntimeRequest::ListSkills => serde_json::to_value(runtime.list_skills()),
+            RuntimeRequest::Diagnostics => serde_json::to_value(runtime.diagnostics()?),
+            RuntimeRequest::ListSkills => serde_json::to_value(runtime.list_skills()?),
             RuntimeRequest::ListManagedSkills => {
                 serde_json::to_value(runtime.list_managed_skills()?)
             }

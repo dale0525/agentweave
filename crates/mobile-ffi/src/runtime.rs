@@ -18,7 +18,7 @@ use agent_runtime::skill_policy::{
 use agent_runtime::skill_recovery::RecoveryStatus;
 use agent_runtime::skill_resolver::SkillResolutionStatus;
 use agent_runtime::skill_source::{ManagedSkillSource, SkillLayer, SkillSource};
-use agent_runtime::skill_state::{SkillApprovalRecord, SkillStateStore};
+use agent_runtime::skill_state::{SkillApprovalRecord, SkillSnapshotStatus, SkillStateStore};
 use agent_runtime::skill_store::{SkillRevisionStore, SkillStorePaths};
 use agent_runtime::storage::Storage;
 use agent_runtime::tools::RuntimeConfig;
@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
@@ -43,10 +43,9 @@ pub struct MobileRuntime {
     skill_policy: SkillManagementPolicy,
     actor_context: ActorContext,
     runtime_config: RuntimeConfig,
-    quarantine_root: PathBuf,
     database_ready: bool,
     skills_ready: bool,
-    last_reload_status: Mutex<String>,
+    reload_status: MonotonicReloadStatus,
     model_configured: AtomicBool,
     cancellation: CancellationToken,
 }
@@ -95,6 +94,15 @@ impl MobileRuntime {
             &allowed_roots,
             "database path",
         )?;
+        ensure_database_outside_skill_roots(
+            &database_path,
+            &[
+                &builtin_skills_path,
+                &managed_skills_path,
+                &staging_skills_path,
+                &quarantine_skills_path,
+            ],
+        )?;
         if let Some(parent) = database_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -121,6 +129,13 @@ impl MobileRuntime {
             &store_paths.quarantine,
             "quarantine skills directory",
         )?;
+        let prepared_builtin = builtin_skills_path.canonicalize()?;
+        ensure_distinct_roots(&[
+            &prepared_builtin,
+            &store_paths.managed,
+            &store_paths.staging,
+            &store_paths.quarantine,
+        ])?;
         let revisions = SkillRevisionStore::new(store_paths, state.clone());
         let builtin = tokio.block_on(BundleSkillSource::open(&builtin_skills_path))?;
         let managed = ManagedSkillSource::from_store(revisions.clone());
@@ -166,18 +181,23 @@ impl MobileRuntime {
             skill_policy: config.skill_policy,
             actor_context: config.actor_context,
             runtime_config,
-            quarantine_root: quarantine_skills_path,
             database_ready: true,
             skills_ready: true,
-            last_reload_status: Mutex::new(recovery_status_name(recovery.status).into()),
+            reload_status: MonotonicReloadStatus::new(
+                recovery.generation,
+                recovery_status_name(recovery.status),
+            ),
             model_configured: AtomicBool::new(model_configured),
             cancellation: CancellationToken::new(),
         })
     }
 
-    pub fn diagnostics(&self) -> MobileDiagnostics {
+    pub fn diagnostics(&self) -> Result<MobileDiagnostics> {
         let snapshot = self.skill_manager.current_snapshot();
-        MobileDiagnostics {
+        let quarantined_count = self
+            .tokio
+            .block_on(self.skill_state.count_quarantined_revisions())?;
+        Ok(MobileDiagnostics {
             platform: platform_name(self.init.platform).to_string(),
             capabilities: self.init.capabilities.names().to_vec(),
             database_ready: self.database_ready,
@@ -185,28 +205,28 @@ impl MobileRuntime {
             model_configured: self.model_configured.load(Ordering::Acquire),
             skill_management_mode: management_mode_name(self.skill_policy.mode).into(),
             active_snapshot_generation: snapshot.generation(),
-            quarantined_count: count_real_directories(&self.quarantine_root),
-            last_reload_status: self
-                .last_reload_status
-                .lock()
-                .map(|status| status.clone())
-                .unwrap_or_else(|_| "unavailable".into()),
-        }
+            quarantined_count,
+            last_reload_status: self.reload_status.snapshot(),
+        })
     }
 
-    pub fn list_skills(&self) -> Vec<MobileSkillDto> {
+    pub fn list_skills(&self) -> Result<Vec<MobileSkillDto>> {
         let snapshot = self.skill_manager.current_snapshot();
-        let active_revisions = self
+        let snapshot_record = self
             .tokio
-            .block_on(self.skill_state.list_managed_installations_with_revisions())
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|row| {
-                row.installation
-                    .active_revision_id
-                    .map(|revision| (row.installation.package_id, revision))
-            })
-            .collect::<BTreeMap<_, _>>();
+            .block_on(self.skill_state.get_snapshot(snapshot.generation()))?
+            .with_context(|| {
+                format!(
+                    "active skill snapshot state is missing for generation {}",
+                    snapshot.generation()
+                )
+            })?;
+        anyhow::ensure!(
+            snapshot_record.status == SkillSnapshotStatus::Active,
+            "skill snapshot generation {} is not active",
+            snapshot.generation()
+        );
+        let active_revisions = managed_revision_ids(&snapshot_record.members_json)?;
         let mut inventory = BTreeMap::new();
         for resolved in snapshot.packages().iter().chain(snapshot.inactive()) {
             let descriptor = &resolved.package.descriptor;
@@ -244,7 +264,7 @@ impl MobileRuntime {
                 },
             );
         }
-        inventory.into_values().collect()
+        Ok(inventory.into_values().collect())
     }
 
     pub fn list_managed_skills(&self) -> Result<Vec<SkillPackageStatus>> {
@@ -356,9 +376,7 @@ impl MobileRuntime {
     }
 
     fn record_reload(&self, generation: u64) {
-        if let Ok(mut status) = self.last_reload_status.lock() {
-            *status = format!("published_generation_{generation}");
-        }
+        self.reload_status.record(generation);
     }
 
     pub fn create_session(&self, title: &str) -> Result<MobileSessionDto> {
@@ -464,6 +482,50 @@ impl MobileRuntime {
 
     pub fn close(&self) {
         self.cancellation.cancel();
+    }
+}
+
+struct MonotonicReloadStatus {
+    generation: AtomicU64,
+    status: Mutex<String>,
+}
+
+impl MonotonicReloadStatus {
+    fn new(generation: u64, status: impl Into<String>) -> Self {
+        Self {
+            generation: AtomicU64::new(generation),
+            status: Mutex::new(status.into()),
+        }
+    }
+
+    fn record(&self, generation: u64) {
+        let mut current = self.generation.load(Ordering::Acquire);
+        loop {
+            if generation <= current {
+                return;
+            }
+            match self.generation.compare_exchange_weak(
+                current,
+                generation,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+        if let Ok(mut status) = self.status.lock()
+            && self.generation.load(Ordering::Acquire) == generation
+        {
+            *status = format!("published_generation_{generation}");
+        }
+    }
+
+    fn snapshot(&self) -> String {
+        self.status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_else(|_| "unavailable".into())
     }
 }
 
@@ -638,16 +700,6 @@ fn approval_value(approval: &SkillApprovalRecord) -> serde_json::Value {
     })
 }
 
-fn count_real_directories(root: &Path) -> usize {
-    std::fs::read_dir(root)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| entry.file_type().ok())
-        .filter(|file_type| file_type.is_dir() && !file_type.is_symlink())
-        .count()
-}
-
 fn ensure_distinct_roots(roots: &[&Path]) -> Result<()> {
     for (index, left) in roots.iter().enumerate() {
         for right in roots.iter().skip(index + 1) {
@@ -657,6 +709,35 @@ fn ensure_distinct_roots(roots: &[&Path]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn ensure_database_outside_skill_roots(database: &Path, roots: &[&Path]) -> Result<()> {
+    if roots.iter().any(|root| database.starts_with(root)) {
+        anyhow::bail!("database path must stay outside skill roots");
+    }
+    Ok(())
+}
+
+fn managed_revision_ids(value: &serde_json::Value) -> Result<BTreeMap<SkillPackageId, String>> {
+    let members = value
+        .as_array()
+        .context("active skill snapshot members must be an array")?;
+    let mut revisions = BTreeMap::new();
+    for member in members {
+        if member.get("layer").and_then(serde_json::Value::as_str) != Some("managed") {
+            continue;
+        }
+        let package_id = member
+            .get("packageId")
+            .and_then(serde_json::Value::as_str)
+            .context("managed snapshot member is missing packageId")?;
+        let revision_id = member
+            .get("revisionId")
+            .and_then(serde_json::Value::as_str)
+            .context("managed snapshot member is missing revisionId")?;
+        revisions.insert(SkillPackageId::parse(package_id)?, revision_id.to_string());
+    }
+    Ok(revisions)
 }
 
 fn ensure_configured_store_root(configured: &Path, prepared: &Path, label: &str) -> Result<()> {
@@ -733,4 +814,31 @@ fn canonicalize_existing_ancestors(path: &Path) -> Result<PathBuf> {
     }
 
     Ok(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MonotonicReloadStatus;
+    use std::sync::Arc;
+
+    #[test]
+    fn concurrent_reload_status_never_regresses_generation() {
+        let status = Arc::new(MonotonicReloadStatus::new(1, "startup"));
+        let (published, wait_for_publish) = std::sync::mpsc::channel();
+        let newer = status.clone();
+        let newer_thread = std::thread::spawn(move || {
+            newer.record(5);
+            published.send(()).unwrap();
+        });
+        let older = status.clone();
+        let older_thread = std::thread::spawn(move || {
+            wait_for_publish.recv().unwrap();
+            older.record(4);
+        });
+
+        newer_thread.join().unwrap();
+        older_thread.join().unwrap();
+
+        assert_eq!(status.snapshot(), "published_generation_5");
+    }
 }

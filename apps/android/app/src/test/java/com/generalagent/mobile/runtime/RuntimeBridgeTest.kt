@@ -9,6 +9,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -24,7 +25,12 @@ class RuntimeBridgeTest {
     val context = RuntimeEnvironment.getApplication() as Context
     val native = RecordingNativeRuntime()
 
-    val client = RuntimeBridge(context, native, BridgeSkillAssets()).load()
+    val client = RuntimeBridge(
+      context,
+      native,
+      BridgeSkillAssets(),
+      publicationFileSystem = JvmSkillPublicationFileSystem(),
+    ).load()
     val request = JSONObject(native.initializeRequest)
 
     assertEquals(41L, client.handle)
@@ -60,7 +66,14 @@ class RuntimeBridgeTest {
       grants = listOf("inspect", "create_draft"),
     )
 
-    RuntimeBridge(context, native, BridgeSkillAssets(), policy, actor).load()
+    RuntimeBridge(
+      context,
+      native,
+      BridgeSkillAssets(),
+      policy,
+      actor,
+      JvmSkillPublicationFileSystem(),
+    ).load()
     val request = JSONObject(native.initializeRequest)
 
     assertEquals("owner_only", request.getJSONObject("skill_policy").getString("mode"))
@@ -136,6 +149,36 @@ class RuntimeBridgeTest {
       ),
     )
   }
+
+  @Test
+  fun malformedSuccessfulInitializationClosesAllocatedHandle() {
+    val context = RuntimeEnvironment.getApplication() as Context
+    val native = RecordingNativeRuntime(
+      initializeResponse = """{"ok":true,"data":{"handle":41,"unexpected":true}}""",
+    )
+
+    assertThrows(RuntimeBridgeException::class.java) {
+      RuntimeBridge(
+        context,
+        native,
+        BridgeSkillAssets(),
+        publicationFileSystem = JvmSkillPublicationFileSystem(),
+      ).load()
+    }
+
+    assertEquals(listOf(41L), native.closedHandles)
+  }
+
+  @Test
+  fun runtimeClientCloseIsIdempotent() {
+    val native = RecordingNativeRuntime()
+    val client = RuntimeClient(41L, native)
+
+    client.close()
+    client.close()
+
+    assertEquals(listOf(41L), native.closedHandles)
+  }
 }
 
 private class BridgeSkillAssets : SkillAssetSource {
@@ -164,12 +207,15 @@ private class BridgeSkillAssets : SkillAssetSource {
     ByteArrayInputStream(checkNotNull(files[relativePath]))
 }
 
-private class RecordingNativeRuntime : NativeRuntimeApi {
+private class RecordingNativeRuntime(
+  private val initializeResponse: String = """{"ok":true,"data":{"handle":41}}""",
+) : NativeRuntimeApi {
   var initializeRequest: String = ""
+  val closedHandles = mutableListOf<Long>()
 
   override fun initialize(requestJson: String): String {
     initializeRequest = requestJson
-    return """{"ok":true,"data":{"handle":41}}"""
+    return initializeResponse
   }
 
   override fun invoke(handle: Long, requestJson: String): String =
@@ -178,5 +224,8 @@ private class RecordingNativeRuntime : NativeRuntimeApi {
   override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String =
     """{"ok":true,"data":{"assistant_text":"ok"}}"""
 
-  override fun close(handle: Long): String = """{"ok":true,"data":null}"""
+  override fun close(handle: Long): String {
+    closedHandles += handle
+    return """{"ok":true,"data":null}"""
+  }
 }

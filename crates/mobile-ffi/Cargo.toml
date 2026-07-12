@@ -19,6 +19,7 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+sqlx.workspace = true
 tempfile = "3"
 
 [target.'cfg(target_os = "android")'.dependencies]

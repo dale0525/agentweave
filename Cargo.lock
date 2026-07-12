@@ -1272,6 +1272,7 @@ dependencies = [
  "model-gateway",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tokio-util",

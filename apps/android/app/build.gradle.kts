@@ -69,6 +69,7 @@ val prepareAndroidSkillAssets by tasks.registering(Exec::class) {
   inputs.dir(rootProject.projectDir.resolve("../../skills"))
   inputs.file(rootProject.projectDir.resolve("../../scripts/build-android-rust.mjs"))
   outputs.dir(generatedSkillAssets)
+  outputs.upToDateWhen { false }
 }
 
 val buildRustNativeDebug by tasks.registering(Exec::class) {

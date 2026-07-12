@@ -2,20 +2,18 @@ package com.generalagent.mobile.runtime
 
 import android.content.res.AssetManager
 import java.io.File
-import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
-import java.nio.file.StandardCopyOption
-import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
-import java.nio.channels.FileChannel
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 enum class SkillAssetType {
   FILE,
@@ -72,10 +70,17 @@ class AndroidSkillAssetSource(
   }
 }
 
-class SkillAssetInstaller(
+class SkillAssetInstaller internal constructor(
   private val filesDir: File,
   private val assets: SkillAssetSource,
+  private val fileSystem: SkillPublicationFileSystem,
+  private val faults: SkillPublicationFaults = SkillPublicationFaults.NONE,
 ) {
+  constructor(
+    filesDir: File,
+    assets: SkillAssetSource,
+  ) : this(filesDir, assets, AndroidSkillPublicationFileSystem(), SkillPublicationFaults.NONE)
+
   fun installVerifiedBundle(): InstalledSkillBundle {
     val expectedHash = assets.bundleHash().trim()
     require(HASH_PATTERN.matches(expectedHash)) { "Built-in skill bundle hash is invalid" }
@@ -84,28 +89,10 @@ class SkillAssetInstaller(
     val bundleRoot = prepareRealDirectory(privateRoot.resolve("builtin-skills"), privateRoot)
     val lockPath = bundleRoot.resolve(".install.lock")
 
-    return openLockFile(lockPath).use { channel ->
-      channel.lock().use {
+    return processLocks.computeIfAbsent(bundleRoot) { ReentrantLock() }.withLock {
+      fileSystem.withExclusiveLock(lockPath) {
         installLocked(bundleRoot, expectedHash, entries)
       }
-    }
-  }
-
-  private fun openLockFile(lockPath: Path): FileChannel {
-    if (Files.exists(lockPath, LinkOption.NOFOLLOW_LINKS)) {
-      check(Files.isRegularFile(lockPath, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(lockPath)) {
-        "Built-in skill installer lock must be a regular file"
-      }
-    }
-    return try {
-      FileChannel.open(
-        lockPath,
-        StandardOpenOption.CREATE,
-        StandardOpenOption.WRITE,
-        LinkOption.NOFOLLOW_LINKS,
-      )
-    } catch (error: Exception) {
-      throw IllegalStateException("Failed to open built-in skill installer lock", error)
     }
   }
 
@@ -127,7 +114,11 @@ class SkillAssetInstaller(
       check(Files.isDirectory(revision, LinkOption.NOFOLLOW_LINKS)) {
         "Built-in skill revision path is not a real directory"
       }
-      check(hashPublishedTree(revision) == expectedHash) { "Published built-in skill revision failed verification" }
+      check(hashPublishedTree(revision, syncFiles = true) == expectedHash) {
+        "Published built-in skill revision failed verification"
+      }
+      syncDirectoriesBottomUp(revision)
+      fileSystem.syncDirectory(revisions)
     } else {
       publishRevision(revisions, revision, expectedHash, entries)
     }
@@ -154,13 +145,22 @@ class SkillAssetInstaller(
             Files.createDirectories(checkNotNull(target.parent))
             val bytes = assets.open(entry.relativePath).use { it.readBytes() }
             updateDigest(digest, entry.relativePath, bytes)
-            Files.newOutputStream(target).use { output -> output.write(bytes) }
+            fileSystem.writeNewFile(target, bytes)
           }
           SkillAssetType.SYMLINK, SkillAssetType.SPECIAL -> error("unreachable asset type")
         }
       }
+      faults.after(SkillPublicationFaultPoint.FILES_SYNCED)
       check(digest.digest().toHex() == expectedHash) { "Built-in skill bundle content hash mismatch" }
-      moveAtomic(incoming, revision, replace = false)
+      check(hashPublishedTree(incoming) == expectedHash) {
+        "Incoming built-in skill revision failed handle verification"
+      }
+      syncDirectoriesBottomUp(incoming)
+      faults.after(SkillPublicationFaultPoint.DIRECTORIES_SYNCED)
+      fileSystem.atomicMove(incoming, revision, replace = false)
+      faults.after(SkillPublicationFaultPoint.REVISION_RENAMED)
+      fileSystem.syncDirectory(revisions)
+      faults.after(SkillPublicationFaultPoint.REVISIONS_SYNCED)
     } catch (error: Exception) {
       deleteTreeNoFollow(incoming)
       if (error is IllegalStateException) throw error
@@ -172,11 +172,12 @@ class SkillAssetInstaller(
     val incoming = bundleRoot.resolve(".current.incoming")
     Files.deleteIfExists(incoming)
     try {
-      FileOutputStream(incoming.toFile()).use { output ->
-        output.write(expectedHash.toByteArray(StandardCharsets.UTF_8))
-        output.fd.sync()
-      }
-      moveAtomic(incoming, currentFile, replace = true)
+      fileSystem.writeNewFile(incoming, expectedHash.toByteArray(StandardCharsets.UTF_8))
+      faults.after(SkillPublicationFaultPoint.CURRENT_TEMP_SYNCED)
+      fileSystem.atomicMove(incoming, currentFile, replace = true)
+      faults.after(SkillPublicationFaultPoint.CURRENT_RENAMED)
+      fileSystem.syncDirectory(bundleRoot)
+      faults.after(SkillPublicationFaultPoint.BUNDLE_ROOT_SYNCED)
     } catch (error: Exception) {
       Files.deleteIfExists(incoming)
       throw IllegalStateException("Failed to switch built-in skill revision", error)
@@ -217,11 +218,13 @@ class SkillAssetInstaller(
     require(path.normalize() == path) { "Built-in skill asset path traversal is not allowed" }
   }
 
-  private fun hashPublishedTree(root: Path): String {
+  private fun hashPublishedTree(root: Path, syncFiles: Boolean = false): String {
     val files = mutableListOf<Path>()
+    val directories = mutableMapOf<Path, String>()
     Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
       override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
         check(!attrs.isSymbolicLink) { "Published built-in skill revision contains a symlink" }
+        directories[dir] = fileSystem.directoryIdentity(dir)
         return FileVisitResult.CONTINUE
       }
 
@@ -236,7 +239,12 @@ class SkillAssetInstaller(
     val digest = MessageDigest.getInstance("SHA-256")
     for (file in files.sortedBy { root.relativize(it).toString() }) {
       val relativePath = root.relativize(file).joinToString("/")
-      updateDigest(digest, relativePath, Files.readAllBytes(file))
+      updateDigest(digest, relativePath, fileSystem.readVerifiedFile(file, syncFiles))
+    }
+    for ((directory, identity) in directories) {
+      check(fileSystem.directoryIdentity(directory) == identity) {
+        "Published built-in skill directory identity changed during verification"
+      }
     }
     return digest.digest().toHex()
   }
@@ -246,7 +254,7 @@ class SkillAssetInstaller(
     check(Files.isRegularFile(currentFile, LinkOption.NOFOLLOW_LINKS)) {
       "Built-in skill current pointer is not a regular file"
     }
-    return Files.readString(currentFile, StandardCharsets.UTF_8).trim()
+    return fileSystem.readVerifiedFile(currentFile).toString(StandardCharsets.UTF_8).trim()
   }
 
   private fun preparePrivateRoot(path: Path): Path {
@@ -280,16 +288,19 @@ class SkillAssetInstaller(
     return target
   }
 
-  private fun moveAtomic(source: Path, target: Path, replace: Boolean) {
-    val options = if (replace) {
-      arrayOf(StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-    } else {
-      arrayOf(StandardCopyOption.ATOMIC_MOVE)
-    }
-    try {
-      Files.move(source, target, *options)
-    } catch (error: AtomicMoveNotSupportedException) {
-      throw IllegalStateException("App-private storage does not support atomic publication", error)
+  private fun syncDirectoriesBottomUp(root: Path) {
+    val directories = mutableListOf<Path>()
+    Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+      override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+        check(attrs.isDirectory && !attrs.isSymbolicLink) {
+          "Built-in skill revision directory changed during publication"
+        }
+        directories.add(dir)
+        return FileVisitResult.CONTINUE
+      }
+    })
+    for (directory in directories.sortedByDescending(Path::getNameCount)) {
+      fileSystem.syncDirectory(directory)
     }
   }
 
@@ -321,5 +332,6 @@ class SkillAssetInstaller(
 
   companion object {
     private val HASH_PATTERN = Regex("[0-9a-f]{64}")
+    private val processLocks = ConcurrentHashMap<Path, ReentrantLock>()
   }
 }

@@ -1,6 +1,7 @@
 package com.generalagent.mobile.runtime
 
 import android.content.Context
+import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -10,10 +11,11 @@ class RuntimeBridge(
   private val skillAssets: SkillAssetSource = AndroidSkillAssetSource(context.assets),
   private val configuredSkillPolicy: RuntimeSkillPolicy = RuntimeSkillPolicy(),
   private val configuredActorContext: RuntimeActorContext = RuntimeActorContext(),
+  private val publicationFileSystem: SkillPublicationFileSystem = AndroidSkillPublicationFileSystem(),
 ) {
   fun initRequest(): RuntimeInitRequest {
     val filesDir = context.filesDir
-    val installedBundle = SkillAssetInstaller(filesDir, skillAssets).installVerifiedBundle()
+    val installedBundle = SkillAssetInstaller(filesDir, skillAssets, publicationFileSystem).installVerifiedBundle()
     return RuntimeInitRequest(
       appDataDir = filesDir.absolutePath,
       cacheDir = context.cacheDir.absolutePath,
@@ -28,8 +30,24 @@ class RuntimeBridge(
   }
 
   fun load(): RuntimeClient {
-    val data = responseData(native.initialize(initRequest().toJson().toString()))
-    return RuntimeClient(data.getLong("handle"), native)
+    val response = native.initialize(initRequest().toJson().toString())
+    var allocatedHandle: Long? = null
+    try {
+      val envelope = responseEnvelope(response)
+      val data = envelope.getJSONObject("data")
+      allocatedHandle = data.getLong("handle")
+      check(envelope.keys().asSequence().toSet() == setOf("ok", "data")) {
+        "Runtime initialization envelope contains unexpected fields"
+      }
+      check(data.keys().asSequence().toSet() == setOf("handle")) {
+        "Runtime initialization data contains unexpected fields"
+      }
+      return RuntimeClient(allocatedHandle, native)
+    } catch (error: Exception) {
+      allocatedHandle?.let { handle -> runCatching { responseEnvelope(native.close(handle)) } }
+      if (error is RuntimeBridgeException) throw error
+      throw RuntimeBridgeException(error.message ?: "Runtime initialization response is invalid")
+    }
   }
 }
 
@@ -37,6 +55,7 @@ class RuntimeClient internal constructor(
   val handle: Long,
   private val native: NativeRuntimeApi,
 ) : AutoCloseable {
+  private val closed = AtomicBoolean(false)
   fun diagnostics(): RuntimeDiagnostics {
     val data = invoke(JSONObject().put("operation", "diagnostics"))
     return RuntimeDiagnostics(
@@ -89,7 +108,9 @@ class RuntimeClient internal constructor(
   }
 
   override fun close() {
-    responseEnvelope(native.close(handle))
+    if (closed.compareAndSet(false, true)) {
+      responseEnvelope(native.close(handle))
+    }
   }
 
   private fun invoke(request: JSONObject): JSONObject = responseData(native.invoke(handle, request.toString()))

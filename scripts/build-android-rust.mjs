@@ -116,9 +116,34 @@ function resolveTargetLibdir() {
 }
 
 function prepareAndroidSkillAssets() {
-  const paths = androidSkillAssetPaths(projectRoot);
+  const result = prepareAndroidSkillAssetsAt(projectRoot, ({ sourceRoot, bundleRoot }) => {
+    runChecked(
+      "cargo",
+      [
+        "run",
+        "-p",
+        "agent-server",
+        "--bin",
+        "bundle-skills",
+        "--",
+        "--source",
+        sourceRoot,
+        "--output",
+        bundleRoot,
+        "--platform",
+        "android",
+      ],
+      "Android skill bundle",
+      { cwd: projectRoot, stdio: "inherit" },
+    );
+  });
+  console.log(`Prepared verified Android skill assets at ${result.assetRoot}`);
+}
+
+export function prepareAndroidSkillAssetsAt(root, runBundle) {
+  const paths = androidSkillAssetPaths(root);
   const sourceRoot = join(
-    projectRoot,
+    root,
     "apps",
     "android",
     "app",
@@ -131,29 +156,11 @@ function prepareAndroidSkillAssets() {
   rmSync(sourceRoot, { recursive: true, force: true });
   mkdirSync(paths.assetRoot, { recursive: true });
   mkdirSync(sourceRoot, { recursive: true });
-  stageAndroidSkillSource(join(projectRoot, "skills"), sourceRoot);
-  runChecked(
-    "cargo",
-    [
-      "run",
-      "-p",
-      "agent-server",
-      "--bin",
-      "bundle-skills",
-      "--",
-      "--source",
-      sourceRoot,
-      "--output",
-      paths.bundleRoot,
-      "--platform",
-      "android",
-    ],
-    "Android skill bundle",
-    { cwd: projectRoot, stdio: "inherit" },
-  );
+  stageAndroidSkillSource(join(root, "skills"), sourceRoot);
+  runBundle({ sourceRoot, bundleRoot: paths.bundleRoot });
   const contentHash = hashSkillBundle(paths.bundleRoot);
   writeFileSync(paths.hashFile, `${contentHash}\n`, { encoding: "utf8", mode: 0o600 });
-  console.log(`Prepared verified Android skill assets at ${paths.assetRoot}`);
+  return { ...paths, sourceRoot, contentHash };
 }
 
 function makeTreeWritableNoFollow(root) {

@@ -16,6 +16,15 @@ pub struct ManagedSkillInstallationView {
 }
 
 impl SkillStateStore {
+    pub async fn count_quarantined_revisions(&self) -> anyhow::Result<usize> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM skill_revisions WHERE lifecycle_status = 'quarantined'",
+        )
+        .fetch_one(self.pool())
+        .await?;
+        usize::try_from(count).map_err(Into::into)
+    }
+
     pub async fn list_package_revisions(
         &self,
         package_id: &SkillPackageId,

@@ -87,6 +87,115 @@ fn owner_operations_use_stored_actor_and_reject_json_actor_injection() {
     close_runtime(handle);
 }
 
+#[test]
+fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
+    let dir = tempdir().unwrap();
+    let mut requester_config = init_config(dir.path());
+    requester_config.skill_policy = SkillManagementPolicy::owner_only();
+    requester_config.actor_context = ActorContext::owner(
+        "mobile-requester",
+        [
+            SkillGrant::Inspect,
+            SkillGrant::CreateDraft,
+            SkillGrant::Validate,
+            SkillGrant::Activate,
+        ],
+    );
+    let requester = initialize_handle(&requester_config);
+    let mut approver_config = requester_config.clone();
+    approver_config.actor_context = ActorContext::owner(
+        "mobile-approver",
+        [SkillGrant::Inspect, SkillGrant::Activate],
+    );
+    let approver = initialize_handle(&approver_config);
+
+    let draft = invoke_value(
+        requester,
+        json!({
+            "operation": "create_skill_draft",
+            "request": {
+                "package_id": "com.example.mobile-authored",
+                "display_name": "Mobile Authored",
+                "description": "Created through the mobile owner bridge.",
+                "kind": "instruction_only",
+                "required_tools": []
+            }
+        }),
+    );
+    let revision_id = draft["revision_id"].as_str().unwrap();
+    let validation = invoke_value(
+        requester,
+        json!({"operation": "validate_skill_draft", "revision_id": revision_id}),
+    );
+    assert_eq!(validation["ok"], true);
+    let approval = invoke_value(
+        requester,
+        json!({"operation": "request_skill_activation", "revision_id": revision_id}),
+    );
+    assert_eq!(approval["requested_by"], "mobile-requester");
+    let resolved = invoke_value(
+        approver,
+        json!({
+            "operation": "resolve_skill_approval",
+            "approval_id": approval["approval_id"],
+            "approve": true
+        }),
+    );
+    assert_eq!(resolved["status"], "approved");
+
+    let audit_rows: Vec<(String, String, Option<String>)> =
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let pool = sqlx::SqlitePool::connect(&format!(
+            "sqlite://{}",
+            requester_config.database_path
+        ))
+        .await
+        .unwrap();
+        sqlx::query_as(
+            "SELECT actor_id, operation, revision_id FROM skill_audit_log WHERE package_id = ? ORDER BY created_at, id",
+        )
+        .bind("com.example.mobile-authored")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    });
+    assert!(
+        audit_rows.iter().any(|(actor, operation, revision)| {
+            actor == "mobile-requester"
+                && operation == "skill_approval_required"
+                && revision.as_deref() == Some(revision_id)
+        }),
+        "{audit_rows:?}"
+    );
+    assert!(
+        audit_rows.iter().any(|(actor, operation, revision)| {
+            actor == "mobile-approver"
+                && operation == "skill_snapshot_published"
+                && revision.as_deref() == Some(revision_id)
+        }),
+        "{audit_rows:?}"
+    );
+
+    close_runtime(requester);
+    close_runtime(approver);
+}
+
+fn initialize_handle(config: &MobileInitConfig) -> i64 {
+    let response: Value = serde_json::from_str(&initialize_runtime_json(
+        &serde_json::to_string(config).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(response["ok"], true, "{response}");
+    response["data"]["handle"].as_i64().unwrap()
+}
+
+fn invoke_value(handle: i64, request: Value) -> Value {
+    let response: Value =
+        serde_json::from_str(&invoke_runtime_json(handle, &request.to_string())).unwrap();
+    assert_eq!(response["ok"], true, "{response}");
+    response["data"].clone()
+}
+
 fn model_config(base_url: String) -> MobileModelConfigDto {
     MobileModelConfigDto {
         provider_id: "openai".into(),
@@ -117,7 +226,7 @@ fn runtime_persists_sessions_and_non_secret_model_config_across_restart() {
         restarted.load_model_config().unwrap().unwrap().secret_id,
         Some("model.openai.default".into()),
     );
-    assert!(restarted.diagnostics().model_configured);
+    assert!(restarted.diagnostics().unwrap().model_configured);
 }
 
 #[test]
