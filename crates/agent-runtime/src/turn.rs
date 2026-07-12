@@ -200,6 +200,7 @@ where
                     GatewayEvent::ToolCall {
                         call_id,
                         name,
+                        legacy_alias_selected,
                         arguments,
                     } => {
                         saw_tool = true;
@@ -271,7 +272,15 @@ where
                                 }
                             ]
                         }));
-                        let result = tools.execute(&name, &call_id, arguments).await.into_value();
+                        let result = tools
+                            .execute_provider_call(
+                                &name,
+                                legacy_alias_selected,
+                                &call_id,
+                                arguments,
+                            )
+                            .await
+                            .into_value();
                         events.extend(tools.take_observer_diagnostics().into_iter().map(
                             |diagnostic| RuntimeEvent::ToolObserverDiagnostic {
                                 operation: diagnostic.operation.into(),
@@ -354,10 +363,24 @@ impl ModelClient for model_gateway::responses::GatewayHttpClient {
 fn gateway_tools(tools: Vec<ToolDefinition>) -> Vec<GatewayTool> {
     tools
         .into_iter()
-        .map(|tool| GatewayTool {
-            id: tool.name,
-            description: tool.description,
-            input_schema: tool.input_schema,
+        .map(|tool| {
+            let canonical_id = match &tool.source {
+                crate::tools::ToolSource::RuntimeSkill { package_id, .. } => {
+                    let local_name = tool.name.rsplit('/').next().unwrap_or(&tool.name);
+                    format!("{package_id}/{local_name}")
+                }
+                _ => tool.name.clone(),
+            };
+            if tool.name == canonical_id {
+                GatewayTool::new(canonical_id, tool.description, tool.input_schema)
+            } else {
+                GatewayTool::advertised_alias(
+                    canonical_id,
+                    tool.name,
+                    tool.description,
+                    tool.input_schema,
+                )
+            }
         })
         .collect()
 }

@@ -428,8 +428,11 @@ mod tests {
     #[async_trait::async_trait]
     impl ModelClient for CapturingModel {
         async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
-            *self.tool_names.lock().unwrap() =
-                request.tools.into_iter().map(|tool| tool.id).collect();
+            *self.tool_names.lock().unwrap() = request
+                .tools
+                .into_iter()
+                .map(|tool| tool.advertised_name().to_string())
+                .collect();
             Ok(Box::pin(stream::iter(vec![
                 Ok(GatewayEvent::TextDelta {
                     text: "done".into(),

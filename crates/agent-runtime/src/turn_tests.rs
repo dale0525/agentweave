@@ -31,6 +31,7 @@ impl ModelClient for FakeModel {
                 Ok(GatewayEvent::ToolCall {
                     call_id: "call-1".into(),
                     name: "echo".into(),
+                    legacy_alias_selected: false,
                     arguments: serde_json::json!({ "text": "hello" }),
                 }),
                 Ok(GatewayEvent::Completed),
@@ -92,7 +93,12 @@ async fn sends_runtime_tool_schemas_to_the_model() {
     let _events = runner.run("echo hello").await.unwrap();
     let requests = runner.model.requests.lock().unwrap();
 
-    assert!(requests[0].tools.iter().any(|tool| tool.id == "echo"));
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .any(|tool| tool.advertised_name() == "echo")
+    );
     assert_eq!(requests[0].tools[0].input_schema["type"], "object");
 }
 
@@ -142,6 +148,7 @@ impl ModelClient for FakePhaseTwoModel {
                 Ok(GatewayEvent::ToolCall {
                     call_id: "call-1".into(),
                     name: self.tool_name.into(),
+                    legacy_alias_selected: false,
                     arguments: self.arguments.clone(),
                 }),
                 Ok(GatewayEvent::Completed),
@@ -187,7 +194,10 @@ fn tool_result(events: &[RuntimeEvent]) -> serde_json::Value {
 }
 
 fn request_has_tool(request: &model_gateway::responses::GatewayRequest, name: &str) -> bool {
-    request.tools.iter().any(|tool| tool.id == name)
+    request
+        .tools
+        .iter()
+        .any(|tool| tool.advertised_name() == name)
 }
 
 #[tokio::test]
@@ -204,6 +214,7 @@ async fn builtin_create_directory_creates_workspace_directory_through_turn_loop(
                     GatewayEvent::ToolCall {
                         call_id: "call-create".into(),
                         name: "create_directory".into(),
+                        legacy_alias_selected: false,
                         arguments: serde_json::json!({ "path": "made-by-tool" }),
                     },
                     GatewayEvent::Completed,
@@ -602,8 +613,18 @@ async fn first_request_includes_instruction_context_and_tool_schemas() {
     assert!(developer.contains("Use tools for concrete workspace actions"));
     assert!(developer.contains("Project instruction from AGENTS.md"));
     assert_eq!(first.input[2]["role"], "user");
-    assert!(first.tools.iter().any(|tool| tool.id == "create_directory"));
-    assert!(first.tools.iter().any(|tool| tool.id == "echo"));
+    assert!(
+        first
+            .tools
+            .iter()
+            .any(|tool| tool.advertised_name() == "create_directory")
+    );
+    assert!(
+        first
+            .tools
+            .iter()
+            .any(|tool| tool.advertised_name() == "echo")
+    );
     remove_workspace(&workspace);
 }
 
@@ -621,6 +642,7 @@ async fn read_only_mode_denies_create_directory_and_does_not_create_folder() {
                     GatewayEvent::ToolCall {
                         call_id: "call-denied".into(),
                         name: "create_directory".into(),
+                        legacy_alias_selected: false,
                         arguments: serde_json::json!({ "path": "blocked" }),
                     },
                     GatewayEvent::Completed,
@@ -668,6 +690,7 @@ async fn runaway_tool_loop_stops_at_max_tool_calls_per_turn() {
                 GatewayEvent::ToolCall {
                     call_id: "call-loop".into(),
                     name: "echo".into(),
+                    legacy_alias_selected: false,
                     arguments: serde_json::json!({ "text": "again" }),
                 },
                 GatewayEvent::Completed,
@@ -717,6 +740,7 @@ impl ModelClient for SnapshotSwapModel {
                     GatewayEvent::ToolCall {
                         call_id: "call-first".into(),
                         name: "first_tool".into(),
+                        legacy_alias_selected: false,
                         arguments: serde_json::json!({}),
                     },
                     GatewayEvent::Completed,
@@ -735,6 +759,7 @@ impl ModelClient for SnapshotSwapModel {
                     GatewayEvent::ToolCall {
                         call_id: "call-second".into(),
                         name: "second_tool".into(),
+                        legacy_alias_selected: false,
                         arguments: serde_json::json!({}),
                     },
                     GatewayEvent::Completed,

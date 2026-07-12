@@ -377,10 +377,13 @@ struct ManagementVisibilityModel {
 #[async_trait]
 impl ModelClient for ManagementVisibilityModel {
     async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
-        self.requests
-            .lock()
-            .unwrap()
-            .push(request.tools.into_iter().map(|tool| tool.id).collect());
+        self.requests.lock().unwrap().push(
+            request
+                .tools
+                .into_iter()
+                .map(|tool| tool.advertised_name().to_string())
+                .collect(),
+        );
         Ok(Box::pin(stream::iter(vec![Ok(GatewayEvent::Completed)])))
     }
 }
@@ -417,12 +420,17 @@ struct ManagementCallingModel {
 #[async_trait]
 impl ModelClient for ManagementCallingModel {
     async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
-        *self.advertised.lock().unwrap() = request.tools.into_iter().map(|tool| tool.id).collect();
+        *self.advertised.lock().unwrap() = request
+            .tools
+            .into_iter()
+            .map(|tool| tool.advertised_name().to_string())
+            .collect();
         let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             vec![
                 GatewayEvent::ToolCall {
                     call_id: "management-call".into(),
                     name: "create_skill_draft".into(),
+                    legacy_alias_selected: false,
                     arguments: json!({
                         "package_id": "com.example.per-turn",
                         "display_name": "Per turn",

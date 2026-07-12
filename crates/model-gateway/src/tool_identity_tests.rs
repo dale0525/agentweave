@@ -87,6 +87,101 @@ fn tool_identity_rejects_duplicate_canonical_ids_and_wire_collisions() {
 }
 
 #[test]
+fn tool_identity_maps_distinct_canonical_and_alias_entries_to_one_canonical_target() {
+    let canonical = "com.example.calendar/create_event";
+    let tools = vec![
+        tool(canonical),
+        GatewayTool::advertised_alias(
+            canonical,
+            "create_event",
+            "Legacy create event alias",
+            serde_json::json!({ "type": "object" }),
+        ),
+    ];
+    let map = ToolNameMap::from_tools(&tools).unwrap();
+    let canonical_wire = map.wire_name(canonical).unwrap();
+    let alias_wire = map.wire_name_for_tool(&tools[1]).unwrap();
+
+    assert_ne!(canonical_wire, alias_wire);
+    assert_eq!(map.canonical_name(alias_wire), Some(canonical));
+    assert_eq!(map.advertised_name(alias_wire), Some("create_event"));
+
+    let body = gateway_request_body_with_tool_map(
+        &profile(EndpointType::ChatCompletions),
+        GatewayRequest {
+            input: vec![serde_json::json!({ "role": "user", "content": "create it" })],
+            tools,
+        },
+        &map,
+    )
+    .unwrap();
+    assert_eq!(body["tools"][0]["function"]["name"], canonical_wire);
+    assert_eq!(body["tools"][1]["function"]["name"], alias_wire);
+
+    let events = parse_gateway_response_with_tool_map(
+        &profile(EndpointType::ChatCompletions),
+        serde_json::json!({
+            "choices": [{ "message": { "tool_calls": [{
+                "id": "call-alias",
+                "function": { "name": alias_wire, "arguments": "{}" }
+            }] } }]
+        }),
+        &map,
+    )
+    .unwrap();
+    assert!(matches!(
+        &events[0],
+        GatewayEvent::ToolCall {
+            name,
+            legacy_alias_selected: true,
+            ..
+        } if name == canonical
+    ));
+}
+
+#[test]
+fn tool_identity_rejects_duplicate_aliases_and_canonical_alias_wire_collisions() {
+    let canonical = "com.example.calendar/create_event";
+    let duplicate_aliases = vec![
+        tool(canonical),
+        GatewayTool::advertised_alias(
+            canonical,
+            "create_event",
+            "First alias",
+            serde_json::json!({ "type": "object" }),
+        ),
+        GatewayTool::advertised_alias(
+            canonical,
+            "create_event",
+            "Duplicate alias",
+            serde_json::json!({ "type": "object" }),
+        ),
+    ];
+    assert_eq!(
+        ToolNameMap::from_tools(&duplicate_aliases)
+            .unwrap_err()
+            .to_string(),
+        "duplicate advertised provider tool id"
+    );
+
+    let colliding = vec![
+        tool(canonical),
+        GatewayTool::advertised_alias(
+            canonical,
+            "create_event",
+            "Alias",
+            serde_json::json!({ "type": "object" }),
+        ),
+    ];
+    assert_eq!(
+        ToolNameMap::from_tools_with_test_encoder(&colliding, |_| "same_wire".into())
+            .unwrap_err()
+            .to_string(),
+        "provider tool name collision"
+    );
+}
+
+#[test]
 fn tool_identity_maps_definitions_and_assistant_history_for_both_endpoints() {
     let canonical = "com.example.calendar/create_event";
     for endpoint_type in [EndpointType::ChatCompletions, EndpointType::Responses] {
@@ -182,12 +277,38 @@ fn tool_identity_reverse_maps_calls_for_both_endpoints_and_rejects_unknown_wire_
 async fn tool_identity_maps_do_not_leak_between_concurrent_providers_or_retries() {
     let first_canonical = "com.example.calendar/create_event";
     let second_canonical = "com.example.tasks/create_event";
-    let first_map = ToolNameMap::from_tools_with_test_encoder(&[tool(first_canonical)], |_| {
-        "shared_wire".into()
+    let first_tools = [
+        tool(first_canonical),
+        GatewayTool::advertised_alias(
+            first_canonical,
+            "create_event",
+            "Legacy alias",
+            serde_json::json!({ "type": "object" }),
+        ),
+    ];
+    let second_tools = [
+        tool(second_canonical),
+        GatewayTool::advertised_alias(
+            second_canonical,
+            "create_event",
+            "Legacy alias",
+            serde_json::json!({ "type": "object" }),
+        ),
+    ];
+    let first_map = ToolNameMap::from_tools_with_test_encoder(&first_tools, |advertised| {
+        if advertised == "create_event" {
+            "shared_wire".into()
+        } else {
+            "first_canonical_wire".into()
+        }
     })
     .unwrap();
-    let second_map = ToolNameMap::from_tools_with_test_encoder(&[tool(second_canonical)], |_| {
-        "shared_wire".into()
+    let second_map = ToolNameMap::from_tools_with_test_encoder(&second_tools, |advertised| {
+        if advertised == "create_event" {
+            "shared_wire".into()
+        } else {
+            "second_canonical_wire".into()
+        }
     })
     .unwrap();
 

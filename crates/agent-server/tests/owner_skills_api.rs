@@ -43,7 +43,11 @@ struct CapturingChatModel {
 #[async_trait::async_trait]
 impl ModelClient for CapturingChatModel {
     async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
-        *self.tools.lock().unwrap() = request.tools.into_iter().map(|tool| tool.id).collect();
+        *self.tools.lock().unwrap() = request
+            .tools
+            .into_iter()
+            .map(|tool| tool.advertised_name().to_string())
+            .collect();
         Ok(Box::pin(stream::iter(vec![
             Ok(GatewayEvent::TextDelta {
                 text: "done".into(),

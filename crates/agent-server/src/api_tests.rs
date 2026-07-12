@@ -35,12 +35,18 @@ struct SkillCallingModel {
 impl ModelClient for SkillCallingModel {
     async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        assert!(request.tools.iter().any(|tool| tool.id == "echo"));
+        assert!(
+            request
+                .tools
+                .iter()
+                .any(|tool| tool.advertised_name() == "echo")
+        );
         let events = if call == 0 {
             vec![
                 Ok(GatewayEvent::ToolCall {
                     call_id: "call-1".into(),
                     name: "echo".into(),
+                    legacy_alias_selected: false,
                     arguments: json!({ "text": "hidden skill result" }),
                 }),
                 Ok(GatewayEvent::Completed),
@@ -65,7 +71,11 @@ struct ToolSchemaCaptureModel {
 #[async_trait]
 impl ModelClient for ToolSchemaCaptureModel {
     async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
-        *self.tool_names.lock().unwrap() = request.tools.into_iter().map(|tool| tool.id).collect();
+        *self.tool_names.lock().unwrap() = request
+            .tools
+            .into_iter()
+            .map(|tool| tool.advertised_name().to_string())
+            .collect();
         Ok(Box::pin(stream::iter(vec![
             Ok(GatewayEvent::TextDelta {
                 text: "default done".into(),

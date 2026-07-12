@@ -20,6 +20,7 @@ impl ModelClient for ToolThenTextModel {
                 GatewayEvent::ToolCall {
                     call_id: "call-1".into(),
                     name: "observed_echo".into(),
+                    legacy_alias_selected: false,
                     arguments: serde_json::json!({"value": 7}),
                 },
                 GatewayEvent::Completed,

@@ -8,3 +8,6 @@ pub mod tool_identity;
 
 #[cfg(test)]
 mod tool_identity_tests;
+
+#[cfg(test)]
+mod gateway_compatibility_tests;

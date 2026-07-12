@@ -1,19 +1,21 @@
 use crate::events::RuntimeEvent;
-use crate::skill::{InstalledSkill, InstalledSkillVerification, SkillManifest, SkillRegistry};
+use crate::skill::SkillRegistry;
 use crate::skill_authoring_tests::AuthoringFixture;
 use crate::skill_recovery_tests::activate_new_revision;
-use crate::skill_source::ManagedExecutionBinding;
-use crate::skill_store::SkillStoreLimits;
+use crate::skill_state::SkillLayerRecord;
 use crate::tools::discovery::{
     ExternalToolConfig, ExternalToolExecution, ExternalToolKind, ExternalToolVisibility,
 };
-use crate::tools::{
-    RuntimeConfig, ToolExecutionObserver, ToolPermission, ToolRegistry, ToolSource,
-};
+use crate::tools::{RuntimeConfig, ToolPermission, ToolRegistry, ToolSource};
 use crate::turn::{ModelClient, ModelEventStream, TurnRunner};
 use async_trait::async_trait;
 use futures::stream;
-use model_gateway::responses::{GatewayEvent, GatewayRequest};
+use model_gateway::provider::{EndpointType, ProviderProfile};
+use model_gateway::responses::{
+    GatewayEvent, GatewayRequest, parse_gateway_response_with_tool_map,
+};
+use model_gateway::tool_identity::ToolNameMap;
+use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -197,40 +199,13 @@ async fn runtime_tool_identity_rejects_unvalidated_development_package_identity(
 #[tokio::test]
 async fn runtime_tool_identity_alias_preserves_managed_revision_circuit_attribution() {
     let fixture = AuthoringFixture::new().await;
-    let revision = activate_new_revision(&fixture, "1.0.0").await;
-    let package_id = crate::skill_package::SkillPackageId::parse("com.example.calendar").unwrap();
-    let manifest: SkillManifest = serde_json::from_value(serde_json::json!({
-        "name": "calendar-runtime",
-        "description": "Managed calendar runtime.",
-        "version": "1.0.0",
-        "entry": { "type": "command", "command": "false", "args": [] },
-        "tools": [{
-            "name": "create_event",
-            "description": "Create an event.",
-            "permission": "read_workspace",
-            "input_schema": { "type": "object" }
-        }]
-    }))
-    .unwrap();
-    let managed = InstalledSkill {
-        root: fixture.imports.path().to_path_buf(),
-        manifest,
-        verification: Some(InstalledSkillVerification {
-            expected_content_hash: "test-hash".into(),
-            limits: SkillStoreLimits::default().package_limits(),
-            execution_binding: Some(ManagedExecutionBinding {
-                store: fixture.store.clone(),
-                package_id: package_id.clone(),
-                revision_id: revision.clone(),
-                storage_path: fixture.imports.path().to_path_buf(),
-            }),
-        }),
-        development_package_id: None,
-    };
-    let skills = SkillRegistry::from_installed(vec![managed]).unwrap();
-    let config = RuntimeConfig::workspace_write(fixture.imports.path(), fixture.imports.path())
+    let other_revision = activate_new_revision(&fixture, "0.9.0").await;
+    let (skills, package_id, revision) = activate_managed_runtime_skills(&fixture).await;
+    let mut config = RuntimeConfig::workspace_write(fixture.imports.path(), fixture.imports.path())
         .without_builtin_tools();
-    let registry = ToolRegistry::new(skills, &config);
+    config.tool_timeout_ms = 25;
+    let registry = ToolRegistry::new(skills, &config)
+        .with_execution_observer(Arc::new(fixture.manager.clone()));
     let definitions = registry.definitions();
     let canonical = definitions
         .iter()
@@ -250,9 +225,19 @@ async fn runtime_tool_identity_alias_preserves_managed_revision_circuit_attribut
             revision_id: Some(revision.clone()),
         }
     );
-    ToolExecutionObserver::finished(&fixture.manager, &alias.source, false)
-        .await
-        .unwrap();
+    let result = registry
+        .execute("create_event", "call-alias", serde_json::json!({}))
+        .await;
+
+    assert!(!result.ok);
+    assert_eq!(result.tool, "create_event");
+    assert_eq!(result.error.unwrap().code, "timeout");
+    assert!(
+        registry
+            .observer_diagnostics()
+            .iter()
+            .any(|diagnostic| { diagnostic.operation == "runtime_tool_alias_deprecation" })
+    );
     let circuit = fixture
         .state
         .get_circuit_state(&revision)
@@ -260,6 +245,85 @@ async fn runtime_tool_identity_alias_preserves_managed_revision_circuit_attribut
         .unwrap()
         .unwrap();
     assert_eq!(circuit.consecutive_failures, 1);
+    assert!(
+        fixture
+            .state
+            .get_circuit_state(&other_revision)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn provider_selected_alias_stays_canonical_through_turn_and_exact_circuit_attribution() {
+    let fixture = AuthoringFixture::new().await;
+    let other_revision = activate_new_revision(&fixture, "0.9.0").await;
+    let (skills, _, revision) = activate_managed_runtime_skills(&fixture).await;
+    let model = Arc::new(AliasSelectingTurnModel::default());
+    let mut config = RuntimeConfig::workspace_write(fixture.imports.path(), fixture.imports.path())
+        .without_builtin_tools();
+    config.tool_timeout_ms = 25;
+    let runner = TurnRunner::new_with_config(model.clone(), skills, config)
+        .with_execution_observer_for_test(Arc::new(fixture.manager.clone()));
+
+    let events = runner.run("create an event").await.unwrap();
+    let requests = model.requests.lock().unwrap().clone();
+
+    let advertised: Vec<_> = requests[0]
+        .tools
+        .iter()
+        .filter(|tool| tool.id == "com.example.calendar/create_event")
+        .map(|tool| tool.advertised_name())
+        .collect();
+    assert_eq!(
+        advertised,
+        vec!["com.example.calendar/create_event", "create_event"]
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallStarted { name, .. }
+            if name == "com.example.calendar/create_event"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallFinished { result, .. }
+            if result["tool"] == "com.example.calendar/create_event"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolObserverDiagnostic { operation, message }
+            if operation == "runtime_tool_alias_deprecation"
+                && message == "unqualified runtime tool aliases are deprecated"
+    )));
+    assert_eq!(
+        requests[1]
+            .input
+            .iter()
+            .find(|item| {
+                item.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+            })
+            .unwrap()["tool_calls"][0]["function"]["name"],
+        "com.example.calendar/create_event"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .get_circuit_state(&revision)
+            .await
+            .unwrap()
+            .unwrap()
+            .consecutive_failures,
+        1
+    );
+    assert!(
+        fixture
+            .state
+            .get_circuit_state(&other_revision)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -320,6 +384,7 @@ impl ModelClient for Arc<CanonicalTurnModel> {
                 GatewayEvent::ToolCall {
                     call_id: "call-1".into(),
                     name: "calendar/create_event".into(),
+                    legacy_alias_selected: false,
                     arguments: serde_json::json!({}),
                 },
                 GatewayEvent::Completed,
@@ -333,6 +398,133 @@ impl ModelClient for Arc<CanonicalTurnModel> {
             ]
         };
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
+#[derive(Default)]
+struct AliasSelectingTurnModel {
+    calls: AtomicUsize,
+    requests: Mutex<Vec<GatewayRequest>>,
+}
+
+#[async_trait]
+impl ModelClient for Arc<AliasSelectingTurnModel> {
+    async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
+        self.requests.lock().unwrap().push(request.clone());
+        let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let map = ToolNameMap::from_tools(&request.tools)?;
+            let alias = request
+                .tools
+                .iter()
+                .find(|tool| tool.advertised_name() == "create_event")
+                .ok_or_else(|| anyhow::anyhow!("alias was not advertised"))?;
+            let alias_wire = map
+                .wire_name_for_tool(alias)
+                .ok_or_else(|| anyhow::anyhow!("alias wire name is unavailable"))?;
+            parse_gateway_response_with_tool_map(
+                &chat_profile(),
+                serde_json::json!({
+                    "choices": [{ "message": { "tool_calls": [{
+                        "id": "call-alias",
+                        "function": { "name": alias_wire, "arguments": "{}" }
+                    }] } }]
+                }),
+                &map,
+            )?
+        } else {
+            vec![
+                GatewayEvent::TextDelta {
+                    text: "done".into(),
+                },
+                GatewayEvent::Completed,
+            ]
+        };
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
+async fn activate_managed_runtime_skills(
+    fixture: &AuthoringFixture,
+) -> (SkillRegistry, crate::skill_package::SkillPackageId, String) {
+    let package_id = crate::skill_package::SkillPackageId::parse("com.example.calendar").unwrap();
+    let source = fixture
+        .imports
+        .path()
+        .join(format!("managed-runtime-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&source).await.unwrap();
+    tokio::fs::write(
+        source.join("general-agent.json"),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "id": package_id.as_str(),
+            "version": "1.0.0",
+            "displayName": "Calendar runtime",
+            "kind": "native_runtime",
+            "package": { "includeInstructions": false, "includeRuntime": true }
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        source.join("skill.json"),
+        serde_json::json!({
+            "name": "calendar-runtime",
+            "description": "Managed calendar runtime.",
+            "version": "1.0.0",
+            "entry": { "type": "command", "command": "sh", "args": ["run.sh"] },
+            "tools": [{
+                "name": "create_event",
+                "description": "Create an event.",
+                "permission": "read_workspace",
+                "input_schema": { "type": "object" }
+            }]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(source.join("run.sh"), "sleep 60\n")
+        .await
+        .unwrap();
+    let staged = fixture
+        .store
+        .create_staging_revision(&source, "owner-1")
+        .await
+        .unwrap();
+    let managed = fixture
+        .store
+        .promote_revision(&staged.revision_id)
+        .await
+        .unwrap();
+    fixture
+        .state
+        .activate_revision(
+            &package_id,
+            &managed.revision_id,
+            SkillLayerRecord::Managed,
+            "owner-1",
+        )
+        .await
+        .unwrap();
+    fixture.manager.reload().await.unwrap();
+    let lease = fixture.manager.lease_snapshot();
+    (
+        lease.snapshot().registry().clone(),
+        package_id,
+        managed.revision_id,
+    )
+}
+
+fn chat_profile() -> ProviderProfile {
+    ProviderProfile {
+        id: "scripted".into(),
+        name: "Scripted".into(),
+        endpoint_type: EndpointType::ChatCompletions,
+        base_url: "https://example.invalid/v1".into(),
+        model: "scripted-model".into(),
+        api_key: None,
+        headers: BTreeMap::new(),
     }
 }
 

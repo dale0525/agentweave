@@ -455,6 +455,19 @@ impl ToolRegistry {
         result
     }
 
+    pub async fn execute_provider_call(
+        &self,
+        name: &str,
+        legacy_alias_selected: bool,
+        call_id: &str,
+        arguments: Value,
+    ) -> ToolResult {
+        if legacy_alias_selected {
+            self.push_alias_deprecation_diagnostic();
+        }
+        self.execute(name, call_id, arguments).await
+    }
+
     async fn execute_without_timeout(
         &self,
         name: &str,
@@ -485,10 +498,7 @@ impl ToolRegistry {
             ));
         };
         if binding.canonical_id != name {
-            self.push_diagnostic(ToolObserverDiagnostic {
-                operation: "runtime_tool_alias_deprecation",
-                message: "unqualified runtime tool aliases are deprecated".into(),
-            });
+            self.push_alias_deprecation_diagnostic();
         }
 
         if !permission_allowed(self.mode, self.command_mode, binding.tool.permission) {
@@ -603,6 +613,13 @@ impl ToolRegistry {
             diagnostics.pop_front();
         }
         diagnostics.push_back(diagnostic);
+    }
+
+    fn push_alias_deprecation_diagnostic(&self) {
+        self.push_diagnostic(ToolObserverDiagnostic {
+            operation: "runtime_tool_alias_deprecation",
+            message: "unqualified runtime tool aliases are deprecated".into(),
+        });
     }
 
     fn external_tool(&self, name: &str) -> Option<&ExternalToolConfig> {
