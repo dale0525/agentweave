@@ -325,27 +325,16 @@ impl SkillManager {
             if let Some(recovery) =
                 circuit::circuit_recovery_candidate(config_for(self)?, record, &backend).await?
             {
-                let operation = match recovery.transition {
-                    crate::skill_state_lifecycle::CircuitSnapshotTransition::Open => {
-                        "recover_open_skill_revision_circuit"
-                    }
-                    crate::skill_state_lifecycle::CircuitSnapshotTransition::Consume => {
-                        "recover_closed_skill_revision_circuit"
-                    }
-                };
                 backend
                     .state
                     .commit_exact_snapshot_publication(
                         crate::skill_state_lifecycle::ExactSnapshotPublication {
                             actor_id: "system-recovery",
-                            operation,
-                            package_id: &recovery.package_id,
                             previous_generation: record.generation,
                             previous_members: record.members_json.clone(),
                             generation: recovery.snapshot.generation(),
                             members: crate::skill_recovery::snapshot_members(&recovery.snapshot),
-                            revision_id: &recovery.revision_id,
-                            circuit_transition: recovery.transition,
+                            circuit_mutations: &recovery.mutations,
                         },
                     )
                     .await?;

@@ -111,6 +111,7 @@ impl SkillManager {
         revision_id: String,
         success: bool,
     ) -> anyhow::Result<()> {
+        let publication = self.begin_publication().await?;
         let backend = self.managed_runtime()?;
         let update = backend
             .state
@@ -125,7 +126,8 @@ impl SkillManager {
                             crate::skill_store_faults::StoreFaultPoint::CircuitAfterStateTransition,
                         )
                         .await;
-                    self.publish_circuit_snapshot(
+                    self.publish_circuit_snapshot_with_guard(
+                        publication,
                         &package_id,
                         &revision_id,
                         "open_skill_revision_circuit",
@@ -134,7 +136,8 @@ impl SkillManager {
                     .await?;
                 }
                 crate::skill_state_recovery::CircuitStateTransition::Closed => {
-                    self.publish_circuit_snapshot(
+                    self.publish_circuit_snapshot_with_guard(
+                        publication,
                         &package_id,
                         &revision_id,
                         "close_skill_revision_circuit",
@@ -175,6 +178,24 @@ impl SkillManager {
         transition: crate::skill_state_lifecycle::CircuitSnapshotTransition,
     ) -> anyhow::Result<()> {
         let publication = self.begin_publication().await?;
+        self.publish_circuit_snapshot_with_guard(
+            publication,
+            package_id,
+            revision_id,
+            operation,
+            transition,
+        )
+        .await
+    }
+
+    async fn publish_circuit_snapshot_with_guard(
+        &self,
+        publication: crate::skill_manager::SkillPublicationGuard,
+        package_id: &SkillPackageId,
+        revision_id: &str,
+        operation: &'static str,
+        transition: crate::skill_state_lifecycle::CircuitSnapshotTransition,
+    ) -> anyhow::Result<()> {
         let backend = self.managed_runtime()?;
         let SkillManagerMode::Dynamic(config) = &self.inner.mode else {
             anyhow::bail!("static skill manager cannot publish circuit state");
@@ -185,21 +206,37 @@ impl SkillManager {
             .context("skill snapshot generation overflow")?;
         let candidate =
             Arc::new(build_snapshot_with_runtime(config, generation, Some(&backend)).await?);
+        let previous_members =
+            crate::skill_recovery::snapshot_members(&publication.base_snapshot());
+        let candidate_members = crate::skill_recovery::snapshot_members(&candidate);
+        let mut mutations = circuit_snapshot_mutations(
+            &previous_members,
+            &candidate,
+            &backend,
+            "open_skill_revision_circuit",
+            "expire_skill_revision_circuit",
+        )
+        .await?;
+        let selected = mutations.iter_mut().find(|mutation| {
+            mutation.package_id == *package_id
+                && mutation.revision_id == revision_id
+                && mutation.transition == transition
+        });
+        if let Some(selected) = selected {
+            selected.operation = operation;
+        } else if mutations.is_empty() && candidate_members == previous_members {
+            return Ok(());
+        }
         let durable = backend
             .state
             .commit_exact_snapshot_publication(
                 crate::skill_state_lifecycle::ExactSnapshotPublication {
                     actor_id: "system-circuit",
-                    operation,
-                    package_id,
                     previous_generation: publication.base_generation(),
-                    previous_members: crate::skill_recovery::snapshot_members(
-                        &publication.base_snapshot(),
-                    ),
+                    previous_members,
                     generation,
-                    members: crate::skill_recovery::snapshot_members(&candidate),
-                    revision_id,
-                    circuit_transition: transition,
+                    members: candidate_members,
+                    circuit_mutations: &mutations,
                 },
             )
             .await;
@@ -240,9 +277,7 @@ impl SkillManager {
 
 pub(super) struct CircuitRecoveryCandidate {
     pub(super) snapshot: Arc<SkillSnapshot>,
-    pub(super) package_id: SkillPackageId,
-    pub(super) revision_id: String,
-    pub(super) transition: crate::skill_state_lifecycle::CircuitSnapshotTransition,
+    pub(super) mutations: Vec<crate::skill_state_lifecycle::CircuitSnapshotMutation>,
 }
 
 pub(super) async fn circuit_recovery_candidate(
@@ -252,7 +287,7 @@ pub(super) async fn circuit_recovery_candidate(
 ) -> anyhow::Result<Option<CircuitRecoveryCandidate>> {
     let persisted = crate::skill_recovery::parse_snapshot_members(active.members_json.clone())?;
     let now = chrono::Utc::now();
-    let mut recovery = None;
+    let mut recovery_required = false;
     for installation in backend.state.list_active_installations().await? {
         if installation.source_layer != crate::skill_state::SkillLayerRecord::Managed {
             continue;
@@ -267,11 +302,7 @@ pub(super) async fn circuit_recovery_candidate(
         let open = backend.state.circuit_is_open(revision_id, now).await?;
         let omission = backend.state.circuit_omission(revision_id).await?;
         if persisted_member && open {
-            recovery = Some((
-                installation.package_id,
-                revision_id.to_string(),
-                crate::skill_state_lifecycle::CircuitSnapshotTransition::Open,
-            ));
+            recovery_required = true;
             break;
         }
         if !persisted_member
@@ -282,31 +313,94 @@ pub(super) async fn circuit_recovery_candidate(
                     && record.revision_id == revision_id
             })
         {
-            recovery = Some((
-                installation.package_id,
-                revision_id.to_string(),
-                crate::skill_state_lifecycle::CircuitSnapshotTransition::Consume,
-            ));
+            recovery_required = true;
             break;
         }
     }
-    let Some((package_id, revision_id, transition)) = recovery else {
+    if !recovery_required {
         return Ok(None);
-    };
+    }
     let packages = discover_packages_read_only(config).await?;
     let generation = active
         .generation
         .checked_add(1)
         .context("skill snapshot generation overflow")?;
+    let snapshot = Arc::new(
+        build_snapshot_from_packages_with_circuits(config, generation, packages, backend).await?,
+    );
+    let mutations = circuit_snapshot_mutations(
+        &active.members_json,
+        &snapshot,
+        backend,
+        "recover_open_skill_revision_circuit",
+        "recover_closed_skill_revision_circuit",
+    )
+    .await?;
     Ok(Some(CircuitRecoveryCandidate {
-        snapshot: Arc::new(
-            build_snapshot_from_packages_with_circuits(config, generation, packages, backend)
-                .await?,
-        ),
-        package_id,
-        revision_id,
-        transition,
+        snapshot,
+        mutations,
     }))
+}
+
+async fn circuit_snapshot_mutations(
+    previous_members: &serde_json::Value,
+    candidate: &SkillSnapshot,
+    backend: &ManagedRuntimeBackend,
+    open_operation: &'static str,
+    consume_operation: &'static str,
+) -> anyhow::Result<Vec<crate::skill_state_lifecycle::CircuitSnapshotMutation>> {
+    let persisted = crate::skill_recovery::parse_snapshot_members(previous_members.clone())?;
+    let candidate_members = crate::skill_recovery::parse_snapshot_members(
+        crate::skill_recovery::snapshot_members(candidate),
+    )?;
+    let now = chrono::Utc::now();
+    let mut mutations = Vec::new();
+    for installation in backend.state.list_active_installations().await? {
+        if installation.source_layer != crate::skill_state::SkillLayerRecord::Managed {
+            continue;
+        }
+        let Some(revision_id) = installation.active_revision_id.as_deref() else {
+            continue;
+        };
+        let was_visible = persisted.iter().any(|member| {
+            member.package_id == installation.package_id.as_str()
+                && member.revision_id.as_deref() == Some(revision_id)
+        });
+        let will_be_visible = candidate_members.iter().any(|member| {
+            member.package_id == installation.package_id.as_str()
+                && member.revision_id.as_deref() == Some(revision_id)
+        });
+        let open = backend.state.circuit_is_open(revision_id, now).await?;
+        let omission = backend.state.circuit_omission(revision_id).await?;
+        let pending_omission = omission.as_ref().is_some_and(|record| {
+            !record.consumed
+                && record.package_id == installation.package_id
+                && record.revision_id == revision_id
+        });
+        let transition = if open && was_visible && !will_be_visible {
+            Some((
+                crate::skill_state_lifecycle::CircuitSnapshotTransition::Open,
+                open_operation,
+            ))
+        } else if !open && pending_omission {
+            Some((
+                crate::skill_state_lifecycle::CircuitSnapshotTransition::Consume,
+                consume_operation,
+            ))
+        } else {
+            None
+        };
+        if let Some((transition, operation)) = transition {
+            mutations.push(crate::skill_state_lifecycle::CircuitSnapshotMutation {
+                package_id: installation.package_id,
+                revision_id: revision_id.to_string(),
+                transition,
+                operation,
+            });
+        }
+    }
+    mutations.sort_by(|left, right| left.revision_id.cmp(&right.revision_id));
+    Ok(mutations)
 }
 
 pub(super) async fn rebuild_persisted_snapshot_with_circuits(

@@ -74,6 +74,8 @@ mod skill_management_tests;
 #[cfg(test)]
 mod skill_recovery_cleanup_tests;
 #[cfg(test)]
+mod skill_recovery_final_circuit_tests;
+#[cfg(test)]
 mod skill_recovery_residue_tests;
 #[cfg(test)]
 mod skill_recovery_review_lifecycle_tests;

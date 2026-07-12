@@ -36,14 +36,18 @@ pub(crate) struct ExactLifecyclePublication<'a> {
 
 pub(crate) struct ExactSnapshotPublication<'a> {
     pub actor_id: &'a str,
-    pub operation: &'a str,
-    pub package_id: &'a SkillPackageId,
     pub previous_generation: u64,
     pub previous_members: serde_json::Value,
     pub generation: u64,
     pub members: serde_json::Value,
-    pub revision_id: &'a str,
-    pub circuit_transition: CircuitSnapshotTransition,
+    pub circuit_mutations: &'a [CircuitSnapshotMutation],
+}
+
+pub(crate) struct CircuitSnapshotMutation {
+    pub package_id: SkillPackageId,
+    pub revision_id: String,
+    pub transition: CircuitSnapshotTransition,
+    pub operation: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,25 +75,28 @@ impl SkillStateStore {
                 &now,
             )
             .await?;
-            persist_circuit_omission_transition(
-                &mut tx,
-                input.package_id,
-                input.revision_id,
-                generation,
-                input.circuit_transition,
-                &now,
-            )
-            .await?;
-            crate::skill_state::insert_audit(
-                &mut *tx,
-                input.actor_id,
-                input.operation,
-                input.package_id,
-                Some(input.revision_id),
-                "ok",
-                serde_json::json!({"generation": generation}),
-            )
-            .await
+            for mutation in input.circuit_mutations {
+                persist_circuit_omission_transition(
+                    &mut tx,
+                    &mutation.package_id,
+                    &mutation.revision_id,
+                    generation,
+                    mutation.transition,
+                    &now,
+                )
+                .await?;
+                crate::skill_state::insert_audit(
+                    &mut *tx,
+                    input.actor_id,
+                    mutation.operation,
+                    &mutation.package_id,
+                    Some(&mutation.revision_id),
+                    "ok",
+                    serde_json::json!({"generation": generation}),
+                )
+                .await?;
+            }
+            Ok(())
         }
         .await;
         crate::skill_state_transactions::finish(tx, result).await
