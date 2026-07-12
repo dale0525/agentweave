@@ -1,6 +1,7 @@
 use crate::{
     bridge::responses_to_chat_completions,
     provider::{EndpointType, ProviderProfile},
+    tool_identity::ToolNameMap,
 };
 use futures::{Stream, stream};
 use serde::{Deserialize, Serialize};
@@ -11,9 +12,20 @@ pub type GatewayEventStream = Pin<Box<dyn Stream<Item = anyhow::Result<GatewayEv
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct GatewayTool {
-    pub name: String,
+    #[serde(alias = "name")]
+    pub id: String,
     pub description: String,
     pub input_schema: Value,
+}
+
+impl GatewayTool {
+    pub fn new(id: impl Into<String>, description: impl Into<String>, input_schema: Value) -> Self {
+        Self {
+            id: id.into(),
+            description: description.into(),
+            input_schema,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -64,7 +76,8 @@ impl GatewayHttpClient {
     }
 
     pub async fn stream(&self, request: GatewayRequest) -> anyhow::Result<GatewayEventStream> {
-        let body = gateway_request_body(&self.profile, request)?;
+        let tool_map = ToolNameMap::from_tools(&request.tools)?;
+        let body = gateway_request_body_with_tool_map(&self.profile, request, &tool_map)?;
         let mut builder = self.client.post(self.profile.endpoint_url()).json(&body);
 
         if let Some(api_key) = &self.profile.api_key
@@ -87,7 +100,7 @@ impl GatewayHttpClient {
         }
 
         let response = response.json().await?;
-        let events = parse_gateway_response(&self.profile, response)?;
+        let events = parse_gateway_response_with_tool_map(&self.profile, response, &tool_map)?;
 
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
@@ -97,53 +110,131 @@ pub fn gateway_request_body(
     profile: &ProviderProfile,
     request: GatewayRequest,
 ) -> anyhow::Result<Value> {
+    let tool_map = ToolNameMap::from_tools(&request.tools)?;
+    gateway_request_body_with_tool_map(profile, request, &tool_map)
+}
+
+pub fn gateway_request_body_with_tool_map(
+    profile: &ProviderProfile,
+    request: GatewayRequest,
+    tool_map: &ToolNameMap,
+) -> anyhow::Result<Value> {
     if !profile.supports_tools() && !request.tools.is_empty() {
         anyhow::bail!("model_endpoint_does_not_support_tools");
     }
 
     match profile.endpoint_type {
-        EndpointType::Responses => Ok(gateway_responses_body(&profile.model, request)),
+        EndpointType::Responses => gateway_responses_body(&profile.model, request, tool_map),
         EndpointType::ChatCompletions => {
-            responses_to_chat_completions(gateway_base_body(&profile.model, request))
+            responses_to_chat_completions(gateway_base_body(&profile.model, request, tool_map)?)
         }
         EndpointType::Completion => Ok(json!({
             "model": profile.model,
-            "prompt": latest_text_prompt(&gateway_base_body(&profile.model, request)),
+            "prompt": latest_text_prompt(&gateway_base_body(&profile.model, request, tool_map)?),
             "stream": false,
         })),
     }
 }
 
-fn gateway_base_body(model: &str, request: GatewayRequest) -> Value {
-    json!({
+fn gateway_base_body(
+    model: &str,
+    request: GatewayRequest,
+    tool_map: &ToolNameMap,
+) -> anyhow::Result<Value> {
+    Ok(json!({
         "model": model,
-        "input": request.input,
-        "tools": request.tools,
+        "input": mapped_input(request.input, tool_map)?,
+        "tools": mapped_base_tools(request.tools, tool_map)?,
         "stream": false,
-    })
+    }))
 }
 
-fn gateway_responses_body(model: &str, request: GatewayRequest) -> Value {
-    json!({
+fn gateway_responses_body(
+    model: &str,
+    request: GatewayRequest,
+    tool_map: &ToolNameMap,
+) -> anyhow::Result<Value> {
+    Ok(json!({
         "model": model,
-        "input": responses_input_items(request.input),
-        "tools": responses_tools(request.tools),
+        "input": responses_input_items(mapped_input(request.input, tool_map)?),
+        "tools": responses_tools(request.tools, tool_map)?,
         "stream": false,
-    })
+    }))
 }
 
-fn responses_tools(tools: Vec<GatewayTool>) -> Vec<Value> {
+fn mapped_base_tools(
+    tools: Vec<GatewayTool>,
+    tool_map: &ToolNameMap,
+) -> anyhow::Result<Vec<Value>> {
     tools
         .into_iter()
         .map(|tool| {
-            json!({
-                "type": "function",
-                "name": tool.name,
+            let name = mapped_wire_name(tool_map, &tool.id)?;
+            Ok(json!({
+                "name": name,
                 "description": tool.description,
-                "parameters": tool.input_schema,
-            })
+                "input_schema": tool.input_schema,
+            }))
         })
         .collect()
+}
+
+fn responses_tools(tools: Vec<GatewayTool>, tool_map: &ToolNameMap) -> anyhow::Result<Vec<Value>> {
+    tools
+        .into_iter()
+        .map(|tool| {
+            let name = mapped_wire_name(tool_map, &tool.id)?;
+            Ok(json!({
+                "type": "function",
+                "name": name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+            }))
+        })
+        .collect()
+}
+
+fn mapped_input(mut input: Vec<Value>, tool_map: &ToolNameMap) -> anyhow::Result<Vec<Value>> {
+    for item in &mut input {
+        if item.get("role").and_then(Value::as_str) == Some("assistant")
+            && let Some(tool_calls) = item.get_mut("tool_calls").and_then(Value::as_array_mut)
+        {
+            for tool_call in tool_calls {
+                let Some(name) = tool_call
+                    .get_mut("function")
+                    .and_then(|function| function.get_mut("name"))
+                else {
+                    continue;
+                };
+                map_history_name(name, tool_map)?;
+            }
+        }
+        if item.get("type").and_then(Value::as_str) == Some("function_call")
+            && let Some(name) = item.get_mut("name")
+        {
+            map_history_name(name, tool_map)?;
+        }
+    }
+    Ok(input)
+}
+
+fn map_history_name(name: &mut Value, tool_map: &ToolNameMap) -> anyhow::Result<()> {
+    let canonical = name
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("assistant tool history has invalid tool name"))?;
+    *name = Value::String(
+        tool_map
+            .wire_name(canonical)
+            .ok_or_else(|| anyhow::anyhow!("assistant tool history references unavailable tool"))?
+            .to_string(),
+    );
+    Ok(())
+}
+
+fn mapped_wire_name<'a>(tool_map: &'a ToolNameMap, canonical: &str) -> anyhow::Result<&'a str> {
+    tool_map
+        .wire_name(canonical)
+        .ok_or_else(|| anyhow::anyhow!("tool definition is missing provider mapping"))
 }
 
 fn responses_input_items(input: Vec<Value>) -> Vec<Value> {
@@ -203,9 +294,17 @@ pub fn parse_gateway_response(
     profile: &ProviderProfile,
     response: Value,
 ) -> anyhow::Result<Vec<GatewayEvent>> {
+    parse_gateway_response_with_tool_map(profile, response, &ToolNameMap::from_tools(&[])?)
+}
+
+pub fn parse_gateway_response_with_tool_map(
+    profile: &ProviderProfile,
+    response: Value,
+    tool_map: &ToolNameMap,
+) -> anyhow::Result<Vec<GatewayEvent>> {
     match profile.endpoint_type {
-        EndpointType::Responses => parse_responses_response(response),
-        EndpointType::ChatCompletions => parse_chat_completion_response(response),
+        EndpointType::Responses => parse_responses_response(response, tool_map),
+        EndpointType::ChatCompletions => parse_chat_completion_response(response, tool_map),
         EndpointType::Completion => parse_completion_response(response),
     }
 }
@@ -221,7 +320,10 @@ fn latest_text_prompt(body: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn parse_chat_completion_response(response: Value) -> anyhow::Result<Vec<GatewayEvent>> {
+fn parse_chat_completion_response(
+    response: Value,
+    tool_map: &ToolNameMap,
+) -> anyhow::Result<Vec<GatewayEvent>> {
     let mut events = Vec::new();
     let message = response
         .get("choices")
@@ -240,7 +342,7 @@ fn parse_chat_completion_response(response: Value) -> anyhow::Result<Vec<Gateway
 
     if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
         for tool_call in tool_calls {
-            if let Some(event) = parse_chat_tool_call(tool_call)? {
+            if let Some(event) = parse_chat_tool_call(tool_call, tool_map)? {
                 events.push(event);
             }
         }
@@ -267,7 +369,10 @@ fn parse_completion_response(response: Value) -> anyhow::Result<Vec<GatewayEvent
     ])
 }
 
-fn parse_chat_tool_call(tool_call: &Value) -> anyhow::Result<Option<GatewayEvent>> {
+fn parse_chat_tool_call(
+    tool_call: &Value,
+    tool_map: &ToolNameMap,
+) -> anyhow::Result<Option<GatewayEvent>> {
     let function = match tool_call.get("function") {
         Some(function) => function,
         None => return Ok(None),
@@ -276,6 +381,7 @@ fn parse_chat_tool_call(tool_call: &Value) -> anyhow::Result<Option<GatewayEvent
         Some(name) => name,
         None => return Ok(None),
     };
+    let canonical = canonical_tool_name(tool_map, name)?;
     let call_id = tool_call
         .get("id")
         .and_then(Value::as_str)
@@ -285,17 +391,20 @@ fn parse_chat_tool_call(tool_call: &Value) -> anyhow::Result<Option<GatewayEvent
 
     Ok(Some(GatewayEvent::ToolCall {
         call_id,
-        name: name.to_string(),
+        name: canonical.to_string(),
         arguments,
     }))
 }
 
-fn parse_responses_response(response: Value) -> anyhow::Result<Vec<GatewayEvent>> {
+fn parse_responses_response(
+    response: Value,
+    tool_map: &ToolNameMap,
+) -> anyhow::Result<Vec<GatewayEvent>> {
     let mut events = Vec::new();
 
     if let Some(output) = response.get("output").and_then(Value::as_array) {
         for item in output {
-            collect_responses_output_item(item, &mut events)?;
+            collect_responses_output_item(item, &mut events, tool_map)?;
         }
     }
 
@@ -317,6 +426,7 @@ fn parse_responses_response(response: Value) -> anyhow::Result<Vec<GatewayEvent>
 fn collect_responses_output_item(
     item: &Value,
     events: &mut Vec<GatewayEvent>,
+    tool_map: &ToolNameMap,
 ) -> anyhow::Result<()> {
     match item.get("type").and_then(Value::as_str) {
         Some("function_call") => {
@@ -324,6 +434,7 @@ fn collect_responses_output_item(
                 .get("name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("responses function_call missing name"))?;
+            let canonical = canonical_tool_name(tool_map, name)?;
             let call_id = item
                 .get("call_id")
                 .or_else(|| item.get("id"))
@@ -331,7 +442,7 @@ fn collect_responses_output_item(
                 .unwrap_or(name);
             events.push(GatewayEvent::ToolCall {
                 call_id: call_id.to_string(),
-                name: name.to_string(),
+                name: canonical.to_string(),
                 arguments: parse_arguments(item.get("arguments"))?,
             });
         }
@@ -354,6 +465,12 @@ fn collect_responses_output_item(
     }
 
     Ok(())
+}
+
+fn canonical_tool_name<'a>(tool_map: &'a ToolNameMap, wire: &str) -> anyhow::Result<&'a str> {
+    tool_map
+        .canonical_name(wire)
+        .ok_or_else(|| anyhow::anyhow!("unknown provider tool name"))
 }
 
 fn parse_arguments(arguments: Option<&Value>) -> anyhow::Result<Value> {
@@ -392,7 +509,16 @@ mod tests {
             ]
         });
 
-        let events = parse_chat_completion_response(response).unwrap();
+        let map = ToolNameMap::from_tools_with_test_encoder(
+            &[GatewayTool::new(
+                "echo",
+                "Return text.",
+                serde_json::json!({ "type": "object" }),
+            )],
+            |_| "echo".into(),
+        )
+        .unwrap();
+        let events = parse_chat_completion_response(response, &map).unwrap();
 
         assert_eq!(
             events,
@@ -421,7 +547,7 @@ mod tests {
         let request = GatewayRequest {
             input: vec![serde_json::json!({ "role": "user", "content": "echo hello" })],
             tools: vec![GatewayTool {
-                name: "echo".into(),
+                id: "echo".into(),
                 description: "Return text.".into(),
                 input_schema: serde_json::json!({ "type": "object" }),
             }],
@@ -430,7 +556,9 @@ mod tests {
         let body = gateway_request_body(&profile, request).unwrap();
 
         assert_eq!(body["model"], "agent-model");
-        assert_eq!(body["tools"][0]["function"]["name"], "echo");
+        let wire = body["tools"][0]["function"]["name"].as_str().unwrap();
+        assert_ne!(wire, "echo");
+        assert!(wire.len() <= 64);
         assert_eq!(body["stream"], false);
     }
 
@@ -467,13 +595,21 @@ mod tests {
                     "content": { "text": "hello" }
                 }),
             ],
-            tools: Vec::new(),
+            tools: vec![GatewayTool::new(
+                "echo",
+                "Return text.",
+                serde_json::json!({ "type": "object" }),
+            )],
         };
 
         let body = gateway_request_body(&profile, request).unwrap();
 
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["name"],
+            body["tools"][0]["function"]["name"]
+        );
         assert_eq!(body["messages"][2]["role"], "tool");
         assert_eq!(body["messages"][2]["tool_call_id"], "call-1");
         assert_eq!(body["messages"][2]["content"], "{\"text\":\"hello\"}");
@@ -493,7 +629,7 @@ mod tests {
         let request = GatewayRequest {
             input: vec![serde_json::json!({ "role": "user", "content": "echo hello" })],
             tools: vec![GatewayTool {
-                name: "echo".into(),
+                id: "echo".into(),
                 description: "Return text.".into(),
                 input_schema: serde_json::json!({ "type": "object" }),
             }],
@@ -502,7 +638,7 @@ mod tests {
         let body = gateway_request_body(&profile, request).unwrap();
 
         assert_eq!(body["tools"][0]["type"], "function");
-        assert_eq!(body["tools"][0]["name"], "echo");
+        assert_ne!(body["tools"][0]["name"], "echo");
         assert_eq!(body["tools"][0]["parameters"]["type"], "object");
         assert_eq!(body["tools"][0]["input_schema"], Value::Null);
     }
@@ -540,14 +676,18 @@ mod tests {
                     "content": { "text": "hello" }
                 }),
             ],
-            tools: Vec::new(),
+            tools: vec![GatewayTool::new(
+                "echo",
+                "Return text.",
+                serde_json::json!({ "type": "object" }),
+            )],
         };
 
         let body = gateway_request_body(&profile, request).unwrap();
 
         assert_eq!(body["input"][1]["type"], "function_call");
         assert_eq!(body["input"][1]["call_id"], "call-1");
-        assert_eq!(body["input"][1]["name"], "echo");
+        assert_eq!(body["input"][1]["name"], body["tools"][0]["name"]);
         assert_eq!(body["input"][2]["type"], "function_call_output");
         assert_eq!(body["input"][2]["call_id"], "call-1");
         assert_eq!(body["input"][2]["output"], "{\"text\":\"hello\"}");
@@ -597,7 +737,7 @@ mod tests {
         let request = GatewayRequest {
             input: vec![serde_json::json!({ "role": "user", "content": "echo hello" })],
             tools: vec![GatewayTool {
-                name: "echo".into(),
+                id: "echo".into(),
                 description: "Return text.".into(),
                 input_schema: serde_json::json!({ "type": "object" }),
             }],
@@ -667,7 +807,8 @@ mod tests {
             ]
         });
 
-        let events = parse_responses_response(response).unwrap();
+        let map = ToolNameMap::from_tools(&[]).unwrap();
+        let events = parse_responses_response(response, &map).unwrap();
 
         assert_eq!(
             events,

@@ -11,13 +11,14 @@ pub mod search;
 use crate::policy::{ApprovalPolicy, SandboxProfile};
 use crate::skill::{SkillExecutionContext, SkillRegistry};
 use crate::skill_management_tools::{SkillManagementToolContext, SkillManagementTools};
+use crate::skill_runtime_source::RuntimeToolBinding;
 use builtin::BuiltInTools;
 use discovery::{ConnectorMetadata, ExternalToolConfig, ExternalToolExecution, ToolDiscoveryItem};
 use result::{ToolError, ToolResult, ToolResultMetadata};
 use schema::{ToolDiagnostic, validate_tool_definition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -308,31 +309,28 @@ impl ToolRegistry {
         } else {
             Vec::new()
         };
-        definitions.extend(
-            self.skills
-                .tools_with_runtime_sources()
-                .into_iter()
-                .filter_map(|(skill_name, package_id, revision_id, tool)| {
-                    if self.built_in_tools_enabled && BuiltInTools::handles(&tool.name) {
-                        return None;
-                    }
-
-                    Some(ToolDefinition {
-                        name: tool.name,
-                        namespace: None,
-                        description: tool.description,
-                        input_schema: tool.input_schema,
-                        output_schema: None,
-                        permission: tool.permission,
-                        source: ToolSource::RuntimeSkill {
-                            skill_name,
-                            package_id,
-                            revision_id,
-                        },
-                    })
-                }),
-        );
         definitions.extend(self.external_definitions.clone());
+
+        let mut runtime_tools = self.skills.tools_with_runtime_sources();
+        runtime_tools.sort_by(|left, right| left.canonical_id.cmp(&right.canonical_id));
+        let mut local_counts = BTreeMap::<String, usize>::new();
+        for binding in &runtime_tools {
+            *local_counts.entry(binding.local_name.clone()).or_default() += 1;
+            definitions.push(runtime_tool_definition(
+                binding,
+                binding.canonical_id.clone(),
+            ));
+        }
+        for binding in runtime_tools {
+            if local_counts.get(&binding.local_name) == Some(&1)
+                && !self.runtime_alias_is_shadowed(&binding.local_name)
+            {
+                definitions.push(runtime_tool_definition(
+                    &binding,
+                    binding.local_name.clone(),
+                ));
+            }
+        }
         definitions
     }
 
@@ -414,12 +412,11 @@ impl ToolRegistry {
 
     pub async fn execute(&self, name: &str, call_id: &str, arguments: Value) -> ToolResult {
         let started = Instant::now();
-        if let Some(context) = &self.management
-            && SkillManagementTools::is_reserved_name(name)
-        {
-            if SkillManagementTools::handles(context, name) {
-                let result = SkillManagementTools::execute(context, name, call_id, arguments).await;
-                return result;
+        if SkillManagementTools::is_reserved_name(name) {
+            if let Some(context) = &self.management
+                && SkillManagementTools::handles(context, name)
+            {
+                return SkillManagementTools::execute(context, name, call_id, arguments).await;
             }
             return registry_failure(
                 name,
@@ -477,8 +474,7 @@ impl ToolRegistry {
             );
         }
 
-        let skill_tools = self.skills.tools();
-        let Some(skill_tool) = skill_tools.iter().find(|tool| tool.name.as_str() == name) else {
+        let Some(binding) = self.resolve_runtime_binding(name) else {
             return ToolDispatchOutcome::unobserved(registry_failure(
                 name,
                 call_id,
@@ -488,8 +484,14 @@ impl ToolRegistry {
                 ToolResultMetadata::default(),
             ));
         };
+        if binding.canonical_id != name {
+            self.push_diagnostic(ToolObserverDiagnostic {
+                operation: "runtime_tool_alias_deprecation",
+                message: "unqualified runtime tool aliases are deprecated".into(),
+            });
+        }
 
-        if !permission_allowed(self.mode, self.command_mode, skill_tool.permission) {
+        if !permission_allowed(self.mode, self.command_mode, binding.tool.permission) {
             return ToolDispatchOutcome::unobserved(registry_failure(
                 name,
                 call_id,
@@ -500,11 +502,11 @@ impl ToolRegistry {
             ));
         }
 
-        let source = self.runtime_tool_source(name);
+        let source = binding.source.clone();
         let result = match self
             .skills
-            .execute_with_context(
-                name,
+            .execute_runtime_tool_with_context(
+                &binding,
                 arguments,
                 SkillExecutionContext {
                     workspace_root: self.workspace_root.clone(),
@@ -541,41 +543,20 @@ impl ToolRegistry {
         }
     }
 
-    fn runtime_tool_source(&self, name: &str) -> ToolSource {
-        self.find_runtime_tool_source(name)
-            .expect("runtime tool source must exist for an executable skill tool")
-    }
-
-    fn find_runtime_tool_source(&self, name: &str) -> Option<ToolSource> {
-        self.skills
-            .tools_with_runtime_sources()
-            .into_iter()
-            .find_map(|(skill_name, package_id, revision_id, tool)| {
-                (tool.name == name).then_some(ToolSource::RuntimeSkill {
-                    skill_name,
-                    package_id,
-                    revision_id,
-                })
-            })
-    }
-
     fn runtime_timeout_attribution(&self, name: &str) -> Option<ToolExecutionAttribution> {
         if (self.built_in_tools_enabled && BuiltInTools::handles(name))
             || self.external_tool(name).is_some()
         {
             return None;
         }
-        let allowed = self.skills.tools().iter().any(|tool| {
-            tool.name == name && permission_allowed(self.mode, self.command_mode, tool.permission)
-        });
-        if !allowed {
+        let binding = self.resolve_runtime_binding(name)?;
+        if !permission_allowed(self.mode, self.command_mode, binding.tool.permission) {
             return None;
         }
-        self.find_runtime_tool_source(name)
-            .map(|source| ToolExecutionAttribution {
-                source,
-                success: false,
-            })
+        Some(ToolExecutionAttribution {
+            source: binding.source,
+            success: false,
+        })
     }
 
     async fn observe_execution(&self, source: &ToolSource, success: bool) {
@@ -588,6 +569,32 @@ impl ToolRegistry {
         ) {
             return;
         }
+        self.push_diagnostic(ToolObserverDiagnostic {
+            operation: "tool_execution_observer",
+            message: "tool execution observer failed".into(),
+        });
+    }
+
+    fn resolve_runtime_binding(&self, name: &str) -> Option<RuntimeToolBinding> {
+        let binding = self.skills.resolve_runtime_tool(name)?;
+        if binding.canonical_id != name && self.runtime_alias_is_shadowed(name) {
+            return None;
+        }
+        Some(binding)
+    }
+
+    fn runtime_alias_is_shadowed(&self, name: &str) -> bool {
+        SkillManagementTools::is_reserved_name(name)
+            || (self.built_in_tools_enabled && BuiltInTools::handles(name))
+            || self.external_tool(name).is_some()
+            || self
+                .skills
+                .tools_with_runtime_sources()
+                .iter()
+                .any(|binding| binding.canonical_id == name)
+    }
+
+    fn push_diagnostic(&self, diagnostic: ToolObserverDiagnostic) {
         let mut diagnostics = self
             .observer_diagnostics
             .lock()
@@ -595,10 +602,7 @@ impl ToolRegistry {
         if diagnostics.len() == 32 {
             diagnostics.pop_front();
         }
-        diagnostics.push_back(ToolObserverDiagnostic {
-            operation: "tool_execution_observer",
-            message: "tool execution observer failed".into(),
-        });
+        diagnostics.push_back(diagnostic);
     }
 
     fn external_tool(&self, name: &str) -> Option<&ExternalToolConfig> {
@@ -687,6 +691,22 @@ impl ToolRegistry {
         }
 
         Ok(self)
+    }
+}
+
+fn runtime_tool_definition(binding: &RuntimeToolBinding, name: String) -> ToolDefinition {
+    let namespace = match &binding.source {
+        ToolSource::RuntimeSkill { package_id, .. } => Some(package_id.clone()),
+        _ => None,
+    };
+    ToolDefinition {
+        name,
+        namespace,
+        description: binding.tool.description.clone(),
+        input_schema: binding.tool.input_schema.clone(),
+        output_schema: None,
+        permission: binding.tool.permission,
+        source: binding.source.clone(),
     }
 }
 

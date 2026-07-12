@@ -91,10 +91,10 @@ fn ensure_existing_path_contained(root: &Path, resolved_path: &Path) -> Result<(
             return Err(VfsError::PathEscape);
         };
         current.push(segment);
-        if let Some(canonical_current) = canonicalize_if_exists(&current)? {
-            if !path_is_contained(&canonical_root, &canonical_current) {
-                return Err(VfsError::PathEscape);
-            }
+        if let Some(canonical_current) = canonicalize_if_exists(&current)?
+            && !path_is_contained(&canonical_root, &canonical_current)
+        {
+            return Err(VfsError::PathEscape);
         }
     }
 

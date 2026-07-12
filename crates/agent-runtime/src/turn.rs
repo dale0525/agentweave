@@ -355,7 +355,7 @@ fn gateway_tools(tools: Vec<ToolDefinition>) -> Vec<GatewayTool> {
     tools
         .into_iter()
         .map(|tool| GatewayTool {
-            name: tool.name,
+            id: tool.name,
             description: tool.description,
             input_schema: tool.input_schema,
         })

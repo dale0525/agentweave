@@ -53,7 +53,11 @@ async fn observer_failure_does_not_rewrite_the_decided_tool_result() {
     .with_execution_observer(Arc::new(FailingObserver));
 
     let result = registry
-        .execute("observed_echo", "call-1", serde_json::json!({"value": 7}))
+        .execute(
+            "observed/observed_echo",
+            "call-1",
+            serde_json::json!({"value": 7}),
+        )
         .await;
 
     assert!(result.ok);
@@ -82,7 +86,7 @@ async fn permission_denial_is_not_reported_as_a_runtime_execution() {
     .with_execution_observer(observer.clone());
 
     let result = registry
-        .execute("blocked_write", "call-1", serde_json::json!({}))
+        .execute("blocked/blocked_write", "call-1", serde_json::json!({}))
         .await;
 
     assert!(!result.ok);
@@ -109,7 +113,7 @@ async fn runtime_timeout_is_reported_once_as_an_execution_failure() {
     let registry = ToolRegistry::new(skills, &config).with_execution_observer(observer.clone());
 
     let result = registry
-        .execute("slow_read", "call-1", serde_json::json!({}))
+        .execute("slow/slow_read", "call-1", serde_json::json!({}))
         .await;
 
     assert!(!result.ok);
@@ -135,7 +139,11 @@ async fn committed_observer_runs_once_outside_the_tool_timeout() {
     let worker = registry.clone();
     let execution = tokio::spawn(async move {
         worker
-            .execute("observed_echo", "call-1", serde_json::json!({"value": 7}))
+            .execute(
+                "observed/observed_echo",
+                "call-1",
+                serde_json::json!({"value": 7}),
+            )
             .await
     });
 

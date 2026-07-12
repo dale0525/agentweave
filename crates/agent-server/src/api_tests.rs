@@ -35,7 +35,7 @@ struct SkillCallingModel {
 impl ModelClient for SkillCallingModel {
     async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        assert!(request.tools.iter().any(|tool| tool.name == "echo"));
+        assert!(request.tools.iter().any(|tool| tool.id == "echo"));
         let events = if call == 0 {
             vec![
                 Ok(GatewayEvent::ToolCall {
@@ -65,8 +65,7 @@ struct ToolSchemaCaptureModel {
 #[async_trait]
 impl ModelClient for ToolSchemaCaptureModel {
     async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
-        *self.tool_names.lock().unwrap() =
-            request.tools.into_iter().map(|tool| tool.name).collect();
+        *self.tool_names.lock().unwrap() = request.tools.into_iter().map(|tool| tool.id).collect();
         Ok(Box::pin(stream::iter(vec![
             Ok(GatewayEvent::TextDelta {
                 text: "default done".into(),
@@ -401,13 +400,13 @@ async fn custom_model_settings_preserve_management_service_and_request_actor() {
         .unwrap()
         .body
         .clone();
-    assert!(
-        body["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tool| { tool["function"]["name"] == "create_skill_draft" })
-    );
+    let tools = body["tools"].as_array().unwrap();
+    assert!(!tools.is_empty());
+    assert!(tools.iter().all(|tool| {
+        tool["function"]["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("ga_") && name.len() <= 64)
+    }));
     remove_test_dir(app_root).await;
     remove_test_dir(cache_root).await;
 }
@@ -562,7 +561,7 @@ async fn production_state_binds_default_settings_and_dev_views_to_one_manager() 
     )
     .await;
 
-    let default_names = default_tools.lock().unwrap();
+    let default_names = default_tools.lock().unwrap().clone();
     assert!(default_names.iter().any(|name| name == "second_tool"));
     assert!(!default_names.iter().any(|name| name == "echo"));
     let provider_body = provider_capture

@@ -28,6 +28,7 @@ impl SkillRegistry {
                 limits,
                 execution_binding,
             }),
+            development_package_id: None,
         })
     }
 }

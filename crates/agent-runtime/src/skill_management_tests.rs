@@ -1,3 +1,4 @@
+use crate::events::RuntimeEvent;
 use crate::platform::{CapabilitySet, PlatformId};
 use crate::skill::SkillRegistry;
 use crate::skill_authoring::build_package_draft;
@@ -379,7 +380,7 @@ impl ModelClient for ManagementVisibilityModel {
         self.requests
             .lock()
             .unwrap()
-            .push(request.tools.into_iter().map(|tool| tool.name).collect());
+            .push(request.tools.into_iter().map(|tool| tool.id).collect());
         Ok(Box::pin(stream::iter(vec![Ok(GatewayEvent::Completed)])))
     }
 }
@@ -416,8 +417,7 @@ struct ManagementCallingModel {
 #[async_trait]
 impl ModelClient for ManagementCallingModel {
     async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
-        *self.advertised.lock().unwrap() =
-            request.tools.into_iter().map(|tool| tool.name).collect();
+        *self.advertised.lock().unwrap() = request.tools.into_iter().map(|tool| tool.id).collect();
         let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             vec![
                 GatewayEvent::ToolCall {
@@ -688,7 +688,7 @@ fn create_tool_kind_schema_matches_policy_allowed_kind_intersection() {
 }
 
 #[tokio::test]
-async fn turn_registry_collision_returns_error_instead_of_panicking() {
+async fn turn_registry_hides_reserved_runtime_alias_and_keeps_canonical_tool() {
     let fixture = ManagementFixture::new(SkillManagementPolicy::owner_only()).await;
     let root = tempdir().unwrap();
     let skill = root.path().join("collision");
@@ -718,21 +718,39 @@ async fn turn_registry_collision_returns_error_instead_of_panicking() {
         .await
         .unwrap();
     let registry = SkillRegistry::load_development(root.path()).await.unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
     let runner = TurnRunner::new_with_manager_and_config(
         ManagementVisibilityModel {
-            requests: Arc::new(Mutex::new(Vec::new())),
+            requests: requests.clone(),
         },
         SkillManager::from_registry_and_catalog(registry, SkillCatalog::empty()),
         RuntimeConfig::read_only(".", ".").without_builtin_tools(),
     )
     .with_skill_management(fixture.service.clone());
 
-    let error = runner
+    let events = runner
         .run_request(TurnRequest::new("collision").with_actor_context(fixture.owner()))
         .await
-        .unwrap_err();
+        .unwrap();
+    let requests = requests.lock().unwrap();
 
-    assert!(error.to_string().contains("duplicate tool name"));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::TurnFinished { .. }))
+    );
+    assert!(
+        requests[0]
+            .iter()
+            .any(|tool| tool == "collision/create_skill_draft")
+    );
+    assert_eq!(
+        requests[0]
+            .iter()
+            .filter(|tool| tool.as_str() == "create_skill_draft")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

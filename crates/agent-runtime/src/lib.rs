@@ -70,6 +70,8 @@ mod skill_package_tests;
 mod skill_policy_tests;
 
 #[cfg(test)]
+mod runtime_tool_identity_tests;
+#[cfg(test)]
 mod skill_management_tests;
 #[cfg(test)]
 mod skill_recovery_cleanup_tests;

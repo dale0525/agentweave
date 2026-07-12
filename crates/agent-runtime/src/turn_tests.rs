@@ -92,7 +92,7 @@ async fn sends_runtime_tool_schemas_to_the_model() {
     let _events = runner.run("echo hello").await.unwrap();
     let requests = runner.model.requests.lock().unwrap();
 
-    assert!(requests[0].tools.iter().any(|tool| tool.name == "echo"));
+    assert!(requests[0].tools.iter().any(|tool| tool.id == "echo"));
     assert_eq!(requests[0].tools[0].input_schema["type"], "object");
 }
 
@@ -187,7 +187,7 @@ fn tool_result(events: &[RuntimeEvent]) -> serde_json::Value {
 }
 
 fn request_has_tool(request: &model_gateway::responses::GatewayRequest, name: &str) -> bool {
-    request.tools.iter().any(|tool| tool.name == name)
+    request.tools.iter().any(|tool| tool.id == name)
 }
 
 #[tokio::test]
@@ -602,13 +602,8 @@ async fn first_request_includes_instruction_context_and_tool_schemas() {
     assert!(developer.contains("Use tools for concrete workspace actions"));
     assert!(developer.contains("Project instruction from AGENTS.md"));
     assert_eq!(first.input[2]["role"], "user");
-    assert!(
-        first
-            .tools
-            .iter()
-            .any(|tool| tool.name == "create_directory")
-    );
-    assert!(first.tools.iter().any(|tool| tool.name == "echo"));
+    assert!(first.tools.iter().any(|tool| tool.id == "create_directory"));
+    assert!(first.tools.iter().any(|tool| tool.id == "echo"));
     remove_workspace(&workspace);
 }
 

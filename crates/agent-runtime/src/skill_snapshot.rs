@@ -115,8 +115,13 @@ async fn build_registry(packages: &[ResolvedSkillPackage]) -> anyhow::Result<Ski
                         .await?,
                     );
                 }
-                None => skills
-                    .push(SkillRegistry::load_development_skill(&resolved.package.root).await?),
+                None => skills.push(
+                    SkillRegistry::load_development_skill_for_package(
+                        &resolved.package.root,
+                        &resolved.package.descriptor.id,
+                    )
+                    .await?,
+                ),
             }
         }
     }

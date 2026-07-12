@@ -429,7 +429,7 @@ mod tests {
     impl ModelClient for CapturingModel {
         async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
             *self.tool_names.lock().unwrap() =
-                request.tools.into_iter().map(|tool| tool.name).collect();
+                request.tools.into_iter().map(|tool| tool.id).collect();
             Ok(Box::pin(stream::iter(vec![
                 Ok(GatewayEvent::TextDelta {
                     text: "done".into(),
@@ -618,7 +618,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let names = tool_names.lock().unwrap();
+        let names = tool_names.lock().unwrap().clone();
         assert!(names.iter().any(|name| name == "second_tool"));
         assert!(!names.iter().any(|name| name == "first_tool"));
         remove_test_dir(root).await;

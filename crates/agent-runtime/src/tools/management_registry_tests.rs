@@ -48,25 +48,25 @@ impl ManagementContextFixture {
 }
 
 #[tokio::test]
-async fn anonymous_actor_cannot_register_runtime_skill_using_reserved_management_name() {
+async fn anonymous_actor_keeps_reserved_runtime_tool_canonical_only() {
     let fixture = ManagementContextFixture::new(SkillManagementPolicy::owner_only()).await;
     let root = tempdir().unwrap();
     write_runtime_collision(root.path()).await;
     let skills = SkillRegistry::load_development(root.path()).await.unwrap();
     let config = RuntimeConfig::read_only(root.path(), root.path()).without_builtin_tools();
 
-    let error = ToolRegistry::try_new_with_management(
+    let registry = ToolRegistry::try_new_with_management(
         skills,
         &config,
         Some(fixture.context(ActorContext::anonymous())),
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert_reserved_collision(error);
+    assert_reserved_runtime_alias_hidden(&registry);
 }
 
 #[tokio::test]
-async fn empty_allowed_kinds_still_reserve_management_tool_name() {
+async fn empty_allowed_kinds_still_hide_reserved_runtime_alias() {
     let mut policy = SkillManagementPolicy::owner_only();
     policy.allowed_kinds = BTreeSet::new();
     let fixture = ManagementContextFixture::new(policy).await;
@@ -75,14 +75,14 @@ async fn empty_allowed_kinds_still_reserve_management_tool_name() {
     let skills = SkillRegistry::load_development(root.path()).await.unwrap();
     let config = RuntimeConfig::read_only(root.path(), root.path()).without_builtin_tools();
 
-    let error = ToolRegistry::try_new_with_management(
+    let registry = ToolRegistry::try_new_with_management(
         skills,
         &config,
         Some(fixture.context(ActorContext::owner("owner-1", [SkillGrant::CreateDraft]))),
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert_reserved_collision(error);
+    assert_reserved_runtime_alias_hidden(&registry);
 }
 
 #[tokio::test]
@@ -104,21 +104,21 @@ async fn actor_without_create_grant_still_rejects_external_reserved_name() {
 }
 
 #[tokio::test]
-async fn disabled_management_still_rejects_runtime_reserved_name() {
+async fn disabled_management_still_hides_reserved_runtime_alias() {
     let fixture = ManagementContextFixture::new(SkillManagementPolicy::default()).await;
     let root = tempdir().unwrap();
     write_runtime_collision(root.path()).await;
     let skills = SkillRegistry::load_development(root.path()).await.unwrap();
     let config = RuntimeConfig::read_only(root.path(), root.path()).without_builtin_tools();
 
-    let error = ToolRegistry::try_new_with_management(
+    let registry = ToolRegistry::try_new_with_management(
         skills,
         &config,
         Some(fixture.context(ActorContext::anonymous())),
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert_reserved_collision(error);
+    assert_reserved_runtime_alias_hidden(&registry);
 }
 
 #[tokio::test]
@@ -204,4 +204,17 @@ fn assert_reserved_collision(error: anyhow::Error) {
         message.contains("reserved skill management tool name"),
         "{message}"
     );
+}
+
+fn assert_reserved_runtime_alias_hidden(registry: &ToolRegistry) {
+    let definitions = registry.definitions();
+    assert!(
+        definitions
+            .iter()
+            .any(|tool| tool.name == "collision/create_skill_draft")
+    );
+    assert!(!definitions.iter().any(|tool| {
+        tool.name == CREATE_SKILL_DRAFT_TOOL
+            && matches!(tool.source, ToolSource::RuntimeSkill { .. })
+    }));
 }

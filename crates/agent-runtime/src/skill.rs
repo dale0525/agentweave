@@ -57,6 +57,7 @@ pub struct InstalledSkill {
     pub(crate) root: PathBuf,
     pub(crate) manifest: SkillManifest,
     pub(crate) verification: Option<InstalledSkillVerification>,
+    pub(crate) development_package_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +115,7 @@ impl SkillRegistry {
     }
 
     pub fn from_installed(skills: Vec<InstalledSkill>) -> anyhow::Result<Self> {
-        validate_registry_tool_names(&skills)?;
+        crate::skill_runtime_source::validate_runtime_identities(&skills)?;
         Ok(Self {
             skills,
             availability: None,
@@ -143,6 +144,15 @@ impl SkillRegistry {
 
     pub async fn load_development_skill(root: impl AsRef<Path>) -> anyhow::Result<InstalledSkill> {
         Self::load_skill(root.as_ref().to_path_buf()).await
+    }
+
+    pub(crate) async fn load_development_skill_for_package(
+        root: impl AsRef<Path>,
+        package_id: &crate::skill_package::SkillPackageId,
+    ) -> anyhow::Result<InstalledSkill> {
+        let mut skill = Self::load_skill(root.as_ref().to_path_buf()).await?;
+        skill.development_package_id = Some(package_id.as_str().to_string());
+        Ok(skill)
     }
 
     pub async fn load_packaged(root: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -250,17 +260,23 @@ impl SkillRegistry {
         input: Value,
         context: SkillExecutionContext,
     ) -> anyhow::Result<Value> {
+        let binding = self
+            .resolve_runtime_tool_for_execution(tool_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown tool: {tool_name}"))?;
+        self.execute_runtime_tool_with_context(&binding, input, context)
+            .await
+    }
+
+    pub(crate) async fn execute_runtime_tool_with_context(
+        &self,
+        binding: &crate::skill_runtime_source::RuntimeToolBinding,
+        input: Value,
+        context: SkillExecutionContext,
+    ) -> anyhow::Result<Value> {
         let skill = self
             .skills
-            .iter()
-            .find(|skill| {
-                skill
-                    .manifest
-                    .tools
-                    .iter()
-                    .any(|tool| tool.name == tool_name)
-            })
-            .ok_or_else(|| anyhow::anyhow!("unknown tool: {tool_name}"))?;
+            .get(binding.skill_index)
+            .ok_or_else(|| anyhow::anyhow!("runtime tool owner is unavailable"))?;
 
         let availability = self.skill_availability(skill);
         if availability.status != SkillAvailabilityStatus::Available {
@@ -281,7 +297,7 @@ impl SkillRegistry {
         let mut child = Command::new(command)
             .args(args)
             .current_dir(execution_root)
-            .env("GENERAL_AGENT_TOOL_NAME", tool_name)
+            .env("GENERAL_AGENT_TOOL_NAME", &binding.local_name)
             .env("GENERAL_AGENT_WORKSPACE_ROOT", &context.workspace_root)
             .env("GENERAL_AGENT_CWD", &context.cwd)
             .env(
@@ -372,6 +388,7 @@ impl SkillRegistry {
             root,
             manifest,
             verification: None,
+            development_package_id: None,
         })
     }
 
@@ -478,20 +495,6 @@ pub(crate) fn validate_manifest_semantics(manifest: &SkillManifest) -> anyhow::R
     for arg in &manifest.entry.args {
         if classify_manifest_entry_arg(arg) == ManifestEntryArgKind::UnsafeRelative {
             anyhow::bail!("unsafe skill entry resource path: {arg}");
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_registry_tool_names(skills: &[InstalledSkill]) -> anyhow::Result<()> {
-    let mut tool_names = HashSet::new();
-    for skill in skills {
-        for tool in &skill.manifest.tools {
-            validate_tool_name(&tool.name)?;
-            if !tool_names.insert(tool.name.as_str()) {
-                anyhow::bail!("duplicate runtime tool name: {}", tool.name);
-            }
         }
     }
 
@@ -882,7 +885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_duplicate_tool_names_across_packaged_skills() {
+    async fn accepts_duplicate_local_names_across_distinct_packaged_skills() {
         let root = unique_test_dir("duplicate-tools");
         write_echo_skill(&root, "first", "echo").await;
         write_echo_skill(&root, "second", "echo").await;
@@ -899,9 +902,12 @@ mod tests {
         .await
         .unwrap();
 
-        let error = SkillRegistry::load_packaged(&root).await.unwrap_err();
+        let registry = SkillRegistry::load_packaged(&root).await.unwrap();
+        let tools = registry.tools_with_runtime_sources();
 
-        assert!(error.to_string().contains("duplicate runtime tool name"));
+        assert!(tools.iter().any(|tool| tool.canonical_id == "first/echo"));
+        assert!(tools.iter().any(|tool| tool.canonical_id == "second/echo"));
+        assert!(registry.resolve_runtime_tool("echo").is_none());
         remove_test_dir(root).await;
     }
 

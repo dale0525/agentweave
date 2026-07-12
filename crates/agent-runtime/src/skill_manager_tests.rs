@@ -583,7 +583,7 @@ async fn duplicate_instruction_names_reject_candidate_snapshot() {
 }
 
 #[tokio::test]
-async fn duplicate_runtime_tool_names_reject_candidate_snapshot() {
+async fn duplicate_runtime_local_names_keep_distinct_canonical_snapshot_tools() {
     let root = tempdir().unwrap();
     write_runtime_package(root.path(), "first", "com.example.first", "duplicate_tool").await;
     write_runtime_package(
@@ -594,14 +594,27 @@ async fn duplicate_runtime_tool_names_reject_candidate_snapshot() {
     )
     .await;
 
-    let error = SkillManager::new(config(vec![Arc::new(DirectorySkillSource::new(
+    let manager = SkillManager::new(config(vec![Arc::new(DirectorySkillSource::new(
         SkillLayer::Builtin,
         root.path(),
     ))]))
     .await
-    .unwrap_err();
+    .unwrap();
+    let snapshot = manager.current_snapshot();
+    let registry = snapshot.registry();
+    let tools = registry.tools_with_runtime_sources();
 
-    assert!(error.to_string().contains("duplicate runtime tool name"));
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.canonical_id == "com.example.first/duplicate_tool")
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.canonical_id == "com.example.second/duplicate_tool")
+    );
+    assert!(registry.resolve_runtime_tool("duplicate_tool").is_none());
 }
 
 #[tokio::test]
