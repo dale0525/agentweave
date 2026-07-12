@@ -22,11 +22,22 @@ impl BundleInspectionGate {
 }
 
 pub(crate) fn gate_bundle_after_inspection(output_root: &Path) -> BundleInspectionGate {
+    insert_inspection_gate(output_root, inspection_gates())
+}
+
+pub(crate) fn gate_bundle_after_current_commit(output_root: &Path) -> BundleInspectionGate {
+    insert_inspection_gate(output_root, current_commit_gates())
+}
+
+fn insert_inspection_gate(
+    output_root: &Path,
+    gates: &Mutex<BTreeMap<PathBuf, BundleInspectionGate>>,
+) -> BundleInspectionGate {
     let gate = BundleInspectionGate {
         entered: Arc::new(tokio::sync::Barrier::new(2)),
         release: Arc::new(tokio::sync::Barrier::new(2)),
     };
-    inspection_gates()
+    gates
         .lock()
         .unwrap()
         .insert(canonical_test_path(output_root), gate.clone());
@@ -36,6 +47,22 @@ pub(crate) fn gate_bundle_after_inspection(output_root: &Path) -> BundleInspecti
 fn inspection_gates() -> &'static Mutex<BTreeMap<PathBuf, BundleInspectionGate>> {
     static GATES: OnceLock<Mutex<BTreeMap<PathBuf, BundleInspectionGate>>> = OnceLock::new();
     GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn current_commit_gates() -> &'static Mutex<BTreeMap<PathBuf, BundleInspectionGate>> {
+    static GATES: OnceLock<Mutex<BTreeMap<PathBuf, BundleInspectionGate>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub(super) async fn checkpoint_after_current_commit(output_root: &Path) {
+    let gate = current_commit_gates()
+        .lock()
+        .unwrap()
+        .remove(&canonical_test_path(output_root));
+    if let Some(gate) = gate {
+        wait(&gate.entered, "bundle current commit checkpoint entry").await;
+        wait(&gate.release, "bundle current commit checkpoint release").await;
+    }
 }
 
 pub(super) async fn checkpoint_after_inspection(output_root: &Path) {

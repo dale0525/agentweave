@@ -75,6 +75,14 @@ impl PreparedStoreDirectory {
         &self.path
     }
 
+    pub(crate) fn root_identity(&self) -> &StoreRootIdentity {
+        &self.root
+    }
+
+    pub(crate) fn relative(&self) -> &Path {
+        &self.relative
+    }
+
     #[cfg(unix)]
     pub(crate) fn descriptor(&self) -> &File {
         &self.descriptor

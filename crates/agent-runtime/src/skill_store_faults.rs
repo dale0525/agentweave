@@ -40,6 +40,8 @@ pub(crate) enum StoreFaultPoint {
     ExecutionCopyFile,
     BundleBeforeGenerationReservation,
     BundleBeforePublish,
+    BundleBeforeGenerationsCleanup,
+    BundleBeforeOutputCleanup,
     PromoteBeforeDestinationCommit,
     ManagedReadonly,
     ManagedReadonlyBeforeApply,

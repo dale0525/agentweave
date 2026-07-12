@@ -11,7 +11,12 @@ use crate::skill_package::DescriptorSource;
 use crate::skill_resolver::{SkillResolutionInput, SkillResolver};
 use crate::skill_source::{DiscoveredSkillPackage, SkillLayer};
 use crate::skill_store::SkillStoreLimits;
-use crate::skill_store_atomic_write::atomic_replace_replaceable_file;
+use crate::skill_store_atomic_write::{
+    atomic_replace_owned_replaceable_file, atomic_replace_replaceable_file,
+};
+use crate::skill_store_directory_ops::{
+    DirectoryOwnership, prepare_opened_directory, remove_opened_directory_if_empty,
+};
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 use crate::skill_store_fs::{
     copy_package_tree_into_prepared, make_tree_deletable, make_tree_readonly,
@@ -21,9 +26,8 @@ use crate::skill_store_locks::StoreRootIdentity;
 use crate::skill_store_prepared_fs::{create_regular_file, open_regular_file, set_readonly};
 use crate::skill_store_secure_fs::secure_package_snapshot;
 use crate::skill_store_secure_roots::{
-    PreparedStoreDirectory, PreparedStoreUnknownKind, ensure_opened_child_directory,
-    list_opened_child_directories, open_prepared_directory, opened_package_snapshot,
-    remove_opened_tree, reserve_opened_directory,
+    PreparedStoreDirectory, PreparedStoreUnknownKind, list_opened_child_directories,
+    opened_package_snapshot, remove_opened_tree, reserve_opened_directory,
 };
 use anyhow::Context;
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,9 +86,9 @@ async fn build_skill_bundle_inner(
         match super::BundleSkillSource::open(output.root.path()).await {
             Ok(source) => match source.current_generation().await {
                 Ok(generation) => generation,
-                Err(error) => return Err(cleanup_bootstrap_error(&output, error).await),
+                Err(error) => return Err(cleanup_bootstrap_error(&output, error, &faults).await),
             },
-            Err(error) => return Err(cleanup_bootstrap_error(&output, error).await),
+            Err(error) => return Err(cleanup_bootstrap_error(&output, error, &faults).await),
         }
     } else {
         None
@@ -92,18 +96,18 @@ async fn build_skill_bundle_inner(
     let generation_id = uuid::Uuid::new_v4().to_string();
     let generation_relative = PathBuf::from(SKILL_BUNDLE_GENERATIONS_DIR).join(&generation_id);
     if let Err(error) = faults.check(StoreFaultPoint::BundleBeforeGenerationReservation) {
-        return Err(cleanup_bootstrap_error(&output, error).await);
+        return Err(cleanup_bootstrap_error(&output, error, &faults).await);
     }
     let generation = match reserve_opened_directory(&output.identity, &generation_relative).await {
         Ok(generation) => generation,
-        Err(error) => return Err(cleanup_bootstrap_error(&output, error).await),
+        Err(error) => return Err(cleanup_bootstrap_error(&output, error, &faults).await),
     };
     let generation_identity = match StoreRootIdentity::capture(generation.path().to_path_buf()) {
         Ok(identity) => identity,
         Err(error) => {
             let cleanup = remove_opened_tree(&generation).await;
             let error = attach_cleanup(error, cleanup, "unidentified generation cleanup");
-            return Err(cleanup_bootstrap_error(&output, error).await);
+            return Err(cleanup_bootstrap_error(&output, error, &faults).await);
         }
     };
     let mut published = false;
@@ -196,7 +200,7 @@ async fn build_skill_bundle_inner(
             remove_opened_tree(&generation).await,
             "unpublished bundle generation cleanup",
         );
-        return Err(cleanup_bootstrap_error(&output, error).await);
+        return Err(cleanup_bootstrap_error(&output, error, &faults).await);
     }
     Ok(BuildSkillBundleResult {
         root: output_root,
@@ -631,37 +635,14 @@ async fn prepare_output(
     let relative = PathBuf::from(name);
     let bound_output = parent.join(&relative);
     reject_root_overlap(source_roots, &bound_output).await?;
-    let (root, created_root) = match tokio::fs::symlink_metadata(&bound_output).await {
-        Ok(metadata) => {
-            anyhow::ensure!(
-                metadata.is_dir() && !metadata.file_type().is_symlink(),
-                "output root must be a real directory: {}",
-                bound_output.display()
-            );
-            (
-                open_prepared_directory(&parent_identity, &relative).await?,
-                false,
-            )
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
-            reserve_opened_directory(&parent_identity, &relative).await?,
-            true,
-        ),
-        Err(error) => return Err(error.into()),
-    };
+    let (root, root_ownership) = prepare_opened_directory(&parent_identity, &relative).await?;
+    let created_root = root_ownership == DirectoryOwnership::Created;
     let prepared = async {
         let identity = StoreRootIdentity::capture(root.path().to_path_buf())?;
         let has_current = verify_existing_output(&root).await?;
-        let created_generations =
-            match tokio::fs::symlink_metadata(root.path().join(SKILL_BUNDLE_GENERATIONS_DIR)).await
-            {
-                Ok(_) => false,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-                Err(error) => return Err(error.into()),
-            };
-        ensure_opened_child_directory(&root, Path::new(SKILL_BUNDLE_GENERATIONS_DIR)).await?;
-        let generations =
-            open_prepared_directory(&identity, Path::new(SKILL_BUNDLE_GENERATIONS_DIR)).await?;
+        let (generations, generations_ownership) =
+            prepare_opened_directory(&identity, Path::new(SKILL_BUNDLE_GENERATIONS_DIR)).await?;
+        let created_generations = generations_ownership == DirectoryOwnership::Created;
         root.verify()?;
         parent_identity.verify("bundle output parent")?;
         Ok(PreparedBundleOutput {
@@ -699,18 +680,19 @@ async fn cleanup_new_output_bootstrap(root: &PreparedStoreDirectory) -> anyhow::
                 generations.observed == 0,
                 "new bundle generations bootstrap is not empty"
             );
-            remove_opened_tree(&child.directory).await?;
+            remove_opened_directory_if_empty(&child.directory).await?;
         }
         _ => anyhow::bail!("new bundle output bootstrap contains unexpected directories"),
     }
     let listing = list_opened_child_directories(root, 1).await?;
     anyhow::ensure!(listing.observed == 0, "new bundle output bootstrap changed");
-    remove_opened_tree(root).await
+    remove_opened_directory_if_empty(root).await
 }
 
 async fn cleanup_bootstrap_error(
     output: &PreparedBundleOutput,
     error: anyhow::Error,
+    faults: &StoreFaults,
 ) -> anyhow::Error {
     if output.has_current {
         return error;
@@ -720,9 +702,12 @@ async fn cleanup_bootstrap_error(
         let empty = list_opened_child_directories(&output.generations, 1).await;
         match empty {
             Ok(listing) if listing.observed == 0 => {
+                faults
+                    .checkpoint(StoreFaultPoint::BundleBeforeGenerationsCleanup)
+                    .await;
                 error = attach_cleanup(
                     error,
-                    remove_opened_tree(&output.generations).await,
+                    remove_opened_directory_if_empty(&output.generations).await,
                     "empty generations bootstrap cleanup",
                 );
             }
@@ -741,9 +726,12 @@ async fn cleanup_bootstrap_error(
     if output.created_root {
         match list_opened_child_directories(&output.root, 1).await {
             Ok(listing) if listing.observed == 0 => {
+                faults
+                    .checkpoint(StoreFaultPoint::BundleBeforeOutputCleanup)
+                    .await;
                 error = attach_cleanup(
                     error,
-                    remove_opened_tree(&output.root).await,
+                    remove_opened_directory_if_empty(&output.root).await,
                     "empty output bootstrap cleanup",
                 );
             }
@@ -826,11 +814,36 @@ async fn publish_generation(
     faults: &StoreFaults,
     published: &mut bool,
 ) -> anyhow::Result<()> {
+    let first_publication = previous.is_none();
+    let expected = active.clone();
     let bytes = pretty_json(&SkillBundleCurrent {
         schema_version: SKILL_BUNDLE_CURRENT_SCHEMA_VERSION,
         active,
         previous,
     })?;
+    if first_publication {
+        return match atomic_replace_owned_replaceable_file(
+            output,
+            Path::new(SKILL_BUNDLE_CURRENT_FILE),
+            &bytes,
+            0o644,
+            faults,
+        )
+        .await
+        {
+            Ok(marker) => {
+                *published = true;
+                super::publication::verify_first_publication_or_neutralize(
+                    output, &expected, marker,
+                )
+                .await
+            }
+            Err(failure) => {
+                *published = failure.state == AtomicReplaceCommitState::Committed;
+                Err(failure.error)
+            }
+        };
+    }
     match atomic_replace_replaceable_file(
         output,
         Path::new(SKILL_BUNDLE_CURRENT_FILE),

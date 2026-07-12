@@ -1,8 +1,8 @@
 use crate::platform::PlatformId;
 use crate::skill_bundle::{
     BuildSkillBundleRequest, BundleSkillSource, build_skill_bundle, build_skill_bundle_with_faults,
-    gate_bundle_after_final_validation, gate_bundle_before_publish,
-    gate_bundle_discovery_after_layout,
+    gate_bundle_after_current_commit, gate_bundle_after_final_validation,
+    gate_bundle_before_publish, gate_bundle_discovery_after_layout,
 };
 use crate::skill_source::SkillSource;
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
@@ -19,6 +19,7 @@ async fn generation_replacement_after_final_validation_falls_back_to_previous_co
     let fixture = FinalReviewFixture::new().await;
     build_skill_bundle(fixture.request()).await.unwrap();
     let old = selected_package(&fixture.output).await;
+    let original_current = read_current(&fixture.output).await;
     fixture.write_runtime("new").await;
 
     let gate = gate_bundle_after_final_validation(&fixture.output);
@@ -32,19 +33,16 @@ async fn generation_replacement_after_final_validation_falls_back_to_previous_co
         .await
         .unwrap();
     gate.release().await;
-    let _ = publishing.await.unwrap();
+    publishing.await.unwrap().unwrap();
 
     let current = read_current(&fixture.output).await;
-    assert_ne!(
-        current["active"]["generation"],
-        current["previous"]["generation"]
-    );
-    assert_eq!(selected_package(&fixture.output).await, old);
+    assert_ne!(current, original_current);
+    assert_eq!(current["previous"], original_current["active"]);
+    let selected = selected_package(&fixture.output).await;
+    assert_eq!(selected, old);
     assert_eq!(
-        tokio::fs::read_to_string(old.root.join("index.js"))
-            .await
-            .unwrap(),
-        "old\n"
+        selected.root,
+        committed_package_root(&fixture.output, &current["previous"]).await
     );
 }
 
@@ -54,6 +52,7 @@ async fn preopened_writer_after_final_validation_falls_back_to_previous_commitme
     let fixture = FinalReviewFixture::new().await;
     build_skill_bundle(fixture.request()).await.unwrap();
     let old = selected_package(&fixture.output).await;
+    let original_current = read_current(&fixture.output).await;
     fixture.write_runtime("new").await;
 
     let before = gate_bundle_before_publish(&fixture.output);
@@ -70,14 +69,108 @@ async fn preopened_writer_after_final_validation_falls_back_to_previous_commitme
     writer.set_len(26).unwrap();
     writer.sync_all().unwrap();
     final_gate.release().await;
-    let _ = publishing.await.unwrap();
+    publishing.await.unwrap().unwrap();
 
-    assert_eq!(selected_package(&fixture.output).await, old);
+    let current = read_current(&fixture.output).await;
+    assert_ne!(current, original_current);
+    assert_eq!(current["previous"], original_current["active"]);
+    let selected = selected_package(&fixture.output).await;
+    assert_eq!(selected, old);
     assert_eq!(
-        tokio::fs::read_to_string(old.root.join("index.js"))
+        selected.root,
+        committed_package_root(&fixture.output, &current["previous"]).await
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn first_publication_generation_replacement_returns_error_without_authoritative_current() {
+    let fixture = FinalReviewFixture::new().await;
+    let gate = gate_bundle_after_final_validation(&fixture.output);
+    let request = fixture.request();
+    let publishing = tokio::spawn(async move { build_skill_bundle(request).await });
+    let generation = gate.wait_entered().await;
+    let displaced = generation.with_file_name(uuid::Uuid::new_v4().to_string());
+    tokio::fs::rename(&generation, &displaced).await.unwrap();
+    tokio::fs::create_dir(&generation).await.unwrap();
+    tokio::fs::write(generation.join("attacker"), "replacement")
+        .await
+        .unwrap();
+    gate.release().await;
+
+    let error = publishing.await.unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("first bundle publication"));
+    assert_no_authoritative_current(&fixture.output).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn first_publication_preopened_writer_returns_error_without_authoritative_current() {
+    let fixture = FinalReviewFixture::new().await;
+    let before = gate_bundle_before_publish(&fixture.output);
+    let final_gate = gate_bundle_after_final_validation(&fixture.output);
+    let request = fixture.request();
+    let publishing = tokio::spawn(async move { build_skill_bundle(request).await });
+    let generation = before.wait_entered().await;
+    let path = generation.join("com.example.final/index.js");
+    let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    before.release().await;
+    final_gate.wait_entered().await;
+    writer.seek(std::io::SeekFrom::Start(0)).unwrap();
+    writer.write_all(b"tampered-after-validation\n").unwrap();
+    writer.set_len(26).unwrap();
+    writer.sync_all().unwrap();
+    final_gate.release().await;
+
+    let error = publishing.await.unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("first bundle publication"));
+    assert_no_authoritative_current(&fixture.output).await;
+}
+
+#[tokio::test]
+async fn first_publication_neutralization_preserves_concurrently_replaced_current() {
+    let fixture = FinalReviewFixture::new().await;
+    let gate = gate_bundle_after_current_commit(&fixture.output);
+    let request = fixture.request();
+    let publishing = tokio::spawn(async move { build_skill_bundle(request).await });
+    gate.wait_entered().await;
+    let attacker = b"{\"external\":true}\n";
+    let replacement = fixture.output.join("external-current");
+    tokio::fs::write(&replacement, attacker).await.unwrap();
+    tokio::fs::rename(&replacement, fixture.output.join("current"))
+        .await
+        .unwrap();
+    gate.release().await;
+
+    let error = publishing.await.unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("first bundle publication"));
+    assert_eq!(
+        tokio::fs::read(fixture.output.join("current"))
             .await
             .unwrap(),
-        "old\n"
+        attacker
+    );
+}
+
+#[tokio::test]
+async fn successful_first_publication_is_immediately_readable_with_expected_bytes() {
+    let fixture = FinalReviewFixture::new().await;
+    let result = build_skill_bundle(fixture.request()).await.unwrap();
+    let current = read_current(&fixture.output).await;
+    let selected = selected_package(&fixture.output).await;
+
+    assert_eq!(result.package_count, 1);
+    assert_eq!(selected.content, "old\n");
+    assert_eq!(
+        selected.root,
+        committed_package_root(&fixture.output, &current["active"]).await
+    );
+    assert_eq!(
+        selected.hash,
+        serde_json::from_slice::<serde_json::Value>(&result.manifest_bytes).unwrap()["packages"][0]
+            ["contentHash"]
+            .as_str()
+            .unwrap()
     );
 }
 
@@ -129,6 +222,55 @@ async fn first_build_copy_failure_is_immediately_retryable() {
 #[tokio::test]
 async fn first_build_precommit_failure_is_immediately_retryable() {
     assert_first_build_retry(StoreFaultPoint::BundleBeforePublish).await;
+}
+
+#[tokio::test]
+async fn generations_cleanup_preserves_foreign_generation_created_after_empty_observation() {
+    let fixture = FinalReviewFixture::new().await;
+    let faults = StoreFaults::default();
+    faults.fail_once(StoreFaultPoint::BundleBeforeGenerationReservation);
+    let gate = faults.gate_once(StoreFaultPoint::BundleBeforeGenerationsCleanup);
+    let request = fixture.request();
+    let publishing =
+        tokio::spawn(async move { build_skill_bundle_with_faults(request, faults).await });
+    gate.wait_entered().await;
+    let foreign_id = uuid::Uuid::new_v4().to_string();
+    let foreign = fixture.output.join("generations").join(&foreign_id);
+    tokio::fs::create_dir(&foreign).await.unwrap();
+    tokio::fs::write(foreign.join("foreign"), b"preserve me")
+        .await
+        .unwrap();
+    gate.release().await;
+
+    let error = publishing.await.unwrap().unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("BundleBeforeGenerationReservation"));
+    assert!(message.contains("empty generations bootstrap cleanup failed safely"));
+    assert_eq!(
+        tokio::fs::read(foreign.join("foreign")).await.unwrap(),
+        b"preserve me"
+    );
+}
+
+#[tokio::test]
+async fn output_cleanup_preserves_foreign_file_created_after_empty_observation() {
+    let fixture = FinalReviewFixture::new().await;
+    let faults = StoreFaults::default();
+    faults.fail_once(StoreFaultPoint::BundleBeforeGenerationReservation);
+    let gate = faults.gate_once(StoreFaultPoint::BundleBeforeOutputCleanup);
+    let request = fixture.request();
+    let publishing =
+        tokio::spawn(async move { build_skill_bundle_with_faults(request, faults).await });
+    gate.wait_entered().await;
+    let foreign = fixture.output.join("foreign");
+    tokio::fs::write(&foreign, b"preserve me").await.unwrap();
+    gate.release().await;
+
+    let error = publishing.await.unwrap().unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("BundleBeforeGenerationReservation"));
+    assert!(message.contains("empty output bootstrap cleanup failed safely"));
+    assert_eq!(tokio::fs::read(foreign).await.unwrap(), b"preserve me");
 }
 
 #[tokio::test]
@@ -224,6 +366,33 @@ async fn selected_package(output: &Path) -> SelectedPackage {
             .unwrap(),
         root: package.root,
         hash: package.content_hash,
+    }
+}
+
+async fn committed_package_root(output: &Path, commitment: &serde_json::Value) -> PathBuf {
+    tokio::fs::canonicalize(
+        output
+            .join("generations")
+            .join(commitment["generation"].as_str().unwrap())
+            .join("com.example.final"),
+    )
+    .await
+    .unwrap()
+}
+
+async fn assert_no_authoritative_current(output: &Path) {
+    match tokio::fs::read(output.join("current")).await {
+        Ok(bytes) => {
+            assert!(
+                bytes.is_empty(),
+                "current marker was not precisely neutralized"
+            );
+            match BundleSkillSource::open(output).await {
+                Ok(source) => assert!(source.packages().await.is_err()),
+                Err(error) => assert!(format!("{error:#}").contains("current")),
+            }
+        }
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
     }
 }
 

@@ -12,6 +12,8 @@ mod builder;
 #[cfg(test)]
 #[path = "skill_bundle_builder_gates.rs"]
 mod builder_gates;
+#[path = "skill_bundle_publication.rs"]
+mod publication;
 #[path = "skill_bundle_source.rs"]
 mod source;
 
@@ -20,7 +22,8 @@ pub use builder::build_skill_bundle;
 pub(crate) use builder::build_skill_bundle_with_faults;
 #[cfg(test)]
 pub(crate) use builder_gates::{
-    gate_bundle_after_final_validation, gate_bundle_after_inspection, gate_bundle_before_publish,
+    gate_bundle_after_current_commit, gate_bundle_after_final_validation,
+    gate_bundle_after_inspection, gate_bundle_before_publish,
 };
 pub use source::BundleSkillSource;
 #[cfg(all(test, windows))]

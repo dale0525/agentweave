@@ -404,6 +404,17 @@ mod platform {
             )
         }
 
+        pub(crate) fn create_new_replaceable_regular(&self, name: &OsStr) -> anyhow::Result<File> {
+            open_direct_child_with_share(
+                self,
+                name,
+                GENERIC_WRITE | FILE_READ_ATTRIBUTES,
+                CREATE_NEW,
+                false,
+                replaceable_file_share_mode(),
+            )
+        }
+
         pub(crate) fn atomic_replace(
             &self,
             source_name: &OsStr,
@@ -622,6 +633,11 @@ mod platform {
 
     pub(crate) fn delete_opened_tree(directory: &File) -> anyhow::Result<()> {
         delete_opened_directory(directory)
+    }
+
+    pub(crate) fn delete_opened_empty_directory(directory: &File) -> anyhow::Result<()> {
+        set_file_readonly_handle(directory, false)?;
+        set_delete_disposition(directory)
     }
 
     fn delete_opened_directory(directory: &File) -> anyhow::Result<()> {

@@ -4,7 +4,21 @@ use crate::skill_store_fs_types::{AtomicReplaceCommitState, AtomicReplaceFailure
 use crate::skill_store_secure_roots::PreparedStoreDirectory;
 use anyhow::Context;
 use std::path::Path;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+pub(crate) struct OwnedAtomicReplace {
+    file: tokio::fs::File,
+}
+
+impl OwnedAtomicReplace {
+    pub(crate) async fn neutralize(mut self) -> anyhow::Result<()> {
+        self.file.rewind().await?;
+        self.file.set_len(0).await?;
+        self.file.flush().await?;
+        self.file.sync_all().await?;
+        Ok(())
+    }
+}
 
 pub(crate) async fn atomic_replace_file(
     root: &PreparedStoreDirectory,
@@ -13,7 +27,9 @@ pub(crate) async fn atomic_replace_file(
     mode: u32,
     faults: &StoreFaults,
 ) -> Result<(), AtomicReplaceFailure> {
-    atomic_replace_file_with_destination_sharing(root, relative, bytes, mode, faults, false).await
+    atomic_replace_file_with_destination_sharing(root, relative, bytes, mode, faults, false)
+        .await
+        .map(drop)
 }
 
 pub(crate) async fn atomic_replace_replaceable_file(
@@ -23,6 +39,18 @@ pub(crate) async fn atomic_replace_replaceable_file(
     mode: u32,
     faults: &StoreFaults,
 ) -> Result<(), AtomicReplaceFailure> {
+    atomic_replace_file_with_destination_sharing(root, relative, bytes, mode, faults, true)
+        .await
+        .map(drop)
+}
+
+pub(crate) async fn atomic_replace_owned_replaceable_file(
+    root: &PreparedStoreDirectory,
+    relative: &Path,
+    bytes: &[u8],
+    mode: u32,
+    faults: &StoreFaults,
+) -> Result<OwnedAtomicReplace, AtomicReplaceFailure> {
     atomic_replace_file_with_destination_sharing(root, relative, bytes, mode, faults, true).await
 }
 
@@ -33,7 +61,7 @@ async fn atomic_replace_file_with_destination_sharing(
     mode: u32,
     faults: &StoreFaults,
     replaceable_destination: bool,
-) -> Result<(), AtomicReplaceFailure> {
+) -> Result<OwnedAtomicReplace, AtomicReplaceFailure> {
     faults
         .checkpoint(StoreFaultPoint::WriteBeforeTempOpen)
         .await;
@@ -69,7 +97,7 @@ async fn atomic_replace_file_platform(
     mode: u32,
     faults: &StoreFaults,
     _replaceable_destination: bool,
-) -> Result<(), AtomicReplaceFailure> {
+) -> Result<OwnedAtomicReplace, AtomicReplaceFailure> {
     use rustix::fs::{
         AtFlags, FileType, Mode, OFlags, RawMode, fchmod, fstat, openat, renameat, unlinkat,
     };
@@ -84,7 +112,7 @@ async fn atomic_replace_file_platform(
     let descriptor = openat(
         &parent,
         temporary_name.as_str(),
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::from_raw_mode(RawMode::try_from(mode & 0o777).map_err(|error| {
             failure(error.into(), AtomicReplaceCommitState::NotCommitted, None)
         })?),
@@ -104,12 +132,11 @@ async fn atomic_replace_file_platform(
             Some(temporary_path),
         ));
     }
-    let mut file = BufWriter::new(tokio::fs::File::from_std(File::from(descriptor)));
+    let mut file = tokio::fs::File::from_std(File::from(descriptor));
     let mut committed = false;
     let result = async {
         file.write_all(bytes).await?;
         file.flush().await?;
-        drop(file);
         faults.check(StoreFaultPoint::WriteBeforeRename)?;
         renameat(&parent, temporary_name.as_str(), &parent, destination_name).with_context(
             || {
@@ -137,11 +164,11 @@ async fn atomic_replace_file_platform(
         )?;
         faults.check(StoreFaultPoint::WriteAfterRenameRevalidate)?;
         root.verify()?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<tokio::fs::File, anyhow::Error>(file)
     }
     .await;
     match result {
-        Ok(()) => Ok(()),
+        Ok(file) => Ok(OwnedAtomicReplace { file }),
         Err(error) if committed => Err(failure(error, AtomicReplaceCommitState::Committed, None)),
         Err(error) => {
             let cleanup = match faults.check(StoreFaultPoint::WriteTempCleanup) {
@@ -188,7 +215,7 @@ async fn atomic_replace_file_platform(
     _mode: u32,
     faults: &StoreFaults,
     replaceable_destination: bool,
-) -> Result<(), AtomicReplaceFailure> {
+) -> Result<OwnedAtomicReplace, AtomicReplaceFailure> {
     canonical_relative_path(relative).map_err(not_committed)?;
     let (parent, destination_name) =
         crate::skill_store_windows::open_stable_parent(root.windows_descriptor(), relative)
@@ -198,13 +225,13 @@ async fn atomic_replace_file_platform(
     let temporary = parent.child_path(&temporary_name);
     let mut committed = false;
     let result = async {
-        let mut file = tokio::fs::File::from_std(parent.create_new_regular(&temporary_name)?);
+        let mut file =
+            tokio::fs::File::from_std(parent.create_new_replaceable_regular(&temporary_name)?);
         if !file.metadata().await?.is_file() {
             anyhow::bail!("staging temporary path is not a regular file");
         }
         file.write_all(bytes).await?;
         file.flush().await?;
-        drop(file);
         root.verify()?;
         faults.check(StoreFaultPoint::WriteBeforeRename)?;
         parent.atomic_replace(&temporary_name, &destination_name, replaceable_destination)?;
@@ -212,11 +239,11 @@ async fn atomic_replace_file_platform(
         faults.check(StoreFaultPoint::WriteAfterRenameMode)?;
         faults.check(StoreFaultPoint::WriteAfterRenameRevalidate)?;
         root.verify()?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<tokio::fs::File, anyhow::Error>(file)
     }
     .await;
     match result {
-        Ok(()) => Ok(()),
+        Ok(file) => Ok(OwnedAtomicReplace { file }),
         Err(error) if committed => Err(failure(error, AtomicReplaceCommitState::Committed, None)),
         Err(error) => {
             let cleanup = match faults.check(StoreFaultPoint::WriteTempCleanup) {
@@ -236,7 +263,7 @@ async fn atomic_replace_file_platform(
     _mode: u32,
     faults: &StoreFaults,
     _replaceable_destination: bool,
-) -> Result<(), AtomicReplaceFailure> {
+) -> Result<OwnedAtomicReplace, AtomicReplaceFailure> {
     canonical_relative_path(relative).map_err(not_committed)?;
     let destination = root.path().join(relative);
     let parent = destination
@@ -253,7 +280,6 @@ async fn atomic_replace_file_platform(
             .await?;
         file.write_all(bytes).await?;
         file.flush().await?;
-        drop(file);
         root.verify()?;
         faults.check(StoreFaultPoint::WriteBeforeRename)?;
         tokio::fs::rename(&temporary, &destination).await?;
@@ -261,7 +287,7 @@ async fn atomic_replace_file_platform(
         faults.check(StoreFaultPoint::WriteAfterRenameMode)?;
         faults.check(StoreFaultPoint::WriteAfterRenameRevalidate)?;
         root.verify()?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<tokio::fs::File, anyhow::Error>(file)
     }
     .await;
     finish_platform_result(result, committed, faults, temporary).await
@@ -273,9 +299,9 @@ async fn finish_platform_result(
     committed: bool,
     faults: &StoreFaults,
     temporary: std::path::PathBuf,
-) -> Result<(), AtomicReplaceFailure> {
+) -> Result<OwnedAtomicReplace, AtomicReplaceFailure> {
     match result {
-        Ok(()) => Ok(()),
+        Ok(file) => Ok(OwnedAtomicReplace { file }),
         Err(error) if committed => Err(failure(error, AtomicReplaceCommitState::Committed, None)),
         Err(error) => {
             let cleanup = match faults.check(StoreFaultPoint::WriteTempCleanup) {
@@ -289,11 +315,11 @@ async fn finish_platform_result(
     }
 }
 
-fn finish_uncommitted(
+fn finish_uncommitted<T>(
     error: anyhow::Error,
     cleanup: anyhow::Result<()>,
     temporary: std::path::PathBuf,
-) -> Result<(), AtomicReplaceFailure> {
+) -> Result<T, AtomicReplaceFailure> {
     match cleanup {
         Ok(()) => Err(failure(error, AtomicReplaceCommitState::NotCommitted, None)),
         Err(cleanup) if cleanup_is_not_found(&cleanup) => {

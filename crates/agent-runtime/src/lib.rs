@@ -38,6 +38,7 @@ pub mod skill_store;
 mod skill_store_atomic_write;
 mod skill_store_authoring;
 mod skill_store_cleanup;
+mod skill_store_directory_ops;
 mod skill_store_draft;
 mod skill_store_execution;
 mod skill_store_faults;
