@@ -47,7 +47,6 @@ pub struct SkillExecutionContext {
     pub cwd: PathBuf,
     pub output_limit_bytes: usize,
 }
-
 #[derive(Debug, Clone)]
 pub struct InstalledSkill {
     pub(crate) root: PathBuf,
@@ -55,14 +54,12 @@ pub struct InstalledSkill {
     pub(crate) verification: Option<InstalledSkillVerification>,
     pub(crate) development_package_id: Option<String>,
 }
-
 #[derive(Debug, Clone)]
 pub(crate) struct InstalledSkillVerification {
     pub(crate) expected_content_hash: String,
     pub(crate) limits: PackageLimits,
     pub(crate) execution_binding: Option<crate::skill_verified::VerifiedExecutionBinding>,
 }
-
 impl InstalledSkill {
     pub fn root(&self) -> &Path {
         &self.root
@@ -293,6 +290,17 @@ impl SkillRegistry {
         input: Value,
         context: SkillExecutionContext,
     ) -> anyhow::Result<Value> {
+        self.execute_runtime_tool_for_turn(binding, input, context, None)
+            .await
+    }
+
+    pub(crate) async fn execute_runtime_tool_for_turn(
+        &self,
+        binding: &crate::skill_runtime_source::RuntimeToolBinding,
+        input: Value,
+        context: SkillExecutionContext,
+        turn_lease: Option<&crate::skill_snapshot::TurnExecutionLease>,
+    ) -> anyhow::Result<Value> {
         let skill = self
             .skills
             .get(binding.skill_index)
@@ -302,7 +310,8 @@ impl SkillRegistry {
         if availability.status != SkillAvailabilityStatus::Available {
             anyhow::bail!("{}", availability.reason);
         }
-        let prepared_execution = crate::skill_verified::prepare_before_execution(skill).await?;
+        let prepared_execution =
+            crate::skill_verified::prepare_before_execution(skill, turn_lease).await?;
         let (command, args, execution_root) = prepared_execution.as_ref().map_or_else(
             || {
                 (
@@ -967,7 +976,6 @@ mod tests {
         .await
         .unwrap();
     }
-
     async fn write_skill_manifest(root: &Path, folder: &str, manifest: Value) {
         let skill_dir = root.join(folder);
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
@@ -975,16 +983,13 @@ mod tests {
             .await
             .unwrap();
     }
-
     fn unique_test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
     }
-
     #[cfg(unix)]
     fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
         std::os::unix::fs::symlink(target, link)
     }
-
     async fn remove_test_dir(path: PathBuf) {
         if path.exists() {
             tokio::fs::remove_dir_all(path).await.unwrap();

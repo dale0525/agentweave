@@ -226,6 +226,7 @@ pub struct ToolRegistry {
     output_limit_bytes: usize,
     approval_policy: ApprovalPolicy,
     management: Option<SkillManagementToolContext>,
+    turn_execution_lease: Option<crate::skill_snapshot::TurnExecutionLease>,
     execution_observer: Option<Arc<dyn ToolExecutionObserver>>,
     observer_diagnostics: Arc<Mutex<VecDeque<ToolObserverDiagnostic>>>,
 }
@@ -284,6 +285,7 @@ impl ToolRegistry {
             output_limit_bytes: config.output_limit_bytes,
             approval_policy: config.approval_policy,
             management,
+            turn_execution_lease: None,
             execution_observer: None,
             observer_diagnostics: Arc::new(Mutex::new(VecDeque::with_capacity(32))),
         }
@@ -292,6 +294,14 @@ impl ToolRegistry {
 
     pub fn with_execution_observer(mut self, observer: Arc<dyn ToolExecutionObserver>) -> Self {
         self.execution_observer = Some(observer);
+        self
+    }
+
+    pub(crate) fn with_turn_execution_lease(
+        mut self,
+        lease: Option<crate::skill_snapshot::TurnExecutionLease>,
+    ) -> Self {
+        self.turn_execution_lease = lease;
         self
     }
 
@@ -557,7 +567,7 @@ impl ToolRegistry {
         let source = binding.source.clone();
         let result = match self
             .skills
-            .execute_runtime_tool_with_context(
+            .execute_runtime_tool_for_turn(
                 &binding,
                 arguments,
                 SkillExecutionContext {
@@ -565,6 +575,7 @@ impl ToolRegistry {
                     cwd: self.cwd.clone(),
                     output_limit_bytes: self.output_limit_bytes,
                 },
+                self.turn_execution_lease.as_ref(),
             )
             .await
         {

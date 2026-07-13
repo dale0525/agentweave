@@ -130,11 +130,16 @@ where
             .execution_observer
             .clone()
             .unwrap_or_else(|| Arc::new(self.skill_manager.clone()));
+        let execution_lease = lease.execution_lease();
+        let lease_cancellation = execution_lease
+            .as_ref()
+            .map(|lease| lease.cancellation_token());
         let tools = ToolRegistry::try_new_with_management(
             snapshot.registry().clone(),
             &self.config,
             management,
         )?
+        .with_turn_execution_lease(execution_lease.clone())
         .with_execution_observer(observer);
         let skill_catalog = snapshot.catalog();
         let turn_id = Uuid::new_v4().to_string();
@@ -191,16 +196,44 @@ where
         let mut tool_calls = 0usize;
 
         for _step in 0..self.max_steps {
-            let mut stream = self
-                .model
-                .stream(GatewayRequest {
-                    input: input.clone(),
-                    tools: gateway_tools.clone(),
-                })
-                .await?;
+            if turn_lease_is_invalid(execution_lease.as_ref()).await {
+                push_turn_lease_fenced(&mut events, &turn_id);
+                return Ok(events);
+            }
+            let stream_request = GatewayRequest {
+                input: input.clone(),
+                tools: gateway_tools.clone(),
+            };
+            let stream = self.model.stream(stream_request);
+            tokio::pin!(stream);
+            let mut stream = match &lease_cancellation {
+                Some(cancellation) => tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        push_turn_lease_fenced(&mut events, &turn_id);
+                        return Ok(events);
+                    }
+                    stream = &mut stream => stream?,
+                },
+                None => stream.await?,
+            };
             let mut saw_tool = false;
 
-            while let Some(event) = stream.next().await {
+            loop {
+                let event = match &lease_cancellation {
+                    Some(cancellation) => tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => {
+                            push_turn_lease_fenced(&mut events, &turn_id);
+                            return Ok(events);
+                        }
+                        event = stream.next() => event,
+                    },
+                    None => stream.next().await,
+                };
+                let Some(event) = event else {
+                    break;
+                };
                 match event? {
                     GatewayEvent::TextDelta { text } => {
                         final_text.push_str(&text);
@@ -215,6 +248,10 @@ where
                         legacy_alias_selected,
                         arguments,
                     } => {
+                        if turn_lease_is_invalid(execution_lease.as_ref()).await {
+                            push_turn_lease_fenced(&mut events, &turn_id);
+                            return Ok(events);
+                        }
                         saw_tool = true;
                         tool_calls += 1;
                         if tool_calls > self.config.max_tool_calls_per_turn {
@@ -284,15 +321,32 @@ where
                                 }
                             ]
                         }));
-                        let result = tools
-                            .execute_provider_call(
-                                &name,
-                                legacy_alias_selected,
-                                &call_id,
-                                arguments,
-                            )
-                            .await
-                            .into_value();
+                        let execution = tools.execute_provider_call(
+                            &name,
+                            legacy_alias_selected,
+                            &call_id,
+                            arguments,
+                        );
+                        tokio::pin!(execution);
+                        let result = match &lease_cancellation {
+                            Some(cancellation) => tokio::select! {
+                                biased;
+                                _ = cancellation.cancelled() => {
+                                    push_turn_lease_fenced(&mut events, &turn_id);
+                                    return Ok(events);
+                                }
+                                result = &mut execution => result,
+                            },
+                            None => execution.await,
+                        };
+                        if execution_lease
+                            .as_ref()
+                            .is_some_and(|lease| lease.is_fenced())
+                        {
+                            push_turn_lease_fenced(&mut events, &turn_id);
+                            return Ok(events);
+                        }
+                        let result = result.into_value();
                         events.extend(tools.take_observer_diagnostics().into_iter().map(
                             |diagnostic| RuntimeEvent::ToolObserverDiagnostic {
                                 operation: diagnostic.operation.into(),
@@ -340,6 +394,14 @@ where
                 }
             }
 
+            if execution_lease
+                .as_ref()
+                .is_some_and(|lease| lease.is_fenced())
+                || turn_lease_is_invalid(execution_lease.as_ref()).await
+            {
+                push_turn_lease_fenced(&mut events, &turn_id);
+                return Ok(events);
+            }
             if !saw_tool {
                 events.push(RuntimeEvent::AssistantMessageFinished { text: final_text });
                 events.push(RuntimeEvent::TurnFinished { turn_id });
@@ -352,6 +414,26 @@ where
             message: "max agent steps exceeded".into(),
         });
         Ok(events)
+    }
+}
+
+fn push_turn_lease_fenced(events: &mut Vec<RuntimeEvent>, turn_id: &str) {
+    events.push(RuntimeEvent::TurnFailed {
+        turn_id: turn_id.to_string(),
+        message: crate::skill_snapshot::TURN_LEASE_FENCED_MESSAGE.into(),
+    });
+}
+
+async fn turn_lease_is_invalid(lease: Option<&crate::skill_snapshot::TurnExecutionLease>) -> bool {
+    match lease {
+        Some(lease) => match lease.ensure_authoritative().await {
+            Ok(()) => false,
+            Err(error) => {
+                tracing::warn!(?error, "turn snapshot lease authority check failed");
+                true
+            }
+        },
+        None => false,
     }
 }
 

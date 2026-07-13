@@ -4,6 +4,8 @@ use crate::skill_catalog::{SkillCatalog, SkillCatalogEntry};
 use crate::skill_resolver::{ResolvedSkillPackage, ResolvedSkillSet};
 use std::sync::Arc;
 
+pub(crate) const TURN_LEASE_FENCED_MESSAGE: &str = "turn snapshot lease is no longer authoritative";
+
 #[derive(Clone, Debug)]
 pub struct SkillSnapshot {
     generation: u64,
@@ -43,12 +45,19 @@ impl SkillSnapshotLease {
                     _ = tokio::time::sleep(crate::skill_state_leases::SNAPSHOT_LEASE_HEARTBEAT) => {
                         match heartbeat_state.refresh_snapshot_lease(&heartbeat_id).await {
                             Ok(true) => {}
-                            Ok(false) => return,
-                            Err(error) => tracing::warn!(
-                                lease_id = %heartbeat_id,
-                                ?error,
-                                "durable snapshot lease heartbeat will retry after database error"
-                            ),
+                            Ok(false) => {
+                                heartbeat_cancel.cancel();
+                                return;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    lease_id = %heartbeat_id,
+                                    ?error,
+                                    "durable snapshot lease heartbeat fenced the turn"
+                                );
+                                heartbeat_cancel.cancel();
+                                return;
+                            }
                         }
                     }
                 }
@@ -75,6 +84,13 @@ impl SkillSnapshotLease {
     pub fn generation(&self) -> u64 {
         self.snapshot.generation()
     }
+
+    pub(crate) fn execution_lease(&self) -> Option<TurnExecutionLease> {
+        self.durable.as_ref().map(|durable| TurnExecutionLease {
+            durable: durable.clone(),
+            generation: self.generation(),
+        })
+    }
 }
 
 impl std::fmt::Debug for SkillSnapshotLease {
@@ -91,6 +107,74 @@ struct DurableSnapshotLease {
     state: crate::skill_state::SkillStateStore,
     lease_id: String,
     cancellation: tokio_util::sync::CancellationToken,
+}
+
+#[derive(Clone)]
+pub(crate) struct TurnExecutionLease {
+    durable: Arc<DurableSnapshotLease>,
+    generation: u64,
+}
+
+impl TurnExecutionLease {
+    pub(crate) async fn ensure_authoritative(&self) -> anyhow::Result<()> {
+        if self.is_fenced() {
+            anyhow::bail!(TURN_LEASE_FENCED_MESSAGE);
+        }
+        match self
+            .durable
+            .state
+            .snapshot_lease_is_authoritative(&self.durable.lease_id, self.generation)
+            .await
+        {
+            Ok(true) if !self.is_fenced() => Ok(()),
+            Ok(_) => {
+                self.fence();
+                anyhow::bail!(TURN_LEASE_FENCED_MESSAGE)
+            }
+            Err(error) => {
+                self.fence();
+                Err(anyhow::anyhow!("{TURN_LEASE_FENCED_MESSAGE}: {error:#}"))
+            }
+        }
+    }
+
+    pub(crate) async fn authorize_revision(&self, revision_id: &str) -> anyhow::Result<()> {
+        if self.is_fenced() {
+            anyhow::bail!(TURN_LEASE_FENCED_MESSAGE);
+        }
+        match self
+            .durable
+            .state
+            .snapshot_lease_authorizes_revision(
+                &self.durable.lease_id,
+                self.generation,
+                revision_id,
+            )
+            .await
+        {
+            Ok(true) if !self.is_fenced() => Ok(()),
+            Ok(_) => {
+                self.fence();
+                anyhow::bail!(TURN_LEASE_FENCED_MESSAGE)
+            }
+            Err(error) => {
+                self.fence();
+                Err(anyhow::anyhow!("{TURN_LEASE_FENCED_MESSAGE}: {error:#}"))
+            }
+        }
+    }
+
+    pub(crate) fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
+        self.durable.cancellation.clone()
+    }
+
+    pub(crate) fn is_fenced(&self) -> bool {
+        self.durable.cancellation.is_cancelled()
+    }
+
+    pub(crate) fn fence(&self) {
+        self.durable.cancellation.cancel();
+    }
 }
 
 impl Drop for DurableSnapshotLease {

@@ -656,6 +656,48 @@ async fn supports_vite_desktop_cors_preflight() {
 }
 
 #[tokio::test]
+async fn owner_draft_put_supports_vite_desktop_cors_preflight() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let app = router(Arc::new(AppState::new(storage)));
+    let revision_id = uuid::Uuid::new_v4();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri(format!("/owner/skills/drafts/{revision_id}"))
+                .header(header::ORIGIN, "http://127.0.0.1:5173")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PUT")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "authorization,content-type",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "http://127.0.0.1:5173"
+    );
+    let methods = response.headers()[header::ACCESS_CONTROL_ALLOW_METHODS]
+        .to_str()
+        .unwrap();
+    assert!(methods.split(',').any(|method| method.trim() == "PUT"));
+    let headers = response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+        .to_str()
+        .unwrap();
+    assert!(
+        headers
+            .split(',')
+            .any(|name| name.trim() == "authorization")
+    );
+    assert!(headers.split(',').any(|name| name.trim() == "content-type"));
+}
+
+#[tokio::test]
 async fn production_router_does_not_expose_skill_inventory() {
     let storage = Storage::connect("sqlite::memory:").await.unwrap();
     let app = router(Arc::new(AppState::new(storage)));

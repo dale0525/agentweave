@@ -97,6 +97,7 @@ impl SkillRegistry {
 
 pub(crate) async fn prepare_before_execution(
     skill: &InstalledSkill,
+    turn_lease: Option<&crate::skill_snapshot::TurnExecutionLease>,
 ) -> anyhow::Result<Option<PreparedSkillExecution>> {
     let Some(verification) = &skill.verification else {
         return Ok(None);
@@ -106,8 +107,11 @@ pub(crate) async fn prepare_before_execution(
             VerifiedExecutionBinding::Managed(binding) => binding
                 .store
                 .prepare_managed_execution(
-                    &binding.package_id,
-                    &binding.revision_id,
+                    crate::skill_store_execution::ManagedExecutionAuthorization::new(
+                        &binding.package_id,
+                        &binding.revision_id,
+                        turn_lease,
+                    ),
                     &binding.storage_path,
                     &verification.expected_content_hash,
                     verification.limits,

@@ -20,6 +20,26 @@ pub(crate) struct PreparedSkillExecution {
     _temporary: tempfile::TempDir,
 }
 
+pub(crate) struct ManagedExecutionAuthorization<'a> {
+    package_id: &'a SkillPackageId,
+    revision_id: &'a str,
+    turn_lease: Option<&'a crate::skill_snapshot::TurnExecutionLease>,
+}
+
+impl<'a> ManagedExecutionAuthorization<'a> {
+    pub(crate) fn new(
+        package_id: &'a SkillPackageId,
+        revision_id: &'a str,
+        turn_lease: Option<&'a crate::skill_snapshot::TurnExecutionLease>,
+    ) -> Self {
+        Self {
+            package_id,
+            revision_id,
+            turn_lease,
+        }
+    }
+}
+
 impl PreparedSkillExecution {
     pub(crate) fn command(&self) -> &str {
         &self.command
@@ -172,13 +192,17 @@ fn normalize_components<'a>(
 impl SkillRevisionStore {
     pub(crate) async fn prepare_managed_execution(
         &self,
-        package_id: &SkillPackageId,
-        revision_id: &str,
+        authorization: ManagedExecutionAuthorization<'_>,
         expected_path: &Path,
         expected_hash: &str,
         limits: PackageLimits,
         manifest: &SkillManifest,
     ) -> anyhow::Result<PreparedSkillExecution> {
+        let ManagedExecutionAuthorization {
+            package_id,
+            revision_id,
+            turn_lease,
+        } = authorization;
         let guard = acquire_revision_lock(&self.paths.identity, revision_id, &self.faults).await?;
         self.paths.verify_identity()?;
         let record = self
@@ -186,25 +210,32 @@ impl SkillRevisionStore {
             .get_revision(revision_id)
             .await?
             .with_context(|| format!("managed execution revision not found: {revision_id}"))?;
-        let installation = self
-            .state
-            .get_installation(package_id)
-            .await?
-            .with_context(|| {
-                format!(
-                    "managed execution installation not found: {}",
-                    package_id.as_str()
-                )
-            })?;
         if record.status != SkillRevisionStatus::Managed
             || &record.package_id != package_id
             || record.content_hash != expected_hash
-            || installation.source_layer != SkillLayerRecord::Managed
-            || installation.status != SkillInstallStatus::Active
-            || !installation.enabled
-            || installation.active_revision_id.as_deref() != Some(revision_id)
         {
             anyhow::bail!("no longer active managed revision: {revision_id}");
+        }
+        if let Some(turn_lease) = turn_lease {
+            turn_lease.authorize_revision(revision_id).await?;
+        } else {
+            let installation = self
+                .state
+                .get_installation(package_id)
+                .await?
+                .with_context(|| {
+                    format!(
+                        "managed execution installation not found: {}",
+                        package_id.as_str()
+                    )
+                })?;
+            if installation.source_layer != SkillLayerRecord::Managed
+                || installation.status != SkillInstallStatus::Active
+                || !installation.enabled
+                || installation.active_revision_id.as_deref() != Some(revision_id)
+            {
+                anyhow::bail!("no longer active managed revision: {revision_id}");
+            }
         }
         ensure_exact_path(
             Path::new(&record.storage_path),
