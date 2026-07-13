@@ -312,6 +312,7 @@ impl SkillRegistry {
         }
         let prepared_execution =
             crate::skill_verified::prepare_before_execution(skill, turn_lease).await?;
+        crate::skill_verified::recheck_turn_lease(prepared_execution.is_some(), turn_lease).await?;
         let (command, args, execution_root) = prepared_execution.as_ref().map_or_else(
             || {
                 (

@@ -2,6 +2,7 @@ use crate::skill_state::SkillRevisionRecord;
 use crate::skill_store::SkillRevisionStore;
 use crate::skill_store_faults::StoreFaultPoint;
 use crate::skill_store_fs::make_tree_writable;
+use crate::skill_store_locks::{RevisionOperationGuard, acquire_revision_lock};
 use crate::skill_store_operations::error_is_not_found;
 use crate::skill_store_secure_roots::{
     open_prepared_directory, opened_package_snapshot, remove_opened_tree,
@@ -9,9 +10,17 @@ use crate::skill_store_secure_roots::{
 use std::path::PathBuf;
 
 impl SkillRevisionStore {
+    pub(crate) async fn acquire_revision_cleanup_lock(
+        &self,
+        revision_id: &str,
+    ) -> anyhow::Result<RevisionOperationGuard> {
+        acquire_revision_lock(&self.paths.identity, revision_id, &self.faults).await
+    }
+
     pub(crate) async fn delete_managed_revision_tree(
         &self,
         record: &SkillRevisionRecord,
+        _guard: &RevisionOperationGuard,
     ) -> anyhow::Result<bool> {
         self.paths.verify_identity()?;
         self.expected_revision_path(record)?;

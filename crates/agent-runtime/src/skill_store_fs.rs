@@ -141,6 +141,7 @@ async fn copy_collected_entries(
 
     let mut package_bytes = 0_u64;
     for file in entries.files {
+        faults.checkpoint(copy_fault).await;
         faults.check(copy_fault)?;
         faults.checkpoint(StoreFaultPoint::CopyBeforeFileOpen).await;
         if let Some(source) = roots.prepared_source {

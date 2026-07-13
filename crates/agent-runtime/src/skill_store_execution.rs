@@ -205,6 +205,9 @@ impl SkillRevisionStore {
         } = authorization;
         let guard = acquire_revision_lock(&self.paths.identity, revision_id, &self.faults).await?;
         self.paths.verify_identity()?;
+        if let Some(turn_lease) = turn_lease {
+            turn_lease.authorize_revision(revision_id).await?;
+        }
         let record = self
             .state
             .get_revision(revision_id)
@@ -216,9 +219,7 @@ impl SkillRevisionStore {
         {
             anyhow::bail!("no longer active managed revision: {revision_id}");
         }
-        if let Some(turn_lease) = turn_lease {
-            turn_lease.authorize_revision(revision_id).await?;
-        } else {
+        if turn_lease.is_none() {
             let installation = self
                 .state
                 .get_installation(package_id)

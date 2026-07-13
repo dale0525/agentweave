@@ -140,3 +140,13 @@ pub(crate) async fn prepare_before_execution(
     crate::skill::validate_manifest(&skill.root, &skill.manifest).await?;
     Ok(None)
 }
+
+pub(crate) async fn recheck_turn_lease(
+    private_execution_prepared: bool,
+    turn_lease: Option<&crate::skill_snapshot::TurnExecutionLease>,
+) -> anyhow::Result<()> {
+    if private_execution_prepared && let Some(turn_lease) = turn_lease {
+        turn_lease.ensure_authoritative().await?;
+    }
+    Ok(())
+}

@@ -9,7 +9,9 @@ use crate::skill_policy::{ActorContext, SkillGrant};
 use crate::skill_recovery::snapshot_members;
 use crate::skill_source::{ManagedSkillSource, SkillLayer};
 use crate::skill_state::{SkillLayerRecord, SkillStateStore};
-use crate::skill_store::SkillRevisionStore;
+use crate::skill_store::{
+    SkillRevisionStore, SkillStoreFaultPoint, SkillStoreLimits, SkillStoreTestFaults,
+};
 use crate::tools::RuntimeConfig;
 use crate::turn::{ModelClient, ModelEventStream, TurnRunner};
 use async_trait::async_trait;
@@ -31,9 +33,16 @@ struct ManagedTurnFixture {
 
 impl ManagedTurnFixture {
     async fn new() -> Self {
+        Self::with_execution_faults(SkillStoreTestFaults::default(), None).await
+    }
+
+    async fn with_execution_faults(
+        faults: SkillStoreTestFaults,
+        child_marker: Option<&std::path::Path>,
+    ) -> Self {
         let mut policy = SkillManagementPolicy::owner_only();
         policy.allowed_kinds.insert(SkillPackageKind::NativeRuntime);
-        let mut authoring = AuthoringFixture::with_faults(Default::default()).await;
+        let mut authoring = AuthoringFixture::with_faults(faults).await;
         authoring.service = OwnerSkillManagementService::new(
             authoring.manager.clone(),
             authoring.store.clone(),
@@ -41,7 +50,8 @@ impl ManagedTurnFixture {
             policy,
         );
         let package_id = SkillPackageId::parse(PACKAGE_ID).unwrap();
-        let revision_a = create_managed_revision(&authoring, "A", "1.0.0").await;
+        let revision_a =
+            create_managed_revision_with_marker(&authoring, "A", "1.0.0", child_marker).await;
         authoring
             .state
             .activate_revision(
@@ -95,6 +105,37 @@ impl ManagedTurnFixture {
         )
         .await;
     }
+
+    async fn independent_manager_with_faults(&self, faults: SkillStoreTestFaults) -> SkillManager {
+        let state = self.authoring.second_state_connection().await;
+        let store = SkillRevisionStore::with_test_faults(
+            self.authoring.store.paths().clone(),
+            state.clone(),
+            SkillStoreLimits::default(),
+            faults,
+        );
+        let manager = SkillManager::new(SkillManagerConfig {
+            sources: vec![Arc::new(ManagedSkillSource::from_store(store.clone()))],
+            platform: crate::platform::PlatformId::Server,
+            capabilities: crate::platform::CapabilitySet::from_names(Vec::<String>::new()),
+            protected_packages: Vec::new(),
+            allowed_overrides: Vec::new(),
+            runtime_version: "0.1.0".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+        let _service = OwnerSkillManagementService::new(
+            manager.clone(),
+            store,
+            state,
+            SkillManagementPolicy::owner_only(),
+        );
+        manager
+            .converge_to_authoritative_generation()
+            .await
+            .unwrap();
+        manager
+    }
 }
 
 enum TurnMutation {
@@ -124,6 +165,13 @@ enum TurnMutation {
     },
     ExpireLease {
         state: SkillStateStore,
+    },
+    PublishTwo {
+        state: SkillStateStore,
+        manager: SkillManager,
+        package_id: SkillPackageId,
+        revision_b: String,
+        revision_c: String,
     },
 }
 
@@ -191,6 +239,16 @@ impl TurnMutation {
                 sqlx::query("UPDATE skill_snapshot_leases SET expires_at = '2000-01-01T00:00:00Z'")
                     .execute(state.pool())
                     .await?;
+            }
+            Self::PublishTwo {
+                state,
+                manager,
+                package_id,
+                revision_b,
+                revision_c,
+            } => {
+                publish_revision(&state, &manager, &package_id, &revision_b).await;
+                publish_revision(&state, &manager, &package_id, &revision_c).await;
             }
         }
         Ok(())
@@ -437,6 +495,188 @@ async fn expired_durable_lease_cannot_be_refreshed_or_resurrected() {
     assert_eq!(persisted, expired_at);
 }
 
+#[derive(Clone, Copy)]
+enum LeaseInvalidation {
+    Delete,
+    Expire,
+}
+
+#[tokio::test]
+async fn deleted_lease_cleanup_waits_for_copy_and_fences_before_child_spawn() {
+    run_copy_cleanup_race(LeaseInvalidation::Delete).await;
+}
+
+#[tokio::test]
+async fn expired_lease_cleanup_waits_for_copy_and_fences_before_child_spawn() {
+    run_copy_cleanup_race(LeaseInvalidation::Expire).await;
+}
+
+#[tokio::test]
+async fn lease_database_error_after_copy_fences_before_child_spawn() {
+    let execution_faults = SkillStoreTestFaults::default();
+    let after_copy = execution_faults.gate_once(SkillStoreFaultPoint::ExecutionAfterSnapshot);
+    let marker_root = tempdir().unwrap();
+    let child_marker = marker_root.path().join("child-started");
+    let fixture =
+        ManagedTurnFixture::with_execution_faults(execution_faults, Some(&child_marker)).await;
+    let revision_b = fixture.create_revision("B", "2.0.0").await;
+    let revision_c = fixture.create_revision("C", "3.0.0").await;
+    let turn = spawn_turn_with_publications(&fixture, revision_b, revision_c);
+    after_copy.wait_entered().await;
+
+    fixture.authoring.state.pool().close().await;
+    after_copy.release().await;
+
+    let events = turn.await.unwrap();
+    assert_fenced_without_tool_finished(&events);
+    assert!(!child_marker.exists());
+}
+
+#[tokio::test]
+async fn cleanup_winning_revision_lock_fences_execution_without_mixed_bytes() {
+    let execution_faults = SkillStoreTestFaults::default();
+    let marker_root = tempdir().unwrap();
+    let child_marker = marker_root.path().join("child-started");
+    let fixture =
+        ManagedTurnFixture::with_execution_faults(execution_faults.clone(), Some(&child_marker))
+            .await;
+    let revision_b = fixture.create_revision("B", "2.0.0").await;
+    let revision_c = fixture.create_revision("C", "3.0.0").await;
+    let execution_attempt = execution_faults.gate_once(SkillStoreFaultPoint::RevisionLockAttempt);
+    let turn = spawn_turn_with_publications(&fixture, revision_b, revision_c);
+    execution_attempt.wait_entered().await;
+
+    let cleanup_faults = SkillStoreTestFaults::default();
+    let before_delete = cleanup_faults.gate_once(SkillStoreFaultPoint::CleanupBeforeTreeDelete);
+    let cleanup_manager = fixture
+        .independent_manager_with_faults(cleanup_faults)
+        .await;
+    expire_cleanup_protections(&fixture).await;
+    invalidate_lease(&fixture.authoring.state, LeaseInvalidation::Delete).await;
+    let cleanup =
+        tokio::spawn(async move { cleanup_manager.cleanup_unreferenced_revisions().await });
+    before_delete.wait_entered().await;
+    before_delete.release().await;
+    let cleanup_report = cleanup.await.unwrap().unwrap();
+    assert!(
+        cleanup_report
+            .deleted_revisions
+            .contains(&fixture.revision_a)
+    );
+
+    execution_attempt.release().await;
+    let events = turn.await.unwrap();
+    assert_fenced_without_tool_finished(&events);
+    assert!(!child_marker.exists());
+}
+
+async fn run_copy_cleanup_race(invalidation: LeaseInvalidation) {
+    let execution_faults = SkillStoreTestFaults::default();
+    let copy_gate = execution_faults.gate_once(SkillStoreFaultPoint::ExecutionCopyFile);
+    let marker_root = tempdir().unwrap();
+    let child_marker = marker_root.path().join("child-started");
+    let fixture =
+        ManagedTurnFixture::with_execution_faults(execution_faults, Some(&child_marker)).await;
+    let revision_b = fixture.create_revision("B", "2.0.0").await;
+    let revision_c = fixture.create_revision("C", "3.0.0").await;
+    let source_path = std::path::PathBuf::from(
+        fixture
+            .authoring
+            .state
+            .get_revision(&fixture.revision_a)
+            .await
+            .unwrap()
+            .unwrap()
+            .storage_path,
+    );
+    let turn = spawn_turn_with_publications(&fixture, revision_b, revision_c);
+    if tokio::time::timeout(std::time::Duration::from_secs(2), copy_gate.wait_entered())
+        .await
+        .is_err()
+    {
+        if turn.is_finished() {
+            panic!("turn ended before private copy: {:?}", turn.await.unwrap());
+        }
+        panic!("execution did not reach the private-copy gate");
+    }
+
+    let cleanup_faults = SkillStoreTestFaults::default();
+    let cleanup_attempt = cleanup_faults.gate_once(SkillStoreFaultPoint::RevisionLockAttempt);
+    let cleanup_manager = fixture
+        .independent_manager_with_faults(cleanup_faults)
+        .await;
+    expire_cleanup_protections(&fixture).await;
+    invalidate_lease(&fixture.authoring.state, invalidation).await;
+    let mut cleanup =
+        tokio::spawn(async move { cleanup_manager.cleanup_unreferenced_revisions().await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        cleanup_attempt.wait_entered(),
+    )
+    .await
+    .expect("cleanup must join the exact revision lock protocol");
+    cleanup_attempt.release().await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut cleanup)
+            .await
+            .is_err(),
+        "cleanup completed while execution still held the revision lock"
+    );
+    assert!(source_path.is_dir());
+    assert!(!child_marker.exists());
+
+    copy_gate.release().await;
+    let events = turn.await.unwrap();
+    assert_fenced_without_tool_finished(&events);
+    assert!(!child_marker.exists());
+    let cleanup_report = cleanup.await.unwrap().unwrap();
+    assert!(
+        cleanup_report
+            .deleted_revisions
+            .contains(&fixture.revision_a)
+    );
+    assert!(!source_path.exists());
+}
+
+fn spawn_turn_with_publications(
+    fixture: &ManagedTurnFixture,
+    revision_b: String,
+    revision_c: String,
+) -> tokio::task::JoinHandle<Vec<RuntimeEvent>> {
+    let workspace = tempdir().unwrap().keep();
+    let runner = TurnRunner::new_with_manager_and_config(
+        MutatingModel::new(TurnMutation::PublishTwo {
+            state: fixture.authoring.state.clone(),
+            manager: fixture.authoring.manager.clone(),
+            package_id: fixture.package_id.clone(),
+            revision_b,
+            revision_c,
+        }),
+        fixture.authoring.manager.clone(),
+        RuntimeConfig::workspace_write(&workspace, &workspace),
+    );
+    tokio::spawn(async move { runner.run("run exact A").await.unwrap() })
+}
+
+async fn expire_cleanup_protections(fixture: &ManagedTurnFixture) {
+    sqlx::query("UPDATE skill_revision_retention SET retain_until = ? WHERE revision_id = ?")
+        .bind("2000-01-01T00:00:00Z")
+        .bind(&fixture.revision_a)
+        .execute(fixture.authoring.state.pool())
+        .await
+        .unwrap();
+}
+
+async fn invalidate_lease(state: &SkillStateStore, invalidation: LeaseInvalidation) {
+    let query = match invalidation {
+        LeaseInvalidation::Delete => "DELETE FROM skill_snapshot_leases",
+        LeaseInvalidation::Expire => {
+            "UPDATE skill_snapshot_leases SET expires_at = '2000-01-01T00:00:00Z'"
+        }
+    };
+    sqlx::query(query).execute(state.pool()).await.unwrap();
+}
+
 async fn run_mutating_turn(manager: SkillManager, mutation: TurnMutation) -> Vec<RuntimeEvent> {
     let workspace = tempdir().unwrap();
     let runner = TurnRunner::new_with_manager_and_config(
@@ -448,15 +688,19 @@ async fn run_mutating_turn(manager: SkillManager, mutation: TurnMutation) -> Vec
 }
 
 async fn create_managed_revision(fixture: &AuthoringFixture, label: &str, version: &str) -> String {
-    let package = write_runtime_package(label, version).await;
+    create_managed_revision_with_marker(fixture, label, version, None).await
+}
+
+async fn create_managed_revision_with_marker(
+    fixture: &AuthoringFixture,
+    label: &str,
+    version: &str,
+    child_marker: Option<&std::path::Path>,
+) -> String {
+    let package = write_runtime_package(label, version, child_marker).await;
     let staged = fixture
         .store
         .create_staging_revision(package.path(), "fixture")
-        .await
-        .unwrap();
-    let managed = fixture
-        .store
-        .promote_revision(&staged.revision_id)
         .await
         .unwrap();
     let validation = crate::skill_management::SkillDraftValidation {
@@ -470,14 +714,21 @@ async fn create_managed_revision(fixture: &AuthoringFixture, label: &str, versio
         resolver_status: "active".into(),
         resolver_errors: Vec::new(),
         permission_diff: json!({}),
-        revision_id: managed.revision_id.clone(),
-        content_hash: managed.content_hash.clone(),
+        revision_id: staged.revision_id.clone(),
+        content_hash: staged.content_hash.clone(),
         snapshot_generation: fixture.manager.current_snapshot().generation(),
     };
-    sqlx::query("UPDATE skill_revisions SET validation_json = ? WHERE revision_id = ?")
-        .bind(serde_json::to_string(&validation).unwrap())
-        .bind(&managed.revision_id)
-        .execute(fixture.state.pool())
+    fixture
+        .state
+        .update_revision_validation(
+            &staged.revision_id,
+            serde_json::to_value(validation).unwrap(),
+        )
+        .await
+        .unwrap();
+    let managed = fixture
+        .store
+        .promote_revision(&staged.revision_id)
         .await
         .unwrap();
     managed.revision_id
@@ -515,7 +766,11 @@ async fn publish_revision(
         .unwrap();
 }
 
-async fn write_runtime_package(label: &str, version: &str) -> TempDir {
+async fn write_runtime_package(
+    label: &str,
+    version: &str,
+    child_marker: Option<&std::path::Path>,
+) -> TempDir {
     let root = tempdir().unwrap();
     tokio::fs::write(
         root.path().join("general-agent.json"),
@@ -550,7 +805,13 @@ async fn write_runtime_package(label: &str, version: &str) -> TempDir {
     .unwrap();
     tokio::fs::write(
         root.path().join("run.sh"),
-        format!("printf '{{\"revision\":\"{label}\"}}'\n"),
+        format!(
+            "{}printf '{{\"revision\":\"{label}\"}}'\n",
+            child_marker.map_or_else(String::new, |path| format!(
+                "printf started > '{}'\n",
+                path.display()
+            ))
+        ),
     )
     .await
     .unwrap();
@@ -578,6 +839,19 @@ fn assert_lease_fenced(events: &[RuntimeEvent]) {
         event,
         RuntimeEvent::TurnFailed { message, .. }
             if message.contains("turn snapshot lease is no longer authoritative")
+    )));
+}
+
+fn assert_fenced_without_tool_finished(events: &[RuntimeEvent]) {
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::ToolCallFinished { .. }))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::TurnFailed { message, .. }
+            if message == "turn snapshot lease is no longer authoritative"
     )));
 }
 
