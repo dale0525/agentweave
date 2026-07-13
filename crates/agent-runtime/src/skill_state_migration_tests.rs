@@ -298,6 +298,63 @@ async fn structurally_final_quoted_schema_is_not_rebuilt_and_records_schema_vers
 }
 
 #[tokio::test]
+async fn future_schema_version_is_rejected_before_any_skill_schema_write() {
+    let (_directory, url) = file_database();
+    let pool = raw_pool(&url).await;
+    sqlx::query(
+        r#"CREATE TABLE skill_schema_migrations (
+          component TEXT NOT NULL,
+          version INTEGER NOT NULL CHECK(version > 0),
+          applied_at TEXT NOT NULL,
+          PRIMARY KEY(component, version)
+        )"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO skill_schema_migrations (component, version, applied_at) VALUES ('skill_state', 3, '2030-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("CREATE TABLE future_skill_state_marker (value TEXT NOT NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO future_skill_state_marker (value) VALUES ('unchanged')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let schema_before = user_schema(&pool).await;
+    let ledger_before: Vec<(String, i64, String)> = sqlx::query_as(
+        "SELECT component, version, applied_at FROM skill_schema_migrations ORDER BY component, version",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    let error = crate::skill_state::migrate(&pool)
+        .await
+        .expect_err("future skill schema must fail closed");
+
+    assert!(error.to_string().contains("newer"), "{error:#}");
+    assert_eq!(user_schema(&pool).await, schema_before);
+    let ledger_after: Vec<(String, i64, String)> = sqlx::query_as(
+        "SELECT component, version, applied_at FROM skill_schema_migrations ORDER BY component, version",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ledger_after, ledger_before);
+    let marker: String = sqlx::query_scalar("SELECT value FROM future_skill_state_marker")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(marker, "unchanged");
+}
+
+#[tokio::test]
 async fn structurally_similar_schema_with_weakened_checks_is_rebuilt() {
     let (_directory, url) = file_database();
     let pool = raw_pool(&url).await;

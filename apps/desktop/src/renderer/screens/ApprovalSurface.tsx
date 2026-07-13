@@ -1,4 +1,4 @@
-import { Badge, Box, Button, Flex, Heading, Separator, Text } from "@radix-ui/themes";
+import { Badge, Box, Button, Flex, Heading, IconButton, Separator, Text } from "@radix-ui/themes";
 import { Check, LoaderCircle, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -41,11 +41,22 @@ export function ApprovalSurface(): JSX.Element {
     setBusy(decision);
     setError(null);
     try {
-      await api.resolve(approvalId, decision);
-      await api.complete({ approvalId, decision });
+      const resolution = await api.resolve(approvalId, decision);
+      await api.complete({ approvalId, decision, resolution });
     } catch (reason) {
       setError(errorMessage(reason));
       setBusy(null);
+    }
+  };
+
+  const closeObservation = async () => {
+    const api = window.generalAgentApproval;
+    if (!api || !approvalId) return;
+    setError(null);
+    try {
+      await api.close(approvalId);
+    } catch (reason) {
+      setError(errorMessage(reason));
     }
   };
 
@@ -60,10 +71,21 @@ export function ApprovalSurface(): JSX.Element {
             <Text color="gray" size="1" weight="bold">INDEPENDENT APPROVAL</Text>
             <Heading as="h1" mt="1" size="5">Review skill {operation}</Heading>
           </Box>
-          <Box style={{ textAlign: "right" }}>
-            <Text as="div" color="gray" size="1">Authenticated approver</Text>
-            <Text as="div" size="2" weight="medium">{principal?.actorId ?? "Loading"}</Text>
-          </Box>
+          <Flex align="center" gap="3">
+            <Box style={{ textAlign: "right" }}>
+              <Text as="div" color="gray" size="1">Authenticated approver</Text>
+              <Text as="div" size="2" weight="medium">{principal?.actorId ?? "Loading"}</Text>
+            </Box>
+            <IconButton
+              aria-label="Close approval window"
+              color="gray"
+              disabled={busy !== null}
+              onClick={() => void closeObservation()}
+              variant="ghost"
+            >
+              <X aria-hidden="true" size={17} />
+            </IconButton>
+          </Flex>
         </Flex>
         <Separator size="4" />
         {error ? <Box aria-live="assertive" p="5"><Text color="red" role="alert">{error}</Text></Box> : null}

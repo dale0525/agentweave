@@ -20,7 +20,8 @@ describe("approval surface", () => {
       principal: vi.fn(async () => ({ actorId: "approver-2", role: "owner" })),
       approval: vi.fn(async () => approvalReview()),
       resolve,
-      complete
+      complete,
+      close: vi.fn(async () => ({}))
     };
     const user = userEvent.setup();
 
@@ -34,7 +35,11 @@ describe("approval surface", () => {
     await user.click(screen.getByRole("button", { name: "Approve" }));
 
     await waitFor(() => expect(resolve).toHaveBeenCalledWith(APPROVAL_ID, "approve"));
-    expect(complete).toHaveBeenCalledWith({ approvalId: APPROVAL_ID, decision: "approve" });
+    expect(complete).toHaveBeenCalledWith({
+      approvalId: APPROVAL_ID,
+      decision: "approve",
+      resolution: { status: "approved" }
+    });
   });
 
   it("supports explicit rejection without exposing requester APIs", async () => {
@@ -43,7 +48,8 @@ describe("approval surface", () => {
       principal: vi.fn(async () => ({ actorId: "approver-2", role: "owner" })),
       approval: vi.fn(async () => approvalReview()),
       resolve,
-      complete: vi.fn(async () => ({}))
+      complete: vi.fn(async () => ({})),
+      close: vi.fn(async () => ({}))
     };
     const user = userEvent.setup();
 
@@ -52,6 +58,25 @@ describe("approval surface", () => {
 
     await waitFor(() => expect(resolve).toHaveBeenCalledWith(APPROVAL_ID, "reject"));
     expect("owner" in window.generalAgentApproval).toBe(false);
+  });
+
+  it("lets the approver close observation without making a decision", async () => {
+    const resolve = vi.fn(async () => ({ status: "approved" }));
+    const close = vi.fn(async () => ({}));
+    window.generalAgentApproval = {
+      principal: vi.fn(async () => ({ actorId: "approver-2", role: "owner" })),
+      approval: vi.fn(async () => approvalReview()),
+      resolve,
+      complete: vi.fn(async () => ({})),
+      close
+    };
+    const user = userEvent.setup();
+
+    render(<ApprovalSurface />);
+    await user.click(await screen.findByRole("button", { name: "Close approval window" }));
+
+    expect(close).toHaveBeenCalledWith(APPROVAL_ID);
+    expect(resolve).not.toHaveBeenCalled();
   });
 });
 

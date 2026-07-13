@@ -53,11 +53,19 @@ internal class AndroidDirectoryBoundSkillPublisher(
     bundleRoot: AndroidPublicationDirectory,
     revisions: AndroidPublicationDirectory,
   ): InstalledSkillBundle {
-    val currentHash = readPointerHash(bundleRoot, CURRENT)
-    val previousHash = readPointerHash(bundleRoot, PREVIOUS)
+    var currentHash = readPointerHash(bundleRoot, CURRENT)
+    var previousHash = readPointerHash(bundleRoot, PREVIOUS)
     check(currentHash != null || previousHash == null) {
       "Built-in skill previous pointer exists without current"
     }
+    val recovered = recoverPointerTransaction(
+      bundleRoot,
+      currentHash,
+      previousHash,
+      request.expectedHash,
+    )
+    currentHash = recovered.current
+    previousHash = recovered.previous
     if (currentHash == request.expectedHash && revisions.entryKind(request.expectedHash) == EntryKind.DIRECTORY) {
       revisions.openDirectory(request.expectedHash).use { revision ->
         check(hashTree(revision, syncFiles = false, syncDirectories = false) == request.expectedHash) {
@@ -71,7 +79,7 @@ internal class AndroidDirectoryBoundSkillPublisher(
         privateRoot.sync()
         verifyRootChain(privateRoot, bundleRoot, revisions, revision)
       }
-      return installed(changed = false)
+      return installed(changed = recovered.changed)
     }
 
     var retainedRevision: AndroidPublicationDirectory? = null
@@ -92,9 +100,17 @@ internal class AndroidDirectoryBoundSkillPublisher(
         else -> error("Built-in skill revision path is not a real directory")
       }
       verifyRootChain(privateRoot, bundleRoot, revisions, retainedRevision)
-      if (currentHash != null) switchPointer(bundleRoot, PREVIOUS, PREVIOUS_INCOMING, currentHash)
+      if (currentHash != null) {
+        writePointerTransaction(
+          bundleRoot,
+          SkillPointerTransaction(currentHash, previousHash, request.expectedHash),
+        )
+        switchPointer(bundleRoot, PREVIOUS, PREVIOUS_INCOMING, currentHash)
+        request.faults.after(SkillPublicationFaultPoint.PREVIOUS_RENAMED)
+      }
       switchCurrent(bundleRoot)
       privateRoot.sync()
+      clearPointerTransaction(bundleRoot)
       verifyRootChain(privateRoot, bundleRoot, revisions, retainedRevision)
       cleanupRevisions(revisions, setOfNotNull(request.expectedHash, currentHash))
       return installed(changed = true)
@@ -104,6 +120,88 @@ internal class AndroidDirectoryBoundSkillPublisher(
       } else {
         retainedRevision?.close()
       }
+    }
+  }
+
+  private data class PointerRecovery(
+    val current: String?,
+    val previous: String?,
+    val changed: Boolean,
+  )
+
+  private fun recoverPointerTransaction(
+    bundleRoot: AndroidPublicationDirectory,
+    currentHash: String?,
+    previousHash: String?,
+    expectedHash: String,
+  ): PointerRecovery {
+    bundleRoot.deleteTree(TRANSACTION_INCOMING)
+    when (bundleRoot.entryKind(TRANSACTION)) {
+      null -> return PointerRecovery(currentHash, previousHash, false)
+      EntryKind.FILE -> {}
+      else -> error("Built-in skill pointer transaction is not a regular file")
+    }
+    val transaction = SkillPointerTransaction.decode(
+      bundleRoot.readVerifiedFile(TRANSACTION, sync = false),
+    )
+    return when (
+      skillPointerRecoveryAction(transaction, currentHash, previousHash, expectedHash)
+    ) {
+      SkillPointerRecoveryAction.ABORT -> {
+        restorePreviousPointer(bundleRoot, previousHash, transaction.oldPrevious)
+        clearPointerTransaction(bundleRoot)
+        PointerRecovery(transaction.oldCurrent, transaction.oldPrevious, false)
+      }
+      SkillPointerRecoveryAction.FINALIZE -> {
+        clearPointerTransaction(bundleRoot)
+        PointerRecovery(transaction.target, transaction.oldCurrent, false)
+      }
+      SkillPointerRecoveryAction.RESUME -> {
+        if (previousHash != transaction.oldCurrent) {
+          switchPointer(bundleRoot, PREVIOUS, PREVIOUS_INCOMING, transaction.oldCurrent)
+          request.faults.after(SkillPublicationFaultPoint.PREVIOUS_RENAMED)
+        }
+        switchCurrent(bundleRoot, transaction.target)
+        clearPointerTransaction(bundleRoot)
+        PointerRecovery(transaction.target, transaction.oldCurrent, true)
+      }
+    }
+  }
+
+  private fun writePointerTransaction(
+    bundleRoot: AndroidPublicationDirectory,
+    transaction: SkillPointerTransaction,
+  ) {
+    bundleRoot.deleteTree(TRANSACTION_INCOMING)
+    try {
+      val identity = bundleRoot.writeNewFile(TRANSACTION_INCOMING, transaction.encode())
+      bundleRoot.renameVerifiedFile(TRANSACTION_INCOMING, identity, TRANSACTION)
+      bundleRoot.sync()
+    } catch (error: Exception) {
+      bundleRoot.deleteTree(TRANSACTION_INCOMING)
+      throw IllegalStateException("Failed to prepare built-in skill pointer transaction", error)
+    }
+  }
+
+  private fun clearPointerTransaction(bundleRoot: AndroidPublicationDirectory) {
+    bundleRoot.deleteTree(TRANSACTION_INCOMING)
+    if (bundleRoot.entryKind(TRANSACTION) != null) {
+      bundleRoot.deleteTree(TRANSACTION)
+      bundleRoot.sync()
+    }
+  }
+
+  private fun restorePreviousPointer(
+    bundleRoot: AndroidPublicationDirectory,
+    observed: String?,
+    restored: String?,
+  ) {
+    if (observed == restored) return
+    if (restored == null) {
+      bundleRoot.deleteTree(PREVIOUS)
+      bundleRoot.sync()
+    } else {
+      switchPointer(bundleRoot, PREVIOUS, PREVIOUS_INCOMING, restored)
     }
   }
 
@@ -151,10 +249,13 @@ internal class AndroidDirectoryBoundSkillPublisher(
     }
   }
 
-  private fun switchCurrent(bundleRoot: AndroidPublicationDirectory) {
+  private fun switchCurrent(
+    bundleRoot: AndroidPublicationDirectory,
+    targetHash: String = request.expectedHash,
+  ) {
     bundleRoot.deleteTree(CURRENT_INCOMING)
     try {
-      val identity = bundleRoot.writeNewFile(CURRENT_INCOMING, pointerBytes(request.expectedHash))
+      val identity = bundleRoot.writeNewFile(CURRENT_INCOMING, pointerBytes(targetHash))
       request.faults.after(SkillPublicationFaultPoint.CURRENT_TEMP_SYNCED)
       bundleRoot.renameVerifiedFile(CURRENT_INCOMING, identity, CURRENT)
       hooks.after(AndroidSkillPublicationEvent.CURRENT_RENAMED)
@@ -304,6 +405,8 @@ internal class AndroidDirectoryBoundSkillPublisher(
     private const val CURRENT_INCOMING = ".current.incoming"
     private const val PREVIOUS = "previous"
     private const val PREVIOUS_INCOMING = ".previous.incoming"
+    private const val TRANSACTION = ".pointer-transaction"
+    private const val TRANSACTION_INCOMING = ".pointer-transaction.incoming"
     private val HASH_PATTERN = Regex("[0-9a-f]{64}")
   }
 }

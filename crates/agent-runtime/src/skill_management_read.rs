@@ -118,10 +118,7 @@ impl OwnerSkillManagementService {
             .collect::<std::collections::BTreeSet<_>>();
         let mut inventory = Vec::with_capacity(package_ids.len());
         for package_id in std::mem::take(&mut package_ids) {
-            let effective = effective_rows
-                .iter()
-                .find(|status| status.package_id == package_id && status.available)
-                .cloned();
+            let effective = authoritative_effective_status(&effective_rows, &package_id).cloned();
             let managed = managed_rows
                 .iter()
                 .find(|status| status.package_id == package_id)
@@ -135,14 +132,13 @@ impl OwnerSkillManagementService {
                 });
             let built_in_collision = has_builtin && has_managed;
             let actions = self
-                .skill_action_facts(
-                    actor,
-                    &package_id,
-                    effective.as_ref(),
-                    managed.as_ref(),
-                    has_builtin,
-                )
+                .skill_action_facts(actor, &package_id, managed.as_ref(), has_builtin)
                 .await?;
+            anyhow::ensure!(
+                effective.is_some() || managed.is_some(),
+                "layered inventory item has no authoritative layer for {}",
+                package_id.as_str()
+            );
             inventory.push(LayeredSkillInventoryItem {
                 package_id,
                 effective,
@@ -158,7 +154,6 @@ impl OwnerSkillManagementService {
         &self,
         actor: &ActorContext,
         package_id: &SkillPackageId,
-        effective: Option<&SkillPackageStatus>,
         managed: Option<&SkillPackageStatus>,
         has_builtin: bool,
     ) -> anyhow::Result<SkillActionFacts> {
@@ -180,8 +175,10 @@ impl OwnerSkillManagementService {
         let Some(descriptor) = descriptor else {
             return Ok(SkillActionFacts::default());
         };
-        let active_managed = effective.is_some_and(|status| status.source_layer == "managed")
-            && managed.is_some_and(|status| status.status == "active");
+        let active_managed = active.is_some()
+            && managed.is_some_and(|status| {
+                status.status == "active" && status.active_revision_id.is_some()
+            });
         let validated_draft = draft.is_some_and(|record| {
             record
                 .validation_json
@@ -326,6 +323,23 @@ impl OwnerSkillManagementService {
             content_hash: record.content_hash,
         })
     }
+}
+
+fn authoritative_effective_status<'a>(
+    rows: &'a [SkillPackageStatus],
+    package_id: &SkillPackageId,
+) -> Option<&'a SkillPackageStatus> {
+    rows.iter()
+        .find(|status| status.package_id == *package_id && status.available)
+        .or_else(|| {
+            ["builtin", "managed", "session"]
+                .into_iter()
+                .find_map(|layer| {
+                    rows.iter().find(|status| {
+                        status.package_id == *package_id && status.source_layer == layer
+                    })
+                })
+        })
 }
 
 fn descriptor(record: &SkillRevisionRecord) -> anyhow::Result<SkillPackageDescriptor> {

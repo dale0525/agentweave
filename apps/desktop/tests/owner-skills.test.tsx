@@ -6,6 +6,7 @@ import App from "../src/renderer/App";
 import { OwnerSkillInventory, OwnerSkillPackage } from "../src/renderer/api";
 import { OwnerPolicy } from "../src/renderer/ownerBridge";
 import { OwnerSkills } from "../src/renderer/screens/OwnerSkills";
+import type { ApprovalObservationResult } from "../src/shared/approvalObservation";
 import detailFixture from "./fixtures/owner-package-detail.json";
 
 class TestResizeObserver implements ResizeObserver {
@@ -145,6 +146,50 @@ describe("owner workflows", () => {
     expect(screen.queryByRole("button", { name: "Remove skill" })).not.toBeInTheDocument();
   });
 
+  it("shows unavailable effective state while keeping backend-authorized recovery actions", async () => {
+    const effective = {
+      ...inventorySummary,
+      status: "circuit_open",
+      reason: "managed revision circuit open",
+      available: false
+    };
+    const managed = { ...inventorySummary, status: "active", reason: "active", available: true };
+    const detail = structuredClone(detailFixture) as OwnerSkillPackage;
+    detail.status = effective.status;
+    detail.reason = effective.reason;
+    detail.effective = effective;
+    detail.managed = managed;
+    detail.actions = { ...inventoryActions, can_disable: true, can_rollback: true };
+    detail.editable_draft = null;
+    detail.revisions = detail.revisions.filter((revision) => !revision.editable);
+    detail.revisions.push({
+      ...structuredClone(detail.revisions[0]),
+      revision_id: "11111111-1111-4111-8111-111111111111",
+      status: "managed",
+      version: "1.0.0"
+    });
+    installBridge({
+      detail,
+      inventory: {
+        effective: [effective],
+        managed: [managed],
+        packages: [{
+          package_id: effective.package_id,
+          effective,
+          managed,
+          built_in_collision: false,
+          actions: detail.actions
+        }]
+      }
+    });
+
+    renderOwner();
+
+    expect(await screen.findByText("managed revision circuit open")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disable skill" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Rollback to 1.0.0" })).toBeEnabled();
+  });
+
   it("opens an independent approval surface and reloads after completion", async () => {
     const bridge = installBridge();
     renderOwner();
@@ -168,6 +213,34 @@ describe("owner workflows", () => {
     const dialog = await screen.findByRole("dialog", { name: "Skill activation approval requested" });
     await userEvent.click(within(dialog).getByRole("button", { name: "Open approval window" }));
     expect(await within(dialog).findByText("Independent approval surface is unavailable")).toBeInTheDocument();
+  });
+
+  it("keeps backend pending approval reopenable when observation is closed", async () => {
+    const bridge = installBridge();
+    bridge.openApproval
+      .mockResolvedValueOnce({
+        approvalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        status: "closed"
+      })
+      .mockResolvedValueOnce({
+        approvalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        decision: "approve",
+        status: "completed"
+      });
+    renderOwner();
+    await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
+    await userEvent.click(screen.getByRole("button", { name: "Request activation" }));
+    const dialog = await screen.findByRole("dialog", { name: "Skill activation approval requested" });
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open approval window" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Approval window closed. The request remains pending."
+    );
+    expect(screen.queryByText("Skill operation approved")).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open approval window" }));
+    expect(await screen.findByText("Skill operation approved")).toBeInTheDocument();
+    expect(bridge.openApproval).toHaveBeenCalledTimes(2);
   });
 
   it("does not expose a draft editor for an active package without editable_draft", async () => {
@@ -481,9 +554,17 @@ function installBridge(options: {
   validation?: Record<string, unknown>;
 } = {}) {
   const requester = principal(options.policy ?? ownerPolicy);
-  const openApproval = options.approvalError
-    ? vi.fn(async () => { throw options.approvalError; })
-    : vi.fn(async () => ({ status: "approved", active_generation: 4 }));
+  const openApproval = vi.fn<(approvalId: string) => Promise<ApprovalObservationResult>>();
+  if (options.approvalError) {
+    openApproval.mockRejectedValue(options.approvalError);
+  } else {
+    openApproval.mockImplementation(async (approvalId: string) => ({
+      approvalId,
+      decision: "approve",
+      resolution: { active_generation: 4 },
+      status: "completed"
+    }));
+  }
   const api = {
     principal: vi.fn(async () => requester),
     listSkills: vi.fn(async () => options.inventory ?? inventory),

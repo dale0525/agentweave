@@ -144,6 +144,37 @@ fn android_runtime_reports_platform_incompatible_bundle_packages() {
 }
 
 #[test]
+fn owner_inventory_preserves_builtin_only_unavailable_effective_layer() {
+    let dir = tempdir().unwrap();
+    write_instruction_package(
+        &dir.path().join("source-skills"),
+        "desktop-owner",
+        "com.example.desktop-owner",
+        "Desktop Owner Skill",
+        "desktop",
+    );
+    build_bundle(dir.path(), PlatformId::Desktop);
+    let mut config = mobile_config(dir.path());
+    config.skill_policy = SkillManagementPolicy::owner_only();
+    config.actor_context = ActorContext::owner("inventory-owner", [SkillGrant::Inspect]);
+
+    let skill = MobileRuntime::initialize(config)
+        .unwrap()
+        .list_skills()
+        .unwrap()
+        .remove(0);
+
+    assert_eq!(skill.status, "platform_unsupported");
+    assert!(!skill.available);
+    assert_eq!(skill.source_layer, "builtin");
+    assert_eq!(
+        skill.effective.as_ref().map(|layer| layer.status.as_str()),
+        Some("platform_unsupported")
+    );
+    assert!(skill.managed.is_none());
+}
+
+#[test]
 fn android_init_uses_separate_skill_roots_and_disabled_policy_by_default() {
     let dir = tempdir().unwrap();
     write_instruction_package(

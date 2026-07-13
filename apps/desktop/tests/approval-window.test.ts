@@ -92,11 +92,44 @@ describe("independent approval window", () => {
       { sender: requester },
       APPROVAL_ID
     ) as Promise<unknown>;
-    approval.emit("closed");
+    const close = handlers.get("general-agent:approval:close")!;
+    await expect(close({ sender: requester }, APPROVAL_ID)).rejects.toThrow(/approval window/);
+    await expect(close({ sender: approval.webContents }, APPROVAL_ID)).resolves.toEqual({
+      accepted: true
+    });
 
     await expect(observed).resolves.toEqual({
       approvalId: APPROVAL_ID,
       status: "closed"
+    });
+    expect(approval.closed).toBe(true);
+    expect(approval.destroyed).toBe(true);
+  });
+
+  it("returns a load_failed observation instead of completing the approval", async () => {
+    const requester = fakeWebContents(51);
+    const approval = new FakeWindow(61);
+    approval.loadError = new Error("renderer failed to load");
+    const handlers = new Map<string, (event: { sender: FakeWebContents }, value: unknown) => unknown>();
+    registerApprovalWindowController({
+      approvalPreload: "/approval-preload.cjs",
+      approvalUrl: "file:///app/approval.html",
+      createWindow: () => approval,
+      ipcMain: {
+        handle: (channel, handler) => handlers.set(channel, handler),
+        removeHandler: () => undefined
+      },
+      requesterWebContents: requester
+    });
+
+    const observed = handlers.get("general-agent:approval:open")!(
+      { sender: requester },
+      APPROVAL_ID
+    ) as Promise<unknown>;
+
+    await expect(observed).resolves.toEqual({
+      approvalId: APPROVAL_ID,
+      status: "load_failed"
     });
   });
 });
@@ -119,16 +152,29 @@ function fakeWebContents(id: number): FakeWebContents {
 }
 
 class FakeWindow {
-  readonly webContents: FakeWebContents;
+  private readonly contents: FakeWebContents;
   readonly listeners = new Map<string, () => void>();
   closed = false;
+  destroyed = false;
+  loadError: Error | null = null;
   loadedUrl = "";
 
   constructor(id: number) {
-    this.webContents = fakeWebContents(id);
+    this.contents = fakeWebContents(id);
+  }
+
+  get webContents(): FakeWebContents {
+    if (this.destroyed) throw new TypeError("Object has been destroyed");
+    return this.contents;
   }
 
   close(): void {
+    this.closed = true;
+    this.emit("closed");
+  }
+
+  destroy(): void {
+    this.destroyed = true;
     this.closed = true;
     this.emit("closed");
   }
@@ -139,7 +185,7 @@ class FakeWindow {
 
   loadURL(url: string): Promise<void> {
     this.loadedUrl = url;
-    return Promise.resolve();
+    return this.loadError ? Promise.reject(this.loadError) : Promise.resolve();
   }
 
   on(event: string, listener: () => void): void {

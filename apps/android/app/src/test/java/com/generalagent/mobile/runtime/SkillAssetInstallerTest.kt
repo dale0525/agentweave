@@ -115,6 +115,57 @@ class SkillAssetInstallerTest {
   }
 
   @Test
+  fun previousPointerCrashRecoversAcrossRetryDowngradeAndReupgrade() {
+    val rollbackFiles = validBundleFiles("journal-v0")
+    val currentFiles = validBundleFiles("journal-v1")
+    val targetFiles = validBundleFiles("journal-v2")
+    val rollback = testInstaller(temporaryFolder.root, FakeSkillAssets(rollbackFiles))
+      .installVerifiedBundle()
+    val current = testInstaller(temporaryFolder.root, FakeSkillAssets(currentFiles))
+      .installVerifiedBundle()
+    val revisions = temporaryFolder.root.resolve("builtin-skills/revisions")
+    val foreign = revisions.resolve("foreign-owner-file").apply { writeText("keep", Charsets.UTF_8) }
+    val outside = temporaryFolder.newFolder("journal-outside")
+    val symlink = revisions.resolve("e".repeat(64)).toPath()
+    Files.createSymbolicLink(symlink, outside.toPath())
+    val interrupted = SkillAssetInstaller(
+      temporaryFolder.root,
+      FakeSkillAssets(targetFiles),
+      JvmSkillPublicationFileSystem(),
+      SkillPublicationFaults { point ->
+        if (point == SkillPublicationFaultPoint.PREVIOUS_RENAMED) {
+          throw IllegalStateException("injected interruption after previous rename")
+        }
+      },
+    )
+
+    assertThrows(IllegalStateException::class.java) { interrupted.installVerifiedBundle() }
+    assertEquals(current.contentHash, currentHash(temporaryFolder.root))
+    assertEquals(current.contentHash, previousHash(temporaryFolder.root))
+
+    testInstaller(temporaryFolder.root, FakeSkillAssets(currentFiles)).installVerifiedBundle()
+
+    assertEquals(current.contentHash, currentHash(temporaryFolder.root))
+    assertEquals(rollback.contentHash, previousHash(temporaryFolder.root))
+    assertRevisionHashes(temporaryFolder.root, current.contentHash, rollback.contentHash)
+    assertTrue(foreign.isFile)
+    assertTrue(Files.isSymbolicLink(symlink))
+
+    testInstaller(temporaryFolder.root, FakeSkillAssets(rollbackFiles)).installVerifiedBundle()
+    assertEquals(rollback.contentHash, currentHash(temporaryFolder.root))
+    assertEquals(current.contentHash, previousHash(temporaryFolder.root))
+
+    val upgraded = testInstaller(temporaryFolder.root, FakeSkillAssets(targetFiles))
+      .installVerifiedBundle()
+    assertEquals(upgraded.contentHash, currentHash(temporaryFolder.root))
+    assertEquals(rollback.contentHash, previousHash(temporaryFolder.root))
+    assertRevisionHashes(temporaryFolder.root, upgraded.contentHash, rollback.contentHash)
+    assertTrue(foreign.isFile)
+    assertTrue(Files.isSymbolicLink(symlink))
+    assertTrue(outside.isDirectory)
+  }
+
+  @Test
   fun cleanupPreservesForeignNamesAndHashLikeSymlinks() {
     val firstFiles = validBundleFiles("preserve-v1")
     val secondFiles = validBundleFiles("preserve-v2")
@@ -509,10 +560,16 @@ private class RequireNoOpDurabilitySync : JvmSkillPublicationFileSystem() {
 }
 
 private class FailBundleRootSyncFileSystem : JvmSkillPublicationFileSystem() {
-  private var bundleRootSyncs = 0
+  private var currentRenamed = false
+
+  override fun atomicMove(source: java.nio.file.Path, target: java.nio.file.Path, replace: Boolean) {
+    super.atomicMove(source, target, replace)
+    if (target.fileName.toString() == "current") currentRenamed = true
+  }
 
   override fun syncDirectory(path: java.nio.file.Path) {
-    if (path.fileName.toString() == "builtin-skills" && ++bundleRootSyncs == 2) {
+    if (path.fileName.toString() == "builtin-skills" && currentRenamed) {
+      currentRenamed = false
       throw IllegalStateException("injected bundle root sync failure")
     }
     super.syncDirectory(path)

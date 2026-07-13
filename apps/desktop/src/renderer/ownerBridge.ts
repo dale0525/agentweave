@@ -1,3 +1,5 @@
+import type { ApprovalObservationResult } from "../shared/approvalObservation";
+
 export type OwnerMode =
   | "disabled"
   | "diagnostics_only"
@@ -52,10 +54,36 @@ const devBrowserOwnerApi: NonNullable<Window["generalAgent"]>["owner"] = {
   requestRemoval: (packageId) => devRequest("requester", `/owner/skills/${packageId}`, "DELETE")
 };
 
-export async function requestApprovalSurface(approvalId: string): Promise<unknown> {
+export async function requestApprovalSurface(
+  approvalId: string
+): Promise<ApprovalObservationResult> {
   const approval = window.generalAgent?.approval;
   if (!approval) throw new Error("Independent approval surface is unavailable");
-  return approval.open(approvalId);
+  return requireApprovalObservation(await approval.open(approvalId), approvalId);
+}
+
+function requireApprovalObservation(
+  value: unknown,
+  approvalId: string
+): ApprovalObservationResult {
+  if (!isRecord(value) || value.approvalId !== approvalId) {
+    throw new Error("Approval observation result is invalid");
+  }
+  if (value.status === "completed") {
+    if (value.decision !== "approve" && value.decision !== "reject") {
+      throw new Error("Approval observation decision is invalid");
+    }
+    return {
+      approvalId,
+      decision: value.decision,
+      ...(Object.hasOwn(value, "resolution") ? { resolution: value.resolution } : {}),
+      status: "completed"
+    };
+  }
+  if (value.status === "closed" || value.status === "disposed" || value.status === "load_failed") {
+    return { approvalId, status: value.status };
+  }
+  throw new Error("Approval observation status is invalid");
 }
 
 async function devRequest(actor: "requester", path: string, method: string, body?: unknown): Promise<unknown> {
@@ -111,4 +139,8 @@ function requirePrincipal(value: unknown): OwnerPrincipalWire {
     throw new Error("Authenticated owner principal response is invalid");
   }
   return value as OwnerPrincipalWire;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

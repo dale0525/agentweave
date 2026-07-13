@@ -54,6 +54,7 @@ const CREATE_APPROVALS: &str = r#"CREATE TABLE skill_approvals (
 pub(crate) async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     let mut tx = crate::skill_state_transactions::begin_immediate(pool).await?;
     let result = async {
+        ensure_supported_schema_versions(&mut tx).await?;
         create_migration_ledger(&mut tx).await?;
         migrate_approvals(&mut tx).await?;
         create_supporting_tables(&mut tx).await?;
@@ -84,6 +85,30 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
 }
 
 const SKILL_SCHEMA_VERSION: i64 = 2;
+const MIN_COMPATIBLE_SKILL_SCHEMA_VERSION: i64 = 1;
+
+async fn ensure_supported_schema_versions(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> {
+    if !table_exists(tx, "skill_schema_migrations").await? {
+        return Ok(());
+    }
+    let versions: Vec<i64> = sqlx::query_scalar(
+        "SELECT version FROM skill_schema_migrations WHERE component = 'skill_state' ORDER BY version",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    for version in versions {
+        if version > SKILL_SCHEMA_VERSION {
+            anyhow::bail!(
+                "skill state schema version {version} is newer than supported version {SKILL_SCHEMA_VERSION}"
+            );
+        }
+        anyhow::ensure!(
+            version >= MIN_COMPATIBLE_SKILL_SCHEMA_VERSION,
+            "skill state schema version {version} is outside the compatible range {MIN_COMPATIBLE_SKILL_SCHEMA_VERSION}..={SKILL_SCHEMA_VERSION}"
+        );
+    }
+    Ok(())
+}
 
 async fn create_migration_ledger(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> {
     sqlx::query(

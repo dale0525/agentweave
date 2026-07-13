@@ -117,11 +117,21 @@ class SkillAssetInstaller internal constructor(
     val revision = containedPath(revisions, expectedHash)
     val currentFile = bundleRoot.resolve("current")
     val previousFile = bundleRoot.resolve("previous")
-    val currentHash = readPointerHash(currentFile, "current")
-    val previousHash = readPointerHash(previousFile, "previous")
+    var currentHash = readPointerHash(currentFile, "current")
+    var previousHash = readPointerHash(previousFile, "previous")
     check(currentHash != null || previousHash == null) {
       "Built-in skill previous pointer exists without current"
     }
+    val recovered = recoverPointerTransaction(
+      bundleRoot,
+      currentFile,
+      previousFile,
+      currentHash,
+      previousHash,
+      expectedHash,
+    )
+    currentHash = recovered.current
+    previousHash = recovered.previous
     if (currentHash == expectedHash && Files.isDirectory(revision, LinkOption.NOFOLLOW_LINKS)) {
       check(hashPublishedTree(revision) == expectedHash) { "Published built-in skill revision failed verification" }
       check(readPointerHash(currentFile, "current", sync = true) == expectedHash) {
@@ -129,7 +139,7 @@ class SkillAssetInstaller internal constructor(
       }
       cleanupRevisions(revisions, setOfNotNull(expectedHash, previousHash))
       fileSystem.syncDirectory(bundleRoot)
-      return InstalledSkillBundle(revision.toFile(), expectedHash, false)
+      return InstalledSkillBundle(revision.toFile(), expectedHash, recovered.changed)
     }
 
     if (Files.exists(revision, LinkOption.NOFOLLOW_LINKS)) {
@@ -144,10 +154,101 @@ class SkillAssetInstaller internal constructor(
     } else {
       publishRevision(revisions, revision, expectedHash, entries)
     }
-    if (currentHash != null) switchPointer(bundleRoot, previousFile, ".previous.incoming", currentHash)
+    if (currentHash != null) {
+      writePointerTransaction(
+        bundleRoot,
+        SkillPointerTransaction(currentHash, previousHash, expectedHash),
+      )
+      switchPointer(bundleRoot, previousFile, ".previous.incoming", currentHash)
+      faults.after(SkillPublicationFaultPoint.PREVIOUS_RENAMED)
+    }
     switchCurrent(bundleRoot, currentFile, expectedHash)
+    clearPointerTransaction(bundleRoot)
     cleanupRevisions(revisions, setOfNotNull(expectedHash, currentHash))
     return InstalledSkillBundle(revision.toFile(), expectedHash, true)
+  }
+
+  private data class PointerRecovery(
+    val current: String?,
+    val previous: String?,
+    val changed: Boolean,
+  )
+
+  private fun recoverPointerTransaction(
+    bundleRoot: Path,
+    currentFile: Path,
+    previousFile: Path,
+    currentHash: String?,
+    previousHash: String?,
+    expectedHash: String,
+  ): PointerRecovery {
+    Files.deleteIfExists(bundleRoot.resolve(TRANSACTION_INCOMING))
+    val transactionFile = bundleRoot.resolve(TRANSACTION)
+    if (!Files.exists(transactionFile, LinkOption.NOFOLLOW_LINKS)) {
+      return PointerRecovery(currentHash, previousHash, false)
+    }
+    check(Files.isRegularFile(transactionFile, LinkOption.NOFOLLOW_LINKS)) {
+      "Built-in skill pointer transaction is not a regular file"
+    }
+    val transaction = SkillPointerTransaction.decode(fileSystem.readVerifiedFile(transactionFile))
+    return when (
+      skillPointerRecoveryAction(transaction, currentHash, previousHash, expectedHash)
+    ) {
+      SkillPointerRecoveryAction.ABORT -> {
+        restorePreviousPointer(bundleRoot, previousFile, previousHash, transaction.oldPrevious)
+        clearPointerTransaction(bundleRoot)
+        PointerRecovery(transaction.oldCurrent, transaction.oldPrevious, false)
+      }
+      SkillPointerRecoveryAction.FINALIZE -> {
+        clearPointerTransaction(bundleRoot)
+        PointerRecovery(transaction.target, transaction.oldCurrent, false)
+      }
+      SkillPointerRecoveryAction.RESUME -> {
+        if (previousHash != transaction.oldCurrent) {
+          switchPointer(bundleRoot, previousFile, ".previous.incoming", transaction.oldCurrent)
+          faults.after(SkillPublicationFaultPoint.PREVIOUS_RENAMED)
+        }
+        switchCurrent(bundleRoot, currentFile, transaction.target)
+        clearPointerTransaction(bundleRoot)
+        PointerRecovery(transaction.target, transaction.oldCurrent, true)
+      }
+    }
+  }
+
+  private fun writePointerTransaction(bundleRoot: Path, transaction: SkillPointerTransaction) {
+    val incoming = bundleRoot.resolve(TRANSACTION_INCOMING)
+    val target = bundleRoot.resolve(TRANSACTION)
+    Files.deleteIfExists(incoming)
+    try {
+      fileSystem.writeNewFile(incoming, transaction.encode())
+      fileSystem.atomicMove(incoming, target, replace = true)
+      fileSystem.syncDirectory(bundleRoot)
+    } catch (error: Exception) {
+      Files.deleteIfExists(incoming)
+      throw IllegalStateException("Failed to prepare built-in skill pointer transaction", error)
+    }
+  }
+
+  private fun clearPointerTransaction(bundleRoot: Path) {
+    Files.deleteIfExists(bundleRoot.resolve(TRANSACTION_INCOMING))
+    if (Files.deleteIfExists(bundleRoot.resolve(TRANSACTION))) {
+      fileSystem.syncDirectory(bundleRoot)
+    }
+  }
+
+  private fun restorePreviousPointer(
+    bundleRoot: Path,
+    previousFile: Path,
+    observed: String?,
+    restored: String?,
+  ) {
+    if (observed == restored) return
+    if (restored == null) {
+      Files.deleteIfExists(previousFile)
+      fileSystem.syncDirectory(bundleRoot)
+    } else {
+      switchPointer(bundleRoot, previousFile, ".previous.incoming", restored)
+    }
   }
 
   private fun publishRevision(
@@ -389,6 +490,8 @@ class SkillAssetInstaller internal constructor(
   private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte) }
 
   companion object {
+    private const val TRANSACTION = ".pointer-transaction"
+    private const val TRANSACTION_INCOMING = ".pointer-transaction.incoming"
     private val HASH_PATTERN = Regex("[0-9a-f]{64}")
     private val processLocks = ConcurrentHashMap<Path, ReentrantLock>()
   }

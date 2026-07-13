@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { ApprovalObservationResult } from "../shared/approvalObservation";
 import { createOwnerTransport } from "./ownerTransport";
 
 type DesktopRuntimeInfo = {
@@ -10,7 +11,7 @@ export type DesktopPreloadApi = {
   getRuntimeInfo: () => DesktopRuntimeInfo;
   owner: ReturnType<typeof createOwnerTransport>;
   approval: {
-    open: (approvalId: string) => Promise<unknown>;
+    open: (approvalId: string) => Promise<ApprovalObservationResult>;
   };
 };
 
@@ -26,11 +27,11 @@ export const desktopPreloadApi: DesktopPreloadApi = Object.freeze({
   getRuntimeInfo: () => runtimeInfo,
   owner,
   approval: Object.freeze({
-    open: (approvalId: string) => {
+    open: (approvalId: string): Promise<ApprovalObservationResult> => {
       if (!/^[0-9a-f-]+$/.test(approvalId)) {
         return Promise.reject(new Error("Approval identifier is not allowed"));
       }
-      return ipcRenderer.invoke("general-agent:approval:open", approvalId);
+      return ipcRenderer.invoke("general-agent:approval:open", approvalId) as Promise<ApprovalObservationResult>;
     }
   })
 });

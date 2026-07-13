@@ -173,6 +173,8 @@ export function OwnerSkillDetail({
             <Grid columns={{ initial: "1", md: "2" }} gap="3" pt="4" style={{ minWidth: 0 }}>
               <Fact label="Package kind" value={selectedRevision.kind} />
               <Fact label="Effective source" value={selected.effective?.source_layer ?? selected.source_layer} />
+              <Fact label="Runtime status" value={selected.effective?.status ?? selected.status} />
+              <Fact label="Runtime reason" value={selected.effective?.reason ?? selected.reason} />
               <Fact label="Effective revision" value={selected.effective?.active_revision_id ?? selected.active_revision_id ?? "None"} />
               <Fact label="Managed status" value={selected.managed?.status ?? "Not installed"} />
               <Fact label="Managed revision" value={selected.managed?.active_revision_id ?? "None"} />

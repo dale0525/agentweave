@@ -392,6 +392,30 @@ class SkillManagementStateTest {
   }
 
   @Test
+  fun unavailableRuntimeDoesNotHideBackendAuthorizedRecoveryActions() {
+    val access = SkillAccessState(
+      mode = SkillScreenMode.OwnerManage,
+      visibleTabs = AppTab.entries,
+      actions = setOf(SkillAction.Disable, SkillAction.Rollback),
+      allowedKinds = setOf("instruction_only"),
+      agentAuthoring = true,
+    )
+    val unavailable = skillDetail(activeRevisionId = "revision-active").copy(
+      status = "circuit_open",
+      reason = "managed revision circuit open",
+      actions = com.generalagent.mobile.runtime.RuntimeSkillActions(
+        canDisable = true,
+        canRollback = true,
+      ),
+    )
+
+    assertEquals(
+      setOf(SkillAction.Disable, SkillAction.Rollback),
+      skillTargetActions(access, unavailable),
+    )
+  }
+
+  @Test
   fun targetActionsCannotReEnableBackendDeniedOperations() {
     val detail = skillDetailWithHistory().copy(
       actions = com.generalagent.mobile.runtime.RuntimeSkillActions(),

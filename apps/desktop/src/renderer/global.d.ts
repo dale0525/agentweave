@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 
+import type { ApprovalObservationResult } from "../shared/approvalObservation";
+
 export {};
 
 declare global {
@@ -18,7 +20,7 @@ declare global {
         requestRemoval(packageId: string): Promise<unknown>;
       };
       approval: {
-        open(approvalId: string): Promise<unknown>;
+        open(approvalId: string): Promise<ApprovalObservationResult>;
       };
     };
     generalAgentApproval?: {
@@ -26,6 +28,7 @@ declare global {
       approval(approvalId: string): Promise<unknown>;
       resolve(approvalId: string, decision: "approve" | "reject"): Promise<unknown>;
       complete(result: unknown): Promise<unknown>;
+      close(approvalId: string): Promise<unknown>;
     };
   }
 }

@@ -1,5 +1,11 @@
+import type {
+  ApprovalDecision,
+  ApprovalObservationResult
+} from "../shared/approvalObservation";
+
 export const APPROVAL_OPEN_CHANNEL = "general-agent:approval:open";
 export const APPROVAL_COMPLETE_CHANNEL = "general-agent:approval:complete";
+export const APPROVAL_CLOSE_CHANNEL = "general-agent:approval:close";
 
 type IpcEvent = { sender: ApprovalWebContents };
 type IpcHandler = (event: IpcEvent, value: unknown) => unknown;
@@ -13,6 +19,7 @@ export type ApprovalWebContents = {
 export type ApprovalWindow = {
   webContents: ApprovalWebContents;
   close(): void;
+  destroy(): void;
   isDestroyed(): boolean;
   loadURL(url: string): Promise<void>;
   on(event: "closed", listener: () => void): void;
@@ -46,12 +53,14 @@ type ApprovalWindowControllerOptions = {
 
 type Completion = {
   approvalId: string;
-  decision: "approve" | "reject";
+  decision: ApprovalDecision;
+  resolution?: unknown;
 };
 
 type PendingWindow = {
   approvalId: string;
-  resolve(value: unknown): void;
+  resolve(value: ApprovalObservationResult): void;
+  webContentsId: number;
   window: ApprovalWindow;
 };
 
@@ -86,18 +95,19 @@ export function registerApprovalWindowController(
     window.webContents.on("will-navigate", (navigation, url) => {
       if (url !== target) navigation.preventDefault();
     });
-    const observed = new Promise<unknown>((resolve) => {
-      const pending = { approvalId, resolve, window };
+    const observed = new Promise<ApprovalObservationResult>((resolve) => {
+      const webContentsId = window.webContents.id;
+      const pending = { approvalId, resolve, webContentsId, window };
       byApproval.set(approvalId, pending);
-      byWebContents.set(window.webContents.id, pending);
+      byWebContents.set(webContentsId, pending);
       window.on("closed", () => settle(pending, { approvalId, status: "closed" }));
     });
     try {
       await window.loadURL(target);
-    } catch (error) {
+    } catch {
       const pending = byApproval.get(approvalId);
       if (pending) settle(pending, { approvalId, status: "load_failed" });
-      throw error;
+      if (!window.isDestroyed()) window.close();
     }
     return observed;
   });
@@ -116,16 +126,29 @@ export function registerApprovalWindowController(
     return { accepted: true };
   });
 
-  function settle(pending: PendingWindow, value: unknown): void {
+  options.ipcMain.handle(APPROVAL_CLOSE_CHANNEL, async (event, value) => {
+    const pending = byWebContents.get(event.sender.id);
+    if (!pending || event.sender !== pending.window.webContents) {
+      throw new Error("Approval close must originate from the approval window");
+    }
+    if (approvalUuid(value) !== pending.approvalId) {
+      throw new Error("Approval close identifier does not match the isolated window");
+    }
+    if (!pending.window.isDestroyed()) pending.window.destroy();
+    return { accepted: true };
+  });
+
+  function settle(pending: PendingWindow, value: ApprovalObservationResult): void {
     if (byApproval.get(pending.approvalId) !== pending) return;
     byApproval.delete(pending.approvalId);
-    byWebContents.delete(pending.window.webContents.id);
+    byWebContents.delete(pending.webContentsId);
     pending.resolve(value);
   }
 
   return () => {
     options.ipcMain.removeHandler(APPROVAL_OPEN_CHANNEL);
     options.ipcMain.removeHandler(APPROVAL_COMPLETE_CHANNEL);
+    options.ipcMain.removeHandler(APPROVAL_CLOSE_CHANNEL);
     for (const pending of byApproval.values()) {
       settle(pending, { approvalId: pending.approvalId, status: "disposed" });
       if (!pending.window.isDestroyed()) pending.window.close();
@@ -153,7 +176,11 @@ function parseCompletion(value: unknown): Completion {
   if (decision !== "approve" && decision !== "reject") {
     throw new Error("Approval decision is invalid");
   }
-  return { approvalId, decision };
+  return {
+    approvalId,
+    decision,
+    ...(Object.hasOwn(value, "resolution") ? { resolution: value.resolution } : {})
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

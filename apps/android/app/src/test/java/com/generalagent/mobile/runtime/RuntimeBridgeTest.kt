@@ -395,6 +395,31 @@ class RuntimeBridgeTest {
   }
 
   @Test
+  fun listSkillsKeepsUnavailableEffectiveSeparateFromActiveInstallationActions() {
+    val native = object : NativeRuntimeApi {
+      override fun initialize(requestJson: String): String = error("not used")
+
+      override fun invoke(handle: Long, requestJson: String): String =
+        """{"ok":true,"data":[{"package_id":"com.example.circuit","display_name":"Circuit skill","version":"2.0.0","source_layer":"managed","status":"circuit_open","available":false,"reason":"managed revision circuit open","active_revision_id":"revision-2","manageable":true,"built_in_collision":false,"effective":{"package_id":"com.example.circuit","display_name":"Circuit skill","version":"2.0.0","source_layer":"managed","status":"circuit_open","reason":"managed revision circuit open","active_revision_id":"revision-2","manageable":true,"available":false,"content_hash":"abc"},"managed":{"package_id":"com.example.circuit","display_name":"Circuit skill","version":"2.0.0","source_layer":"managed","status":"active","reason":"active","active_revision_id":"revision-2","manageable":true,"available":true,"content_hash":"abc"},"actions":{"can_edit_draft":false,"can_validate_draft":false,"can_request_activation":false,"can_disable":true,"can_request_removal":true,"can_rollback":true}}]}"""
+
+      override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String =
+        error("not used")
+
+      override fun close(handle: Long): String = """{"ok":true,"data":null}"""
+    }
+
+    val skill = RuntimeClient(9L, native).listSkills().single()
+
+    assertEquals("circuit_open", skill.status)
+    assertEquals("managed revision circuit open", skill.reason)
+    assertFalse(skill.available)
+    assertEquals("circuit_open", skill.effective?.status)
+    assertEquals("active", skill.managed?.status)
+    assertTrue(skill.actions.canDisable)
+    assertTrue(skill.actions.canRollback)
+  }
+
+  @Test
   fun ownerOperationsUseStoredActorAndMapRuntimeDtos() {
     val native = OwnerNativeRuntime()
     val client = RuntimeClient(

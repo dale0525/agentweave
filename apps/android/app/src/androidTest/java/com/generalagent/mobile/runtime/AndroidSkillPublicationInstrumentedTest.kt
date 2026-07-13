@@ -78,6 +78,56 @@ class AndroidSkillPublicationInstrumentedTest {
   }
 
   @Test
+  fun previousPointerCrashRecoversAcrossRetryDowngradeAndReupgrade() {
+    val root = testRoot("previous-journal")
+    val rollbackFiles = bundleFiles("android-journal-v0")
+    val currentFiles = bundleFiles("android-journal-v1")
+    val targetFiles = bundleFiles("android-journal-v2")
+    val rollback = SkillAssetInstaller(root, InstrumentedSkillAssets(rollbackFiles)).installVerifiedBundle()
+    val current = SkillAssetInstaller(root, InstrumentedSkillAssets(currentFiles)).installVerifiedBundle()
+    val revisions = root.resolve("builtin-skills/revisions")
+    val foreign = revisions.resolve("foreign-owner-file").apply { writeText("keep", Charsets.UTF_8) }
+    val outside = root.resolve("journal-outside").apply { check(mkdir()) }
+    val symlink = revisions.resolve("e".repeat(64)).toPath()
+    Files.createSymbolicLink(symlink, outside.toPath())
+    val interrupted = SkillAssetInstaller(
+      root,
+      InstrumentedSkillAssets(targetFiles),
+      AndroidSkillPublicationFileSystem(),
+      SkillPublicationFaults { point ->
+        if (point == SkillPublicationFaultPoint.PREVIOUS_RENAMED) {
+          throw IllegalStateException("injected interruption after previous rename")
+        }
+      },
+    )
+
+    assertThrows(IllegalStateException::class.java) { interrupted.installVerifiedBundle() }
+    assertEquals(current.contentHash, currentHash(root))
+    assertEquals(current.contentHash, previousHash(root))
+
+    SkillAssetInstaller(root, InstrumentedSkillAssets(currentFiles)).installVerifiedBundle()
+
+    assertEquals(current.contentHash, currentHash(root))
+    assertEquals(rollback.contentHash, previousHash(root))
+    assertEquals(setOf(current.contentHash, rollback.contentHash), revisionHashes(root))
+    assertTrue(foreign.isFile)
+    assertTrue(Files.isSymbolicLink(symlink))
+
+    SkillAssetInstaller(root, InstrumentedSkillAssets(rollbackFiles)).installVerifiedBundle()
+    assertEquals(rollback.contentHash, currentHash(root))
+    assertEquals(current.contentHash, previousHash(root))
+
+    val upgraded = SkillAssetInstaller(root, InstrumentedSkillAssets(targetFiles)).installVerifiedBundle()
+    assertEquals(upgraded.contentHash, currentHash(root))
+    assertEquals(rollback.contentHash, previousHash(root))
+    assertEquals(setOf(upgraded.contentHash, rollback.contentHash), revisionHashes(root))
+    assertTrue(foreign.isFile)
+    assertTrue(Files.isSymbolicLink(symlink))
+    assertTrue(outside.isDirectory)
+    root.deleteRecursively()
+  }
+
+  @Test
   fun ancestorSwapsFailClosedWithoutOutsideWritesOrNewCurrent() {
     for (ancestor in SwapAncestor.entries) {
       val root = testRoot("fail-${ancestor.name.lowercase()}")

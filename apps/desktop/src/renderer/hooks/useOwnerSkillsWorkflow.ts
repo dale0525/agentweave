@@ -199,11 +199,27 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
     approvePending: () => void mutate("approval", async () => {
       if (!pendingApproval) return;
       try {
-        const report = await requestApprovalSurface(
+        setApprovalError(null);
+        const observation = await requestApprovalSurface(
           pendingApproval.approval.approval_id
-        ) as { active_generation?: number; generation?: number };
-        const generation = report.active_generation ?? report.generation;
-        setPendingApproval(null); setApprovalError(null);
+        );
+        if (observation.status === "closed") {
+          setApprovalError("Approval window closed. The request remains pending.");
+          return;
+        }
+        if (observation.status === "disposed") {
+          throw new Error("Approval observation was disposed before a decision");
+        }
+        if (observation.status === "load_failed") {
+          throw new Error("Approval window failed to load");
+        }
+        setPendingApproval(null);
+        if (observation.decision === "reject") {
+          await reconcile("Skill operation rejected");
+          return;
+        }
+        const report = isRecord(observation.resolution) ? observation.resolution : {};
+        const generation = numberValue(report.active_generation) ?? numberValue(report.generation);
         await reconcile(pendingApproval.operation === "removal"
           ? "Skill removed"
           : generation ? `Active snapshot ${generation}` : "Skill operation approved");
@@ -395,3 +411,5 @@ function draftFiles(skill: OwnerSkillPackage, revision: OwnerSkillRevision, inst
 
 function splitValues(value: string): string[] { return value.split(",").map((item) => item.trim()).filter(Boolean); }
 function errorMessage(error: unknown, fallback: string): string { return error instanceof Error && error.message ? error.message : fallback; }
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
+function numberValue(value: unknown): number | null { return typeof value === "number" ? value : null; }
