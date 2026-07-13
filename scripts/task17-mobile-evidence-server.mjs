@@ -1,6 +1,7 @@
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, rename } from "node:fs/promises";
+import { closeSync, fsyncSync, mkdirSync, openSync, rmSync } from "node:fs";
+import { link, mkdir, open, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -8,7 +9,10 @@ const ACTIVE_MARKER = "TASK17_UI_ACTIVE_SKILL_EVIDENCE";
 const SELECTED_SKILL = "Task17 mobile lifecycle";
 const NONCE_PATTERN = /\bnonce:([a-zA-Z0-9][a-zA-Z0-9._-]{7,127})\b/;
 
-export function buildNextTurnCapture(rawBytes, { requestId = randomUUID() } = {}) {
+export function buildNextTurnCapture(
+  rawBytes,
+  { requestId = randomUUID(), seenNonces } = {},
+) {
   const raw = Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(rawBytes);
   if (raw.length === 0 || raw.length > MAX_REQUEST_BYTES) {
     throw new Error("provider request exceeds evidence limit");
@@ -24,6 +28,8 @@ export function buildNextTurnCapture(rawBytes, { requestId = randomUUID() } = {}
   if (!nonce || !userText.includes("task17-mobile")) {
     throw new Error("provider request does not contain the bound UI nonce");
   }
+  if (seenNonces?.has(nonce)) throw new Error("provider request nonce was already used");
+  seenNonces?.add(nonce);
   return {
     request_id: requestId,
     capture_nonce: nonce,
@@ -64,23 +70,39 @@ export function startEvidenceServer({
   port = 18717,
   host = "127.0.0.1",
   capturePath = process.env.TASK17_EVIDENCE_CAPTURE_PATH,
+  quiet = false,
 } = {}) {
+  if (capturePath) clearCapturePath(capturePath);
+  const seenNonces = new Set();
+  let currentCapture = null;
   const server = http.createServer(async (request, response) => {
     try {
-      if (request.method !== "POST" || !request.url?.endsWith("/responses")) {
+      const url = new URL(request.url ?? "/", `http://${host}`);
+      if (request.method === "GET" && url.pathname === "/task17-capture") {
+        const nonce = url.searchParams.get("nonce");
+        if (!currentCapture || nonce !== currentCapture.capture_nonce) {
+          sendJson(response, 409, { error: "same-run capture is unavailable" });
+          return;
+        }
+        sendJson(response, 200, currentCapture);
+        response.once("finish", () => server.close());
+        return;
+      }
+      if (request.method !== "POST" || !url.pathname.endsWith("/responses")) {
         sendJson(response, 404, { error: "not found" });
         return;
       }
+      if (currentCapture) throw new Error("evidence server accepts one provider request");
       const rawBytes = await readBoundedBody(request);
-      const evidence = buildNextTurnCapture(rawBytes);
+      const evidence = buildNextTurnCapture(rawBytes, { seenNonces });
       if (capturePath) await writeCaptureAtomically(capturePath, evidence);
+      currentCapture = evidence;
       sendJson(response, 200, {
         output: [{
           type: "message",
           content: [{ type: "output_text", text: JSON.stringify(evidence) }],
         }],
       });
-      server.close();
     } catch (error) {
       sendJson(response, 400, { error: error instanceof Error ? error.message : "invalid request" });
     }
@@ -89,7 +111,11 @@ export function startEvidenceServer({
   server.listen(port, host, () => {
     const address = server.address();
     const activePort = typeof address === "object" && address ? address.port : port;
-    process.stdout.write(`task17 mobile evidence server listening on http://${host}:${activePort}/v1\n`);
+    if (!quiet) {
+      process.stdout.write(
+        `task17 mobile evidence server listening on http://${host}:${activePort}/v1\n`,
+      );
+    }
   });
   return server;
 }
@@ -123,12 +149,28 @@ async function writeCaptureAtomically(target, capture) {
   } finally {
     await file.close();
   }
-  await rename(temporary, target);
+  try {
+    await link(temporary, target);
+  } finally {
+    await unlink(temporary).catch(() => {});
+  }
   const directory = await open(parent, "r");
   try {
     await directory.sync();
   } finally {
     await directory.close();
+  }
+}
+
+function clearCapturePath(target) {
+  const parent = dirname(target);
+  mkdirSync(parent, { recursive: true });
+  rmSync(target, { force: true });
+  const directory = openSync(parent, "r");
+  try {
+    fsyncSync(directory);
+  } finally {
+    closeSync(directory);
   }
 }
 

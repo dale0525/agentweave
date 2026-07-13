@@ -29,6 +29,10 @@ import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.security.SecureRandom
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Base64
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
@@ -86,6 +90,10 @@ internal fun runRealRuntimeVisualHarness(arguments: Bundle) {
   val bridge = runtimeBridge(context)
   val client = bridge.load()
   val phase = arguments.getString("acceptance_phase") ?: "manual"
+  val evidenceRoot = context.getExternalFilesDir(null) ?: context.filesDir
+  val evidenceTarget = File(evidenceRoot, "task17-$phase-next-turn-evidence.json")
+  val inputTarget = File(evidenceRoot, "task17-$phase-next-turn-input.json")
+  val verifyNextTurn = arguments.getString("verify_next_turn") == "true"
   try {
     if (arguments.getString("seed_runtime") != "false") {
       seedLifecycle(client)
@@ -93,8 +101,10 @@ internal fun runRealRuntimeVisualHarness(arguments: Bundle) {
     }
     val secrets = InMemoryModelSecretStore()
     var nextTurnBinding: NextTurnBinding? = null
+    var mockBaseUrl: String? = null
     arguments.getString("mock_base_url")?.let { baseUrl ->
-      val nonce = arguments.getString("next_turn_nonce") ?: "nonce-${UUID.randomUUID()}"
+      mockBaseUrl = baseUrl
+      val nonce = secureAcceptanceNonce()
       val binding = authoritativeNextTurnBinding(client, nonce)
       nextTurnBinding = binding
       val secretId = "task17.mobile.mock"
@@ -109,7 +119,16 @@ internal fun runRealRuntimeVisualHarness(arguments: Bundle) {
           secretId = secretId,
         ),
       )
+      if (verifyNextTurn) {
+        clearCaptureTarget(evidenceTarget)
+        clearCaptureTarget(inputTarget)
+        writeJsonCreateNew(
+          inputTarget,
+          JSONObject().put("capture_nonce", nonce).put("user_text", binding.userText),
+        )
+      }
     }
+    val preexistingMessageIds = messageIds(client)
     writeAcceptanceState(context, client, "$phase-before")
     val turnGate = RuntimeTurnGate()
     val settingsGate = RuntimeSettingsGate()
@@ -131,22 +150,23 @@ internal fun runRealRuntimeVisualHarness(arguments: Bundle) {
       Thread.sleep(arguments.getString("visual_wait_ms")?.toLongOrNull() ?: 240_000L)
     }
     writeAcceptanceState(context, client, "$phase-after")
-    if (arguments.getString("verify_next_turn") == "true") {
+    if (verifyNextTurn) {
       val binding = requireNotNull(nextTurnBinding) { "next-turn verification requires mock_base_url" }
-      val capture = capturedNextTurnEvidence(client, binding.userText)
-      val evidence = bindAuthoritativeRuntimeState(capture, binding, client)
+      val hostCapture = fetchHostCapture(requireNotNull(mockBaseUrl), binding.nonce)
+      val capture = capturedNextTurnEvidence(client, binding.userText, preexistingMessageIds)
+      val evidence = bindAuthoritativeRuntimeState(capture, hostCapture, binding, client)
       assertTrue(
         evidence.toString(2),
         validateNextTurnEvidence(
           evidence,
+          hostCapture,
           expectedNonce = binding.nonce,
           expectedUserText = binding.userText,
           expectedRevisionId = binding.revisionId,
           expectedContentHash = binding.contentHash,
         ),
       )
-      val root = context.getExternalFilesDir(null) ?: context.filesDir
-      writeJsonAtomically(File(root, "task17-$phase-next-turn-evidence.json"), evidence)
+      writeJsonCreateNew(evidenceTarget, evidence)
     }
     turnGate.close()
     settingsGate.close()
@@ -289,11 +309,19 @@ private fun authoritativeNextTurnBinding(client: RuntimeClient, nonce: String): 
   )
 }
 
-private fun capturedNextTurnEvidence(client: RuntimeClient, expectedUserText: String): JSONObject {
+private fun messageIds(client: RuntimeClient): Set<String> = client.listSessions()
+  .flatMap { session -> client.getMessages(session.id) }
+  .mapTo(mutableSetOf()) { message -> message.id }
+
+private fun capturedNextTurnEvidence(
+  client: RuntimeClient,
+  expectedUserText: String,
+  preexistingMessageIds: Set<String>,
+): JSONObject {
   val artifact = client.listSessions()
     .asSequence()
     .flatMap { session -> client.getMessages(session.id).asSequence() }
-    .filter { message -> message.role == "assistant" }
+    .filter { message -> message.role == "assistant" && message.id !in preexistingMessageIds }
     .mapNotNull { message -> runCatching { JSONObject(message.content) }.getOrNull() }
     .lastOrNull { evidence -> evidence.optString("user_text") == expectedUserText }
   return requireNotNull(artifact) { "UI-triggered next-turn evidence was not persisted" }
@@ -301,9 +329,11 @@ private fun capturedNextTurnEvidence(client: RuntimeClient, expectedUserText: St
 
 private fun bindAuthoritativeRuntimeState(
   capture: JSONObject,
+  hostCapture: JSONObject,
   binding: NextTurnBinding,
   client: RuntimeClient,
 ): JSONObject {
+  check(capturesMatch(capture, hostCapture)) { "persisted response differs from host capture" }
   val current = authoritativeNextTurnBinding(client, binding.nonce)
   check(current.revisionId == binding.revisionId && current.contentHash == binding.contentHash) {
     "active lifecycle revision changed during the UI provider request"
@@ -312,17 +342,24 @@ private fun bindAuthoritativeRuntimeState(
     .put("active_revision_id", binding.revisionId)
     .put("content_hash", binding.contentHash)
     .put(
-      "authoritative_state",
-      JSONObject()
-        .put("source", "mobile_runtime_ffi")
-        .put("package_id", LIFECYCLE_PACKAGE)
-        .put("active_revision_id", binding.revisionId)
-        .put("content_hash", binding.contentHash),
+      "authoritative_before",
+      authoritativeState(binding.revisionId, binding.contentHash),
+    )
+    .put(
+      "authoritative_after",
+      authoritativeState(current.revisionId, current.contentHash),
     )
 }
 
+private fun authoritativeState(revisionId: String, contentHash: String): JSONObject = JSONObject()
+  .put("source", "mobile_runtime_ffi")
+  .put("package_id", LIFECYCLE_PACKAGE)
+  .put("active_revision_id", revisionId)
+  .put("content_hash", contentHash)
+
 internal fun validateNextTurnEvidence(
   evidence: JSONObject,
+  hostCapture: JSONObject,
   expectedNonce: String,
   expectedUserText: String,
   expectedRevisionId: String,
@@ -342,8 +379,11 @@ internal fun validateNextTurnEvidence(
   val selectedInstruction = Regex(
     """<skill_instructions\s+[^>]*name="Task17 mobile lifecycle"[^>]*>([\s\S]*?)</skill_instructions>""",
   ).findAll(developerText).any { match -> match.groupValues[1].contains(ACTIVE_INSTRUCTION) }
-  val authoritative = evidence.optJSONObject("authoritative_state") ?: return false
+  val before = evidence.optJSONObject("authoritative_before") ?: return false
+  val after = evidence.optJSONObject("authoritative_after") ?: return false
   return evidence.optString("request_id").isNotBlank() &&
+    capturesMatch(evidence, hostCapture) &&
+    hostCapture.optString("capture_nonce") == expectedNonce &&
     evidence.optString("capture_nonce") == expectedNonce &&
     evidence.optString("user_text") == expectedUserText &&
     evidence.optString("active_revision_id") == expectedRevisionId &&
@@ -353,12 +393,24 @@ internal fun validateNextTurnEvidence(
     evidence.optString("marker_location") == "skill_instructions" &&
     evidence.optString("raw_request_sha256").matches(Regex("[0-9a-f]{64}")) &&
     selectedInstruction &&
-    authoritative.optString("source") == "mobile_runtime_ffi" &&
-    authoritative.optString("package_id") == LIFECYCLE_PACKAGE &&
-    authoritative.optString("active_revision_id") == expectedRevisionId &&
-    authoritative.optString("content_hash") == expectedContentHash &&
+    authoritativeStateMatches(before, expectedRevisionId, expectedContentHash) &&
+    authoritativeStateMatches(after, expectedRevisionId, expectedContentHash) &&
     userBound
 }
+
+private fun capturesMatch(left: JSONObject, right: JSONObject): Boolean =
+  left.optString("request_id").isNotBlank() &&
+    left.optString("request_id") == right.optString("request_id") &&
+    left.optString("capture_nonce") == right.optString("capture_nonce") &&
+    left.optString("user_text") == right.optString("user_text") &&
+    left.optString("raw_request_sha256") == right.optString("raw_request_sha256") &&
+    left.optJSONObject("request_body")?.toString() == right.optJSONObject("request_body")?.toString()
+
+private fun authoritativeStateMatches(state: JSONObject, revisionId: String, contentHash: String): Boolean =
+  state.optString("source") == "mobile_runtime_ffi" &&
+    state.optString("package_id") == LIFECYCLE_PACKAGE &&
+    state.optString("active_revision_id") == revisionId &&
+    state.optString("content_hash") == contentHash
 
 private fun requestContentForRole(requestBody: JSONObject?, role: String): String {
   val input = requestBody?.optJSONArray("input") ?: return ""
@@ -387,9 +439,36 @@ private fun requestContentContains(content: Any?, expected: String): Boolean {
   }
 }
 
-private fun writeJsonAtomically(target: File, value: JSONObject) {
+internal fun secureAcceptanceNonce(): String {
+  val bytes = ByteArray(24)
+  SecureRandom().nextBytes(bytes)
+  return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+}
+
+private fun fetchHostCapture(baseUrl: String, nonce: String): JSONObject {
+  val connection = URL(URL(baseUrl), "/task17-capture?nonce=$nonce")
+    .openConnection() as HttpURLConnection
+  connection.requestMethod = "GET"
+  connection.connectTimeout = 10_000
+  connection.readTimeout = 10_000
+  try {
+    check(connection.responseCode == 200) { "independent host capture is unavailable" }
+    val bytes = connection.inputStream.use { input -> input.readNBytes(1_048_577) }
+    check(bytes.size <= 1_048_576) { "independent host capture exceeds limit" }
+    return JSONObject(String(bytes, StandardCharsets.UTF_8))
+  } finally {
+    connection.disconnect()
+  }
+}
+
+private fun clearCaptureTarget(target: File) {
+  check(!target.exists() || target.delete()) { "stale acceptance capture could not be cleared" }
+}
+
+private fun writeJsonCreateNew(target: File, value: JSONObject) {
   target.parentFile?.mkdirs()
   val temporary = File(target.parentFile, ".${target.name}.${UUID.randomUUID()}.tmp")
+  Files.createFile(temporary.toPath())
   FileOutputStream(temporary).use { output ->
     output.write(value.toString(2).toByteArray(StandardCharsets.UTF_8))
     output.fd.sync()
@@ -399,10 +478,9 @@ private fun writeJsonAtomically(target: File, value: JSONObject) {
       temporary.toPath(),
       target.toPath(),
       StandardCopyOption.ATOMIC_MOVE,
-      StandardCopyOption.REPLACE_EXISTING,
     )
   } catch (_: AtomicMoveNotSupportedException) {
-    Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+    Files.move(temporary.toPath(), target.toPath())
   }
 }
 

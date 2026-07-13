@@ -5,6 +5,36 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const JOURNAL_LIMIT: u64 = 256 * 1024;
+#[cfg(any(windows, test))]
+const WINDOWS_SHARE_MODE: u32 = 0x0000_0001 | 0x0000_0002;
+#[cfg(any(windows, test))]
+const WINDOWS_DIRECTORY_FLAGS: u32 = 0x0200_0000 | 0x0020_0000;
+#[cfg(any(windows, test))]
+const WINDOWS_DIRECTORY_SYNC_ACCESS: u32 = 0x4000_0000;
+#[cfg(any(windows, test))]
+const WINDOWS_DIRECTORY_WRITE_ACCESS: u32 = 0x8000_0000 | 0x4000_0000;
+#[cfg(any(windows, test))]
+const WINDOWS_CLEANUP_ACCESS: u32 = 0x8000_0000 | 0x0001_0000;
+
+#[cfg(test)]
+pub(super) struct WindowsOpenContract {
+    pub(super) share_mode: u32,
+    pub(super) directory_flags: u32,
+    pub(super) directory_sync_access: u32,
+    pub(super) directory_write_access: u32,
+    pub(super) cleanup_access: u32,
+}
+
+#[cfg(test)]
+pub(super) fn windows_open_contract_for_test() -> WindowsOpenContract {
+    WindowsOpenContract {
+        share_mode: WINDOWS_SHARE_MODE,
+        directory_flags: WINDOWS_DIRECTORY_FLAGS,
+        directory_sync_access: WINDOWS_DIRECTORY_SYNC_ACCESS,
+        directory_write_access: WINDOWS_DIRECTORY_WRITE_ACCESS,
+        cleanup_access: WINDOWS_CLEANUP_ACCESS,
+    }
+}
 
 pub(super) fn canonical_real_directory(path: &Path) -> anyhow::Result<PathBuf> {
     let metadata = std::fs::symlink_metadata(path)?;
@@ -99,11 +129,35 @@ pub(super) fn open_nofollow(
     if kind == AttemptPathKind::File {
         options.write(write);
     }
+    #[cfg(windows)]
+    if kind == AttemptPathKind::Directory && write {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.access_mode(WINDOWS_DIRECTORY_WRITE_ACCESS);
+    }
     set_nofollow(&mut options, kind);
     let file = options.open(path)?;
     validate_metadata(&file.metadata()?, kind)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(file)
+}
+
+#[cfg(windows)]
+pub(super) fn open_delete_nofollow(path: &Path, kind: AttemptPathKind) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(WINDOWS_CLEANUP_ACCESS)
+        .share_mode(WINDOWS_SHARE_MODE);
+    set_nofollow(&mut options, kind);
+    let file = options.open(path)?;
+    validate_metadata(&file.metadata()?, kind)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(file)
+}
+
+#[cfg(not(windows))]
+pub(super) fn open_delete_nofollow(path: &Path, kind: AttemptPathKind) -> std::io::Result<File> {
+    open_nofollow(path, kind, false)
 }
 
 fn create_file_nofollow(path: &Path) -> std::io::Result<File> {
@@ -122,10 +176,10 @@ fn set_nofollow(options: &mut OpenOptions, _kind: AttemptPathKind) {
 #[cfg(windows)]
 fn set_nofollow(options: &mut OpenOptions, kind: AttemptPathKind) {
     use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    let directory = u32::from(kind == AttemptPathKind::Directory) * FILE_FLAG_BACKUP_SEMANTICS;
-    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | directory);
+    let directory = u32::from(kind == AttemptPathKind::Directory) * 0x0200_0000;
+    options
+        .share_mode(WINDOWS_SHARE_MODE)
+        .custom_flags(0x0020_0000 | directory);
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -206,8 +260,23 @@ pub(super) fn read_record(path: &Path) -> anyhow::Result<AttemptRecord> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+#[cfg(not(windows))]
 pub(super) fn sync_directory(path: &Path) -> anyhow::Result<()> {
     let directory = open_nofollow(path, AttemptPathKind::Directory, false)?;
+    directory.sync_all()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(super) fn sync_directory(path: &Path) -> anyhow::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(WINDOWS_DIRECTORY_SYNC_ACCESS)
+        .share_mode(WINDOWS_SHARE_MODE)
+        .custom_flags(WINDOWS_DIRECTORY_FLAGS);
+    let directory = options.open(path)?;
+    validate_metadata(&directory.metadata()?, AttemptPathKind::Directory)?;
     directory.sync_all()?;
     Ok(())
 }
@@ -324,6 +393,85 @@ pub(super) fn remove_private_object(
     Ok(())
 }
 
+#[cfg(unix)]
+pub(super) fn clear_owned_directory_contents(directory: &File, _path: &Path) -> anyhow::Result<()> {
+    let opened = rustix::io::dup(directory)?;
+    let mut entries = 0_usize;
+    clear_opened_directory(&opened, &mut entries)
+}
+
+#[cfg(unix)]
+fn clear_opened_directory(
+    directory: &std::os::fd::OwnedFd,
+    entries: &mut usize,
+) -> anyhow::Result<()> {
+    use rustix::fs::{AtFlags, Dir, Mode, OFlags, openat, unlinkat};
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    for entry in Dir::read_from(directory)? {
+        let entry = entry?;
+        let bytes = entry.file_name().to_bytes();
+        if matches!(bytes, b"." | b"..") {
+            continue;
+        }
+        *entries += 1;
+        anyhow::ensure!(
+            *entries <= 65_536,
+            "tenant owned cleanup entry limit exceeded"
+        );
+        let name = OsStr::from_bytes(bytes);
+        match openat(
+            directory,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(child) => {
+                clear_opened_directory(&child, entries)?;
+                unlinkat(directory, name, AtFlags::REMOVEDIR)?;
+            }
+            Err(rustix::io::Errno::NOTDIR) | Err(rustix::io::Errno::LOOP) => {
+                unlinkat(directory, name, AtFlags::empty())?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(super) fn clear_owned_directory_contents(_directory: &File, path: &Path) -> anyhow::Result<()> {
+    clear_owned_directory_path(path, &mut 0_usize)
+}
+
+#[cfg(windows)]
+fn clear_owned_directory_path(path: &Path, entries: &mut usize) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        *entries += 1;
+        anyhow::ensure!(
+            *entries <= 65_536,
+            "tenant owned cleanup entry limit exceeded"
+        );
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            clear_owned_directory_path(&entry.path(), entries)?;
+            std::fs::remove_dir(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(super) fn clear_owned_directory_contents(
+    _directory: &File,
+    _path: &Path,
+) -> anyhow::Result<()> {
+    anyhow::bail!("secure owned directory cleanup is unsupported on this platform")
+}
+
 #[cfg(windows)]
 pub(super) fn remove_private_object(
     _path: &Path,
@@ -363,6 +511,20 @@ pub(super) fn remove_private_object(
 
 #[cfg(test)]
 pub(super) fn replace_quarantine_for_test(
+    path: &Path,
+    kind: AttemptPathKind,
+) -> anyhow::Result<()> {
+    let displaced = path.with_extension("displaced-owned");
+    rename_noreplace(path, &displaced)?;
+    match kind {
+        AttemptPathKind::File => std::fs::write(path, b"foreign replacement")?,
+        AttemptPathKind::Directory => std::fs::create_dir(path)?,
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn replace_temporary_source_for_test(
     path: &Path,
     kind: AttemptPathKind,
 ) -> anyhow::Result<()> {

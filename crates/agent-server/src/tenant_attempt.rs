@@ -5,19 +5,32 @@ use std::path::{Path, PathBuf};
 
 #[path = "tenant_attempt_fs.rs"]
 mod fs;
-#[cfg(test)]
-use fs::replace_quarantine_for_test;
 use fs::{
-    canonical_real_directory, create_private_object, open_nofollow, read_object_binding,
-    read_record, remove_private_object, rename_noreplace, sync_directory, validate_link_count,
-    validate_metadata, write_object_binding, write_record,
+    canonical_real_directory, clear_owned_directory_contents, create_private_object,
+    open_delete_nofollow, open_nofollow, read_object_binding, read_record, remove_private_object,
+    rename_noreplace, sync_directory, validate_link_count, validate_metadata, write_object_binding,
+    write_record,
 };
+#[cfg(test)]
+use fs::{replace_quarantine_for_test, replace_temporary_source_for_test};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AttemptPathKind {
     File,
     Directory,
+}
+
+#[cfg(test)]
+pub(crate) fn windows_open_contract_for_test() -> (u32, u32, u32, u32, u32) {
+    let contract = fs::windows_open_contract_for_test();
+    (
+        contract.share_mode,
+        contract.directory_flags,
+        contract.directory_sync_access,
+        contract.directory_write_access,
+        contract.cleanup_access,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -132,6 +145,8 @@ pub(crate) struct TenantAttemptJournal {
     fault: Option<AttemptFaultPoint>,
     #[cfg(test)]
     cleanup_actions: std::collections::HashMap<PathBuf, CleanupTestAction>,
+    #[cfg(test)]
+    publish_replacements: std::collections::HashSet<PathBuf>,
 }
 
 impl TenantAttemptJournal {
@@ -210,6 +225,8 @@ impl TenantAttemptJournal {
             fault: None,
             #[cfg(test)]
             cleanup_actions: std::collections::HashMap::new(),
+            #[cfg(test)]
+            publish_replacements: std::collections::HashSet::new(),
         })
     }
 
@@ -287,14 +304,21 @@ impl TenantAttemptJournal {
         descriptor.sync_all()?;
         sync_directory(&parent)?;
         self.fault(AttemptFaultPoint::ObjectDurable)?;
+        drop(descriptor);
 
         self.record.resources[index].identity = Some(identity);
         self.record.resources[index].state = ResourceState::Prepared;
         self.persist()?;
         self.fault(AttemptFaultPoint::PreparedJournalStored)?;
+        #[cfg(test)]
+        if self.publish_replacements.remove(&canonical_path) {
+            replace_temporary_source_for_test(&temporary_path, kind)?;
+        }
 
         rename_noreplace(&temporary_path, &canonical_path)?;
         sync_directory(&parent)?;
+        let published = self.record.resources[index].clone();
+        self.validate_bound_object(&canonical_path, &published, false)?;
         self.fault(AttemptFaultPoint::PublishedObjectDurable)?;
 
         self.record.resources[index].state = ResourceState::Published;
@@ -354,12 +378,13 @@ impl TenantAttemptJournal {
     fn cleanup_resource(&mut self, resource: &OwnedResource) -> anyhow::Result<()> {
         let quarantine = self.quarantine_destination(resource);
         let source = self.locate_resource(resource, &quarantine)?;
-        let Some(source) = source else {
+        let Some((source, opened, binding)) = source else {
             return Ok(());
         };
-        let (opened, binding) = self.validate_bound_object(&source, resource)?;
+        let mut source_opened = Some(opened);
         if source != quarantine {
             let quarantine_dir = self.ensure_quarantine_directory()?;
+            drop(source_opened.take());
             rename_noreplace(&source, &quarantine)?;
             sync_directory(source.parent().context("tenant source has no parent")?)?;
             sync_directory(&quarantine_dir)?;
@@ -377,18 +402,22 @@ impl TenantAttemptJournal {
             self.record.resources[index].identity = Some(binding.identity.clone());
             self.persist()?;
         }
-        let (moved, _) = self.validate_bound_object(&quarantine, resource)?;
+        drop(source_opened.take());
+        let (moved, _) = self.validate_bound_object(&quarantine, resource, true)?;
+        if self.is_owned_unit_root(resource) {
+            clear_owned_directory_contents(&moved, &quarantine)?;
+        }
+        let moved_identity = PersistentIdentity::from_file(&moved, resource.kind)?;
+        drop(moved);
         #[cfg(test)]
         if self.cleanup_action(resource) == Some(CleanupTestAction::ReplaceQuarantineBeforeDelete) {
             replace_quarantine_for_test(&quarantine, resource.kind)?;
         }
-        let (current, _) = self.validate_bound_object(&quarantine, resource)?;
+        let (current, _) = self.validate_bound_object(&quarantine, resource, true)?;
         anyhow::ensure!(
-            PersistentIdentity::from_file(&moved, resource.kind)?
-                == PersistentIdentity::from_file(&current, resource.kind)?,
+            moved_identity == PersistentIdentity::from_file(&current, resource.kind)?,
             "tenant quarantine identity changed before deletion"
         );
-        drop(opened);
         remove_private_object(&quarantine, resource.kind, &current)?;
         sync_directory(
             quarantine
@@ -402,7 +431,7 @@ impl TenantAttemptJournal {
         &self,
         resource: &OwnedResource,
         quarantine: &Path,
-    ) -> anyhow::Result<Option<PathBuf>> {
+    ) -> anyhow::Result<Option<(PathBuf, File, ObjectBinding)>> {
         let candidates = match resource.state {
             ResourceState::Quarantined => [
                 quarantine,
@@ -420,22 +449,45 @@ impl TenantAttemptJournal {
                 quarantine,
             ],
         };
+        let mut mismatches = 0_usize;
         for candidate in candidates {
             match std::fs::symlink_metadata(candidate) {
-                Ok(_) => return Ok(Some(candidate.to_path_buf())),
+                Ok(_) => match self.validate_bound_object(candidate, resource, true) {
+                    Ok((descriptor, binding)) => {
+                        return Ok(Some((candidate.to_path_buf(), descriptor, binding)));
+                    }
+                    Err(_) => mismatches += 1,
+                },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
         }
+        anyhow::ensure!(
+            mismatches == 0,
+            "tenant owned resource candidates exist but none match the journal binding"
+        );
         Ok(None)
+    }
+
+    fn is_owned_unit_root(&self, resource: &OwnedResource) -> bool {
+        resource.kind == AttemptPathKind::Directory
+            && self
+                .allowed_roots
+                .iter()
+                .any(|root| resource.canonical_path.parent() == Some(root.as_path()))
     }
 
     fn validate_bound_object(
         &self,
         path: &Path,
         resource: &OwnedResource,
+        for_delete: bool,
     ) -> anyhow::Result<(File, ObjectBinding)> {
-        let descriptor = open_nofollow(path, resource.kind, false)?;
+        let descriptor = if for_delete {
+            open_delete_nofollow(path, resource.kind)?
+        } else {
+            open_nofollow(path, resource.kind, false)?
+        };
         let actual = PersistentIdentity::from_file(&descriptor, resource.kind)?;
         let binding = read_object_binding(&descriptor, path)?;
         anyhow::ensure!(binding.version == 1, "unsupported tenant object binding");
@@ -475,7 +527,7 @@ impl TenantAttemptJournal {
             .clone()
             .context("tenant quarantine ownership record missing")?;
         if path.exists() {
-            let (_, binding) = self.validate_bound_object(&path, &resource)?;
+            let (_, binding) = self.validate_bound_object(&path, &resource, false)?;
             resource.identity = Some(binding.identity);
             resource.state = ResourceState::Published;
             self.record.quarantine = Some(resource);
@@ -483,7 +535,8 @@ impl TenantAttemptJournal {
             return Ok(path);
         }
         if resource.temporary_path.exists() {
-            let (_, binding) = self.validate_bound_object(&resource.temporary_path, &resource)?;
+            let (_, binding) =
+                self.validate_bound_object(&resource.temporary_path, &resource, false)?;
             resource.identity = Some(binding.identity);
         } else {
             anyhow::ensure!(
@@ -505,12 +558,14 @@ impl TenantAttemptJournal {
             sync_directory(&self.quarantine_root)?;
             resource.identity = Some(identity);
             self.fault(AttemptFaultPoint::QuarantineObjectStored)?;
+            drop(descriptor);
         }
         resource.state = ResourceState::Prepared;
         self.record.quarantine = Some(resource.clone());
         self.persist()?;
         rename_noreplace(&resource.temporary_path, &path)?;
         sync_directory(&self.quarantine_root)?;
+        self.validate_bound_object(&path, &resource, false)?;
         self.fault(AttemptFaultPoint::QuarantinePublished)?;
         resource.state = ResourceState::Published;
         self.record.quarantine = Some(resource);
@@ -530,7 +585,7 @@ impl TenantAttemptJournal {
             .quarantine
             .clone()
             .context("tenant quarantine ownership record missing")?;
-        let (descriptor, _) = self.validate_bound_object(&path, &resource)?;
+        let (descriptor, _) = self.validate_bound_object(&path, &resource, true)?;
         anyhow::ensure!(
             std::fs::read_dir(&path)?.next().is_none(),
             "tenant quarantine directory is not empty"
@@ -621,6 +676,11 @@ impl TenantAttemptJournal {
     #[cfg(test)]
     pub(crate) fn set_cleanup_action_for_test(&mut self, path: PathBuf, action: CleanupTestAction) {
         self.cleanup_actions.insert(path, action);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_temporary_source_for_test(&mut self, path: PathBuf) {
+        self.publish_replacements.insert(path);
     }
 
     #[cfg(test)]

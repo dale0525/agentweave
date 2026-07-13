@@ -46,7 +46,7 @@ async fn fresh_migration_failure_closes_cleans_and_retries_immediately() {
 }
 
 #[tokio::test]
-async fn subprocess_lock_serializes_registry_initialization() {
+async fn cooperating_processes_serialize_all_tenant_initialization() {
     let root = tempfile::tempdir().unwrap();
     let marker = root.path().join("child-locked");
     let release = root.path().join("release-child");

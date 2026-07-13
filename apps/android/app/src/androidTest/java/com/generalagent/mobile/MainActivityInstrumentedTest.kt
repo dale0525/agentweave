@@ -1,5 +1,6 @@
 package com.generalagent.mobile
 
+import android.security.NetworkSecurityPolicy
 import androidx.activity.compose.setContent
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
@@ -29,6 +30,11 @@ import org.junit.Test
 import org.json.JSONObject
 
 class MainActivityInstrumentedTest {
+  @Test
+  fun debugAcceptanceBuildAllowsLoopbackEvidenceServer() {
+    assertTrue(NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted("127.0.0.1"))
+  }
+
   @Test
   fun disabledAndOwnerPolicyStatesAreStableOnDevice() {
     val disabled = skillAccessState("disabled", emptySet())
@@ -158,28 +164,32 @@ class MainActivityInstrumentedTest {
           )
           .put(JSONObject().put("role", "user").put("content", userText)),
       )
-    val evidence = JSONObject()
+    val hostCapture = JSONObject()
       .put("request_id", "request-1")
       .put("capture_nonce", "nonce-absolute-1")
       .put("user_text", userText)
-      .put("active_revision_id", "revision-1")
-      .put("content_hash", "hash-1")
       .put("marker", "TASK17_UI_ACTIVE_SKILL_EVIDENCE")
       .put("marker_location", "skill_instructions")
       .put("raw_request_sha256", "a".repeat(64))
       .put("request_body", requestBody)
+    val authoritative = JSONObject()
+      .put("source", "mobile_runtime_ffi")
+      .put("package_id", "com.example.task17-mobile")
+      .put("active_revision_id", "revision-1")
+      .put("content_hash", "hash-1")
+    val evidence = JSONObject(hostCapture.toString())
+      .put("active_revision_id", "revision-1")
+      .put("content_hash", "hash-1")
+      .put("authoritative_before", authoritative)
       .put(
-        "authoritative_state",
-        JSONObject()
-          .put("source", "mobile_runtime_ffi")
-          .put("package_id", "com.example.task17-mobile")
-          .put("active_revision_id", "revision-1")
-          .put("content_hash", "hash-1"),
+        "authoritative_after",
+        JSONObject(authoritative.toString()),
       )
 
     assertTrue(
       validateNextTurnEvidence(
         evidence,
+        hostCapture,
         expectedNonce = "nonce-absolute-1",
         expectedUserText = userText,
         expectedRevisionId = "revision-1",
@@ -189,6 +199,7 @@ class MainActivityInstrumentedTest {
     assertFalse(
       validateNextTurnEvidence(
         JSONObject(evidence.toString()).put("active_revision_id", "revision-2"),
+        hostCapture,
         expectedNonce = "nonce-absolute-1",
         expectedUserText = userText,
         expectedRevisionId = "revision-1",
@@ -198,6 +209,7 @@ class MainActivityInstrumentedTest {
     assertFalse(
       validateNextTurnEvidence(
         JSONObject(evidence.toString()).put("marker_location", "available_skills"),
+        hostCapture,
         expectedNonce = "nonce-absolute-1",
         expectedUserText = userText,
         expectedRevisionId = "revision-1",
@@ -207,12 +219,44 @@ class MainActivityInstrumentedTest {
     assertFalse(
       validateNextTurnEvidence(
         JSONObject(evidence.toString()).put("raw_request_sha256", "forged-header-value"),
+        hostCapture,
         expectedNonce = "nonce-absolute-1",
         expectedUserText = userText,
         expectedRevisionId = "revision-1",
         expectedContentHash = "hash-1",
       ),
     )
+    assertFalse(
+      validateNextTurnEvidence(
+        JSONObject(evidence.toString()).put("request_id", "stale-request"),
+        hostCapture,
+        expectedNonce = "nonce-absolute-1",
+        expectedUserText = userText,
+        expectedRevisionId = "revision-1",
+        expectedContentHash = "hash-1",
+      ),
+    )
+    assertFalse(
+      validateNextTurnEvidence(
+        evidence,
+        JSONObject(hostCapture.toString()).put("capture_nonce", "reused-nonce"),
+        expectedNonce = "nonce-absolute-1",
+        expectedUserText = userText,
+        expectedRevisionId = "revision-1",
+        expectedContentHash = "hash-1",
+      ),
+    )
+    assertFalse(
+      validateNextTurnEvidence(
+        evidence,
+        JSONObject(hostCapture.toString()).put("request_body", JSONObject()),
+        expectedNonce = "nonce-absolute-1",
+        expectedUserText = userText,
+        expectedRevisionId = "revision-1",
+        expectedContentHash = "hash-1",
+      ),
+    )
+    assertTrue(secureAcceptanceNonce() != secureAcceptanceNonce())
   }
 
   @Test

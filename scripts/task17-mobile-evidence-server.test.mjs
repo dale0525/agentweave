@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import { buildNextTurnCapture } from "./task17-mobile-evidence-server.mjs";
+import { buildNextTurnCapture, startEvidenceServer } from "./task17-mobile-evidence-server.mjs";
 
 const marker = "TASK17_UI_ACTIVE_SKILL_EVIDENCE";
 const nonce = "nonce-absolute-1";
@@ -62,4 +66,46 @@ test("rejects a marker outside the selected lifecycle instruction block", () => 
     `<skill_instructions name="another-skill" source="SKILL.md">${marker}</skill_instructions>`,
   ));
   assert.throws(() => buildNextTurnCapture(raw), /selected skill instructions/);
+});
+
+test("rejects reuse of a nonce already accepted by this server run", () => {
+  const seenNonces = new Set();
+  const raw = Buffer.from(bodyWithDeveloper(
+    `<skill_instructions name="Task17 mobile lifecycle">${marker}</skill_instructions>`,
+  ));
+  buildNextTurnCapture(raw, { seenNonces });
+  assert.throws(() => buildNextTurnCapture(raw, { seenNonces }), /nonce was already used/);
+});
+
+test("clears stale capture and serves only the same-run request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "task17-evidence-"));
+  const capturePath = join(root, "capture.json");
+  await writeFile(capturePath, '{"request_id":"stale"}');
+  const server = startEvidenceServer({ port: 0, capturePath, quiet: true });
+  try {
+    await once(server, "listening");
+    await assert.rejects(readFile(capturePath), /ENOENT/);
+    const { port } = server.address();
+    const base = `http://127.0.0.1:${port}`;
+    assert.equal((await fetch(`${base}/task17-capture?nonce=${nonce}`)).status, 409);
+
+    const raw = bodyWithDeveloper(
+      `<skill_instructions name="Task17 mobile lifecycle">${marker}</skill_instructions>`,
+    );
+    const response = await fetch(`${base}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: raw,
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await fetch(`${base}/task17-capture?nonce=wrong-request`)).status, 409);
+    const host = await (await fetch(`${base}/task17-capture?nonce=${nonce}`)).json();
+    const persisted = JSON.parse(await readFile(capturePath, "utf8"));
+    assert.deepEqual(host, persisted);
+    assert.notEqual(host.request_id, "stale");
+    assert.equal(host.raw_request_sha256, createHash("sha256").update(raw).digest("hex"));
+  } finally {
+    server.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
