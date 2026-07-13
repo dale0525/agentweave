@@ -28,8 +28,6 @@ async fn authenticated_principal_returns_authoritative_actor_grants_and_policy()
                 "allowed_kinds": ["instruction_only", "host_tools_only"],
                 "protected_packages": [],
                 "allowed_overrides": [],
-                "activation_approval_required": true,
-                "permission_escalation_approval_required": true,
                 "rollback_approval_required": false
             }
         })

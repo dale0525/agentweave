@@ -1,4 +1,4 @@
-import { contextBridge } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
 import { createOwnerTransport } from "./ownerTransport";
 
 type DesktopRuntimeInfo = {
@@ -9,11 +9,13 @@ type DesktopRuntimeInfo = {
 export type DesktopPreloadApi = {
   getRuntimeInfo: () => DesktopRuntimeInfo;
   owner: ReturnType<typeof createOwnerTransport>;
+  approval: {
+    open: (approvalId: string) => Promise<unknown>;
+  };
 };
 
 const ownerToken = process.env.GENERAL_AGENT_OWNER_TOKEN ?? "";
-const approverToken = process.env.GENERAL_AGENT_APPROVER_TOKEN ?? "";
-const owner = createOwnerTransport({ requesterToken: ownerToken, approverToken });
+const owner = createOwnerTransport({ requesterToken: ownerToken });
 
 const runtimeInfo: DesktopRuntimeInfo = {
   platform: typeof process === "undefined" ? "browser" : process.platform,
@@ -22,7 +24,15 @@ const runtimeInfo: DesktopRuntimeInfo = {
 
 export const desktopPreloadApi: DesktopPreloadApi = Object.freeze({
   getRuntimeInfo: () => runtimeInfo,
-  owner
+  owner,
+  approval: Object.freeze({
+    open: (approvalId: string) => {
+      if (!/^[0-9a-f-]+$/.test(approvalId)) {
+        return Promise.reject(new Error("Approval identifier is not allowed"));
+      }
+      return ipcRenderer.invoke("general-agent:approval:open", approvalId);
+    }
+  })
 });
 
 if (typeof process !== "undefined" && process.contextIsolated) {

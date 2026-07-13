@@ -20,13 +20,26 @@ const ownerPolicy: OwnerPolicy = {
   role: "owner",
   grants: ["inspect", "create_draft", "edit_draft", "validate", "activate", "rollback", "disable", "delete_managed"]
 };
-const approverPolicy: OwnerPolicy = { ...ownerPolicy, actorId: "approver-2" };
-const inventory = {
-  effective: [{
-    package_id: "com.example.calendar", display_name: "Calendar Operations", version: "2.0.0", source_layer: "managed",
-    status: "active", reason: "active", active_revision_id: "22222222-2222-4222-8222-222222222222"
-  }],
-  managed: []
+const inventorySummary = {
+  package_id: "com.example.calendar", display_name: "Calendar Operations", version: "2.0.0", source_layer: "managed",
+  status: "active", reason: "active", active_revision_id: "22222222-2222-4222-8222-222222222222",
+  available: true, content_hash: "b454f82c5857ebabf342b7258e5cf7def78b7cd975814119462973de9a38df10",
+  manageable: true
+};
+const inventoryActions = {
+  can_edit_draft: true, can_validate_draft: true, can_request_activation: true,
+  can_disable: true, can_request_removal: true, can_rollback: true
+};
+const inventory: OwnerSkillInventory = {
+  effective: [inventorySummary],
+  managed: [],
+  packages: [{
+    package_id: inventorySummary.package_id,
+    effective: inventorySummary,
+    managed: inventorySummary,
+    built_in_collision: false,
+    actions: inventoryActions
+  }]
 };
 
 beforeEach(() => {
@@ -72,29 +85,89 @@ describe("owner principal route gating", () => {
 });
 
 describe("owner workflows", () => {
-  it("uses distinct requester and approver actors and reloads after approval", async () => {
+  it("keeps all detail tabs shrinkable in the mobile viewport", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+    installBridge();
+    renderOwner();
+    await userEvent.click(await screen.findByRole("button", { name: /Calendar Operations/ }));
+
+    const tabs = await screen.findAllByRole("tab");
+    expect(tabs).toHaveLength(4);
+    for (const tab of tabs) {
+      expect(tab).toHaveStyle({ minWidth: "0", flex: "1 1 auto" });
+    }
+  });
+
+  it("keeps effective builtin authoritative while showing a disabled managed collision", async () => {
+    const effective = {
+      package_id: "com.example.calendar", display_name: "Built-in Calendar", version: "3.0.0",
+      source_layer: "builtin", status: "active", reason: "active",
+      active_revision_id: "builtin:effective-hash", available: true, content_hash: "effective-hash", manageable: false
+    };
+    const managed = {
+      package_id: "com.example.calendar", display_name: "Managed Calendar", version: "2.0.0",
+      source_layer: "managed", status: "disabled", reason: "managed installation is disabled",
+      active_revision_id: "22222222-2222-4222-8222-222222222222", available: false,
+      content_hash: "managed-hash", manageable: false
+    };
+    const actions = {
+      can_edit_draft: false, can_validate_draft: false, can_request_activation: false,
+      can_disable: false, can_request_removal: false, can_rollback: false
+    };
+    const collision = {
+      ...(structuredClone(detailFixture) as OwnerSkillPackage),
+      display_name: effective.display_name,
+      version: effective.version,
+      source_layer: effective.source_layer,
+      status: effective.status,
+      active_revision_id: effective.active_revision_id,
+      effective,
+      managed,
+      built_in_collision: true,
+      actions
+    };
+    installBridge({
+      detail: collision,
+      inventory: {
+        effective: [effective],
+        managed: [managed],
+        packages: [{ package_id: effective.package_id, effective, managed, built_in_collision: true, actions }]
+      } as unknown as OwnerSkillInventory
+    });
+
+    renderOwner();
+
+    expect(await screen.findByRole("heading", { name: "Built-in Calendar" })).toBeInTheDocument();
+    expect(screen.getByText("Collision")).toBeInTheDocument();
+    expect(screen.getByText("Managed disabled")).toBeInTheDocument();
+    expect(screen.getByText("builtin:effective-hash")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Disable skill" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove skill" })).not.toBeInTheDocument();
+  });
+
+  it("opens an independent approval surface and reloads after completion", async () => {
     const bridge = installBridge();
     renderOwner();
     await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
     await userEvent.click(screen.getByRole("button", { name: "Request activation" }));
-    const dialog = await screen.findByRole("dialog", { name: "Approve skill activation" });
+    const dialog = await screen.findByRole("dialog", { name: "Skill activation approval requested" });
     expect(within(dialog).getByText("owner-1")).toBeInTheDocument();
-    expect(within(dialog).getByText("approver-2")).toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole("button", { name: "Approve activation" }));
+    expect(within(dialog).getByText("Independent window")).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open approval window" }));
     expect(await screen.findByText("Active snapshot 4")).toBeInTheDocument();
-    expect(bridge.resolveApproval).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "approve");
+    expect(bridge.openApproval).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     expect(bridge.listSkills.mock.calls.length).toBeGreaterThan(1);
     expect(bridge.skillDetail.mock.calls.length).toBeGreaterThan(1);
   });
 
-  it("disables approval with a clear state when no independent approver exists", async () => {
-    installBridge({ approverError: new Error("Independent approver credential is not configured") });
+  it("keeps the request pending when the independent approval surface is unavailable", async () => {
+    installBridge({ approvalError: new Error("Independent approval surface is unavailable") });
     renderOwner();
     await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
     await userEvent.click(screen.getByRole("button", { name: "Request activation" }));
-    const dialog = await screen.findByRole("dialog", { name: "Approve skill activation" });
-    expect(within(dialog).getByText("Independent approver credential is not configured")).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Approve activation" })).toBeDisabled();
+    const dialog = await screen.findByRole("dialog", { name: "Skill activation approval requested" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open approval window" }));
+    expect(await within(dialog).findByText("Independent approval surface is unavailable")).toBeInTheDocument();
   });
 
   it("does not expose a draft editor for an active package without editable_draft", async () => {
@@ -179,7 +252,7 @@ describe("owner workflows", () => {
     renderOwner();
     await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
     await userEvent.click(screen.getByRole("button", { name: "Request activation" }));
-    const dialog = await screen.findByRole("dialog", { name: "Approve skill activation" });
+    const dialog = await screen.findByRole("dialog", { name: "Skill activation approval requested" });
     const unchanged = [...dialog.querySelectorAll('[data-diff-kind="unchanged"]')];
     const removed = [...dialog.querySelectorAll('[data-diff-kind="removed"]')];
     const added = [...dialog.querySelectorAll('[data-diff-kind="added"]')];
@@ -199,7 +272,7 @@ describe("owner workflows", () => {
     await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
     await userEvent.click(screen.getByRole("button", { name: "Validate draft" }));
     await userEvent.click(await screen.findByRole("button", { name: "Request activation" }));
-    const dialog = await screen.findByRole("dialog", { name: "Approve skill activation" });
+    const dialog = await screen.findByRole("dialog", { name: "Skill activation approval requested" });
     expect(within(dialog).getByText("calendar.write")).toBeInTheDocument();
     expect(within(dialog).getByText("calendar.modify")).toBeInTheDocument();
     expect(within(dialog).getByText("cloud.calendar")).toBeInTheDocument();
@@ -244,12 +317,12 @@ describe("owner workflows", () => {
 
   it("keeps the approval dialog open and visible after approval failure", async () => {
     const bridge = installBridge();
-    bridge.resolveApproval.mockRejectedValueOnce(new Error("approver service unavailable"));
+    bridge.openApproval.mockRejectedValueOnce(new Error("approver service unavailable"));
     renderOwner();
     await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
     await userEvent.click(screen.getByRole("button", { name: "Request activation" }));
-    const dialog = await screen.findByRole("dialog", { name: "Approve skill activation" });
-    await userEvent.click(within(dialog).getByRole("button", { name: "Approve activation" }));
+    const dialog = await screen.findByRole("dialog", { name: "Skill activation approval requested" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open approval window" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("approver service unavailable");
     expect(dialog).toBeInTheDocument();
   });
@@ -261,9 +334,9 @@ describe("owner workflows", () => {
     renderOwner();
     await userEvent.click(await screen.findByRole("tab", { name: "Draft" }));
     await userEvent.click(screen.getByRole("button", { name: "Request activation" }));
-    const dialog = await screen.findByRole("dialog", { name: "Approve skill activation" });
+    const dialog = await screen.findByRole("dialog", { name: "Skill activation approval requested" });
     current = packageDetail("com.example.calendar", "Calendar Operations", false);
-    await userEvent.click(within(dialog).getByRole("button", { name: "Approve activation" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open approval window" }));
     expect(await screen.findByText("Active snapshot 4")).toBeInTheDocument();
     const overview = screen.getByRole("tab", { name: "Overview" });
     await waitFor(() => expect(overview).toHaveAttribute("data-state", "active"));
@@ -304,10 +377,9 @@ describe("owner workflows", () => {
     });
     renderOwner();
     await userEvent.click(await screen.findByRole("button", { name: "Rollback to 1.0.0" }));
-    const dialog = await screen.findByRole("dialog", { name: "Approve skill rollback" });
-    expect(within(dialog).getByText("approver-2")).toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole("button", { name: "Approve rollback" }));
-    expect(bridge.resolveApproval).toHaveBeenCalledWith("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "approve");
+    const dialog = await screen.findByRole("dialog", { name: "Skill rollback approval requested" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open approval window" }));
+    expect(bridge.openApproval).toHaveBeenCalledWith("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
     expect(bridge.listSkills.mock.calls.length).toBeGreaterThan(1);
   });
 
@@ -318,15 +390,21 @@ describe("owner workflows", () => {
     const bridge = installBridge({ detail: activeOnly });
     renderOwner();
     await userEvent.click(await screen.findByRole("button", { name: "Remove skill" }));
-    const dialog = await screen.findByRole("dialog", { name: "Approve skill removal" });
-    await userEvent.click(within(dialog).getByRole("button", { name: "Approve removal" }));
+    const dialog = await screen.findByRole("dialog", { name: "Skill removal approval requested" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open approval window" }));
     expect(bridge.requestRemoval).toHaveBeenCalledWith("com.example.calendar");
-    expect(bridge.resolveApproval).toHaveBeenCalledWith("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "approve");
+    expect(bridge.openApproval).toHaveBeenCalledWith("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
   });
 
   it("hides inapplicable lifecycle actions for removed packages", async () => {
     const removed = structuredClone(detailFixture) as OwnerSkillPackage;
     removed.status = "removed";
+    removed.actions = {
+      ...removed.actions,
+      can_disable: false,
+      can_request_removal: false,
+      can_rollback: false
+    };
     removed.editable_draft = null;
     removed.revisions = removed.revisions.filter((revision) => !revision.editable);
     installBridge({ detail: removed });
@@ -353,7 +431,11 @@ describe("owner workflows", () => {
   it("ignores an older inventory response that resolves last", async () => {
     let resolveOld!: (value: typeof inventory) => void;
     const old = new Promise<typeof inventory>((resolve) => { resolveOld = resolve; });
-    const newer = { effective: [{ ...inventory.effective[0], package_id: "com.example.newer" }], managed: [] };
+    const newerSummary = { ...inventorySummary, package_id: "com.example.newer" };
+    const newer: OwnerSkillInventory = {
+      effective: [newerSummary], managed: [],
+      packages: [{ package_id: newerSummary.package_id, effective: newerSummary, managed: null, built_in_collision: false, actions: inventoryActions }]
+    };
     const bridge = installBridge();
     bridge.listSkills.mockReset().mockReturnValueOnce(old).mockResolvedValueOnce(newer);
     bridge.skillDetail.mockImplementation(async (id: string) => ({ ...detailFixture, package_id: id, display_name: id }));
@@ -392,18 +474,18 @@ function renderOwner() {
 
 function installBridge(options: {
   policy?: OwnerPolicy;
-  approverError?: Error;
+  approvalError?: Error;
   detail?: OwnerSkillPackage;
   details?: Record<string, OwnerSkillPackage>;
   inventory?: OwnerSkillInventory;
   validation?: Record<string, unknown>;
 } = {}) {
   const requester = principal(options.policy ?? ownerPolicy);
+  const openApproval = options.approvalError
+    ? vi.fn(async () => { throw options.approvalError; })
+    : vi.fn(async () => ({ status: "approved", active_generation: 4 }));
   const api = {
     principal: vi.fn(async () => requester),
-    approverPrincipal: options.approverError
-      ? vi.fn(async () => { throw options.approverError; })
-      : vi.fn(async () => principal(approverPolicy)),
     listSkills: vi.fn(async () => options.inventory ?? inventory),
     skillDetail: vi.fn(async (id: string) => structuredClone(
       options.details?.[id] ?? options.detail ?? detailFixture
@@ -415,7 +497,6 @@ function installBridge(options: {
       approval_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", package_id: "com.example.calendar",
       permission_diff: {}, requested_by: "owner-1", revision_id: "33333333-3333-4333-8333-333333333333", status: "pending"
     })),
-    resolveApproval: vi.fn(async () => ({ status: "approved", active_generation: 4 })),
     rollback: vi.fn(async (): Promise<Record<string, unknown>> => ({ generation: 5 })),
     disable: vi.fn(async () => ({})),
     requestRemoval: vi.fn(async () => ({
@@ -423,14 +504,22 @@ function installBridge(options: {
       permission_diff: {}, requested_by: "owner-1", revision_id: "22222222-2222-4222-8222-222222222222", status: "pending"
     }))
   };
-  window.generalAgent = { owner: api };
-  return api;
+  window.generalAgent = { owner: api, approval: { open: openApproval } };
+  return { ...api, openApproval };
 }
 
 function packageDetail(packageId: string, displayName: string, withDraft: boolean): OwnerSkillPackage {
   const detail = structuredClone(detailFixture) as OwnerSkillPackage;
   detail.package_id = packageId;
   detail.display_name = displayName;
+  if (detail.effective) {
+    detail.effective.package_id = packageId;
+    detail.effective.display_name = displayName;
+  }
+  if (detail.managed) {
+    detail.managed.package_id = packageId;
+    detail.managed.display_name = displayName;
+  }
   if (packageId !== "com.example.calendar") {
     detail.active_revision_id = "44444444-4444-4444-8444-444444444444";
     detail.revisions[0].revision_id = "55555555-5555-4555-8555-555555555555";
@@ -445,9 +534,17 @@ function packageDetail(packageId: string, displayName: string, withDraft: boolea
 }
 
 function inventoryFor(...details: OwnerSkillPackage[]): OwnerSkillInventory {
+  const packages = details.map((detail) => ({
+    package_id: detail.package_id,
+    effective: detail.effective,
+    managed: detail.managed,
+    built_in_collision: detail.built_in_collision,
+    actions: detail.actions
+  }));
   return {
-    effective: details.map(({ revisions: _revisions, editable_draft: _draft, ...summary }) => summary),
-    managed: []
+    effective: packages.flatMap((item) => item.effective ? [item.effective] : []),
+    managed: packages.flatMap((item) => item.managed ? [item.managed] : []),
+    packages
   };
 }
 

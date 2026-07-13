@@ -420,6 +420,15 @@ fn mobile_draft_approval_flow_binds_requester_approver_and_audit_actors() {
         }),
     );
     assert_eq!(removed["status"], "approved");
+    let inventory = invoke_value(requester, json!({"operation": "list_skills"}));
+    assert!(
+        inventory
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|skill| { skill["package_id"] != json!("com.example.mobile-authored") }),
+        "removed managed package leaked into layered inventory: {inventory}"
+    );
 
     let audit_rows: Vec<(String, String, Option<String>)> =
         tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -752,6 +761,111 @@ fn bridge_send_message_keeps_api_key_out_of_json_payloads() {
     assert_eq!(response["ok"], false);
     assert!(!response.to_string().contains("sk-separate-argument"));
     close_runtime(handle);
+}
+
+#[test]
+fn owner_turn_transport_binds_initialized_author_and_rejects_approver_or_json_actor() {
+    let author_root = tempdir().unwrap();
+    let mut author_config = init_config(author_root.path());
+    author_config.skill_policy = SkillManagementPolicy::owner_only();
+    author_config.actor_context = ActorContext::owner(
+        "mobile-author",
+        [SkillGrant::Inspect, SkillGrant::CreateDraft],
+    );
+    let author_handle = initialize_handle(&author_config);
+    let (author_url, author_request, author_server) = capture_responses_request();
+    invoke_value(
+        author_handle,
+        json!({"operation": "save_model_config", "config": model_config(author_url)}),
+    );
+    let author_session = invoke_value(
+        author_handle,
+        json!({"operation": "create_session", "title": "Owner author"}),
+    );
+    let author_turn: Value = serde_json::from_str(&send_message_json(
+        author_handle,
+        &json!({
+            "session_id": author_session["id"],
+            "content": "create a skill"
+        })
+        .to_string(),
+        Some("sk-author".into()),
+    ))
+    .unwrap();
+    assert_eq!(author_turn["ok"], true, "{author_turn}");
+    author_server.join().unwrap();
+    let author_body = captured_http_json(&author_request.recv().unwrap());
+    assert!(
+        author_body["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()),
+        "{author_body}"
+    );
+    assert!(
+        author_body
+            .to_string()
+            .contains("Create an inactive owner-managed skill draft")
+    );
+
+    let approver_root = tempdir().unwrap();
+    let mut approver_config = init_config(approver_root.path());
+    approver_config.skill_policy = SkillManagementPolicy::owner_only();
+    approver_config.actor_context = ActorContext::owner(
+        "mobile-approver",
+        [SkillGrant::Inspect, SkillGrant::Activate],
+    );
+    let approver_handle = initialize_handle(&approver_config);
+    let (approver_url, approver_request, approver_server) = capture_responses_request();
+    invoke_value(
+        approver_handle,
+        json!({"operation": "save_model_config", "config": model_config(approver_url)}),
+    );
+    let approver_session = invoke_value(
+        approver_handle,
+        json!({"operation": "create_session", "title": "Approver"}),
+    );
+    let approver_turn: Value = serde_json::from_str(&send_message_json(
+        approver_handle,
+        &json!({
+            "session_id": approver_session["id"],
+            "content": "create a skill"
+        })
+        .to_string(),
+        Some("sk-approver".into()),
+    ))
+    .unwrap();
+    assert_eq!(approver_turn["ok"], true, "{approver_turn}");
+    approver_server.join().unwrap();
+    let approver_body = captured_http_json(&approver_request.recv().unwrap());
+    assert!(
+        approver_body["tools"].as_array().is_none_or(Vec::is_empty),
+        "{approver_body}"
+    );
+
+    let injected: Value = serde_json::from_str(&send_message_json(
+        approver_handle,
+        &json!({
+            "session_id": approver_session["id"],
+            "content": "spoof",
+            "actor_context": {"role": "owner", "grants": ["create_draft"]}
+        })
+        .to_string(),
+        None,
+    ))
+    .unwrap();
+    assert_eq!(injected["ok"], false);
+    assert!(
+        injected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown field")
+    );
+    close_runtime(author_handle);
+    close_runtime(approver_handle);
+}
+
+fn captured_http_json(request: &str) -> Value {
+    serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap()
 }
 
 #[test]

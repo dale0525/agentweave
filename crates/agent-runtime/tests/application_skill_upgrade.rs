@@ -1,7 +1,7 @@
 use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::skill_bundle::{BuildSkillBundleRequest, BundleSkillSource, build_skill_bundle};
 use agent_runtime::skill_management::{
-    CreateSkillDraftRequest, DraftFileUpdate, OwnerSkillManagementService,
+    CreateSkillDraftRequest, DraftFileUpdate, OwnerSkillManagementService, SkillManagementError,
 };
 use agent_runtime::skill_manager::{SkillManager, SkillManagerConfig};
 use agent_runtime::skill_package::{SkillPackageId, SkillPackageKind};
@@ -136,12 +136,24 @@ async fn new_protected_package_policy_overrides_a_previous_managed_allowlist() {
         .activate_managed(&service, shared.as_str(), None, None)
         .await;
     assert!(active_managed(&manager, shared.as_str()));
+    let allowed = service
+        .list_layered_skills(&lifecycle_owner("inventory-owner"))
+        .await
+        .unwrap();
+    assert_eq!(allowed.len(), 1);
+    assert_eq!(
+        allowed[0].effective.as_ref().unwrap().source_layer,
+        "managed"
+    );
+    assert_eq!(allowed[0].managed.as_ref().unwrap().status, "active");
+    assert!(allowed[0].built_in_collision);
+    assert!(allowed[0].actions.can_disable);
 
     fixture
         .write_builtin_shared("2.0.0", "Builtin shared v2")
         .await;
     fixture.publish_bundle("v2-protected").await;
-    let (upgraded, _) = fixture
+    let (upgraded, protected_service) = fixture
         .manager(vec![shared.clone()], vec![shared.clone()])
         .await;
     upgraded.startup_reconcile().await.unwrap();
@@ -167,6 +179,67 @@ async fn new_protected_package_policy_overrides_a_previous_managed_allowlist() {
             .status,
         SkillInstallStatus::Inactive
     );
+    let protected = protected_service
+        .list_layered_skills(&lifecycle_owner("inventory-owner"))
+        .await
+        .unwrap();
+    assert_eq!(
+        protected[0].effective.as_ref().unwrap().source_layer,
+        "builtin"
+    );
+    assert_eq!(protected[0].managed.as_ref().unwrap().status, "inactive");
+    assert!(protected[0].built_in_collision);
+    assert!(!protected[0].actions.can_disable);
+    assert!(!protected[0].actions.can_request_activation);
+
+    let replacement = fixture
+        .create_managed_draft(&protected_service, shared.as_str(), None, None)
+        .await;
+    let error = protected_service
+        .validate_draft(&owner("requester"), &replacement)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<SkillManagementError>(),
+        Some(SkillManagementError::Denied {
+            operation: "override_builtin"
+        })
+    ));
+}
+
+#[tokio::test]
+async fn disabled_managed_override_keeps_builtin_effective_and_separate_action_facts() {
+    let fixture = UpgradeFixture::new().await;
+    fixture
+        .write_builtin_shared("1.0.0", "Builtin shared")
+        .await;
+    fixture.publish_bundle("v1").await;
+    let shared = package_id("com.example.shared");
+    let (manager, service) = fixture.manager(Vec::new(), vec![shared.clone()]).await;
+    manager.startup_reconcile().await.unwrap();
+    fixture
+        .activate_managed(&service, shared.as_str(), None, None)
+        .await;
+
+    service
+        .disable_managed_skill(&lifecycle_owner("inventory-owner"), &shared)
+        .await
+        .unwrap();
+    let inventory = service
+        .list_layered_skills(&lifecycle_owner("inventory-owner"))
+        .await
+        .unwrap();
+
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(
+        inventory[0].effective.as_ref().unwrap().source_layer,
+        "builtin"
+    );
+    assert_eq!(inventory[0].effective.as_ref().unwrap().version, "1.0.0");
+    assert_eq!(inventory[0].managed.as_ref().unwrap().status, "disabled");
+    assert!(inventory[0].built_in_collision);
+    assert!(!inventory[0].actions.can_disable);
+    assert!(inventory[0].actions.can_request_removal);
 }
 
 #[tokio::test]
@@ -406,6 +479,29 @@ impl UpgradeFixture {
         dependency: Option<&str>,
         capability: Option<&str>,
     ) -> String {
+        let revision_id = self
+            .create_managed_draft(service, id, dependency, capability)
+            .await;
+        let actor = owner("requester");
+        service.validate_draft(&actor, &revision_id).await.unwrap();
+        let approval = service
+            .request_activation(&actor, &revision_id)
+            .await
+            .unwrap();
+        service
+            .approve_activation(&approval.approval_id, &owner("approver"))
+            .await
+            .unwrap();
+        revision_id
+    }
+
+    async fn create_managed_draft(
+        &self,
+        service: &OwnerSkillManagementService,
+        id: &str,
+        dependency: Option<&str>,
+        capability: Option<&str>,
+    ) -> String {
         let actor = owner("requester");
         let descriptor = serde_json::json!({
             "schemaVersion": 1,
@@ -444,18 +540,6 @@ impl UpgradeFixture {
             )
             .await
             .unwrap();
-        service
-            .validate_draft(&actor, &draft.revision_id)
-            .await
-            .unwrap();
-        let approval = service
-            .request_activation(&actor, &draft.revision_id)
-            .await
-            .unwrap();
-        service
-            .approve_activation(&approval.approval_id, &owner("approver"))
-            .await
-            .unwrap();
         draft.revision_id
     }
 }
@@ -469,6 +553,23 @@ fn owner(id: &str) -> ActorContext {
             SkillGrant::EditDraft,
             SkillGrant::Validate,
             SkillGrant::Activate,
+            SkillGrant::OverrideBuiltin,
+        ],
+    )
+}
+
+fn lifecycle_owner(id: &str) -> ActorContext {
+    ActorContext::owner(
+        id,
+        [
+            SkillGrant::Inspect,
+            SkillGrant::CreateDraft,
+            SkillGrant::EditDraft,
+            SkillGrant::Validate,
+            SkillGrant::Activate,
+            SkillGrant::Disable,
+            SkillGrant::DeleteManaged,
+            SkillGrant::Rollback,
             SkillGrant::OverrideBuiltin,
         ],
     )

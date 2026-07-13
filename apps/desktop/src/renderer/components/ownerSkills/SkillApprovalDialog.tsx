@@ -9,8 +9,6 @@ export type OwnerApprovalOperation = "activation" | "removal" | "rollback";
 
 type SkillApprovalDialogProps = {
   approval: OwnerSkillApproval | null;
-  approverActor: string | null;
-  approverAvailable: boolean;
   baselineRevision: OwnerSkillRevision | null;
   busy: boolean;
   error: string | null;
@@ -22,8 +20,6 @@ type SkillApprovalDialogProps = {
 
 export function SkillApprovalDialog({
   approval,
-  approverActor,
-  approverAvailable,
   baselineRevision,
   busy,
   error,
@@ -32,7 +28,7 @@ export function SkillApprovalDialog({
   onApprove,
   onOpenChange
 }: SkillApprovalDialogProps): JSX.Element {
-  const title = `Approve skill ${operation}`;
+  const title = `Skill ${operation} approval requested`;
   const capabilities = getAddedCapabilities(approval?.permission_diff, revision);
   return (
     <Dialog.Root open={approval !== null} onOpenChange={onOpenChange}>
@@ -128,8 +124,8 @@ export function SkillApprovalDialog({
                 <Text size="2" weight="medium">{approval?.requested_by ?? "Unknown"}</Text>
               </Flex>
               <Flex justify="between" gap="3" wrap="wrap">
-                <Text color="gray" size="2">Approving actor</Text>
-                <Text size="2" weight="medium">{approverActor ?? "Independent approver unavailable"}</Text>
+                <Text color="gray" size="2">Approval surface</Text>
+                <Text size="2" weight="medium">Independent window</Text>
               </Flex>
               <Text color="gray" size="2">
                 {operation === "removal"
@@ -144,9 +140,9 @@ export function SkillApprovalDialog({
             <Dialog.Close asChild>
               <Button disabled={busy} variant="soft">Cancel</Button>
             </Dialog.Close>
-            <Button disabled={busy || !revision?.validation.ok || !approverAvailable} onClick={onApprove}>
+            <Button disabled={busy || !revision?.validation.ok} onClick={onApprove}>
               {busy ? <LoaderCircle size={15} aria-hidden="true" /> : null}
-              {busy ? "Approving..." : `Approve ${operation}`}
+              {busy ? "Opening..." : "Open approval window"}
             </Button>
           </Flex>
           </Dialog.Content>

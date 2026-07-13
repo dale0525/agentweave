@@ -116,12 +116,18 @@ class SkillAssetInstaller internal constructor(
     val revisions = prepareRealDirectory(bundleRoot.resolve("revisions"), bundleRoot)
     val revision = containedPath(revisions, expectedHash)
     val currentFile = bundleRoot.resolve("current")
-    val currentHash = readCurrentHash(currentFile)
+    val previousFile = bundleRoot.resolve("previous")
+    val currentHash = readPointerHash(currentFile, "current")
+    val previousHash = readPointerHash(previousFile, "previous")
+    check(currentHash != null || previousHash == null) {
+      "Built-in skill previous pointer exists without current"
+    }
     if (currentHash == expectedHash && Files.isDirectory(revision, LinkOption.NOFOLLOW_LINKS)) {
       check(hashPublishedTree(revision) == expectedHash) { "Published built-in skill revision failed verification" }
-      check(readCurrentHash(currentFile, sync = true) == expectedHash) {
+      check(readPointerHash(currentFile, "current", sync = true) == expectedHash) {
         "Built-in skill current pointer changed during durability recovery"
       }
+      cleanupRevisions(revisions, setOfNotNull(expectedHash, previousHash))
       fileSystem.syncDirectory(bundleRoot)
       return InstalledSkillBundle(revision.toFile(), expectedHash, false)
     }
@@ -138,7 +144,9 @@ class SkillAssetInstaller internal constructor(
     } else {
       publishRevision(revisions, revision, expectedHash, entries)
     }
+    if (currentHash != null) switchPointer(bundleRoot, previousFile, ".previous.incoming", currentHash)
     switchCurrent(bundleRoot, currentFile, expectedHash)
+    cleanupRevisions(revisions, setOfNotNull(expectedHash, currentHash))
     return InstalledSkillBundle(revision.toFile(), expectedHash, true)
   }
 
@@ -185,10 +193,11 @@ class SkillAssetInstaller internal constructor(
   }
 
   private fun switchCurrent(bundleRoot: Path, currentFile: Path, expectedHash: String) {
-    val incoming = bundleRoot.resolve(".current.incoming")
+    val incomingName = ".current.incoming"
+    val incoming = bundleRoot.resolve(incomingName)
     Files.deleteIfExists(incoming)
     try {
-      fileSystem.writeNewFile(incoming, expectedHash.toByteArray(StandardCharsets.UTF_8))
+      writePointer(incoming, expectedHash)
       faults.after(SkillPublicationFaultPoint.CURRENT_TEMP_SYNCED)
       fileSystem.atomicMove(incoming, currentFile, replace = true)
       faults.after(SkillPublicationFaultPoint.CURRENT_RENAMED)
@@ -198,6 +207,37 @@ class SkillAssetInstaller internal constructor(
       Files.deleteIfExists(incoming)
       throw IllegalStateException("Failed to switch built-in skill revision", error)
     }
+  }
+
+  private fun switchPointer(bundleRoot: Path, target: Path, incomingName: String, hash: String) {
+    val incoming = bundleRoot.resolve(incomingName)
+    Files.deleteIfExists(incoming)
+    try {
+      writePointer(incoming, hash)
+      fileSystem.atomicMove(incoming, target, replace = true)
+      fileSystem.syncDirectory(bundleRoot)
+    } catch (error: Exception) {
+      Files.deleteIfExists(incoming)
+      throw IllegalStateException("Failed to switch built-in skill rollback pointer", error)
+    }
+  }
+
+  private fun writePointer(path: Path, hash: String) {
+    fileSystem.writeNewFile(path, hash.toByteArray(StandardCharsets.UTF_8))
+  }
+
+  private fun cleanupRevisions(revisions: Path, retained: Set<String>) {
+    var changed = false
+    Files.newDirectoryStream(revisions).use { entries ->
+      for (entry in entries) {
+        val name = entry.fileName.toString()
+        if (name !in retained && HASH_PATTERN.matches(name) && Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS)) {
+          deleteTreeNoFollow(entry)
+          changed = true
+        }
+      }
+    }
+    if (changed) fileSystem.syncDirectory(revisions)
   }
 
   private fun validateEntries(unvalidated: List<SkillAssetEntry>): List<SkillAssetEntry> {
@@ -265,12 +305,14 @@ class SkillAssetInstaller internal constructor(
     return digest.digest().toHex()
   }
 
-  private fun readCurrentHash(currentFile: Path, sync: Boolean = false): String? {
-    if (!Files.exists(currentFile, LinkOption.NOFOLLOW_LINKS)) return null
-    check(Files.isRegularFile(currentFile, LinkOption.NOFOLLOW_LINKS)) {
-      "Built-in skill current pointer is not a regular file"
+  private fun readPointerHash(pointer: Path, label: String, sync: Boolean = false): String? {
+    if (!Files.exists(pointer, LinkOption.NOFOLLOW_LINKS)) return null
+    check(Files.isRegularFile(pointer, LinkOption.NOFOLLOW_LINKS)) {
+      "Built-in skill $label pointer is not a regular file"
     }
-    return fileSystem.readVerifiedFile(currentFile, sync).toString(StandardCharsets.UTF_8).trim()
+    val hash = fileSystem.readVerifiedFile(pointer, sync).toString(StandardCharsets.UTF_8).trim()
+    check(HASH_PATTERN.matches(hash)) { "Built-in skill $label pointer hash is invalid" }
+    return hash
   }
 
   private fun preparePrivateRoot(path: Path): Path {

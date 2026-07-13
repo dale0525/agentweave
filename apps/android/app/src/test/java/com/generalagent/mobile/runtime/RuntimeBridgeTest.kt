@@ -58,7 +58,6 @@ class RuntimeBridgeTest {
       allowedKinds = listOf("instruction_only"),
       protectedPackages = listOf("com.example.protected"),
       allowedOverrides = listOf("com.example.override"),
-      activationApprovalRequired = false,
     )
     val actor = RuntimeActorContext(
       actorId = "android-owner",
@@ -369,6 +368,30 @@ class RuntimeBridgeTest {
     assertEquals("capability_missing", skills.single().status)
     assertFalse(skills.single().available)
     assertEquals("Missing required capability: browser.headless", skills.single().reason)
+  }
+
+  @Test
+  fun listSkillsPreservesLayeredWinnerCollisionAndAuthoritativeActions() {
+    val native = object : NativeRuntimeApi {
+      override fun initialize(requestJson: String): String = error("not used")
+
+      override fun invoke(handle: Long, requestJson: String): String =
+        """{"ok":true,"data":[{"package_id":"com.example.collision","display_name":"Built-in winner","version":"1.0.0","source_layer":"builtin","status":"active","available":true,"reason":"active","active_revision_id":"builtin:abc","manageable":false,"built_in_collision":true,"effective":{"package_id":"com.example.collision","display_name":"Built-in winner","version":"1.0.0","source_layer":"builtin","status":"active","reason":"active","active_revision_id":"builtin:abc","manageable":false,"available":true,"content_hash":"abc"},"managed":{"package_id":"com.example.collision","display_name":"Managed draft","version":"2.0.0","source_layer":"managed","status":"disabled","reason":"disabled","active_revision_id":"revision-2","manageable":true,"available":false,"content_hash":"def"},"actions":{"can_edit_draft":false,"can_validate_draft":false,"can_request_activation":false,"can_disable":false,"can_request_removal":true,"can_rollback":false}}]}"""
+
+      override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String =
+        error("not used")
+
+      override fun close(handle: Long): String = """{"ok":true,"data":null}"""
+    }
+
+    val skill = RuntimeClient(9L, native).listSkills().single()
+
+    assertEquals("builtin", skill.sourceLayer)
+    assertEquals("builtin:abc", skill.activeRevisionId)
+    assertEquals("disabled", skill.managed?.status)
+    assertTrue(skill.builtInCollision)
+    assertTrue(skill.actions.canRequestRemoval)
+    assertFalse(skill.actions.canRequestActivation)
   }
 
   @Test

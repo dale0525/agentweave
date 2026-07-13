@@ -53,15 +53,20 @@ internal class AndroidDirectoryBoundSkillPublisher(
     bundleRoot: AndroidPublicationDirectory,
     revisions: AndroidPublicationDirectory,
   ): InstalledSkillBundle {
-    val currentHash = readCurrentHash(bundleRoot)
+    val currentHash = readPointerHash(bundleRoot, CURRENT)
+    val previousHash = readPointerHash(bundleRoot, PREVIOUS)
+    check(currentHash != null || previousHash == null) {
+      "Built-in skill previous pointer exists without current"
+    }
     if (currentHash == request.expectedHash && revisions.entryKind(request.expectedHash) == EntryKind.DIRECTORY) {
       revisions.openDirectory(request.expectedHash).use { revision ->
         check(hashTree(revision, syncFiles = false, syncDirectories = false) == request.expectedHash) {
           "Published built-in skill revision failed verification"
         }
-        check(readCurrentHash(bundleRoot, sync = true) == request.expectedHash) {
+        check(readPointerHash(bundleRoot, CURRENT, sync = true) == request.expectedHash) {
           "Built-in skill current pointer changed during durability recovery"
         }
+        cleanupRevisions(revisions, setOfNotNull(request.expectedHash, previousHash))
         bundleRoot.sync()
         privateRoot.sync()
         verifyRootChain(privateRoot, bundleRoot, revisions, revision)
@@ -87,9 +92,11 @@ internal class AndroidDirectoryBoundSkillPublisher(
         else -> error("Built-in skill revision path is not a real directory")
       }
       verifyRootChain(privateRoot, bundleRoot, revisions, retainedRevision)
+      if (currentHash != null) switchPointer(bundleRoot, PREVIOUS, PREVIOUS_INCOMING, currentHash)
       switchCurrent(bundleRoot)
       privateRoot.sync()
       verifyRootChain(privateRoot, bundleRoot, revisions, retainedRevision)
+      cleanupRevisions(revisions, setOfNotNull(request.expectedHash, currentHash))
       return installed(changed = true)
     } finally {
       if (retainedTree != null) {
@@ -147,10 +154,7 @@ internal class AndroidDirectoryBoundSkillPublisher(
   private fun switchCurrent(bundleRoot: AndroidPublicationDirectory) {
     bundleRoot.deleteTree(CURRENT_INCOMING)
     try {
-      val identity = bundleRoot.writeNewFile(
-        CURRENT_INCOMING,
-        request.expectedHash.toByteArray(StandardCharsets.UTF_8),
-      )
+      val identity = bundleRoot.writeNewFile(CURRENT_INCOMING, pointerBytes(request.expectedHash))
       request.faults.after(SkillPublicationFaultPoint.CURRENT_TEMP_SYNCED)
       bundleRoot.renameVerifiedFile(CURRENT_INCOMING, identity, CURRENT)
       hooks.after(AndroidSkillPublicationEvent.CURRENT_RENAMED)
@@ -163,10 +167,49 @@ internal class AndroidDirectoryBoundSkillPublisher(
     }
   }
 
-  private fun readCurrentHash(bundleRoot: AndroidPublicationDirectory, sync: Boolean = false): String? {
-    if (bundleRoot.entryKind(CURRENT) == null) return null
-    return bundleRoot.readVerifiedFile(CURRENT, sync).toString(StandardCharsets.UTF_8).trim()
+  private fun switchPointer(
+    bundleRoot: AndroidPublicationDirectory,
+    target: String,
+    incoming: String,
+    hash: String,
+  ) {
+    bundleRoot.deleteTree(incoming)
+    try {
+      val identity = bundleRoot.writeNewFile(incoming, pointerBytes(hash))
+      bundleRoot.renameVerifiedFile(incoming, identity, target)
+      bundleRoot.sync()
+    } catch (error: Exception) {
+      bundleRoot.deleteTree(incoming)
+      throw IllegalStateException("Failed to switch built-in skill rollback pointer", error)
+    }
   }
+
+  private fun cleanupRevisions(revisions: AndroidPublicationDirectory, retained: Set<String>) {
+    var changed = false
+    for (name in revisions.listNames()) {
+      if (name !in retained && HASH_PATTERN.matches(name) && revisions.entryKind(name) == EntryKind.DIRECTORY) {
+        revisions.deleteTree(name)
+        changed = true
+      }
+    }
+    if (changed) revisions.sync()
+  }
+
+  private fun readPointerHash(
+    bundleRoot: AndroidPublicationDirectory,
+    name: String,
+    sync: Boolean = false,
+  ): String? {
+    if (bundleRoot.entryKind(name) == null) return null
+    check(bundleRoot.entryKind(name) == EntryKind.FILE) {
+      "Built-in skill $name pointer is not a regular file"
+    }
+    val hash = bundleRoot.readVerifiedFile(name, sync).toString(StandardCharsets.UTF_8).trim()
+    check(HASH_PATTERN.matches(hash)) { "Built-in skill $name pointer hash is invalid" }
+    return hash
+  }
+
+  private fun pointerBytes(hash: String): ByteArray = hash.toByteArray(StandardCharsets.UTF_8)
 
   private fun hashTree(
     root: AndroidPublicationDirectory,
@@ -259,6 +302,9 @@ internal class AndroidDirectoryBoundSkillPublisher(
     private const val LOCK_FILE = ".install.lock"
     private const val CURRENT = "current"
     private const val CURRENT_INCOMING = ".current.incoming"
+    private const val PREVIOUS = "previous"
+    private const val PREVIOUS_INCOMING = ".previous.incoming"
+    private val HASH_PATTERN = Regex("[0-9a-f]{64}")
   }
 }
 

@@ -1,3 +1,4 @@
+use agent_runtime::skill_management::{SkillActionFacts, SkillPackageStatus};
 use agent_runtime::skill_policy::{ActorContext, SkillManagementPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -59,6 +60,9 @@ pub struct MobileSkillDto {
     pub active_revision_id: Option<String>,
     pub manageable: bool,
     pub built_in_collision: bool,
+    pub effective: Option<SkillPackageStatus>,
+    pub managed: Option<SkillPackageStatus>,
+    pub actions: SkillActionFacts,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

@@ -29,11 +29,7 @@ describe("owner preload capability", () => {
     const fetcher = vi.fn(async () =>
       new Response(JSON.stringify({ effective: [], managed: [] }), { status: 200 })
     );
-    const transport = createOwnerTransport({
-      requesterToken: "requester-secret",
-      approverToken: "approver-secret",
-      fetcher
-    });
+    const transport = createOwnerTransport({ requesterToken: "requester-secret", fetcher });
 
     await transport.listSkills();
 
@@ -47,35 +43,14 @@ describe("owner preload capability", () => {
     );
   });
 
-  it("uses the independent approver credential only for approval resolution", async () => {
-    const fetcher = vi.fn(async () =>
-      new Response(JSON.stringify({ status: "approved" }), { status: 200 })
-    );
+  it("does not expose approver identity or resolution capability to requester renderer", () => {
     const transport = createOwnerTransport({
       requesterToken: "requester-secret",
-      approverToken: "approver-secret",
-      fetcher
-    });
-
-    await transport.resolveApproval("00000000-0000-4000-8000-000000000001", "approve");
-
-    expect(fetcher).toHaveBeenCalledWith(
-      expect.stringContaining("/owner/skills/approvals/"),
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer approver-secret" })
-      })
-    );
-  });
-
-  it("reports an explicit unavailable state without an independent approver", async () => {
-    const transport = createOwnerTransport({
-      requesterToken: "requester-secret",
-      approverToken: "",
       fetcher: vi.fn()
     });
 
-    await expect(
-      transport.resolveApproval("00000000-0000-4000-8000-000000000001", "approve")
-    ).rejects.toThrow("Independent approver credential is not configured");
+    expect("approverPrincipal" in transport).toBe(false);
+    expect("resolveApproval" in transport).toBe(false);
+    expect(Object.keys(transport)).not.toContain("approverToken");
   });
 });

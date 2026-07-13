@@ -131,13 +131,13 @@ fn owner_grant_does_not_allow_native_runtime_when_kind_is_blocked() {
 }
 
 #[test]
-fn protected_override_requires_allowlist_and_override_grant() {
+fn protected_override_is_denied_even_with_allowlist_and_override_grant() {
     let package = SkillPackageId::parse("generalagent.core.runtime").unwrap();
     let policy = SkillManagementPolicy::owner_only()
         .protect(package.clone())
         .allow_override(package.clone());
 
-    assert!(policy.can_override(
+    assert!(!policy.can_override(
         &ActorContext::owner("owner-1", [SkillGrant::OverrideBuiltin]),
         &package
     ));
@@ -157,7 +157,7 @@ fn generic_allows_never_authorizes_builtin_override() {
         SkillOperation::OverrideBuiltin,
         SkillPackageKind::InstructionOnly
     ));
-    assert!(policy.can_override(&actor, &package));
+    assert!(!policy.can_override(&actor, &package));
 }
 
 #[test]
@@ -283,8 +283,6 @@ fn skill_management_policy_serializes_deterministically_and_round_trips() {
             .into_iter()
             .collect(),
         allowed_overrides: [protected_runtime].into_iter().collect(),
-        activation_approval_required: false,
-        permission_escalation_approval_required: true,
         rollback_approval_required: false,
     };
     let expected = serde_json::json!({
@@ -293,15 +291,16 @@ fn skill_management_policy_serializes_deterministically_and_round_trips() {
         "allowed_kinds": ["instruction_only", "native_runtime"],
         "protected_packages": ["generalagent.core.alpha", "generalagent.core.runtime"],
         "allowed_overrides": ["generalagent.core.runtime"],
-        "activation_approval_required": false,
-        "permission_escalation_approval_required": true,
         "rollback_approval_required": false
     });
 
     let serialized = serde_json::to_value(&policy).unwrap();
     assert_eq!(serialized, expected);
 
-    let decoded: SkillManagementPolicy = serde_json::from_value(serialized).unwrap();
+    let mut legacy = serialized;
+    legacy["activation_approval_required"] = serde_json::json!(false);
+    legacy["permission_escalation_approval_required"] = serde_json::json!(true);
+    let decoded: SkillManagementPolicy = serde_json::from_value(legacy).unwrap();
     assert_eq!(decoded, policy);
     assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
 }

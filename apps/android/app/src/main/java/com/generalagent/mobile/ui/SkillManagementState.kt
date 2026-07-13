@@ -58,37 +58,16 @@ fun skillAccessState(policy: RuntimeSkillPolicy, actor: RuntimeActorContext): Sk
 fun skillTargetActions(
   access: SkillAccessState,
   detail: RuntimeSkillDetail,
-  manageable: Boolean,
 ): Set<SkillAction> {
   if (access.mode != SkillScreenMode.OwnerManage) return emptySet()
-  val draft = detail.editableDraft
-  val protected = detail.packageId in access.protectedPackages
-  val overrideRequired = protected || detail.builtInCollision
-  val overrideAllowed = !overrideRequired || (
-    detail.packageId in access.allowedOverrides && access.canOverrideProtected
-  )
-  val draftAllowed = draft != null &&
-    draft.editable &&
-    draft.status == "staging" &&
-    draft.kind in access.allowedKinds
-  val active = detail.activeRevisionId?.let { activeId ->
-    detail.revisions.find { it.revisionId == activeId && !it.editable && it.status == "managed" }
-  }
-  val activeInstallation = detail.sourceLayer == "managed" && detail.status == "active" && active != null
-  val activeKindAllowed = active?.kind in access.allowedKinds
-  val lifecycleAllowed = manageable && !protected && activeInstallation && activeKindAllowed
-  val rollbackAvailable = lifecycleAllowed && detail.revisions.any { revision ->
-    revision.kind in access.allowedKinds && selectRollbackTarget(detail, revision) != null
-  }
-  return access.actions.filterTo(mutableSetOf()) { action ->
-    when (action) {
-      SkillAction.Create -> false
-      SkillAction.Edit -> draftAllowed && access.agentAuthoring
-      SkillAction.Validate, SkillAction.Activate -> draftAllowed && overrideAllowed
-      SkillAction.Disable -> lifecycleAllowed
-      SkillAction.Rollback -> rollbackAvailable
-      SkillAction.Delete -> lifecycleAllowed
-    }
+  return buildSet {
+    val facts = detail.actions
+    if (facts.canEditDraft) add(SkillAction.Edit)
+    if (facts.canValidateDraft) add(SkillAction.Validate)
+    if (facts.canRequestActivation) add(SkillAction.Activate)
+    if (facts.canDisable) add(SkillAction.Disable)
+    if (facts.canRollback) add(SkillAction.Rollback)
+    if (facts.canRequestRemoval) add(SkillAction.Delete)
   }
 }
 
@@ -98,8 +77,7 @@ fun skillDetailWithInventoryFacts(
 ): RuntimeSkillDetail =
   detail.copy(
     builtInCollision = detail.builtInCollision ||
-      inventorySkill?.builtInCollision == true ||
-      (inventorySkill?.sourceLayer == "builtin" && detail.editableDraft != null),
+      inventorySkill?.builtInCollision == true,
   )
 
 private val existingDraftActionSet =

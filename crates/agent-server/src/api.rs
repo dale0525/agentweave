@@ -205,7 +205,7 @@ pub struct CreateSessionResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UserMessageRequest {
     pub content: String,
     #[serde(default)]
@@ -242,7 +242,7 @@ pub struct ErrorResponse {
 }
 
 #[derive(Debug)]
-enum ApiError {
+pub(crate) enum ApiError {
     BadRequest(&'static str),
     ConnectionFailed(anyhow::Error),
     NotFound(&'static str),
@@ -366,6 +366,15 @@ async fn post_message(
     State(state): State<Arc<AppState>>,
     Json(request): Json<UserMessageRequest>,
 ) -> Result<Json<UserMessageResponse>, ApiError> {
+    post_message_for_actor(session_id, state, request, ActorContext::anonymous()).await
+}
+
+pub(crate) async fn post_message_for_actor(
+    session_id: String,
+    state: Arc<AppState>,
+    request: UserMessageRequest,
+    actor: ActorContext,
+) -> Result<Json<UserMessageResponse>, ApiError> {
     let session_exists = state
         .storage
         .session_exists(&session_id)
@@ -375,7 +384,7 @@ async fn post_message(
         return Err(ApiError::NotFound("session not found"));
     }
 
-    let events = run_agent_turn(&state, &request).await?;
+    let events = run_agent_turn_for_actor(&state, &request, actor).await?;
     let assistant_text = assistant_text_from_events(&events)
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("agent turn did not finish")))?;
     let (user_message, assistant_message) = state
@@ -390,13 +399,6 @@ async fn post_message(
         assistant_message,
         events,
     }))
-}
-
-async fn run_agent_turn(
-    state: &AppState,
-    request: &UserMessageRequest,
-) -> Result<Vec<RuntimeEvent>, ApiError> {
-    run_agent_turn_for_actor(state, request, ActorContext::anonymous()).await
 }
 
 async fn run_agent_turn_for_actor(
@@ -423,7 +425,7 @@ async fn run_agent_turn_for_actor(
 
     state
         .agent
-        .run(&request.content)
+        .run_request(TurnRequest::new(&request.content).with_actor_context(actor))
         .await
         .map_err(agent_turn_error)
 }

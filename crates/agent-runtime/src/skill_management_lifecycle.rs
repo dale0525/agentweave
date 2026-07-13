@@ -55,6 +55,37 @@ struct UnavailablePublication<'a> {
 }
 
 impl OwnerSkillManagementService {
+    pub async fn inspect_pending_skill_approval(
+        &self,
+        approval_id: &str,
+        actor: &ActorContext,
+    ) -> anyhow::Result<SkillApprovalRecord> {
+        self.authorize_inspect(actor)?;
+        let approval = self
+            .state
+            .get_approval(approval_id)
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_state("inspect_skill_approval", "skill approval", error)
+            })?
+            .ok_or(SkillManagementError::NotFound {
+                resource: "skill approval",
+            })?;
+        if approval.status != crate::skill_state::SkillApprovalStatus::Pending {
+            return Err(SkillManagementError::Conflict {
+                resource: "skill approval",
+            }
+            .into());
+        }
+        if approval.requested_by == actor.actor_id {
+            return Err(SkillManagementError::Denied {
+                operation: "inspect_skill_approval",
+            }
+            .into());
+        }
+        Ok(approval)
+    }
+
     pub async fn approve_pending_skill_operation(
         &self,
         approval_id: &str,
@@ -148,7 +179,6 @@ impl OwnerSkillManagementService {
             .begin_publication()
             .await
             .map_err(|error| SkillManagementError::internal("rollback", error))?;
-        self.deny_builtin(package_id, SkillOperation::Rollback)?;
         self.deny_protected(package_id, SkillOperation::Rollback)?;
         let installation = self
             .active_managed_installation(package_id, "rollback")
@@ -337,7 +367,6 @@ impl OwnerSkillManagementService {
             }
             .into());
         }
-        self.deny_builtin(&approval.package_id, SkillOperation::Rollback)?;
         self.deny_protected(&approval.package_id, SkillOperation::Rollback)?;
         let binding = self
             .state
@@ -391,7 +420,6 @@ impl OwnerSkillManagementService {
             }
             .into());
         }
-        self.deny_builtin(&approval.package_id, SkillOperation::Rollback)?;
         self.deny_protected(&approval.package_id, SkillOperation::Rollback)?;
         self.authorize_any_kind(actor, SkillOperation::Rollback)?;
         self.state
@@ -430,7 +458,6 @@ impl OwnerSkillManagementService {
             .begin_publication()
             .await
             .map_err(|error| SkillManagementError::internal("disable", error))?;
-        self.deny_builtin(package_id, SkillOperation::Disable)?;
         self.deny_protected(package_id, SkillOperation::Disable)?;
         let installation = self
             .active_managed_installation(package_id, "disable")
@@ -499,7 +526,6 @@ impl OwnerSkillManagementService {
             .begin_publication()
             .await
             .map_err(|error| SkillManagementError::internal("request_removal", error))?;
-        self.deny_builtin(package_id, SkillOperation::DeleteManaged)?;
         self.deny_protected(package_id, SkillOperation::DeleteManaged)?;
         let installation = self
             .removable_managed_installation(package_id, "request_removal")
@@ -585,7 +611,6 @@ impl OwnerSkillManagementService {
             }
             .into());
         }
-        self.deny_builtin(&approval.package_id, SkillOperation::DeleteManaged)?;
         self.deny_protected(&approval.package_id, SkillOperation::DeleteManaged)?;
         let binding_value = self
             .state
@@ -802,28 +827,6 @@ impl OwnerSkillManagementService {
         operation: SkillOperation,
     ) -> Result<(), SkillManagementError> {
         if self.policy.protected_packages.contains(package_id) {
-            return Err(SkillManagementError::Denied {
-                operation: operation.as_str(),
-            });
-        }
-        Ok(())
-    }
-
-    fn deny_builtin(
-        &self,
-        package_id: &SkillPackageId,
-        operation: SkillOperation,
-    ) -> Result<(), SkillManagementError> {
-        let snapshot = self.manager.current_snapshot();
-        let builtin = snapshot
-            .packages()
-            .iter()
-            .chain(snapshot.inactive())
-            .any(|resolved| {
-                resolved.package.layer == SkillLayer::Builtin
-                    && resolved.package.descriptor.id == *package_id
-            });
-        if builtin {
             return Err(SkillManagementError::Denied {
                 operation: operation.as_str(),
             });

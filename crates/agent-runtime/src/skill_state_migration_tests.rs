@@ -270,6 +270,68 @@ async fn upgrades_legacy_approval_schema_and_preserves_valid_rows() {
 }
 
 #[tokio::test]
+async fn structurally_final_quoted_schema_is_not_rebuilt_and_records_schema_version() {
+    let (_directory, url) = file_database();
+    let pool = raw_pool(&url).await;
+    create_core_storage_tables(&pool).await;
+    create_structurally_final_quoted_skill_tables(&pool).await;
+    pool.close().await;
+
+    let storage = Storage::connect(&url).await.unwrap();
+    for index in ["preserve_installation_marker", "preserve_approval_marker"] {
+        let present: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+        )
+        .bind(index)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(present, 1, "semantic schema was unnecessarily rebuilt");
+    }
+    let version: i64 = sqlx::query_scalar(
+        "SELECT MAX(version) FROM skill_schema_migrations WHERE component = 'skill_state'",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
+    assert!(version >= 1);
+}
+
+#[tokio::test]
+async fn structurally_similar_schema_with_weakened_checks_is_rebuilt() {
+    let (_directory, url) = file_database();
+    let pool = raw_pool(&url).await;
+    create_core_storage_tables(&pool).await;
+    create_weakened_check_skill_tables(&pool).await;
+    pool.close().await;
+
+    let storage = Storage::connect(&url).await.unwrap();
+    for (index, expected) in [("weak_installation_marker", 0), ("weak_approval_marker", 1)] {
+        let present: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+        )
+        .bind(index)
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            present, expected,
+            "schema rebuild decision was not semantic"
+        );
+    }
+    let invalid_enabled = sqlx::query(
+        r#"INSERT INTO skill_installations
+           (package_id, source_layer, active_revision_id, enabled, trust_level,
+            install_status, installed_at, updated_at)
+           VALUES ('migration.invalid.enabled', 'managed', NULL, 2, 'approved',
+                   'disabled', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"#,
+    )
+    .execute(storage.pool())
+    .await;
+    assert!(invalid_enabled.is_err());
+}
+
+#[tokio::test]
 async fn legacy_approval_migration_rejects_pending_with_resolver_and_rolls_back() {
     assert_legacy_approval_rejected("pending", Some("owner-2"), None, "pending").await;
 }
@@ -586,6 +648,75 @@ async fn create_legacy_task6_tables(pool: &SqlitePool) {
     .execute(pool)
     .await
     .unwrap();
+}
+
+async fn create_structurally_final_quoted_skill_tables(pool: &SqlitePool) {
+    for statement in [
+        r#"CREATE TABLE "skill_revisions" (
+          "revision_id" TEXT PRIMARY KEY, "package_id" TEXT NOT NULL,
+          "version" TEXT NOT NULL, "content_hash" TEXT NOT NULL,
+          "storage_path" TEXT NOT NULL, "descriptor_json" TEXT NOT NULL,
+          "validation_json" TEXT NOT NULL, "created_by" TEXT NOT NULL,
+          "created_at" TEXT NOT NULL, "lifecycle_status" TEXT NOT NULL,
+          UNIQUE("package_id", "revision_id")
+        )"#,
+        r#"CREATE TABLE "skill_installations" (
+          "package_id" TEXT PRIMARY KEY,
+          "source_layer" TEXT NOT NULL CHECK ("source_layer" IN ('builtin','managed','session')),
+          "active_revision_id" TEXT,
+          "enabled" INTEGER NOT NULL CHECK ("enabled" IN (0,1)),
+          "trust_level" TEXT NOT NULL CHECK (length("trust_level") > 0),
+          "install_status" TEXT NOT NULL CHECK ("install_status" IN ('active','disabled','inactive','quarantined','removed')),
+          "installed_at" TEXT NOT NULL, "updated_at" TEXT NOT NULL,
+          CHECK ( "install_status" <> 'active' OR ("enabled" = 1 AND "active_revision_id" IS NOT NULL) ),
+          FOREIGN KEY("package_id", "active_revision_id")
+            REFERENCES "skill_revisions"("package_id", "revision_id")
+        )"#,
+        r#"CREATE TABLE "skill_approvals" (
+          "approval_id" TEXT PRIMARY KEY, "package_id" TEXT NOT NULL,
+          "revision_id" TEXT NOT NULL, "operation" TEXT NOT NULL,
+          "requested_by" TEXT NOT NULL, "approved_by" TEXT,
+          "status" TEXT NOT NULL, "permission_diff" TEXT NOT NULL,
+          "created_at" TEXT NOT NULL, "resolved_at" TEXT,
+          CHECK (("status" = 'pending' AND "approved_by" IS NULL AND "resolved_at" IS NULL)
+            OR ("status" IN ('approved','rejected') AND "approved_by" IS NOT NULL AND "resolved_at" IS NOT NULL))
+        )"#,
+        "CREATE INDEX preserve_installation_marker ON skill_installations(updated_at)",
+        "CREATE INDEX preserve_approval_marker ON skill_approvals(created_at)",
+    ] {
+        sqlx::query(statement).execute(pool).await.unwrap();
+    }
+}
+
+async fn create_weakened_check_skill_tables(pool: &SqlitePool) {
+    for statement in [
+        r#"CREATE TABLE skill_revisions (
+          revision_id TEXT PRIMARY KEY, package_id TEXT NOT NULL, version TEXT NOT NULL,
+          content_hash TEXT NOT NULL, storage_path TEXT NOT NULL, descriptor_json TEXT NOT NULL,
+          validation_json TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+          lifecycle_status TEXT NOT NULL, UNIQUE(package_id, revision_id)
+        )"#,
+        r#"CREATE TABLE skill_installations (
+          package_id TEXT PRIMARY KEY, source_layer TEXT NOT NULL, active_revision_id TEXT,
+          enabled INTEGER NOT NULL, trust_level TEXT NOT NULL, install_status TEXT NOT NULL,
+          installed_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          CHECK(install_status != 'active' OR (enabled = 1 AND active_revision_id IS NOT NULL)),
+          FOREIGN KEY(package_id, active_revision_id)
+            REFERENCES skill_revisions(package_id, revision_id)
+        )"#,
+        r#"CREATE TABLE skill_approvals (
+          approval_id TEXT PRIMARY KEY, package_id TEXT NOT NULL, revision_id TEXT NOT NULL,
+          operation TEXT NOT NULL, requested_by TEXT NOT NULL, approved_by TEXT,
+          status TEXT NOT NULL, permission_diff TEXT NOT NULL, created_at TEXT NOT NULL,
+          resolved_at TEXT,
+          CHECK((status = 'pending' AND approved_by IS NULL AND resolved_at IS NULL)
+            OR (status IN ('approved','rejected') AND approved_by IS NOT NULL AND resolved_at IS NOT NULL))
+        )"#,
+        "CREATE INDEX weak_installation_marker ON skill_installations(updated_at)",
+        "CREATE INDEX weak_approval_marker ON skill_approvals(created_at)",
+    ] {
+        sqlx::query(statement).execute(pool).await.unwrap();
+    }
 }
 
 async fn create_core_storage_tables(pool: &SqlitePool) {

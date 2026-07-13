@@ -6,6 +6,39 @@
   "status": "active",
   "reason": "active",
   "active_revision_id": "22222222-2222-4222-8222-222222222222",
+  "effective": {
+    "package_id": "com.example.calendar",
+    "display_name": "Calendar Operations",
+    "version": "2.0.0",
+    "source_layer": "managed",
+    "status": "active",
+    "reason": "active",
+    "active_revision_id": "22222222-2222-4222-8222-222222222222",
+    "available": true,
+    "content_hash": "b454f82c5857ebabf342b7258e5cf7def78b7cd975814119462973de9a38df10",
+    "manageable": true
+  },
+  "managed": {
+    "package_id": "com.example.calendar",
+    "display_name": "Calendar Operations",
+    "version": "2.0.0",
+    "source_layer": "managed",
+    "status": "active",
+    "reason": "managed installation is active",
+    "active_revision_id": "22222222-2222-4222-8222-222222222222",
+    "available": true,
+    "content_hash": "b454f82c5857ebabf342b7258e5cf7def78b7cd975814119462973de9a38df10",
+    "manageable": true
+  },
+  "built_in_collision": false,
+  "actions": {
+    "can_edit_draft": true,
+    "can_validate_draft": true,
+    "can_request_activation": true,
+    "can_disable": true,
+    "can_request_removal": true,
+    "can_rollback": true
+  },
   "revisions": [
     {
       "revision_id": "33333333-3333-4333-8333-333333333333",

@@ -54,6 +54,7 @@ const CREATE_APPROVALS: &str = r#"CREATE TABLE skill_approvals (
 pub(crate) async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     let mut tx = crate::skill_state_transactions::begin_immediate(pool).await?;
     let result = async {
+        create_migration_ledger(&mut tx).await?;
         migrate_approvals(&mut tx).await?;
         create_supporting_tables(&mut tx).await?;
 
@@ -75,10 +76,49 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         }
 
         create_indexes(&mut tx).await?;
+        record_schema_version(&mut tx).await?;
         Ok(())
     }
     .await;
     crate::skill_state_transactions::finish(tx, result).await
+}
+
+const SKILL_SCHEMA_VERSION: i64 = 2;
+
+async fn create_migration_ledger(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS skill_schema_migrations (
+          component TEXT NOT NULL,
+          version INTEGER NOT NULL CHECK(version > 0),
+          applied_at TEXT NOT NULL,
+          PRIMARY KEY(component, version)
+        )"#,
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn record_schema_version(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"INSERT INTO skill_schema_migrations (component, version, applied_at)
+           VALUES ('skill_state', ?, ?)
+           ON CONFLICT(component, version) DO NOTHING"#,
+    )
+    .bind(SKILL_SCHEMA_VERSION)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn schema_version_is_current(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<bool> {
+    let version: Option<i64> = sqlx::query_scalar(
+        "SELECT MAX(version) FROM skill_schema_migrations WHERE component = 'skill_state'",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(version.is_some_and(|version| version >= SKILL_SCHEMA_VERSION))
 }
 
 async fn create_supporting_tables(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> {
@@ -154,6 +194,20 @@ async fn create_supporting_tables(tx: &mut Transaction<'_, Sqlite>) -> anyhow::R
           graph_fingerprint TEXT NOT NULL CHECK(length(graph_fingerprint) = 64),
           snapshot_generation INTEGER NOT NULL CHECK(snapshot_generation >= 0),
           updated_at TEXT NOT NULL
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS skill_snapshot_leases (
+          lease_id TEXT PRIMARY KEY,
+          generation INTEGER NOT NULL CHECK(generation >= 0),
+          members_json TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS skill_snapshot_lease_revisions (
+          lease_id TEXT NOT NULL,
+          revision_id TEXT NOT NULL,
+          PRIMARY KEY(lease_id, revision_id),
+          FOREIGN KEY(lease_id) REFERENCES skill_snapshot_leases(lease_id) ON DELETE CASCADE
         )"#,
     ] {
         sqlx::query(statement).execute(&mut **tx).await?;
@@ -345,6 +399,8 @@ async fn create_indexes(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> 
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_snapshots_single_active ON skill_snapshots(status) WHERE status = 'active'",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_snapshots_single_lkg ON skill_snapshots(status) WHERE status = 'last_known_good'",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_approvals_single_removal ON skill_approvals(package_id, operation) WHERE status = 'pending' AND operation = 'remove'",
+        "CREATE INDEX IF NOT EXISTS idx_skill_snapshot_leases_expiry ON skill_snapshot_leases(expires_at, generation)",
+        "CREATE INDEX IF NOT EXISTS idx_skill_snapshot_lease_revisions_revision ON skill_snapshot_lease_revisions(revision_id, lease_id)",
     ] {
         sqlx::query(statement).execute(&mut **tx).await?;
     }
@@ -378,29 +434,181 @@ async fn column_exists(
 }
 
 async fn installation_schema_is_final(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<bool> {
-    let sql: String = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'skill_installations'",
+    let expected_columns = [
+        "package_id",
+        "source_layer",
+        "active_revision_id",
+        "enabled",
+        "trust_level",
+        "install_status",
+        "installed_at",
+        "updated_at",
+    ];
+    if table_columns(tx, "skill_installations").await? != expected_columns {
+        return Ok(false);
+    }
+    let foreign_keys: Vec<(String, String, String)> = sqlx::query_as(
+        r#"SELECT "table", "from", "to"
+           FROM pragma_foreign_key_list('skill_installations') ORDER BY seq"#,
     )
-    .fetch_one(&mut **tx)
+    .fetch_all(&mut **tx)
     .await?;
-    let foreign_keys: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_foreign_key_list('skill_installations') WHERE \"table\" = 'skill_revisions'",
+    let expected_foreign_keys = vec![
+        (
+            "skill_revisions".to_string(),
+            "package_id".to_string(),
+            "package_id".to_string(),
+        ),
+        (
+            "skill_revisions".to_string(),
+            "active_revision_id".to_string(),
+            "revision_id".to_string(),
+        ),
+    ];
+    if foreign_keys != expected_foreign_keys
+        || !has_unique_index(tx, "skill_revisions", &["package_id", "revision_id"]).await?
+    {
+        return Ok(false);
+    }
+    if schema_version_is_current(tx).await? {
+        return Ok(true);
+    }
+    constraints_reject_all(
+        tx,
+        &[
+            installation_constraint_probe("source", "invalid", 0, "approved", "disabled", false),
+            installation_constraint_probe("enabled", "managed", 2, "approved", "disabled", false),
+            installation_constraint_probe("trust", "managed", 0, "", "disabled", false),
+            installation_constraint_probe("status", "managed", 0, "approved", "invalid", false),
+            installation_constraint_probe("active", "managed", 1, "approved", "active", false),
+        ],
     )
-    .fetch_one(&mut **tx)
-    .await?;
-    Ok(sql.contains("active_revision_id IS NOT NULL") && foreign_keys == 2)
+    .await
 }
 
 async fn approval_schema_is_final(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<bool> {
-    let sql: String = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'skill_approvals'",
+    let expected_columns = [
+        "approval_id",
+        "package_id",
+        "revision_id",
+        "operation",
+        "requested_by",
+        "approved_by",
+        "status",
+        "permission_diff",
+        "created_at",
+        "resolved_at",
+    ];
+    if table_columns(tx, "skill_approvals").await? != expected_columns {
+        return Ok(false);
+    }
+    if schema_version_is_current(tx).await? {
+        return Ok(true);
+    }
+    constraint_rejects(
+        tx,
+        r#"INSERT INTO skill_approvals
+           (approval_id, package_id, revision_id, operation, requested_by, approved_by,
+            status, permission_diff, created_at, resolved_at)
+           VALUES ('migration-probe-approval', 'migration.probe.approval', 'revision',
+                   'activate', 'requester', 'approver', 'pending', '{}',
+                   '2026-01-01T00:00:00Z', NULL)"#,
+        "DELETE FROM skill_approvals WHERE approval_id = 'migration-probe-approval'",
     )
-    .fetch_one(&mut **tx)
-    .await?;
-    let sql = sql.to_ascii_lowercase();
-    Ok(sql.contains("status = 'pending'")
-        && sql.contains("approved_by is null")
-        && sql.contains("resolved_at is null")
-        && sql.contains("approved_by is not null")
-        && sql.contains("resolved_at is not null"))
+    .await
+}
+
+async fn table_columns(
+    tx: &mut Transaction<'_, Sqlite>,
+    table: &str,
+) -> anyhow::Result<Vec<String>> {
+    let rows = sqlx::query("SELECT name FROM pragma_table_info(?) ORDER BY cid")
+        .bind(table)
+        .fetch_all(&mut **tx)
+        .await?;
+    rows.iter()
+        .map(|row| row.try_get("name").map_err(Into::into))
+        .collect()
+}
+
+async fn has_unique_index(
+    tx: &mut Transaction<'_, Sqlite>,
+    table: &str,
+    expected: &[&str],
+) -> anyhow::Result<bool> {
+    let indexes = sqlx::query("SELECT name, \"unique\" FROM pragma_index_list(?)")
+        .bind(table)
+        .fetch_all(&mut **tx)
+        .await?;
+    for index in indexes {
+        let unique: i64 = index.try_get("unique")?;
+        if unique == 0 {
+            continue;
+        }
+        let name: String = index.try_get("name")?;
+        let columns = sqlx::query(
+            "SELECT name FROM pragma_index_xinfo(?) WHERE key = 1 AND cid >= 0 ORDER BY seqno",
+        )
+        .bind(name)
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(|row| row.try_get::<String, _>("name"))
+        .collect::<Result<Vec<_>, _>>()?;
+        if columns
+            .iter()
+            .map(String::as_str)
+            .eq(expected.iter().copied())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn constraint_rejects(
+    tx: &mut Transaction<'_, Sqlite>,
+    invalid_insert: &str,
+    cleanup: &str,
+) -> anyhow::Result<bool> {
+    let result = sqlx::query(invalid_insert).execute(&mut **tx).await;
+    if result.is_err() {
+        return Ok(true);
+    }
+    sqlx::query(cleanup).execute(&mut **tx).await?;
+    Ok(false)
+}
+
+async fn constraints_reject_all(
+    tx: &mut Transaction<'_, Sqlite>,
+    probes: &[(String, String)],
+) -> anyhow::Result<bool> {
+    for (insert, cleanup) in probes {
+        if !constraint_rejects(tx, insert, cleanup).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn installation_constraint_probe(
+    suffix: &str,
+    source_layer: &str,
+    enabled: i64,
+    trust_level: &str,
+    install_status: &str,
+    with_revision: bool,
+) -> (String, String) {
+    let package_id = format!("migration.probe.installation.{suffix}");
+    let revision = if with_revision { "'revision'" } else { "NULL" };
+    (
+        format!(
+            r#"INSERT INTO skill_installations
+               (package_id, source_layer, active_revision_id, enabled, trust_level,
+                install_status, installed_at, updated_at)
+               VALUES ('{package_id}', '{source_layer}', {revision}, {enabled}, '{trust_level}',
+                       '{install_status}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"#
+        ),
+        format!("DELETE FROM skill_installations WHERE package_id = '{package_id}'"),
+    )
 }

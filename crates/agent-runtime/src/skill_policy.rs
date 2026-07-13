@@ -89,8 +89,6 @@ pub struct SkillManagementPolicy {
     pub allowed_kinds: BTreeSet<SkillPackageKind>,
     pub protected_packages: BTreeSet<SkillPackageId>,
     pub allowed_overrides: BTreeSet<SkillPackageId>,
-    pub activation_approval_required: bool,
-    pub permission_escalation_approval_required: bool,
     #[serde(default)]
     pub rollback_approval_required: bool,
 }
@@ -103,8 +101,6 @@ impl Default for SkillManagementPolicy {
             allowed_kinds: BTreeSet::new(),
             protected_packages: BTreeSet::new(),
             allowed_overrides: BTreeSet::new(),
-            activation_approval_required: true,
-            permission_escalation_approval_required: true,
             rollback_approval_required: false,
         }
     }
@@ -174,8 +170,25 @@ impl SkillManagementPolicy {
     pub fn can_override(&self, actor: &ActorContext, id: &SkillPackageId) -> bool {
         self.mode == SkillManagementMode::OwnerOnly
             && actor.role == "owner"
+            && !self.protected_packages.contains(id)
             && self.allowed_overrides.contains(id)
             && actor.grants.contains(&SkillGrant::OverrideBuiltin)
+    }
+
+    pub fn can_author_conversationally(&self, actor: &ActorContext) -> bool {
+        self.mode == SkillManagementMode::OwnerOnly
+            && self.agent_authoring
+            && actor.role == "owner"
+            && self.allowed_kinds.iter().copied().any(|kind| {
+                [
+                    SkillOperation::CreateDraft,
+                    SkillOperation::EditDraft,
+                    SkillOperation::Validate,
+                    SkillOperation::Test,
+                ]
+                .into_iter()
+                .any(|operation| self.allows(actor, operation, kind))
+            })
     }
 }
 

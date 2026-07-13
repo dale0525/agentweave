@@ -449,7 +449,7 @@ async fn protected_managed_package_denies_destructive_lifecycle_operations() {
 }
 
 #[tokio::test]
-async fn builtin_package_returns_denial_for_destructive_lifecycle_operations() {
+async fn builtin_package_without_managed_layer_returns_not_found_for_destructive_operations() {
     let fixture = AuthoringFixture::with_known_runtime_tool().await;
     let package_id =
         crate::skill_package::SkillPackageId::parse("com.example.host-runtime").unwrap();
@@ -468,7 +468,7 @@ async fn builtin_package_returns_denial_for_destructive_lifecycle_operations() {
     for error in [disable, removal] {
         assert!(matches!(
             error.downcast_ref::<SkillManagementError>(),
-            Some(SkillManagementError::Denied { .. })
+            Some(SkillManagementError::NotFound { .. })
         ));
     }
 }

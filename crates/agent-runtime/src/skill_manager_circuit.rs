@@ -2,8 +2,77 @@ use super::*;
 
 impl SkillManager {
     pub async fn lease_snapshot_for_turn(&self) -> anyhow::Result<SkillSnapshotLease> {
+        self.converge_to_authoritative_generation().await?;
         self.refresh_expired_circuits().await?;
-        Ok(self.lease_snapshot())
+        self.lease_authoritative_snapshot().await
+    }
+
+    pub(crate) async fn converge_to_authoritative_generation(&self) -> anyhow::Result<()> {
+        let Ok(backend) = self.managed_runtime() else {
+            return Ok(());
+        };
+        let _guard = self.inner.reload_lock.lock().await;
+        self.converge_under_lock(&backend).await.map(|_| ())
+    }
+
+    async fn lease_authoritative_snapshot(&self) -> anyhow::Result<SkillSnapshotLease> {
+        let Ok(backend) = self.managed_runtime() else {
+            return Ok(self.lease_snapshot());
+        };
+        let _guard = self.inner.reload_lock.lock().await;
+        for _ in 0..3 {
+            let Some((snapshot, members)) = self.converge_under_lock(&backend).await? else {
+                return Ok(self.lease_snapshot());
+            };
+            let revisions = crate::skill_recovery::snapshot_revision_ids(&snapshot);
+            match backend
+                .state
+                .acquire_snapshot_lease(snapshot.generation(), &members, &revisions)
+                .await
+            {
+                Ok(lease_id) => {
+                    self.track_live_snapshot(&snapshot);
+                    return Ok(SkillSnapshotLease::new_durable(
+                        snapshot,
+                        backend.state.clone(),
+                        lease_id,
+                    ));
+                }
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<crate::skill_state::SkillStateBoundaryError>(),
+                        Some(crate::skill_state::SkillStateBoundaryError::Conflict(_))
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        anyhow::bail!("authoritative active snapshot changed repeatedly before turn lease")
+    }
+
+    async fn converge_under_lock(
+        &self,
+        backend: &ManagedRuntimeBackend,
+    ) -> anyhow::Result<Option<(Arc<SkillSnapshot>, serde_json::Value)>> {
+        let Some(active) = backend
+            .state
+            .snapshot_with_status(crate::skill_state::SkillSnapshotStatus::Active)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let current = self.current_snapshot();
+        if current.generation() == active.generation
+            && crate::skill_recovery::snapshot_members(&current) == active.members_json
+        {
+            return Ok(Some((current, active.members_json)));
+        }
+        let converged = self.rebuild_persisted_snapshot(backend, &active).await?;
+        *self
+            .inner
+            .current
+            .write()
+            .expect("skill snapshot lock poisoned") = converged.clone();
+        Ok(Some((converged, active.members_json)))
     }
 
     async fn refresh_expired_circuits(&self) -> anyhow::Result<()> {

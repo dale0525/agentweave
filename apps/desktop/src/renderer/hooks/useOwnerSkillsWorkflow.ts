@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   OwnerSkillApproval,
+  OwnerLayeredSkill,
   OwnerSkillPackage,
   OwnerSkillPackageSummary,
   OwnerSkillRevision,
   OwnerSkillValidation
 } from "../api";
 import { ownerClient } from "../ownerClient";
-import { getApproverPolicy, OwnerPolicy } from "../ownerBridge";
+import { OwnerPolicy, requestApprovalSurface } from "../ownerBridge";
 import { DraftForm } from "../components/ownerSkills/CreateDraftDialog";
 import { OwnerApprovalOperation } from "../components/ownerSkills/SkillApprovalDialog";
 
@@ -41,8 +42,6 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
   const [busy, setBusy] = useState<string | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
-  const [approver, setApprover] = useState<OwnerPolicy | null>(null);
-  const [approverError, setApproverError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [createdPackageId, setCreatedPackageId] = useState<string | null>(null);
   const [draftInstructions, setDraftInstructions] = useState("");
@@ -94,7 +93,7 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
     try {
       const inventory = await ownerClient.listSkills();
       if (requestId !== inventoryRequest.current) return;
-      const next = normalizeInventory([...inventory.effective, ...inventory.managed]);
+      const next = normalizeInventory(inventory.packages);
       setSummaries(next);
       const nextSelected = selectedId && next.some((item) => item.package_id === selectedId)
         ? selectedId
@@ -110,11 +109,6 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
   }, [loadDetail, selectedId]);
 
   useEffect(() => { void loadInventory(); }, []);
-  useEffect(() => {
-    getApproverPolicy()
-      .then((value) => { setApprover(value); setApproverError(null); })
-      .catch((error) => setApproverError(errorMessage(error, "Independent approver unavailable")));
-  }, []);
   useEffect(() => {
     if (!selectedId) return;
     void loadDetail(selectedId);
@@ -170,7 +164,7 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
 
   return {
     policy, packages, selectedId, selected, selectedRevision, editableDraft, search, status,
-    loadError, busy, pendingApproval, approvalError, approver, approverError, createOpen,
+    loadError, busy, pendingApproval, approvalError, createOpen,
     createdPackageId,
     draftInstructions, draftRequiredTools, draftValidation,
     setSearch, setCreateOpen,
@@ -203,9 +197,11 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
       } catch (error) { setStatus(errorMessage(error, "Activation request failed")); }
     }),
     approvePending: () => void mutate("approval", async () => {
-      if (!pendingApproval || !approver) return;
+      if (!pendingApproval) return;
       try {
-        const report = await ownerClient.resolveApproval(pendingApproval.approval.approval_id);
+        const report = await requestApprovalSurface(
+          pendingApproval.approval.approval_id
+        ) as { active_generation?: number; generation?: number };
         const generation = report.active_generation ?? report.generation;
         setPendingApproval(null); setApprovalError(null);
         await reconcile(pendingApproval.operation === "removal"
@@ -310,13 +306,11 @@ export function useOwnerSkillsWorkflow(policy: OwnerPolicy) {
   };
 }
 
-function normalizeInventory(items: OwnerSkillPackageSummary[]): OwnerSkillPackageSummary[] {
-  const byId = new Map<string, OwnerSkillPackageSummary>();
-  for (const item of items) {
-    const current = byId.get(item.package_id);
-    if (!current || item.source_layer === "managed") byId.set(item.package_id, item);
-  }
-  return [...byId.values()].sort((a, b) => a.package_id.localeCompare(b.package_id));
+function normalizeInventory(items: OwnerLayeredSkill[]): OwnerSkillPackageSummary[] {
+  return items
+    .map((item) => item.effective ?? item.managed)
+    .filter((item): item is OwnerSkillPackageSummary => item !== null)
+    .sort((a, b) => a.package_id.localeCompare(b.package_id));
 }
 
 function activeRevisionFor(detail: OwnerSkillPackage): OwnerSkillRevision | null {

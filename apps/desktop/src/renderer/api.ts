@@ -80,10 +80,37 @@ export type OwnerSkillPackageSummary = {
   status: string;
   reason: string;
   active_revision_id: string | null;
+  available: boolean;
+  content_hash: string | null;
+  manageable: boolean;
 };
 
-export type OwnerSkillPackage = OwnerSkillPackageSummary & {
+export type OwnerSkillActionFacts = {
+  can_edit_draft: boolean;
+  can_validate_draft: boolean;
+  can_request_activation: boolean;
+  can_disable: boolean;
+  can_request_removal: boolean;
+  can_rollback: boolean;
+};
+
+export type OwnerLayeredSkill = {
+  package_id: string;
+  effective: OwnerSkillPackageSummary | null;
+  managed: OwnerSkillPackageSummary | null;
+  built_in_collision: boolean;
+  actions: OwnerSkillActionFacts;
+};
+
+export type OwnerSkillPackage = Omit<
+  OwnerSkillPackageSummary,
+  "available" | "content_hash" | "manageable"
+> & {
   display_name: string;
+  effective: OwnerSkillPackageSummary | null;
+  managed: OwnerSkillPackageSummary | null;
+  built_in_collision: boolean;
+  actions: OwnerSkillActionFacts;
   revisions: OwnerSkillRevision[];
   editable_draft: OwnerSkillRevision | null;
 };
@@ -91,6 +118,7 @@ export type OwnerSkillPackage = OwnerSkillPackageSummary & {
 export type OwnerSkillInventory = {
   effective: OwnerSkillPackageSummary[];
   managed: OwnerSkillPackageSummary[];
+  packages: OwnerLayeredSkill[];
 };
 
 export type OwnerSkillDraftSummary = {
@@ -104,6 +132,7 @@ export type OwnerSkillDraftSummary = {
 
 export type OwnerSkillApproval = {
   approval_id: string;
+  operation?: "activation" | "removal" | "rollback";
   package_id: string;
   permission_diff: unknown;
   requested_by: string;

@@ -90,6 +90,30 @@ impl AuthoringFixture {
         SkillStateStore::new(Storage::connect(&database_url).await.unwrap())
     }
 
+    pub(crate) async fn second_runtime(
+        &self,
+    ) -> (SkillManager, OwnerSkillManagementService, SkillStateStore) {
+        let state = self.second_state_connection().await;
+        let store = SkillRevisionStore::new(self.store.paths().clone(), state.clone());
+        let manager = SkillManager::new_deferred_managed(SkillManagerConfig {
+            sources: vec![Arc::new(ManagedSkillSource::from_store(store.clone()))],
+            platform: PlatformId::Server,
+            capabilities: CapabilitySet::from_names(Vec::<String>::new()),
+            protected_packages: Vec::new(),
+            allowed_overrides: Vec::new(),
+            runtime_version: "0.1.0".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+        let service = OwnerSkillManagementService::new(
+            manager.clone(),
+            store,
+            state.clone(),
+            SkillManagementPolicy::owner_only(),
+        );
+        (manager, service, state)
+    }
+
     pub(crate) async fn with_limits(limits: crate::skill_store::SkillStoreLimits) -> Self {
         let app = tempdir().unwrap();
         let cache = tempdir().unwrap();
@@ -504,7 +528,7 @@ async fn known_host_tool_draft_creates_and_validates_through_production_registry
 }
 
 #[tokio::test]
-async fn builtin_override_requires_allowlist_and_override_grant_for_all_protection_states() {
+async fn builtin_override_requires_unprotected_allowlist_and_override_grant() {
     let package_id = SkillPackageId::parse("com.example.host-runtime").unwrap();
     for protected in [false, true] {
         for allowlisted in [false, true] {
@@ -539,7 +563,7 @@ async fn builtin_override_requires_allowlist_and_override_grant_for_all_protecti
                     .service
                     .validate_draft(&fixture.actor(grants), &draft.revision_id)
                     .await;
-                if allowlisted && granted {
+                if !protected && allowlisted && granted {
                     let validation = result.unwrap();
                     assert!(validation.ok, "{:?}", validation.errors);
                     assert_eq!(validation.resolver_status, "active");

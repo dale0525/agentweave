@@ -156,6 +156,11 @@ impl SkillManager {
 
     pub fn lease_snapshot(&self) -> SkillSnapshotLease {
         let snapshot = self.current_snapshot();
+        self.track_live_snapshot(&snapshot);
+        SkillSnapshotLease::new(snapshot)
+    }
+
+    fn track_live_snapshot(&self, snapshot: &Arc<SkillSnapshot>) {
         let mut live = self
             .inner
             .live_snapshots
@@ -164,11 +169,10 @@ impl SkillManager {
         live.retain(|entry| entry.strong_count() > 0);
         if !live
             .iter()
-            .any(|entry| entry.ptr_eq(&Arc::downgrade(&snapshot)))
+            .any(|entry| entry.ptr_eq(&Arc::downgrade(snapshot)))
         {
-            live.push(Arc::downgrade(&snapshot));
+            live.push(Arc::downgrade(snapshot));
         }
-        SkillSnapshotLease::new(snapshot)
     }
 
     pub(crate) fn live_snapshot_protections(

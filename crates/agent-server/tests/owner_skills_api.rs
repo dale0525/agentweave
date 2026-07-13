@@ -576,6 +576,105 @@ async fn ordinary_chat_does_not_inherit_owner_api_actor_or_management_tools() {
 }
 
 #[tokio::test]
+async fn authenticated_owner_chat_transport_exposes_authoring_tools_only_to_author_principal() {
+    let auth = OwnerAuth::from_principals([
+        (b"author-token".as_slice(), task10_actor("owner-author")),
+        (
+            b"requester-token".as_slice(),
+            ActorContext::owner("requester", [SkillGrant::Inspect, SkillGrant::Activate]),
+        ),
+        (
+            b"approver-token".as_slice(),
+            ActorContext::owner("approver", [SkillGrant::Inspect, SkillGrant::Activate]),
+        ),
+    ])
+    .unwrap();
+    let test = owner_test_app_with_auth(
+        SkillManagementPolicy::owner_only(),
+        auth,
+        SkillStoreLimits::default(),
+    )
+    .await;
+    let session = test
+        .app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/sessions",
+            None,
+            Some(json!({"title": "Owner authoring"})),
+        ))
+        .await
+        .unwrap();
+    let session = response_json(session).await;
+    let path = format!(
+        "/owner/sessions/{}/messages",
+        session["id"].as_str().unwrap()
+    );
+
+    let positive = test
+        .app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &path,
+            Some("Bearer author-token"),
+            Some(json!({"content": "create a skill"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(positive.status(), StatusCode::OK);
+    assert!(
+        test.chat_tools
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|name| name == "create_skill_draft")
+    );
+
+    for token in [
+        Some("Bearer requester-token"),
+        Some("Bearer approver-token"),
+        None,
+    ] {
+        let response = test
+            .app
+            .clone()
+            .oneshot(request(
+                "POST",
+                &path,
+                token,
+                Some(json!({"content": "create a skill"})),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
+            ),
+            "unexpected owner turn status: {}",
+            response.status()
+        );
+    }
+
+    let spoofed = test
+        .app
+        .oneshot(request(
+            "POST",
+            &path,
+            Some("Bearer author-token"),
+            Some(json!({
+                "content": "create a skill",
+                "actor": {"role": "owner", "grants": ["create_draft"]}
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(spoofed.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn oversized_owner_draft_request_is_bad_request_not_internal_error() {
     let test = owner_test_app_with_limits(
         SkillManagementPolicy::owner_only(),
@@ -713,6 +812,33 @@ async fn owner_task10_routes_complete_authoring_and_request_flow() {
         .find(|record| record.operation == "skill_approval_required")
         .unwrap();
     let approval_id = approval_audit.metadata_json["approvalId"].as_str().unwrap();
+    let requester_review = test
+        .app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/owner/skills/approvals/{approval_id}"),
+            token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(requester_review.status(), StatusCode::FORBIDDEN);
+    let approver_review = test
+        .app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/owner/skills/approvals/{approval_id}"),
+            Some("Bearer approver-token"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(approver_review.status(), StatusCode::OK);
+    let review = response_json(approver_review).await;
+    assert_eq!(review["approval"]["operation"], "activation");
+    assert_eq!(review["package"]["package_id"], "com.example.task10");
     let approved = test
         .app
         .clone()
@@ -808,170 +934,6 @@ async fn all_task10_mutations_authenticate_before_json_and_reject_actor_spoofing
     assert_eq!(spoofed.status(), StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
-async fn task10_service_errors_map_to_stable_http_boundaries_without_leaks() {
-    let token = Some("Bearer secret-token");
-    let test = owner_test_app(
-        SkillManagementPolicy::owner_only(),
-        "secret-token",
-        task10_actor("owner-1"),
-    )
-    .await;
-
-    let malformed = test
-        .app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/owner/skills/approvals/not-a-uuid",
-            token,
-            Some(json!({"decision": "approve"})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
-
-    let malformed_revision = test
-        .app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/owner/skills/drafts/private-not-a-revision/validate",
-            token,
-            Some(json!({})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(malformed_revision.status(), StatusCode::BAD_REQUEST);
-    let malformed_body = response_json(malformed_revision).await.to_string();
-    assert!(!malformed_body.contains("private-not-a-revision"));
-    assert!(!malformed_body.contains("skill_revisions"));
-    assert!(!malformed_body.contains("secret-token"));
-    assert!(!malformed_body.contains(test.roots.app_root.to_string_lossy().as_ref()));
-
-    let missing = test
-        .app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/owner/skills/drafts/00000000-0000-4000-8000-000000000001/validate",
-            token,
-            Some(json!({})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-
-    let missing_export = test
-        .app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/owner/skills/com.example.missing/export",
-            token,
-            Some(json!({"name": "missing"})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(missing_export.status(), StatusCode::NOT_FOUND);
-
-    let created = test
-        .app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/owner/skills/drafts",
-            token,
-            Some(draft_body("com.example.error-boundary")),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(created.status(), StatusCode::CREATED);
-    let revision_id = response_json(created).await["revision_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let invalid_update = test
-        .app
-        .clone()
-        .oneshot(request(
-            "PUT",
-            &format!("/owner/skills/drafts/{revision_id}"),
-            token,
-            Some(json!({"files": [{
-                "path": "general-agent.json",
-                "content": "{ private malformed descriptor"
-            }]})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(invalid_update.status(), StatusCode::BAD_REQUEST);
-    let invalid_body = response_json(invalid_update).await.to_string();
-    assert!(!invalid_body.contains("private malformed descriptor"));
-    assert!(!invalid_body.contains(test.roots.app_root.to_string_lossy().as_ref()));
-
-    let malformed_import_root = test.roots.import_root.join("malformed");
-    std::fs::create_dir_all(&malformed_import_root).unwrap();
-    std::fs::write(malformed_import_root.join("general-agent.json"), "{ bad").unwrap();
-    std::fs::write(malformed_import_root.join("SKILL.md"), "# Bad").unwrap();
-    let invalid_import = test
-        .app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/owner/skills/drafts/import",
-            token,
-            Some(json!({"name": "malformed"})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(invalid_import.status(), StatusCode::BAD_REQUEST);
-
-    test.store.promote_revision(&revision_id).await.unwrap();
-    let wrong_lifecycle = test
-        .app
-        .clone()
-        .oneshot(request(
-            "POST",
-            &format!("/owner/skills/drafts/{revision_id}/test"),
-            token,
-            Some(json!({})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(wrong_lifecycle.status(), StatusCode::CONFLICT);
-
-    let internal_draft = test
-        .service
-        .create_draft(
-            &task10_actor("owner-1"),
-            serde_json::from_value(draft_body("com.example.internal-boundary")).unwrap(),
-        )
-        .await
-        .unwrap();
-    let staging = test.store.paths().staging.clone();
-    std::fs::rename(&staging, staging.with_extension("moved")).unwrap();
-    std::fs::create_dir(&staging).unwrap();
-    let internal = test
-        .app
-        .oneshot(request(
-            "POST",
-            &format!(
-                "/owner/skills/drafts/{}/validate",
-                internal_draft.revision_id
-            ),
-            token,
-            Some(json!({})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = response_json(internal).await.to_string();
-    assert!(!body.contains("skill_revisions"));
-    assert!(!body.contains("secret-token"));
-    assert!(!body.contains(test.roots.app_root.to_string_lossy().as_ref()));
-}
-
 async fn directory_is_empty(path: &std::path::Path) -> bool {
     tokio::fs::read_dir(path)
         .await
@@ -982,6 +944,8 @@ async fn directory_is_empty(path: &std::path::Path) -> bool {
         .is_none()
 }
 
+#[path = "support/owner_skills_error_api.rs"]
+mod error_api;
 #[path = "support/owner_skills_lifecycle_api.rs"]
 mod lifecycle_api;
 #[path = "support/owner_skills_read_api.rs"]

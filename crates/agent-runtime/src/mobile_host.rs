@@ -4,7 +4,9 @@ use crate::platform::{CapabilitySet, PlatformId};
 use crate::session::{Message, Session};
 use crate::skill::SkillRegistry;
 use crate::skill_catalog::SkillCatalog;
+use crate::skill_management::OwnerSkillManagementService;
 use crate::skill_manager::SkillManager;
+use crate::skill_policy::ActorContext;
 use crate::storage::Storage;
 use crate::tools::RuntimeConfig;
 use crate::turn::{ModelClient, TurnRunner};
@@ -161,6 +163,7 @@ pub struct HttpMobileRuntimeHost<R> {
     init: MobileRuntimeInit,
     model_config: StoredModelConfig,
     secret_resolver: R,
+    management: Option<(OwnerSkillManagementService, ActorContext)>,
 }
 
 impl<R> HttpMobileRuntimeHost<R>
@@ -211,7 +214,19 @@ where
             init,
             model_config,
             secret_resolver,
+            management: None,
         })
+    }
+
+    pub fn with_owner_turn_context(
+        mut self,
+        service: OwnerSkillManagementService,
+        actor: ActorContext,
+    ) -> Self {
+        if service.policy().can_author_conversationally(&actor) {
+            self.management = Some((service, actor));
+        }
+        self
     }
 
     pub async fn create_session(&self, title: &str) -> anyhow::Result<Session> {
@@ -266,12 +281,22 @@ where
         let api_key = resolve_model_api_key(&self.model_config, &self.secret_resolver).await?;
         let profile = self.model_config.to_provider_profile(api_key);
         let skill_manager = mobile_safe_snapshot_manager(&self.init, &self.skill_manager);
-        let runner = TurnRunner::new_with_manager_and_config(
+        let mut runner = TurnRunner::new_with_manager_and_config(
             model_gateway::responses::GatewayHttpClient::new(profile),
             skill_manager,
             self.runtime_config.clone(),
         );
-        let events = runner.run(content).await?;
+        let events = if let Some((service, actor)) = &self.management {
+            runner = runner.with_skill_management(service.clone());
+            runner
+                .run_request(
+                    crate::turn_request::TurnRequest::new(content)
+                        .with_actor_context(actor.clone()),
+                )
+                .await?
+        } else {
+            runner.run(content).await?
+        };
         let assistant_text = assistant_text_from_events(&events);
         self.storage
             .append_message(session_id, "assistant", &assistant_text)

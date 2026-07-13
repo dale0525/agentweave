@@ -204,12 +204,7 @@ fun SkillsScreen(
       try {
         val packageId = state.detail?.packageId
         val result = withContext(Dispatchers.IO) {
-          val effective = runtimeClient.listSkills()
-          val skills = if (mode == SkillScreenMode.OwnerManage) {
-            ownerSkillInventory(effective, runtimeClient.listManagedSkills())
-          } else {
-            effective
-          }
+          val skills = runtimeClient.listSkills()
           val nextDiagnostics = runtimeClient.diagnostics()
           val detail = if (
             returnToDetail && packageId != null && skills.any { it.packageId == packageId }
@@ -280,7 +275,6 @@ fun SkillsScreen(
         canOverrideProtected = canOverrideProtected,
       ),
       detail,
-      manageable = state.inventory.find { it.packageId == detail.packageId }?.manageable == true,
     )
 
   fun requestApproval(operation: SkillApprovalOperation, revision: RuntimeSkillRevision) {

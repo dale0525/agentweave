@@ -20,8 +20,6 @@ export const ownerClient = {
     getOwnerApi().validateDraft(revisionId) as Promise<OwnerSkillValidation>,
   requestActivation: (revisionId: string) =>
     getOwnerApi().requestActivation(revisionId) as Promise<OwnerSkillApproval>,
-  resolveApproval: (approvalId: string) =>
-    getOwnerApi().resolveApproval(approvalId, "approve") as Promise<OwnerSkillMutationReport>,
   rollback: (packageId: string, revisionId: string) =>
     getOwnerApi().rollback(packageId, revisionId) as Promise<OwnerSkillMutationReport & Partial<OwnerSkillApproval>>,
   disable: (packageId: string) => getOwnerApi().disable(packageId),

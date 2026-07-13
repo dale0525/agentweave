@@ -317,8 +317,6 @@ private fun RuntimeSkillPolicy.toJson(): JSONObject =
     .put("allowed_kinds", JSONArray(allowedKinds))
     .put("protected_packages", JSONArray(protectedPackages))
     .put("allowed_overrides", JSONArray(allowedOverrides))
-    .put("activation_approval_required", activationApprovalRequired)
-    .put("permission_escalation_approval_required", permissionEscalationApprovalRequired)
     .put("rollback_approval_required", rollbackApprovalRequired)
 
 private fun RuntimeActorContext.toJson(): JSONObject =
@@ -409,6 +407,9 @@ private fun JSONObject.toSkill(): RuntimeSkill =
     manageable = getBoolean("manageable"),
     description = optString("description"),
     builtInCollision = optBoolean("built_in_collision", false),
+    effective = optJSONObject("effective")?.toSkillPackageSummary(),
+    managed = optJSONObject("managed")?.toSkillPackageSummary(),
+    actions = optJSONObject("actions")?.toSkillActions() ?: RuntimeSkillActions(),
   )
 
 private fun JSONObject.toSkillPackageSummary(): RuntimeSkillPackageSummary =
@@ -421,6 +422,18 @@ private fun JSONObject.toSkillPackageSummary(): RuntimeSkillPackageSummary =
     reason = getString("reason"),
     activeRevisionId = nullableString("active_revision_id"),
     manageable = optBoolean("manageable", false),
+    available = optBoolean("available", false),
+    contentHash = nullableString("content_hash"),
+  )
+
+private fun JSONObject.toSkillActions(): RuntimeSkillActions =
+  RuntimeSkillActions(
+    canEditDraft = optBoolean("can_edit_draft"),
+    canValidateDraft = optBoolean("can_validate_draft"),
+    canRequestActivation = optBoolean("can_request_activation"),
+    canDisable = optBoolean("can_disable"),
+    canRequestRemoval = optBoolean("can_request_removal"),
+    canRollback = optBoolean("can_rollback"),
   )
 
 private fun JSONObject.toSkillDetail(): RuntimeSkillDetail =
@@ -435,6 +448,9 @@ private fun JSONObject.toSkillDetail(): RuntimeSkillDetail =
     revisions = getJSONArray("revisions").objects().map { it.toSkillRevision() },
     editableDraft = optJSONObject("editable_draft")?.toSkillRevision(),
     builtInCollision = optBoolean("built_in_collision", false),
+    effective = optJSONObject("effective")?.toSkillPackageSummary(),
+    managed = optJSONObject("managed")?.toSkillPackageSummary(),
+    actions = optJSONObject("actions")?.toSkillActions() ?: RuntimeSkillActions(),
   )
 
 private fun JSONObject.toSkillRevision(): RuntimeSkillRevision {

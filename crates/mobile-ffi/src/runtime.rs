@@ -1,3 +1,7 @@
+use crate::runtime_inventory::{
+    layer_name, managed_inventory_revision, managed_revision_ids, mobile_layer_status,
+    mobile_layered_skill, resolution_status_name,
+};
 use crate::types::{
     MobileDiagnostics, MobileInitConfig, MobileMessageDto, MobileModelConfigDto, MobileSessionDto,
     MobileSkillDto, MobileTurnDto,
@@ -7,8 +11,8 @@ use agent_runtime::model_config::StoredModelConfig;
 use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::skill_bundle::BundleSkillSource;
 use agent_runtime::skill_management::{
-    CreateSkillDraftRequest, DraftFileUpdate, OwnerSkillManagementService, SkillDraftSummary,
-    SkillDraftValidation, SkillPackageStatus, SkillRollbackOutcome,
+    CreateSkillDraftRequest, DraftFileUpdate, OwnerSkillManagementService, SkillActionFacts,
+    SkillDraftSummary, SkillDraftValidation, SkillPackageStatus, SkillRollbackOutcome,
 };
 use agent_runtime::skill_manager::{SkillManager, SkillManagerConfig};
 use agent_runtime::skill_package::SkillPackageId;
@@ -16,7 +20,6 @@ use agent_runtime::skill_policy::{
     ActorContext, SkillManagementMode, SkillManagementPolicy, SkillOperation,
 };
 use agent_runtime::skill_recovery::RecoveryStatus;
-use agent_runtime::skill_resolver::SkillResolutionStatus;
 use agent_runtime::skill_source::{ManagedSkillSource, SkillLayer, SkillSource};
 use agent_runtime::skill_state::{SkillApprovalRecord, SkillSnapshotStatus, SkillStateStore};
 use agent_runtime::skill_store::{SkillRevisionStore, SkillStorePaths};
@@ -218,6 +221,13 @@ impl MobileRuntime {
     }
 
     pub fn list_skills(&self) -> Result<Vec<MobileSkillDto>> {
+        if self.skill_policy.can_inspect(&self.actor_context) {
+            let layered = self.tokio.block_on(
+                self.skill_management
+                    .list_layered_skills(&self.actor_context),
+            )?;
+            return layered.into_iter().map(mobile_layered_skill).collect();
+        }
         let snapshot = self.skill_manager.current_snapshot();
         let snapshot_record = self
             .tokio
@@ -286,10 +296,20 @@ impl MobileRuntime {
                 status: status.into(),
                 available: false,
                 reason: resolved.reason.clone(),
-                active_revision_id,
+                active_revision_id: active_revision_id.clone(),
                 manageable: self.skill_manageable(resolved),
                 built_in_collision: builtin_ids.contains(&descriptor.id)
                     && managed_ids.contains(&descriptor.id),
+                effective: None,
+                managed: (resolved.package.layer == SkillLayer::Managed).then(|| {
+                    mobile_layer_status(
+                        resolved,
+                        false,
+                        active_revision_id.clone(),
+                        self.skill_manageable(resolved),
+                    )
+                }),
+                actions: SkillActionFacts::default(),
             };
             let key = descriptor.id.as_str().to_string();
             if dto.source_layer == "managed"
@@ -304,8 +324,13 @@ impl MobileRuntime {
             let descriptor = &resolved.package.descriptor;
             let active_revision_id =
                 managed_inventory_revision(resolved, true, &active_revisions, &managed_revisions)?;
+            let key = descriptor.id.as_str().to_string();
+            let previous_managed = inventory.get(&key).and_then(|item| item.managed.clone());
+            let manageable = self.skill_manageable(resolved);
+            let effective =
+                mobile_layer_status(resolved, true, active_revision_id.clone(), manageable);
             inventory.insert(
-                descriptor.id.as_str().to_string(),
+                key,
                 MobileSkillDto {
                     package_id: descriptor.id.as_str().to_string(),
                     display_name: descriptor.display_name.clone(),
@@ -315,9 +340,16 @@ impl MobileRuntime {
                     available: true,
                     reason: resolved.reason.clone(),
                     active_revision_id,
-                    manageable: self.skill_manageable(resolved),
+                    manageable,
                     built_in_collision: builtin_ids.contains(&descriptor.id)
                         && managed_ids.contains(&descriptor.id),
+                    effective: Some(effective.clone()),
+                    managed: if resolved.package.layer == SkillLayer::Managed {
+                        Some(effective)
+                    } else {
+                        previous_managed
+                    },
+                    actions: SkillActionFacts::default(),
                 },
             );
         }
@@ -572,7 +604,8 @@ impl MobileRuntime {
                     self.init.clone(),
                     config,
                     TransientSecretResolver::new(api_key),
-                )?;
+                )?
+                .with_owner_turn_context(self.skill_management.clone(), self.actor_context.clone());
                 host.send_message_after_user_persisted(session_id, content)
                     .await
             };
@@ -766,29 +799,6 @@ fn recovery_status_name(status: RecoveryStatus) -> &'static str {
     }
 }
 
-fn layer_name(layer: SkillLayer) -> &'static str {
-    match layer {
-        SkillLayer::Builtin => "builtin",
-        SkillLayer::Managed => "managed",
-        SkillLayer::Session => "session",
-    }
-}
-
-fn resolution_status_name(status: SkillResolutionStatus) -> &'static str {
-    match status {
-        SkillResolutionStatus::Active => "active",
-        SkillResolutionStatus::Overridden => "overridden",
-        SkillResolutionStatus::OverrideDenied => "override_denied",
-        SkillResolutionStatus::ProtectedPackage => "protected_package",
-        SkillResolutionStatus::DependencyMissing => "dependency_missing",
-        SkillResolutionStatus::CapabilityMissing => "capability_missing",
-        SkillResolutionStatus::PlatformUnsupported => "platform_unsupported",
-        SkillResolutionStatus::RuntimeIncompatible => "runtime_incompatible",
-        SkillResolutionStatus::CircuitOpen => "circuit_open",
-        SkillResolutionStatus::NetworkPolicyUnavailable => "network_policy_unavailable",
-    }
-}
-
 fn reload_report_value(
     report: &agent_runtime::skill_manager::SkillReloadReport,
 ) -> serde_json::Value {
@@ -827,71 +837,6 @@ fn ensure_database_outside_skill_roots(database: &Path, roots: &[&Path]) -> Resu
         anyhow::bail!("database path must stay outside skill roots");
     }
     Ok(())
-}
-
-fn managed_revision_ids(value: &serde_json::Value) -> Result<BTreeMap<SkillPackageId, String>> {
-    let members = value
-        .as_array()
-        .context("active skill snapshot members must be an array")?;
-    let mut revisions = BTreeMap::new();
-    for member in members {
-        if member.get("layer").and_then(serde_json::Value::as_str) != Some("managed") {
-            continue;
-        }
-        let package_id = member
-            .get("packageId")
-            .and_then(serde_json::Value::as_str)
-            .context("managed snapshot member is missing packageId")?;
-        let revision_id = member
-            .get("revisionId")
-            .and_then(serde_json::Value::as_str)
-            .context("managed snapshot member is missing revisionId")?;
-        revisions.insert(SkillPackageId::parse(package_id)?, revision_id.to_string());
-    }
-    Ok(revisions)
-}
-
-fn managed_inventory_revision(
-    resolved: &agent_runtime::skill_resolver::ResolvedSkillPackage,
-    active: bool,
-    active_revisions: &BTreeMap<SkillPackageId, String>,
-    managed_revisions: &BTreeMap<SkillPackageId, (String, String, String)>,
-) -> Result<Option<String>> {
-    if resolved.package.layer != SkillLayer::Managed {
-        return Ok(None);
-    }
-    let package_id = &resolved.package.descriptor.id;
-    let (authoritative_revision, authoritative_version, authoritative_content_hash) =
-        managed_revisions.get(package_id).with_context(|| {
-            format!(
-                "managed inventory state is missing for {}",
-                package_id.as_str()
-            )
-        })?;
-    anyhow::ensure!(
-        authoritative_version == &resolved.package.descriptor.version.to_string(),
-        "managed inventory version is inconsistent for {}",
-        package_id.as_str()
-    );
-    anyhow::ensure!(
-        authoritative_content_hash == &resolved.package.content_hash,
-        "managed inventory content hash is inconsistent for {}",
-        package_id.as_str()
-    );
-    if active {
-        let generation_revision = active_revisions.get(package_id).with_context(|| {
-            format!(
-                "active snapshot revision is missing for {}",
-                package_id.as_str()
-            )
-        })?;
-        anyhow::ensure!(
-            generation_revision == authoritative_revision,
-            "active snapshot revision is stale for {}",
-            package_id.as_str()
-        );
-    }
-    Ok(Some(authoritative_revision.clone()))
 }
 
 fn ensure_configured_store_root(configured: &Path, prepared: &Path, label: &str) -> Result<()> {

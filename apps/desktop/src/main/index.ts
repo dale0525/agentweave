@@ -8,6 +8,7 @@ export type DesktopWindowConfig = {
   webPreferences: {
     contextIsolation: true;
     nodeIntegration: false;
+    sandbox: true;
   };
 };
 
@@ -21,7 +22,8 @@ export const desktopWindowConfig: DesktopWindowConfig = {
   width: 1280,
   webPreferences: {
     contextIsolation: true,
-    nodeIntegration: false
+    nodeIntegration: false,
+    sandbox: true
   }
 };
 

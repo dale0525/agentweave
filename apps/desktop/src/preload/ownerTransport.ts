@@ -1,11 +1,9 @@
 const OWNER_SERVER_ORIGIN = "http://127.0.0.1:49321";
 
 type OwnerMethod = "DELETE" | "GET" | "POST" | "PUT";
-type ApprovalDecision = "approve" | "reject";
 
 type OwnerTransportOptions = {
   requesterToken: string;
-  approverToken: string;
   fetcher?: typeof fetch;
 };
 
@@ -16,7 +14,6 @@ const OWNER_ROUTES: Array<{ method: OwnerMethod; path: RegExp }> = [
   { method: "POST", path: /^\/owner\/skills\/drafts$/ },
   { method: "PUT", path: /^\/owner\/skills\/drafts\/[0-9a-f-]+$/ },
   { method: "POST", path: /^\/owner\/skills\/drafts\/[0-9a-f-]+\/(validate|activation)$/ },
-  { method: "POST", path: /^\/owner\/skills\/approvals\/[0-9a-f-]+$/ },
   { method: "POST", path: /^\/owner\/skills\/[A-Za-z0-9._-]+\/(rollback|disable)$/ },
   { method: "DELETE", path: /^\/owner\/skills\/[A-Za-z0-9._-]+$/ }
 ];
@@ -48,21 +45,13 @@ export function normalizeOwnerRequest(path: string, method: string): URL {
 
 export function createOwnerTransport({
   requesterToken,
-  approverToken,
   fetcher = fetch
 }: OwnerTransportOptions) {
   const requester = (path: string, method: OwnerMethod, body?: unknown) =>
     requestOwnerJson(fetcher, requesterToken, path, method, body);
-  const approver = async (path: string, method: OwnerMethod, body?: unknown) => {
-    if (!approverToken) {
-      throw new Error("Independent approver credential is not configured");
-    }
-    return requestOwnerJson(fetcher, approverToken, path, method, body);
-  };
 
   return Object.freeze({
     principal: () => requester("/owner/principal", "GET"),
-    approverPrincipal: () => approver("/owner/principal", "GET"),
     listSkills: () => requester("/owner/skills", "GET"),
     skillDetail: (packageId: string) =>
       requester(`/owner/skills/${ownerPackageId(packageId)}/detail`, "GET"),
@@ -73,8 +62,6 @@ export function createOwnerTransport({
       requester(`/owner/skills/drafts/${ownerUuid(revisionId)}/validate`, "POST", {}),
     requestActivation: (revisionId: string) =>
       requester(`/owner/skills/drafts/${ownerUuid(revisionId)}/activation`, "POST", {}),
-    resolveApproval: (approvalId: string, decision: ApprovalDecision) =>
-      approver(`/owner/skills/approvals/${ownerUuid(approvalId)}`, "POST", { decision }),
     rollback: (packageId: string, revisionId: string) =>
       requester(`/owner/skills/${ownerPackageId(packageId)}/rollback`, "POST", {
         revision_id: revisionId

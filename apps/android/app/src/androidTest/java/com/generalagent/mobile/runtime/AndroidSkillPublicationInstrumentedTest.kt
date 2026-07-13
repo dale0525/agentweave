@@ -9,11 +9,74 @@ import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.UUID
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidSkillPublicationInstrumentedTest {
+  @Test
+  fun boundedRetentionSupportsUpdateAndDowngradeWithoutTouchingForeignEntries() {
+    val root = testRoot("bounded-retention")
+    val firstFiles = bundleFiles("android-v1")
+    val secondFiles = bundleFiles("android-v2")
+    val thirdFiles = bundleFiles("android-v3")
+    val first = SkillAssetInstaller(root, InstrumentedSkillAssets(firstFiles)).installVerifiedBundle()
+    val second = SkillAssetInstaller(root, InstrumentedSkillAssets(secondFiles)).installVerifiedBundle()
+    val revisions = root.resolve("builtin-skills/revisions")
+    val foreign = revisions.resolve("foreign-owner-data").apply { check(mkdir()) }
+    val outside = root.resolve("outside-retention").apply { check(mkdir()) }
+    val symlink = revisions.resolve("f".repeat(64)).toPath()
+    Files.createSymbolicLink(symlink, outside.toPath())
+
+    val third = SkillAssetInstaller(root, InstrumentedSkillAssets(thirdFiles)).installVerifiedBundle()
+
+    assertFalse(first.root.exists())
+    assertEquals(setOf(third.contentHash, second.contentHash), revisionHashes(root))
+    assertEquals(second.contentHash, previousHash(root))
+    assertTrue(foreign.isDirectory)
+    assertTrue(Files.isSymbolicLink(symlink))
+    assertTrue(outside.isDirectory)
+
+    SkillAssetInstaller(root, InstrumentedSkillAssets(secondFiles)).installVerifiedBundle()
+
+    assertEquals(second.contentHash, currentHash(root))
+    assertEquals(third.contentHash, previousHash(root))
+    assertEquals(setOf(second.contentHash, third.contentHash), revisionHashes(root))
+    root.deleteRecursively()
+  }
+
+  @Test
+  fun retryFinishesCleanupInterruptedAfterCurrentIsDurable() {
+    val root = testRoot("interrupted-retention")
+    val firstFiles = bundleFiles("cleanup-v1")
+    val secondFiles = bundleFiles("cleanup-v2")
+    val thirdFiles = bundleFiles("cleanup-v3")
+    SkillAssetInstaller(root, InstrumentedSkillAssets(firstFiles)).installVerifiedBundle()
+    val second = SkillAssetInstaller(root, InstrumentedSkillAssets(secondFiles)).installVerifiedBundle()
+    val thirdHash = bundleHash(thirdFiles)
+    val interrupted = SkillAssetInstaller(
+      root,
+      InstrumentedSkillAssets(thirdFiles),
+      AndroidSkillPublicationFileSystem(),
+      SkillPublicationFaults { point ->
+        if (point == SkillPublicationFaultPoint.BUNDLE_ROOT_SYNCED) {
+          throw IllegalStateException("injected interruption before retention cleanup")
+        }
+      },
+    )
+
+    assertThrows(IllegalStateException::class.java) { interrupted.installVerifiedBundle() }
+    assertEquals(thirdHash, currentHash(root))
+    assertEquals(second.contentHash, previousHash(root))
+    assertEquals(3, revisionHashes(root).size)
+
+    SkillAssetInstaller(root, InstrumentedSkillAssets(thirdFiles)).installVerifiedBundle()
+
+    assertEquals(setOf(thirdHash, second.contentHash), revisionHashes(root))
+    root.deleteRecursively()
+  }
+
   @Test
   fun ancestorSwapsFailClosedWithoutOutsideWritesOrNewCurrent() {
     for (ancestor in SwapAncestor.entries) {
@@ -151,6 +214,17 @@ private fun bundleFiles(version: String): Map<String, ByteArray> = mapOf(
 
 private fun currentHash(root: File): String =
   root.resolve("builtin-skills/current").readText(Charsets.UTF_8).trim()
+
+private fun previousHash(root: File): String =
+  root.resolve("builtin-skills/previous").readText(Charsets.UTF_8).trim()
+
+private fun revisionHashes(root: File): Set<String> =
+  root.resolve("builtin-skills/revisions").listFiles().orEmpty()
+    .filter { file ->
+      file.name.matches(Regex("[0-9a-f]{64}")) &&
+        Files.isDirectory(file.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+    }
+    .mapTo(mutableSetOf(), File::getName)
 
 private fun bundleHash(files: Map<String, ByteArray>): String {
   val digest = MessageDigest.getInstance("SHA-256")

@@ -90,7 +90,11 @@ impl crate::skill_manager::SkillManager {
         let _publication = self.begin_publication().await?;
         let backend = self.managed_runtime()?;
         let current = self.current_snapshot();
-        let (live_generations, mut protected) = self.live_snapshot_protections();
+        let (mut live_generations, mut protected) = self.live_snapshot_protections();
+        let (durable_generations, durable_revisions) =
+            backend.state.durable_snapshot_protections().await?;
+        live_generations.extend(durable_generations);
+        protected.extend(durable_revisions);
         protected.extend(snapshot_revision_ids(&current));
         protected.extend(backend.state.lifecycle_protected_revision_ids().await?);
 
@@ -191,7 +195,7 @@ async fn record_cleanup_failure(
     Ok(())
 }
 
-fn snapshot_revision_ids(snapshot: &SkillSnapshot) -> BTreeSet<String> {
+pub(crate) fn snapshot_revision_ids(snapshot: &SkillSnapshot) -> BTreeSet<String> {
     snapshot
         .packages()
         .iter()

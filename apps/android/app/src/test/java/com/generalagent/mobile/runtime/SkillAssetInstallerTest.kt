@@ -63,6 +63,77 @@ class SkillAssetInstallerTest {
     assertTrue(second.root.isDirectory)
     assertFalse(first.root.canonicalFile == second.root.canonicalFile)
     assertEquals(second.contentHash, currentHash(temporaryFolder.root))
+    assertEquals(first.contentHash, previousHash(temporaryFolder.root))
+  }
+
+  @Test
+  fun retainsOnlyCurrentAndExplicitRollbackAcrossUpdateAndDowngrade() {
+    val firstFiles = validBundleFiles("bounded-v1")
+    val secondFiles = validBundleFiles("bounded-v2")
+    val thirdFiles = validBundleFiles("bounded-v3")
+    val first = testInstaller(temporaryFolder.root, FakeSkillAssets(firstFiles)).installVerifiedBundle()
+    val second = testInstaller(temporaryFolder.root, FakeSkillAssets(secondFiles)).installVerifiedBundle()
+    val third = testInstaller(temporaryFolder.root, FakeSkillAssets(thirdFiles)).installVerifiedBundle()
+
+    assertRevisionHashes(temporaryFolder.root, third.contentHash, second.contentHash)
+    assertFalse(first.root.exists())
+
+    testInstaller(temporaryFolder.root, FakeSkillAssets(secondFiles)).installVerifiedBundle()
+
+    assertEquals(second.contentHash, currentHash(temporaryFolder.root))
+    assertEquals(third.contentHash, previousHash(temporaryFolder.root))
+    assertRevisionHashes(temporaryFolder.root, second.contentHash, third.contentHash)
+  }
+
+  @Test
+  fun retryCompletesCleanupInterruptedAfterDurableCurrentPublication() {
+    val firstFiles = validBundleFiles("cleanup-v1")
+    val secondFiles = validBundleFiles("cleanup-v2")
+    val thirdFiles = validBundleFiles("cleanup-v3")
+    testInstaller(temporaryFolder.root, FakeSkillAssets(firstFiles)).installVerifiedBundle()
+    val second = testInstaller(temporaryFolder.root, FakeSkillAssets(secondFiles)).installVerifiedBundle()
+    val interrupted = SkillAssetInstaller(
+      temporaryFolder.root,
+      FakeSkillAssets(thirdFiles),
+      JvmSkillPublicationFileSystem(),
+      SkillPublicationFaults { point ->
+        if (point == SkillPublicationFaultPoint.BUNDLE_ROOT_SYNCED) {
+          throw IllegalStateException("injected interruption before retention cleanup")
+        }
+      },
+    )
+
+    assertThrows(IllegalStateException::class.java) { interrupted.installVerifiedBundle() }
+    val thirdHash = bundleHash(thirdFiles)
+    assertEquals(thirdHash, currentHash(temporaryFolder.root))
+    assertEquals(second.contentHash, previousHash(temporaryFolder.root))
+    assertEquals(3, revisionDirectories(temporaryFolder.root).size)
+
+    testInstaller(temporaryFolder.root, FakeSkillAssets(thirdFiles)).installVerifiedBundle()
+
+    assertRevisionHashes(temporaryFolder.root, thirdHash, second.contentHash)
+  }
+
+  @Test
+  fun cleanupPreservesForeignNamesAndHashLikeSymlinks() {
+    val firstFiles = validBundleFiles("preserve-v1")
+    val secondFiles = validBundleFiles("preserve-v2")
+    val thirdFiles = validBundleFiles("preserve-v3")
+    testInstaller(temporaryFolder.root, FakeSkillAssets(firstFiles)).installVerifiedBundle()
+    testInstaller(temporaryFolder.root, FakeSkillAssets(secondFiles)).installVerifiedBundle()
+    val revisions = temporaryFolder.root.resolve("builtin-skills/revisions")
+    val foreign = revisions.resolve("foreign-owner-data").apply { check(mkdir()) }
+    val outside = temporaryFolder.newFolder("outside-retention")
+    val symlink = revisions.resolve("f".repeat(64)).toPath()
+    Files.createSymbolicLink(symlink, outside.toPath())
+
+    val third = testInstaller(temporaryFolder.root, FakeSkillAssets(thirdFiles)).installVerifiedBundle()
+
+    assertTrue(foreign.isDirectory)
+    assertTrue(Files.isSymbolicLink(symlink))
+    assertTrue(outside.isDirectory)
+    assertEquals(2, revisionDirectories(temporaryFolder.root).size)
+    assertTrue(third.root.isDirectory)
   }
 
   @Test
@@ -438,8 +509,10 @@ private class RequireNoOpDurabilitySync : JvmSkillPublicationFileSystem() {
 }
 
 private class FailBundleRootSyncFileSystem : JvmSkillPublicationFileSystem() {
+  private var bundleRootSyncs = 0
+
   override fun syncDirectory(path: java.nio.file.Path) {
-    if (path.fileName.toString() == "builtin-skills") {
+    if (path.fileName.toString() == "builtin-skills" && ++bundleRootSyncs == 2) {
       throw IllegalStateException("injected bundle root sync failure")
     }
     super.syncDirectory(path)
@@ -486,6 +559,21 @@ private fun validBundleFiles(version: String): Map<String, ByteArray> =
 
 private fun currentHash(filesDir: File): String =
   filesDir.resolve("builtin-skills/current").readText(Charsets.UTF_8).trim()
+
+private fun previousHash(filesDir: File): String =
+  filesDir.resolve("builtin-skills/previous").readText(Charsets.UTF_8).trim()
+
+private fun revisionDirectories(filesDir: File): Set<String> =
+  filesDir.resolve("builtin-skills/revisions").listFiles().orEmpty()
+    .filter { file ->
+      file.name.matches(Regex("[0-9a-f]{64}")) &&
+        Files.isDirectory(file.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+    }
+    .mapTo(mutableSetOf(), File::getName)
+
+private fun assertRevisionHashes(filesDir: File, vararg expected: String) {
+  assertEquals(expected.toSet(), revisionDirectories(filesDir))
+}
 
 private fun assertPublishedRevisionMatchesCurrent(filesDir: File, hash: String) {
   val revision = filesDir.resolve("builtin-skills/revisions/$hash")

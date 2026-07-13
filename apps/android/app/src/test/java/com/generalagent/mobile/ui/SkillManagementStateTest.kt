@@ -274,7 +274,7 @@ class SkillManagementStateTest {
   }
 
   @Test
-  fun ownerInventoryPreservesAuthoritativeBuiltinCollisionFacts() {
+  fun ownerInventoryDoesNotInferCollisionOrReplaceTheEffectiveWinner() {
     val builtin = runtimeSkill(activeRevisionId = "revision-builtin").copy(
       sourceLayer = "builtin",
       activeRevisionId = null,
@@ -293,7 +293,11 @@ class SkillManagementStateTest {
       builtInCollision = true,
     )
 
-    assertTrue(ownerSkillInventory(listOf(builtin), listOf(staging)).single().builtInCollision)
+    val merged = ownerSkillInventory(listOf(builtin), listOf(staging)).single()
+    assertFalse(merged.builtInCollision)
+    assertEquals("builtin", merged.sourceLayer)
+    assertEquals("active", merged.status)
+    assertEquals("draft", merged.managed?.status)
     assertTrue(ownerSkillInventory(listOf(activeOverride), listOf(staging)).single().builtInCollision)
   }
 
@@ -360,7 +364,7 @@ class SkillManagementStateTest {
   }
 
   @Test
-  fun targetActionsRespectManageabilityKindAndLifecycle() {
+  fun targetActionsUseOnlyBackendAuthoritativeFacts() {
     val access = SkillAccessState(
       mode = SkillScreenMode.OwnerManage,
       visibleTabs = AppTab.entries,
@@ -375,32 +379,23 @@ class SkillManagementStateTest {
       allowedKinds = setOf("instruction_only"),
       agentAuthoring = true,
     )
-    val unmanaged = skillDetail(activeRevisionId = "revision-active").copy(
-      sourceLayer = "builtin",
-      builtInCollision = true,
+    val backendLimited = skillDetail(activeRevisionId = "revision-active").copy(
+      actions = com.generalagent.mobile.runtime.RuntimeSkillActions(
+        canDisable = true,
+        canRequestRemoval = true,
+      ),
     )
     assertEquals(
-      setOf(SkillAction.Edit),
-      skillTargetActions(access, unmanaged, manageable = false),
+      setOf(SkillAction.Disable, SkillAction.Delete),
+      skillTargetActions(access, backendLimited),
     )
-
-    val removed = skillDetail(activeRevisionId = "revision-active").copy(status = "removed")
-    assertEquals(
-      setOf(SkillAction.Edit, SkillAction.Validate, SkillAction.Activate),
-      skillTargetActions(access, removed, manageable = true),
-    )
-
-    val managed = skillDetailWithHistory()
-    val actions = skillTargetActions(access, managed, manageable = true)
-    assertTrue(SkillAction.Edit in actions)
-    assertTrue(SkillAction.Validate in actions)
-    assertTrue(SkillAction.Disable in actions)
-    assertTrue(SkillAction.Delete in actions)
   }
 
   @Test
-  fun targetActionsRejectProtectedDisallowedAndDraftOnlyLifecycle() {
-    val detail = skillDetailWithHistory()
+  fun targetActionsCannotReEnableBackendDeniedOperations() {
+    val detail = skillDetailWithHistory().copy(
+      actions = com.generalagent.mobile.runtime.RuntimeSkillActions(),
+    )
     val access = skillAccessState(
       RuntimeSkillPolicy(
         mode = "owner_only",
@@ -412,174 +407,7 @@ class SkillManagementStateTest {
       RuntimeActorContext(role = "owner", grants = listOf("inspect") + allSkillGrants()),
     )
     assertTrue(detail.packageId in access.allowedOverrides)
-    assertEquals(setOf(SkillAction.Edit), skillTargetActions(access, detail, manageable = true))
-
-    val disallowed = detail.copy(
-      packageId = "com.example.host-tools",
-      revisions = detail.revisions.map { it.copy(kind = "host_tools_only") },
-      editableDraft = detail.editableDraft?.copy(kind = "host_tools_only"),
-    )
-    assertTrue(skillTargetActions(access.copy(protectedPackages = emptySet()), disallowed, true).isEmpty())
-
-    val draftOnly = detail.copy(
-      packageId = "com.example.draft-only",
-      status = "draft",
-      activeRevisionId = null,
-      revisions = listOf(checkNotNull(detail.editableDraft)),
-    )
-    val draftActions = skillTargetActions(
-      access.copy(protectedPackages = emptySet()),
-      draftOnly,
-      manageable = true,
-    )
-    assertFalse(SkillAction.Delete in draftActions)
-    assertFalse(SkillAction.Disable in draftActions)
-    assertFalse(SkillAction.Rollback in draftActions)
-  }
-
-  @Test
-  fun draftActionsDoNotRequirePackageLifecycleManageability() {
-    val detail = skillDetailWithHistory().let { original ->
-      original.copy(
-        revisions = original.revisions.map { revision ->
-          if (revision.revisionId == original.activeRevisionId) {
-            revision.copy(kind = "host_tools_only")
-          } else {
-            revision
-          }
-        },
-      )
-    }
-    val activateOnly = skillAccessState(
-      RuntimeSkillPolicy(
-        mode = "owner_only",
-        agentAuthoring = true,
-        allowedKinds = listOf("instruction_only"),
-      ),
-      RuntimeActorContext(role = "owner", grants = listOf("inspect", "activate")),
-    )
-    val editOnly = skillAccessState(
-      RuntimeSkillPolicy(
-        mode = "owner_only",
-        agentAuthoring = true,
-        allowedKinds = listOf("instruction_only"),
-      ),
-      RuntimeActorContext(role = "owner", grants = listOf("inspect", "edit_draft")),
-    )
-
-    assertEquals(setOf(SkillAction.Activate), skillTargetActions(activateOnly, detail, manageable = false))
-    assertEquals(setOf(SkillAction.Edit), skillTargetActions(editOnly, detail, manageable = false))
-  }
-
-  @Test
-  fun authoringPolicyDisablesEditWithoutHidingOtherDraftActions() {
-    val detail = skillDetailWithHistory()
-    val access = skillAccessState(
-      RuntimeSkillPolicy(
-        mode = "owner_only",
-        agentAuthoring = false,
-        allowedKinds = listOf("instruction_only"),
-      ),
-      RuntimeActorContext(
-        role = "owner",
-        grants = listOf("inspect", "edit_draft", "validate", "activate"),
-      ),
-    )
-
-    assertEquals(
-      setOf(SkillAction.Validate, SkillAction.Activate),
-      skillTargetActions(access, detail, manageable = false),
-    )
-  }
-
-  @Test
-  fun protectedOverrideAllowsOnlyValidationAndActivation() {
-    val detail = skillDetailWithHistory()
-    val policy = RuntimeSkillPolicy(
-      mode = "owner_only",
-      agentAuthoring = true,
-      allowedKinds = listOf("instruction_only"),
-      protectedPackages = listOf(detail.packageId),
-      allowedOverrides = listOf(detail.packageId),
-    )
-    val access = skillAccessState(
-      policy,
-      RuntimeActorContext(
-        role = "owner",
-        grants = listOf(
-          "inspect",
-          "validate",
-          "activate",
-          "disable",
-          "rollback",
-          "delete_managed",
-          "override_builtin",
-        ),
-      ),
-    )
-
-    assertEquals(
-      setOf(SkillAction.Validate, SkillAction.Activate),
-      skillTargetActions(access, detail, manageable = true),
-    )
-    assertTrue(
-      skillTargetActions(
-        access.copy(canOverrideProtected = false),
-        detail,
-        manageable = true,
-      ).isEmpty(),
-    )
-  }
-
-  @Test
-  fun builtinCollisionRequiresOverrideOnlyForValidationAndActivation() {
-    val detail = skillDetailWithHistory().copy(builtInCollision = true)
-    val policy = RuntimeSkillPolicy(
-      mode = "owner_only",
-      agentAuthoring = true,
-      allowedKinds = listOf("instruction_only"),
-      allowedOverrides = listOf(detail.packageId),
-    )
-    val grants = listOf("inspect", "edit_draft", "validate", "activate")
-    val withoutOverride = skillAccessState(
-      policy,
-      RuntimeActorContext(role = "owner", grants = grants),
-    )
-    val withOverride = skillAccessState(
-      policy,
-      RuntimeActorContext(role = "owner", grants = grants + "override_builtin"),
-    )
-
-    assertEquals(
-      setOf(SkillAction.Edit),
-      skillTargetActions(withoutOverride, detail, manageable = false),
-    )
-    assertEquals(
-      setOf(SkillAction.Edit, SkillAction.Validate, SkillAction.Activate),
-      skillTargetActions(withOverride, detail, manageable = false),
-    )
-  }
-
-  @Test
-  fun protectedEditDoesNotRequireOverrideAuthority() {
-    val detail = skillDetailWithHistory()
-    val access = skillAccessState(
-      RuntimeSkillPolicy(
-        mode = "owner_only",
-        agentAuthoring = true,
-        allowedKinds = listOf("instruction_only"),
-        protectedPackages = listOf(detail.packageId),
-      ),
-      RuntimeActorContext(
-        role = "owner",
-        grants = listOf("inspect", "edit_draft", "validate", "activate"),
-      ),
-    )
-
-    assertEquals(
-      setOf(SkillAction.Edit),
-      skillTargetActions(access, detail, manageable = false),
-    )
+    assertTrue(skillTargetActions(access, detail).isEmpty())
   }
 
   @Test
@@ -807,14 +635,15 @@ class SkillManagementStateTest {
 
   private fun skillDetailWithHistory(): RuntimeSkillDetail {
     val base = skillDetail(activeRevisionId = "revision-active")
-    val active = base.editableDraft!!.copy(
+    val draft = checkNotNull(base.editableDraft)
+    val active = draft.copy(
       revisionId = "revision-active",
       status = "managed",
       editable = false,
       validation = RuntimeSkillValidationSummary(true, emptyList(), emptyList()),
     )
     val old = active.copy(revisionId = "revision-old", version = "0.9.0")
-    return base.copy(revisions = listOf(base.editableDraft!!, active, old))
+    return base.copy(revisions = listOf(draft, active, old))
   }
 
   private fun allSkillGrants(): Set<String> =

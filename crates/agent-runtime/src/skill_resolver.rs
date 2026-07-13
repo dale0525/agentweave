@@ -201,7 +201,7 @@ fn select_managed_override(
     overrides: &BTreeSet<SkillPackageId>,
     inactive: &mut Vec<ResolvedSkillPackage>,
 ) -> Option<ActiveCandidate> {
-    if overrides.contains(id) {
+    if !protected.contains(id) && overrides.contains(id) {
         return Some(ActiveCandidate {
             package: managed,
             fallback: builtin,

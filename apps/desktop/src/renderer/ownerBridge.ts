@@ -9,8 +9,6 @@ export type OwnerPolicy = {
   actorId: string;
   role?: string;
   grants: string[];
-  activation_approval_required?: boolean;
-  permission_escalation_approval_required?: boolean;
   rollback_approval_required?: boolean;
 };
 
@@ -33,11 +31,6 @@ export async function getOwnerPolicy(): Promise<OwnerPolicy> {
   return principalPolicy(principal);
 }
 
-export async function getApproverPolicy(): Promise<OwnerPolicy> {
-  const principal = requirePrincipal(await getOwnerApi().approverPrincipal());
-  return principalPolicy(principal);
-}
-
 export function getOwnerApi(): NonNullable<Window["generalAgent"]>["owner"] {
   const useDevServer = import.meta.env.DEV
     && new URLSearchParams(window.location.search).get("ownerServer") === "1";
@@ -48,20 +41,24 @@ export function getOwnerApi(): NonNullable<Window["generalAgent"]>["owner"] {
 
 const devBrowserOwnerApi: NonNullable<Window["generalAgent"]>["owner"] = {
   principal: () => devRequest("requester", "/owner/principal", "GET"),
-  approverPrincipal: () => devRequest("approver", "/owner/principal", "GET"),
   listSkills: () => devRequest("requester", "/owner/skills", "GET"),
   skillDetail: (packageId) => devRequest("requester", `/owner/skills/${packageId}/detail`, "GET"),
   createDraft: (request) => devRequest("requester", "/owner/skills/drafts", "POST", request),
   updateDraft: (revisionId, files) => devRequest("requester", `/owner/skills/drafts/${revisionId}`, "PUT", { files }),
   validateDraft: (revisionId) => devRequest("requester", `/owner/skills/drafts/${revisionId}/validate`, "POST", {}),
   requestActivation: (revisionId) => devRequest("requester", `/owner/skills/drafts/${revisionId}/activation`, "POST", {}),
-  resolveApproval: (approvalId, decision) => devRequest("approver", `/owner/skills/approvals/${approvalId}`, "POST", { decision }),
   rollback: (packageId, revisionId) => devRequest("requester", `/owner/skills/${packageId}/rollback`, "POST", { revision_id: revisionId }),
   disable: (packageId) => devRequest("requester", `/owner/skills/${packageId}/disable`, "POST", {}),
   requestRemoval: (packageId) => devRequest("requester", `/owner/skills/${packageId}`, "DELETE")
 };
 
-async function devRequest(actor: "requester" | "approver", path: string, method: string, body?: unknown): Promise<unknown> {
+export async function requestApprovalSurface(approvalId: string): Promise<unknown> {
+  const approval = window.generalAgent?.approval;
+  if (!approval) throw new Error("Independent approval surface is unavailable");
+  return approval.open(approvalId);
+}
+
+async function devRequest(actor: "requester", path: string, method: string, body?: unknown): Promise<unknown> {
   const response = await fetch(`/__owner/${actor}${path}`, {
     body: body === undefined ? undefined : JSON.stringify(body),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },

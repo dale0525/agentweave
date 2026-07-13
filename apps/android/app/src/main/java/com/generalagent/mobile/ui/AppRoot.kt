@@ -160,18 +160,22 @@ fun ownerSkillInventory(
       return@forEach
     }
     val effectiveSkill = inventory[summary.packageId]
-    inventory[summary.packageId] = RuntimeSkill(
-      packageId = summary.packageId,
-      displayName = summary.displayName,
-      version = summary.version,
-      sourceLayer = summary.sourceLayer,
-      status = summary.status,
-      available = summary.status == "active",
-      reason = summary.reason,
-      activeRevisionId = summary.activeRevisionId,
-      manageable = effectiveSkill?.manageable ?: summary.manageable,
-      builtInCollision = effectiveSkill?.builtInCollision == true || effectiveSkill?.sourceLayer == "builtin",
-    )
+    inventory[summary.packageId] = if (effectiveSkill != null) {
+      effectiveSkill.copy(managed = effectiveSkill.managed ?: summary)
+    } else {
+      RuntimeSkill(
+        packageId = summary.packageId,
+        displayName = summary.displayName,
+        version = summary.version,
+        sourceLayer = summary.sourceLayer,
+        status = summary.status,
+        available = summary.available,
+        reason = summary.reason,
+        activeRevisionId = summary.activeRevisionId,
+        manageable = summary.manageable,
+        managed = summary,
+      )
+    }
   }
   return inventory.values.sortedBy(RuntimeSkill::packageId)
 }
@@ -207,7 +211,7 @@ fun AppRoot(
   LaunchedEffect(runtimeClient) {
     try {
       skills = withContext(Dispatchers.IO) {
-        runtimeClient.loadSkillInventory(skillAccess.mode)
+        runtimeClient.loadSkillInventory()
       }
       skillLoadError = null
     } catch (cancelled: CancellationException) {
@@ -226,7 +230,7 @@ fun AppRoot(
     scope.launch {
       runCatching {
         withContext(Dispatchers.IO) {
-          runtimeClient.loadSkillInventory(skillAccess.mode) to runtimeClient.diagnostics()
+          runtimeClient.loadSkillInventory() to runtimeClient.diagnostics()
         }
       }.onSuccess { refreshed ->
         skills = refreshed.first
@@ -323,14 +327,7 @@ fun AppRoot(
   }
 }
 
-private fun RuntimeClient.loadSkillInventory(mode: SkillScreenMode): List<RuntimeSkill> {
-  val effective = listSkills()
-  return if (mode == SkillScreenMode.OwnerManage) {
-    ownerSkillInventory(effective, listManagedSkills())
-  } else {
-    effective
-  }
-}
+private fun RuntimeClient.loadSkillInventory(): List<RuntimeSkill> = listSkills()
 
 @Composable
 private fun AppBottomNavigation(

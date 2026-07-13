@@ -31,6 +31,7 @@ pub mod skill_state;
 mod skill_state_activation;
 mod skill_state_cleanup;
 mod skill_state_compensation;
+mod skill_state_leases;
 mod skill_state_lifecycle;
 mod skill_state_management;
 mod skill_state_migration;
@@ -135,6 +136,8 @@ mod skill_authoring_atomicity_tests;
 #[cfg(test)]
 mod skill_store_authoring_race_tests;
 
+#[cfg(test)]
+mod skill_manager_convergence_tests;
 #[cfg(test)]
 mod skill_manager_tests;
 

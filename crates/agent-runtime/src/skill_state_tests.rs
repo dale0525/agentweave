@@ -534,6 +534,9 @@ async fn skill_state_migration_is_idempotent_with_foreign_keys_enabled() {
             "skill_revision_cleanup",
             "skill_revision_retention",
             "skill_revisions",
+            "skill_schema_migrations",
+            "skill_snapshot_lease_revisions",
+            "skill_snapshot_leases",
             "skill_snapshots",
         ]
         .into_iter()

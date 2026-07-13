@@ -5,11 +5,19 @@ import { defineConfig } from "vitest/config";
 import { normalizeOwnerRequest } from "./src/preload/ownerTransport";
 
 export default defineConfig({
+  base: "./",
+  build: {
+    rollupOptions: {
+      input: {
+        approval: "approval.html",
+        main: "index.html"
+      }
+    }
+  },
   plugins: [react()],
   server: {
     proxy: {
       "/__owner/requester": ownerProxy(process.env.GENERAL_AGENT_OWNER_TOKEN),
-      "/__owner/approver": ownerProxy(process.env.GENERAL_AGENT_APPROVER_TOKEN)
     }
   },
   test: {
@@ -25,9 +33,9 @@ function ownerProxy(token: string | undefined): ProxyOptions {
     target: "http://127.0.0.1:49321",
     changeOrigin: false,
     headers,
-    rewrite: (path: string) => path.replace(/^\/__owner\/(requester|approver)/, ""),
+    rewrite: (path: string) => path.replace(/^\/__owner\/requester/, ""),
     bypass: (request, response) => {
-      const path = request.url?.replace(/^\/__owner\/(requester|approver)/, "") ?? "";
+      const path = request.url?.replace(/^\/__owner\/requester/, "") ?? "";
       try {
         normalizeOwnerRequest(path, request.method ?? "GET");
       } catch {

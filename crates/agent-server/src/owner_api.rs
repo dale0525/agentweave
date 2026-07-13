@@ -1,4 +1,4 @@
-use crate::api::{AppState, ErrorResponse};
+use crate::api::{ApiError, AppState, ErrorResponse, UserMessageRequest, UserMessageResponse};
 use agent_runtime::skill_management::{
     CreateSkillDraftRequest, DraftFileUpdate, OwnerSkillManagementService, SkillManagementError,
     SkillPackageStatus,
@@ -108,6 +108,13 @@ impl OwnerApiConfig {
 struct OwnerSkillsResponse {
     effective: Vec<SkillPackageStatus>,
     managed: Vec<SkillPackageStatus>,
+    packages: Vec<agent_runtime::skill_management::LayeredSkillInventoryItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct OwnerApprovalReviewResponse {
+    approval: serde_json::Value,
+    package: agent_runtime::skill_management::SkillPackageDetail,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +172,16 @@ pub(crate) fn router(state: &Arc<AppState>) -> Option<Router<Arc<AppState>>> {
         .route("/owner/skills", get(list_skills))
         .route("/owner/skills/{package_id}/detail", get(skill_detail))
         .route("/owner/skills/{package_id}/audit", get(list_audit));
+    if owner
+        .auth
+        .actors()
+        .any(|actor| owner.policy().can_author_conversationally(actor))
+    {
+        router = router.route(
+            "/owner/sessions/{session_id}/messages",
+            post(post_owner_message),
+        );
+    }
     if allows_route(owner, SkillOperation::CreateDraft) {
         router = router.route("/owner/skills/drafts", post(create_draft));
     }
@@ -195,7 +212,7 @@ pub(crate) fn router(state: &Arc<AppState>) -> Option<Router<Arc<AppState>>> {
     {
         router = router.route(
             "/owner/skills/approvals/{approval_id}",
-            post(resolve_approval),
+            get(get_approval).post(resolve_approval),
         );
     }
     if allows_route(owner, SkillOperation::Export) {
@@ -211,6 +228,24 @@ pub(crate) fn router(state: &Arc<AppState>) -> Option<Router<Arc<AppState>>> {
         router = router.route("/owner/skills/{package_id}", delete(request_removal));
     }
     Some(router.route_layer(middleware::from_fn_with_state(state.clone(), require_owner)))
+}
+
+async fn post_owner_message(
+    State(state): State<Arc<AppState>>,
+    Extension(actor): Extension<ActorContext>,
+    Path(session_id): Path<String>,
+    payload: Result<Json<UserMessageRequest>, JsonRejection>,
+) -> Result<Json<UserMessageResponse>, OwnerApiError> {
+    if !owner_config(&state)?
+        .policy()
+        .can_author_conversationally(&actor)
+    {
+        return Err(OwnerApiError::Forbidden);
+    }
+    let Json(request) = payload.map_err(|_| OwnerApiError::BadRequest)?;
+    crate::api::post_message_for_actor(session_id, state, request, actor)
+        .await
+        .map_err(OwnerApiError::from_api)
 }
 
 async fn owner_principal(
@@ -260,7 +295,16 @@ async fn list_skills(
         .list_managed_skills(&actor)
         .await
         .map_err(OwnerApiError::from_service)?;
-    Ok(Json(OwnerSkillsResponse { effective, managed }))
+    let packages = owner
+        .service
+        .list_layered_skills(&actor)
+        .await
+        .map_err(OwnerApiError::from_service)?;
+    Ok(Json(OwnerSkillsResponse {
+        effective,
+        managed,
+        packages,
+    }))
 }
 
 async fn skill_detail(
@@ -496,6 +540,29 @@ async fn resolve_approval(
     Ok(Json(value))
 }
 
+async fn get_approval(
+    State(state): State<Arc<AppState>>,
+    Extension(actor): Extension<ActorContext>,
+    Path(approval_id): Path<String>,
+) -> Result<Json<OwnerApprovalReviewResponse>, OwnerApiError> {
+    validate_uuid(&approval_id)?;
+    let owner = owner_config(&state)?;
+    let approval = owner
+        .service
+        .inspect_pending_skill_approval(&approval_id, &actor)
+        .await
+        .map_err(OwnerApiError::from_service)?;
+    let package = owner
+        .service
+        .get_skill_detail(&actor, &approval.package_id)
+        .await
+        .map_err(OwnerApiError::from_service)?;
+    Ok(Json(OwnerApprovalReviewResponse {
+        approval: approval_json(&approval),
+        package,
+    }))
+}
+
 fn reload_report_json(
     report: &agent_runtime::skill_manager::SkillReloadReport,
 ) -> serde_json::Value {
@@ -508,8 +575,13 @@ fn reload_report_json(
 }
 
 fn approval_json(approval: &agent_runtime::skill_state::SkillApprovalRecord) -> serde_json::Value {
+    let operation = match approval.operation.as_str() {
+        "activate" => "activation",
+        value => value,
+    };
     serde_json::json!({
         "approval_id": approval.approval_id,
+        "operation": operation,
         "package_id": approval.package_id.as_str(),
         "permission_diff": approval.permission_diff,
         "requested_by": approval.requested_by,
@@ -568,6 +640,14 @@ enum OwnerApiError {
 }
 
 impl OwnerApiError {
+    fn from_api(error: ApiError) -> Self {
+        match error {
+            ApiError::BadRequest(_) => Self::BadRequest,
+            ApiError::NotFound(_) => Self::NotFound,
+            ApiError::ConnectionFailed(error) | ApiError::Internal(error) => Self::Internal(error),
+        }
+    }
+
     fn from_service(error: anyhow::Error) -> Self {
         match error.downcast_ref::<SkillManagementError>() {
             Some(SkillManagementError::Denied { .. }) => Self::Forbidden,

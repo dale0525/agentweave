@@ -123,7 +123,28 @@ pub struct SkillPackageStatus {
     pub status: String,
     pub reason: String,
     pub active_revision_id: Option<String>,
+    pub available: bool,
+    pub content_hash: Option<String>,
     pub manageable: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SkillActionFacts {
+    pub can_edit_draft: bool,
+    pub can_validate_draft: bool,
+    pub can_request_activation: bool,
+    pub can_disable: bool,
+    pub can_request_removal: bool,
+    pub can_rollback: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LayeredSkillInventoryItem {
+    pub package_id: SkillPackageId,
+    pub effective: Option<SkillPackageStatus>,
+    pub managed: Option<SkillPackageStatus>,
+    pub built_in_collision: bool,
+    pub actions: SkillActionFacts,
 }
 
 pub use read::{SkillPackageDetail, SkillRevisionDetail, SkillRevisionRequirements};
@@ -386,6 +407,7 @@ impl OwnerSkillManagementService {
         actor: &ActorContext,
     ) -> anyhow::Result<Vec<SkillPackageStatus>> {
         self.authorize_inspect(actor)?;
+        self.manager.converge_to_authoritative_generation().await?;
         let snapshot = self.manager.current_snapshot();
         let mut statuses = snapshot
             .packages()
@@ -397,7 +419,9 @@ impl OwnerSkillManagementService {
                 source_layer: layer_name(resolved.package.layer).into(),
                 status: "active".into(),
                 reason: resolved.reason.clone(),
-                active_revision_id: resolved_revision_id(resolved),
+                active_revision_id: inventory_revision_id(resolved),
+                available: true,
+                content_hash: Some(resolved.package.content_hash.clone()),
                 manageable: self.resolved_manageable(actor, resolved),
             })
             .chain(
@@ -411,7 +435,9 @@ impl OwnerSkillManagementService {
                         source_layer: layer_name(resolved.package.layer).into(),
                         status: resolution_status_name(resolved.status).into(),
                         reason: resolved.reason.clone(),
-                        active_revision_id: resolved_revision_id(resolved),
+                        active_revision_id: inventory_revision_id(resolved),
+                        available: false,
+                        content_hash: Some(resolved.package.content_hash.clone()),
                         manageable: self.resolved_manageable(actor, resolved),
                     }),
             )
@@ -432,6 +458,7 @@ impl OwnerSkillManagementService {
             .await?
         {
             let installation = row.installation;
+            let active_content_hash = row.active_content_hash.clone();
             let descriptor =
                 match installation.active_revision_id.as_deref() {
                     Some(revision_id) => self.state.get_revision(revision_id).await?.and_then(
@@ -478,6 +505,8 @@ impl OwnerSkillManagementService {
                 status: installation.status.as_str().into(),
                 reason: installation_reason(installation.status, installation.enabled).into(),
                 active_revision_id: installation.active_revision_id,
+                available: installation.status.as_str() == "active" && installation.enabled,
+                content_hash: active_content_hash,
                 manageable,
             });
         }
@@ -516,6 +545,8 @@ impl OwnerSkillManagementService {
                 status: "draft".into(),
                 reason: "editable staging draft".into(),
                 active_revision_id: None,
+                available: false,
+                content_hash: Some(revision.content_hash),
                 manageable,
             });
         }
@@ -683,6 +714,16 @@ fn resolved_revision_id(resolved: &crate::skill_resolver::ResolvedSkillPackage) 
         .execution_binding
         .as_ref()
         .map(|binding| binding.revision_id.clone())
+}
+
+fn inventory_revision_id(resolved: &crate::skill_resolver::ResolvedSkillPackage) -> Option<String> {
+    resolved_revision_id(resolved).or_else(|| {
+        Some(format!(
+            "{}:{}",
+            layer_name(resolved.package.layer),
+            resolved.package.content_hash
+        ))
+    })
 }
 
 pub(crate) fn is_exact_managed_candidate(

@@ -82,7 +82,6 @@ export function OwnerSkills({ onBack, policy }: OwnerSkillsProps): JSX.Element {
                 onRollback={workflow.rollback}
                 onSaveDraft={workflow.saveDraft}
                 onValidateDraft={workflow.validateDraft}
-                ownerPolicy={policy}
                 selected={workflow.selected}
                 selectedRevision={workflow.selectedRevision}
               />
@@ -95,11 +94,9 @@ export function OwnerSkills({ onBack, policy }: OwnerSkillsProps): JSX.Element {
       <CreateDraftDialog busy={workflow.busy !== null} onCreate={workflow.createDraft} onOpenChange={workflow.setCreateOpen} open={workflow.createOpen} />
       <SkillApprovalDialog
         approval={workflow.pendingApproval?.approval ?? null}
-        approverActor={workflow.approver?.actorId ?? null}
-        approverAvailable={workflow.approver !== null}
         baselineRevision={workflow.pendingApproval?.baselineRevision ?? null}
         busy={workflow.busy === "approval"}
-        error={workflow.approvalError ?? workflow.approverError}
+        error={workflow.approvalError}
         onApprove={workflow.approvePending}
         onOpenChange={(open) => { if (!open) workflow.closeApproval(); }}
         operation={workflow.pendingApproval?.operation ?? "activation"}

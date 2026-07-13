@@ -27,6 +27,13 @@ pub trait ModelClient: Send + Sync {
 #[async_trait]
 pub trait AgentRunner: Send + Sync {
     async fn run(&self, user_text: &str) -> anyhow::Result<Vec<RuntimeEvent>>;
+
+    async fn run_request(&self, request: TurnRequest) -> anyhow::Result<Vec<RuntimeEvent>> {
+        if request.actor_context != crate::skill_policy::ActorContext::anonymous() {
+            anyhow::bail!("agent runner does not accept a host-authenticated actor");
+        }
+        self.run(&request.user_text).await
+    }
 }
 
 pub struct TurnRunner<C> {
@@ -355,6 +362,10 @@ where
 {
     async fn run(&self, user_text: &str) -> anyhow::Result<Vec<RuntimeEvent>> {
         TurnRunner::run(self, user_text).await
+    }
+
+    async fn run_request(&self, request: TurnRequest) -> anyhow::Result<Vec<RuntimeEvent>> {
+        TurnRunner::run_request(self, request).await
     }
 }
 

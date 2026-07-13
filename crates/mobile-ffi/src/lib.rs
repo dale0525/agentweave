@@ -2,6 +2,7 @@ pub mod bridge;
 #[cfg(target_os = "android")]
 mod jni_bridge;
 pub mod runtime;
+mod runtime_inventory;
 pub mod types;
 
 pub use bridge::{close_runtime, initialize_runtime_json, invoke_runtime_json, send_message_json};

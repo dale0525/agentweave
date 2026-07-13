@@ -259,6 +259,19 @@ async fn revision_is_durably_protected(
     if retention.is_some() {
         return Ok(true);
     }
+    let leased: Option<i64> = sqlx::query_scalar(
+        r#"SELECT 1
+           FROM skill_snapshot_lease_revisions revisions
+           JOIN skill_snapshot_leases leases ON leases.lease_id = revisions.lease_id
+           WHERE revisions.revision_id = ? AND leases.expires_at > ? LIMIT 1"#,
+    )
+    .bind(revision_id)
+    .bind(Utc::now().to_rfc3339())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if leased.is_some() {
+        return Ok(true);
+    }
     let snapshots: Vec<String> = sqlx::query_scalar("SELECT members_json FROM skill_snapshots")
         .fetch_all(&mut **tx)
         .await?;

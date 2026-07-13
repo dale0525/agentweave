@@ -1,4 +1,7 @@
-use super::{OwnerSkillManagementService, SkillManagementError, SkillPackageStatus};
+use super::{
+    LayeredSkillInventoryItem, OwnerSkillManagementService, SkillActionFacts, SkillManagementError,
+    SkillPackageStatus,
+};
 use crate::skill_package::{SkillPackageDescriptor, SkillPackageId, SkillPackageKind};
 use crate::skill_policy::ActorContext;
 use crate::skill_state::{SkillRevisionRecord, SkillRevisionStatus};
@@ -38,6 +41,10 @@ pub struct SkillPackageDetail {
     pub status: String,
     pub reason: String,
     pub active_revision_id: Option<String>,
+    pub effective: Option<SkillPackageStatus>,
+    pub managed: Option<SkillPackageStatus>,
+    pub built_in_collision: bool,
+    pub actions: SkillActionFacts,
     pub revisions: Vec<SkillRevisionDetail>,
     pub editable_draft: Option<SkillRevisionDetail>,
 }
@@ -50,45 +57,182 @@ impl OwnerSkillManagementService {
     ) -> anyhow::Result<SkillPackageDetail> {
         self.authorize_inspect(actor)?;
         let records = self.state.list_package_revisions(package_id).await?;
-        let summaries = self
-            .list_effective_skills(actor)
+        let layered = self
+            .list_layered_skills(actor)
             .await?
             .into_iter()
-            .chain(self.list_managed_skills(actor).await?)
-            .filter(|summary| summary.package_id == *package_id)
-            .collect::<Vec<_>>();
-        let summary = preferred_summary(&summaries).ok_or(SkillManagementError::NotFound {
-            resource: "skill package",
-        })?;
-        let display_name = records
-            .iter()
-            .find_map(|record| descriptor(record).ok())
-            .map(|descriptor| descriptor.display_name)
-            .unwrap_or_else(|| display_name(package_id.as_str()));
+            .find(|item| item.package_id == *package_id)
+            .ok_or(SkillManagementError::NotFound {
+                resource: "skill package",
+            })?;
+        let summary = layered
+            .effective
+            .as_ref()
+            .or(layered.managed.as_ref())
+            .expect("layered inventory item must contain a layer");
         let mut revisions = Vec::with_capacity(records.len());
         for record in records {
             revisions.push(self.revision_detail(record).await?);
         }
-        if revisions.is_empty()
-            && let Some(revision) = self.resolved_revision_detail(package_id, summary)
+        if let Some(effective) = layered.effective.as_ref()
+            && !revisions.iter().any(|revision| {
+                Some(revision.revision_id.as_str()) == effective.active_revision_id.as_deref()
+            })
+            && let Some(revision) = self.resolved_revision_detail(package_id, effective)
         {
             revisions.push(revision?);
         }
         let editable_draft = revisions.iter().find(|revision| revision.editable).cloned();
         Ok(SkillPackageDetail {
             package_id: package_id.clone(),
-            display_name: if display_name.is_empty() {
-                summary.display_name.clone()
-            } else {
-                display_name
-            },
+            display_name: summary.display_name.clone(),
             version: summary.version.clone(),
             source_layer: summary.source_layer.clone(),
             status: summary.status.clone(),
             reason: summary.reason.clone(),
             active_revision_id: summary.active_revision_id.clone(),
+            effective: layered.effective,
+            managed: layered.managed,
+            built_in_collision: layered.built_in_collision,
+            actions: layered.actions,
             revisions,
             editable_draft,
+        })
+    }
+
+    pub async fn list_layered_skills(
+        &self,
+        actor: &ActorContext,
+    ) -> anyhow::Result<Vec<LayeredSkillInventoryItem>> {
+        let effective_rows = self.list_effective_skills(actor).await?;
+        let managed_rows = self
+            .list_managed_skills(actor)
+            .await?
+            .into_iter()
+            .filter(|status| status.status != "removed")
+            .collect::<Vec<_>>();
+        let mut package_ids = effective_rows
+            .iter()
+            .chain(&managed_rows)
+            .map(|status| status.package_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut inventory = Vec::with_capacity(package_ids.len());
+        for package_id in std::mem::take(&mut package_ids) {
+            let effective = effective_rows
+                .iter()
+                .find(|status| status.package_id == package_id && status.available)
+                .cloned();
+            let managed = managed_rows
+                .iter()
+                .find(|status| status.package_id == package_id)
+                .cloned();
+            let has_builtin = effective_rows
+                .iter()
+                .any(|status| status.package_id == package_id && status.source_layer == "builtin");
+            let has_managed = managed.is_some()
+                || effective_rows.iter().any(|status| {
+                    status.package_id == package_id && status.source_layer == "managed"
+                });
+            let built_in_collision = has_builtin && has_managed;
+            let actions = self
+                .skill_action_facts(
+                    actor,
+                    &package_id,
+                    effective.as_ref(),
+                    managed.as_ref(),
+                    has_builtin,
+                )
+                .await?;
+            inventory.push(LayeredSkillInventoryItem {
+                package_id,
+                effective,
+                managed,
+                built_in_collision,
+                actions,
+            });
+        }
+        Ok(inventory)
+    }
+
+    async fn skill_action_facts(
+        &self,
+        actor: &ActorContext,
+        package_id: &SkillPackageId,
+        effective: Option<&SkillPackageStatus>,
+        managed: Option<&SkillPackageStatus>,
+        has_builtin: bool,
+    ) -> anyhow::Result<SkillActionFacts> {
+        if self.policy.protected_packages.contains(package_id) {
+            return Ok(SkillActionFacts::default());
+        }
+        let records = self.state.list_package_revisions(package_id).await?;
+        let draft = records
+            .iter()
+            .find(|record| record.status == SkillRevisionStatus::Staging);
+        let active = managed
+            .and_then(|status| status.active_revision_id.as_deref())
+            .and_then(|revision_id| {
+                records
+                    .iter()
+                    .find(|record| record.revision_id == revision_id)
+            });
+        let descriptor = draft.or(active).and_then(|record| descriptor(record).ok());
+        let Some(descriptor) = descriptor else {
+            return Ok(SkillActionFacts::default());
+        };
+        let active_managed = effective.is_some_and(|status| status.source_layer == "managed")
+            && managed.is_some_and(|status| status.status == "active");
+        let validated_draft = draft.is_some_and(|record| {
+            record
+                .validation_json
+                .get("ok")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        let override_allowed = !has_builtin || self.policy.can_override(actor, package_id);
+        let managed_revision_count = records
+            .iter()
+            .filter(|record| record.status == SkillRevisionStatus::Managed)
+            .count();
+        Ok(SkillActionFacts {
+            can_edit_draft: draft.is_some()
+                && self.policy.allows(
+                    actor,
+                    crate::skill_policy::SkillOperation::EditDraft,
+                    descriptor.kind,
+                ),
+            can_validate_draft: draft.is_some()
+                && self.policy.allows(
+                    actor,
+                    crate::skill_policy::SkillOperation::Validate,
+                    descriptor.kind,
+                ),
+            can_request_activation: validated_draft
+                && override_allowed
+                && self.policy.allows(
+                    actor,
+                    crate::skill_policy::SkillOperation::Activate,
+                    descriptor.kind,
+                ),
+            can_disable: active_managed
+                && self.policy.allows(
+                    actor,
+                    crate::skill_policy::SkillOperation::Disable,
+                    descriptor.kind,
+                ),
+            can_request_removal: managed.is_some_and(|status| status.status != "removed")
+                && self.policy.allows(
+                    actor,
+                    crate::skill_policy::SkillOperation::DeleteManaged,
+                    descriptor.kind,
+                ),
+            can_rollback: active_managed
+                && managed_revision_count > 1
+                && self.policy.allows(
+                    actor,
+                    crate::skill_policy::SkillOperation::Rollback,
+                    descriptor.kind,
+                ),
         })
     }
 
@@ -184,21 +328,6 @@ impl OwnerSkillManagementService {
     }
 }
 
-fn preferred_summary(summaries: &[SkillPackageStatus]) -> Option<&SkillPackageStatus> {
-    summaries
-        .iter()
-        .find(|summary| summary.source_layer == "managed")
-        .or_else(|| summaries.first())
-}
-
 fn descriptor(record: &SkillRevisionRecord) -> anyhow::Result<SkillPackageDescriptor> {
     Ok(serde_json::from_value(record.descriptor_json.clone())?)
-}
-
-fn display_name(package_id: &str) -> String {
-    package_id
-        .rsplit('.')
-        .next()
-        .unwrap_or(package_id)
-        .replace('-', " ")
 }

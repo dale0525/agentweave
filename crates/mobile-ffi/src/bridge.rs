@@ -65,6 +65,7 @@ enum RuntimeRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendMessageRequest {
     session_id: String,
     content: String,

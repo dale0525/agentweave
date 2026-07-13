@@ -20,8 +20,6 @@ data class RuntimeSkillPolicy(
   val allowedKinds: List<String> = emptyList(),
   val protectedPackages: List<String> = emptyList(),
   val allowedOverrides: List<String> = emptyList(),
-  val activationApprovalRequired: Boolean = true,
-  val permissionEscalationApprovalRequired: Boolean = true,
   val rollbackApprovalRequired: Boolean = false,
 )
 
@@ -72,6 +70,9 @@ data class RuntimeSkill(
   val manageable: Boolean,
   val description: String = "",
   val builtInCollision: Boolean = false,
+  val effective: RuntimeSkillPackageSummary? = null,
+  val managed: RuntimeSkillPackageSummary? = null,
+  val actions: RuntimeSkillActions = RuntimeSkillActions(),
 ) {
   val id: String get() = packageId
   val label: String get() = displayName
@@ -105,6 +106,17 @@ data class RuntimeSkillPackageSummary(
   val reason: String,
   val activeRevisionId: String?,
   val manageable: Boolean = false,
+  val available: Boolean = false,
+  val contentHash: String? = null,
+)
+
+data class RuntimeSkillActions(
+  val canEditDraft: Boolean = false,
+  val canValidateDraft: Boolean = false,
+  val canRequestActivation: Boolean = false,
+  val canDisable: Boolean = false,
+  val canRequestRemoval: Boolean = false,
+  val canRollback: Boolean = false,
 )
 
 data class RuntimeSkillRequirements(
@@ -146,6 +158,9 @@ data class RuntimeSkillDetail(
   val revisions: List<RuntimeSkillRevision>,
   val editableDraft: RuntimeSkillRevision?,
   val builtInCollision: Boolean = false,
+  val effective: RuntimeSkillPackageSummary? = null,
+  val managed: RuntimeSkillPackageSummary? = null,
+  val actions: RuntimeSkillActions = RuntimeSkillActions(),
 )
 
 data class RuntimeSkillDraftRequest(

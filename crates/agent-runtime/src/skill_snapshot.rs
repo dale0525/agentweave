@@ -13,14 +13,55 @@ pub struct SkillSnapshot {
     catalog: SkillCatalog,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SkillSnapshotLease {
     snapshot: Arc<SkillSnapshot>,
+    durable: Option<Arc<DurableSnapshotLease>>,
 }
 
 impl SkillSnapshotLease {
     pub(crate) fn new(snapshot: Arc<SkillSnapshot>) -> Self {
-        Self { snapshot }
+        Self {
+            snapshot,
+            durable: None,
+        }
+    }
+
+    pub(crate) fn new_durable(
+        snapshot: Arc<SkillSnapshot>,
+        state: crate::skill_state::SkillStateStore,
+        lease_id: String,
+    ) -> Self {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let heartbeat_cancel = cancellation.clone();
+        let heartbeat_state = state.clone();
+        let heartbeat_id = lease_id.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = heartbeat_cancel.cancelled() => return,
+                    _ = tokio::time::sleep(crate::skill_state_leases::SNAPSHOT_LEASE_HEARTBEAT) => {
+                        match heartbeat_state.refresh_snapshot_lease(&heartbeat_id).await {
+                            Ok(true) => {}
+                            Ok(false) => return,
+                            Err(error) => tracing::warn!(
+                                lease_id = %heartbeat_id,
+                                ?error,
+                                "durable snapshot lease heartbeat will retry after database error"
+                            ),
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            snapshot,
+            durable: Some(Arc::new(DurableSnapshotLease {
+                state,
+                lease_id,
+                cancellation,
+            })),
+        }
     }
 
     pub fn snapshot(&self) -> &SkillSnapshot {
@@ -33,6 +74,36 @@ impl SkillSnapshotLease {
 
     pub fn generation(&self) -> u64 {
         self.snapshot.generation()
+    }
+}
+
+impl std::fmt::Debug for SkillSnapshotLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SkillSnapshotLease")
+            .field("generation", &self.generation())
+            .field("durable", &self.durable.is_some())
+            .finish()
+    }
+}
+
+struct DurableSnapshotLease {
+    state: crate::skill_state::SkillStateStore,
+    lease_id: String,
+    cancellation: tokio_util::sync::CancellationToken,
+}
+
+impl Drop for DurableSnapshotLease {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let state = self.state.clone();
+        let lease_id = self.lease_id.clone();
+        runtime.spawn(async move {
+            let _ = state.release_snapshot_lease(&lease_id).await;
+        });
     }
 }
 
