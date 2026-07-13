@@ -39,10 +39,11 @@ import org.junit.Assert.assertTrue
 private const val LIFECYCLE_PACKAGE = "com.example.task17-mobile"
 private const val RETAINED_PACKAGE = "com.example.task17-retained"
 private const val ACTIVE_INSTRUCTION = "TASK17_UI_ACTIVE_SKILL_EVIDENCE"
-private const val NEXT_TURN_USER_TEXT = "prove_active_skill"
+private const val NEXT_TURN_PROMPT = "task17-mobile prove_active_skill"
 
 private data class NextTurnBinding(
-  val requestId: String,
+  val nonce: String,
+  val userText: String,
   val revisionId: String,
   val contentHash: String,
 )
@@ -93,7 +94,8 @@ internal fun runRealRuntimeVisualHarness(arguments: Bundle) {
     val secrets = InMemoryModelSecretStore()
     var nextTurnBinding: NextTurnBinding? = null
     arguments.getString("mock_base_url")?.let { baseUrl ->
-      val binding = authoritativeNextTurnBinding(client)
+      val nonce = arguments.getString("next_turn_nonce") ?: "nonce-${UUID.randomUUID()}"
+      val binding = authoritativeNextTurnBinding(client, nonce)
       nextTurnBinding = binding
       val secretId = "task17.mobile.mock"
       secrets.saveSecret(secretId, "task17-test-key")
@@ -105,13 +107,6 @@ internal fun runRealRuntimeVisualHarness(arguments: Bundle) {
           baseUrl = baseUrl,
           modelName = "task17-model",
           secretId = secretId,
-          headers = mapOf(
-            "X-Task17-Request-Id" to binding.requestId,
-            "X-Task17-Revision-Id" to binding.revisionId,
-            "X-Task17-Content-Hash" to binding.contentHash,
-            "X-Task17-Marker" to ACTIVE_INSTRUCTION,
-            "X-Task17-User-Text" to NEXT_TURN_USER_TEXT,
-          ),
         ),
       )
     }
@@ -138,13 +133,14 @@ internal fun runRealRuntimeVisualHarness(arguments: Bundle) {
     writeAcceptanceState(context, client, "$phase-after")
     if (arguments.getString("verify_next_turn") == "true") {
       val binding = requireNotNull(nextTurnBinding) { "next-turn verification requires mock_base_url" }
-      val evidence = capturedNextTurnEvidence(client)
+      val capture = capturedNextTurnEvidence(client, binding.userText)
+      val evidence = bindAuthoritativeRuntimeState(capture, binding, client)
       assertTrue(
         evidence.toString(2),
         validateNextTurnEvidence(
           evidence,
-          expectedRequestId = binding.requestId,
-          expectedUserText = NEXT_TURN_USER_TEXT,
+          expectedNonce = binding.nonce,
+          expectedUserText = binding.userText,
           expectedRevisionId = binding.revisionId,
           expectedContentHash = binding.contentHash,
         ),
@@ -224,11 +220,8 @@ private fun createValidatedDraft(
   instructions: String,
 ): String {
   val displayName = if (packageId == LIFECYCLE_PACKAGE) "Task17 mobile lifecycle" else "Task17 retained"
-  val description = if (instructions == ACTIVE_INSTRUCTION) {
-    "Task17 Android acceptance package. $ACTIVE_INSTRUCTION"
-  } else {
-    "Task17 Android acceptance package"
-  }
+  val description = "Task17 Android acceptance package without instruction marker"
+  val aliases = if (packageId == LIFECYCLE_PACKAGE) "aliases:\n  - task17-mobile\n" else ""
   val draft = client.createSkillDraft(
     RuntimeSkillDraftRequest(
       packageId = packageId,
@@ -239,7 +232,7 @@ private fun createValidatedDraft(
       initialFiles = listOf(
         RuntimeSkillDraftFile(
           "SKILL.md",
-          "---\nname: $displayName\ndescription: $description.\n---\n\n$instructions",
+          "---\nname: $displayName\ndescription: $description.\n$aliases---\n\n$instructions",
         ),
         RuntimeSkillDraftFile("general-agent.json", descriptor(packageId, displayName, version)),
       ),
@@ -280,7 +273,7 @@ private fun activeRevision(client: RuntimeClient, packageId: String): String? =
 private fun managedStatus(client: RuntimeClient, packageId: String): String? =
   client.listManagedSkills().find { it.packageId == packageId }?.status
 
-private fun authoritativeNextTurnBinding(client: RuntimeClient): NextTurnBinding {
+private fun authoritativeNextTurnBinding(client: RuntimeClient, nonce: String): NextTurnBinding {
   val detail = client.getSkillDetail(LIFECYCLE_PACKAGE)
   val revisionId = requireNotNull(detail.activeRevisionId) { "lifecycle package has no active revision" }
   val revision = detail.revisions.single { it.revisionId == revisionId }
@@ -288,27 +281,55 @@ private fun authoritativeNextTurnBinding(client: RuntimeClient): NextTurnBinding
     "active lifecycle revision does not contain the acceptance marker"
   }
   check(revision.contentHash.isNotBlank()) { "active lifecycle revision has no content hash" }
-  return NextTurnBinding(UUID.randomUUID().toString(), revisionId, revision.contentHash)
+  return NextTurnBinding(
+    nonce = nonce,
+    userText = "$NEXT_TURN_PROMPT nonce:$nonce",
+    revisionId = revisionId,
+    contentHash = revision.contentHash,
+  )
 }
 
-private fun capturedNextTurnEvidence(client: RuntimeClient): JSONObject {
+private fun capturedNextTurnEvidence(client: RuntimeClient, expectedUserText: String): JSONObject {
   val artifact = client.listSessions()
     .asSequence()
     .flatMap { session -> client.getMessages(session.id).asSequence() }
     .filter { message -> message.role == "assistant" }
     .mapNotNull { message -> runCatching { JSONObject(message.content) }.getOrNull() }
-    .lastOrNull { evidence -> evidence.optString("user_text") == NEXT_TURN_USER_TEXT }
+    .lastOrNull { evidence -> evidence.optString("user_text") == expectedUserText }
   return requireNotNull(artifact) { "UI-triggered next-turn evidence was not persisted" }
+}
+
+private fun bindAuthoritativeRuntimeState(
+  capture: JSONObject,
+  binding: NextTurnBinding,
+  client: RuntimeClient,
+): JSONObject {
+  val current = authoritativeNextTurnBinding(client, binding.nonce)
+  check(current.revisionId == binding.revisionId && current.contentHash == binding.contentHash) {
+    "active lifecycle revision changed during the UI provider request"
+  }
+  return JSONObject(capture.toString())
+    .put("active_revision_id", binding.revisionId)
+    .put("content_hash", binding.contentHash)
+    .put(
+      "authoritative_state",
+      JSONObject()
+        .put("source", "mobile_runtime_ffi")
+        .put("package_id", LIFECYCLE_PACKAGE)
+        .put("active_revision_id", binding.revisionId)
+        .put("content_hash", binding.contentHash),
+    )
 }
 
 internal fun validateNextTurnEvidence(
   evidence: JSONObject,
-  expectedRequestId: String,
+  expectedNonce: String,
   expectedUserText: String,
   expectedRevisionId: String,
   expectedContentHash: String,
 ): Boolean {
   val marker = evidence.optString("marker")
+  val developerText = requestContentForRole(evidence.optJSONObject("request_body"), "developer")
   val requestBody = evidence.optJSONObject("request_body") ?: return false
   val userBound = requestBody.optJSONArray("input")
     ?.let { input ->
@@ -318,14 +339,42 @@ internal fun validateNextTurnEvidence(
         } == true
       }
     } == true
-  return evidence.optString("request_id") == expectedRequestId &&
+  val selectedInstruction = Regex(
+    """<skill_instructions\s+[^>]*name="Task17 mobile lifecycle"[^>]*>([\s\S]*?)</skill_instructions>""",
+  ).findAll(developerText).any { match -> match.groupValues[1].contains(ACTIVE_INSTRUCTION) }
+  val authoritative = evidence.optJSONObject("authoritative_state") ?: return false
+  return evidence.optString("request_id").isNotBlank() &&
+    evidence.optString("capture_nonce") == expectedNonce &&
     evidence.optString("user_text") == expectedUserText &&
     evidence.optString("active_revision_id") == expectedRevisionId &&
     expectedContentHash.isNotBlank() &&
     evidence.optString("content_hash") == expectedContentHash &&
     marker == ACTIVE_INSTRUCTION &&
-    requestBody.toString().contains(marker) &&
+    evidence.optString("marker_location") == "skill_instructions" &&
+    evidence.optString("raw_request_sha256").matches(Regex("[0-9a-f]{64}")) &&
+    selectedInstruction &&
+    authoritative.optString("source") == "mobile_runtime_ffi" &&
+    authoritative.optString("package_id") == LIFECYCLE_PACKAGE &&
+    authoritative.optString("active_revision_id") == expectedRevisionId &&
+    authoritative.optString("content_hash") == expectedContentHash &&
     userBound
+}
+
+private fun requestContentForRole(requestBody: JSONObject?, role: String): String {
+  val input = requestBody?.optJSONArray("input") ?: return ""
+  return (0 until input.length()).mapNotNull { index ->
+    input.optJSONObject(index)?.takeIf { it.optString("role") == role }?.opt("content")
+  }.flatMap { content ->
+    when (content) {
+      is String -> listOf(content)
+      is JSONArray -> (0 until content.length()).mapNotNull { index ->
+        content.optJSONObject(index)
+          ?.takeIf { it.optString("type") == "input_text" }
+          ?.optString("text")
+      }
+      else -> emptyList()
+    }
+  }.joinToString("\n")
 }
 
 private fun requestContentContains(content: Any?, expected: String): Boolean {

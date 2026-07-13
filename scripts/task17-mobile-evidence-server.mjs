@@ -1,56 +1,79 @@
 import http from "node:http";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open, rename } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
-const REQUIRED_HEADERS = [
-  "x-task17-request-id",
-  "x-task17-revision-id",
-  "x-task17-content-hash",
-  "x-task17-marker",
-  "x-task17-user-text",
-];
+const ACTIVE_MARKER = "TASK17_UI_ACTIVE_SKILL_EVIDENCE";
+const SELECTED_SKILL = "Task17 mobile lifecycle";
+const NONCE_PATTERN = /\bnonce:([a-zA-Z0-9][a-zA-Z0-9._-]{7,127})\b/;
 
-export function buildNextTurnEvidence(headers, requestBody) {
-  const values = Object.fromEntries(
-    REQUIRED_HEADERS.map((name) => [name, headerValue(headers, name)]),
-  );
-  for (const [name, value] of Object.entries(values)) {
-    if (!value) throw new Error(`missing ${name}`);
+export function buildNextTurnCapture(rawBytes, { requestId = randomUUID() } = {}) {
+  const raw = Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(rawBytes);
+  if (raw.length === 0 || raw.length > MAX_REQUEST_BYTES) {
+    throw new Error("provider request exceeds evidence limit");
   }
-  const marker = values["x-task17-marker"];
-  if (!JSON.stringify(requestBody).includes(marker)) {
-    throw new Error("provider request does not contain the active marker");
+  const requestBody = JSON.parse(raw.toString("utf8"));
+  const developerText = requestContentForRole(requestBody, "developer").join("\n");
+  const selected = selectedInstructionBodies(developerText, SELECTED_SKILL);
+  if (!selected.some((body) => body.includes(ACTIVE_MARKER))) {
+    throw new Error("provider request does not contain the marker in selected skill instructions");
   }
-  const userText = values["x-task17-user-text"];
-  const userBound = Array.isArray(requestBody.input) && requestBody.input.some(
-    (item) => item?.role === "user" && contentIncludesText(item.content, userText),
-  );
-  if (!userBound) throw new Error("provider request does not contain the bound user text");
+  const userText = requestContentForRole(requestBody, "user").at(-1) ?? "";
+  const nonce = userText.match(NONCE_PATTERN)?.[1];
+  if (!nonce || !userText.includes("task17-mobile")) {
+    throw new Error("provider request does not contain the bound UI nonce");
+  }
   return {
-    request_id: values["x-task17-request-id"],
+    request_id: requestId,
+    capture_nonce: nonce,
     user_text: userText,
-    active_revision_id: values["x-task17-revision-id"],
-    content_hash: values["x-task17-content-hash"],
-    marker,
+    marker: ACTIVE_MARKER,
+    marker_location: "skill_instructions",
+    raw_request_sha256: createHash("sha256").update(raw).digest("hex"),
     request_body: requestBody,
   };
 }
 
-function contentIncludesText(content, expected) {
-  if (content === expected) return true;
-  return Array.isArray(content) && content.some(
-    (part) => part?.type === "input_text" && part?.text === expected,
-  );
+function requestContentForRole(requestBody, role) {
+  if (!Array.isArray(requestBody.input)) return [];
+  return requestBody.input
+    .filter((item) => item?.role === role)
+    .flatMap((item) => contentText(item.content));
 }
 
-export function startEvidenceServer({ port = 18717, host = "127.0.0.1" } = {}) {
+function contentText(content) {
+  if (typeof content === "string") return [content];
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((part) => part?.type === "input_text" && typeof part.text === "string")
+    .map((part) => part.text);
+}
+
+function selectedInstructionBodies(text, expectedName) {
+  const bodies = [];
+  const blocks = text.matchAll(/<skill_instructions\s+([^>]*)>([\s\S]*?)<\/skill_instructions>/g);
+  for (const block of blocks) {
+    const name = block[1].match(/(?:^|\s)name="([^"]+)"(?:\s|$)/)?.[1];
+    if (name === expectedName) bodies.push(block[2]);
+  }
+  return bodies;
+}
+
+export function startEvidenceServer({
+  port = 18717,
+  host = "127.0.0.1",
+  capturePath = process.env.TASK17_EVIDENCE_CAPTURE_PATH,
+} = {}) {
   const server = http.createServer(async (request, response) => {
     try {
       if (request.method !== "POST" || !request.url?.endsWith("/responses")) {
         sendJson(response, 404, { error: "not found" });
         return;
       }
-      const requestBody = JSON.parse(await readBoundedBody(request));
-      const evidence = buildNextTurnEvidence(request.headers, requestBody);
+      const rawBytes = await readBoundedBody(request);
+      const evidence = buildNextTurnCapture(rawBytes);
+      if (capturePath) await writeCaptureAtomically(capturePath, evidence);
       sendJson(response, 200, {
         output: [{
           type: "message",
@@ -71,11 +94,6 @@ export function startEvidenceServer({ port = 18717, host = "127.0.0.1" } = {}) {
   return server;
 }
 
-function headerValue(headers, name) {
-  const value = headers[name];
-  return Array.isArray(value) ? value[0] ?? "" : value ?? "";
-}
-
 function readBoundedBody(request) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -89,9 +107,29 @@ function readBoundedBody(request) {
       }
       chunks.push(chunk);
     });
-    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    request.on("end", () => resolve(Buffer.concat(chunks)));
     request.on("error", reject);
   });
+}
+
+async function writeCaptureAtomically(target, capture) {
+  const parent = dirname(target);
+  await mkdir(parent, { recursive: true });
+  const temporary = join(parent, `.${randomUUID()}.capture.tmp`);
+  const file = await open(temporary, "wx", 0o600);
+  try {
+    await file.writeFile(`${JSON.stringify(capture, null, 2)}\n`, "utf8");
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+  await rename(temporary, target);
+  const directory = await open(parent, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
 }
 
 function sendJson(response, status, value) {

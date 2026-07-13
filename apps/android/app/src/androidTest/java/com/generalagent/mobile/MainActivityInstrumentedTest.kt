@@ -141,33 +141,47 @@ class MainActivityInstrumentedTest {
   }
 
   @Test
-  fun nextTurnEvidenceRequiresSameRequestMarkerRevisionAndContentHash() {
+  fun nextTurnEvidenceRequiresInstructionCaptureAndAuthoritativeRuntimeBinding() {
+    val userText = "task17-mobile prove_active_skill nonce:nonce-absolute-1"
     val requestBody = JSONObject()
-      .put("input", org.json.JSONArray().put(
-        JSONObject()
-          .put("role", "user")
+      .put(
+        "input",
+        org.json.JSONArray()
           .put(
-            "content",
-            org.json.JSONArray().put(
-              JSONObject().put("type", "input_text").put("text", "prove_active_skill"),
-            ),
-          ),
-      ))
-      .put("developer", "TASK17_UI_ACTIVE_SKILL_EVIDENCE")
-      .toString()
+            JSONObject()
+              .put("role", "developer")
+              .put(
+                "content",
+                "<skill_instructions name=\"Task17 mobile lifecycle\" source=\"SKILL.md\">" +
+                  "TASK17_UI_ACTIVE_SKILL_EVIDENCE</skill_instructions>",
+              ),
+          )
+          .put(JSONObject().put("role", "user").put("content", userText)),
+      )
     val evidence = JSONObject()
       .put("request_id", "request-1")
-      .put("user_text", "prove_active_skill")
+      .put("capture_nonce", "nonce-absolute-1")
+      .put("user_text", userText)
       .put("active_revision_id", "revision-1")
       .put("content_hash", "hash-1")
       .put("marker", "TASK17_UI_ACTIVE_SKILL_EVIDENCE")
-      .put("request_body", JSONObject(requestBody))
+      .put("marker_location", "skill_instructions")
+      .put("raw_request_sha256", "a".repeat(64))
+      .put("request_body", requestBody)
+      .put(
+        "authoritative_state",
+        JSONObject()
+          .put("source", "mobile_runtime_ffi")
+          .put("package_id", "com.example.task17-mobile")
+          .put("active_revision_id", "revision-1")
+          .put("content_hash", "hash-1"),
+      )
 
     assertTrue(
       validateNextTurnEvidence(
         evidence,
-        expectedRequestId = "request-1",
-        expectedUserText = "prove_active_skill",
+        expectedNonce = "nonce-absolute-1",
+        expectedUserText = userText,
         expectedRevisionId = "revision-1",
         expectedContentHash = "hash-1",
       ),
@@ -175,8 +189,26 @@ class MainActivityInstrumentedTest {
     assertFalse(
       validateNextTurnEvidence(
         JSONObject(evidence.toString()).put("active_revision_id", "revision-2"),
-        expectedRequestId = "request-1",
-        expectedUserText = "prove_active_skill",
+        expectedNonce = "nonce-absolute-1",
+        expectedUserText = userText,
+        expectedRevisionId = "revision-1",
+        expectedContentHash = "hash-1",
+      ),
+    )
+    assertFalse(
+      validateNextTurnEvidence(
+        JSONObject(evidence.toString()).put("marker_location", "available_skills"),
+        expectedNonce = "nonce-absolute-1",
+        expectedUserText = userText,
+        expectedRevisionId = "revision-1",
+        expectedContentHash = "hash-1",
+      ),
+    )
+    assertFalse(
+      validateNextTurnEvidence(
+        JSONObject(evidence.toString()).put("raw_request_sha256", "forged-header-value"),
+        expectedNonce = "nonce-absolute-1",
+        expectedUserText = userText,
         expectedRevisionId = "revision-1",
         expectedContentHash = "hash-1",
       ),

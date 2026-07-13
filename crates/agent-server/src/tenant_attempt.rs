@@ -1,17 +1,32 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
-const MARKER_NAME: &str = ".general-agent-initialization.json";
-const MARKER_LIMIT: u64 = 64 * 1024;
+#[path = "tenant_attempt_fs.rs"]
+mod fs;
+#[cfg(test)]
+use fs::replace_quarantine_for_test;
+use fs::{
+    canonical_real_directory, create_private_object, open_nofollow, read_object_binding,
+    read_record, remove_private_object, rename_noreplace, sync_directory, validate_link_count,
+    validate_metadata, write_object_binding, write_record,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AttemptPathKind {
     File,
     Directory,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ResourceState {
+    Planned,
+    Prepared,
+    Published,
+    Quarantined,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -57,440 +72,660 @@ impl PersistentIdentity {
         #[cfg(all(not(unix), not(windows)))]
         anyhow::bail!("tenant attempt identities are unsupported on this platform")
     }
+}
 
-    fn from_path(path: &Path, kind: AttemptPathKind) -> anyhow::Result<Self> {
-        let file = open_nofollow(path, kind, false)?;
-        Self::from_file(&file, kind)
-    }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ObjectBinding {
+    version: u8,
+    attempt_token: String,
+    object_token: String,
+    identity: PersistentIdentity,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct OwnedResource {
-    relative_path: String,
-    identity: PersistentIdentity,
+    canonical_path: PathBuf,
+    temporary_path: PathBuf,
+    quarantine_name: String,
+    kind: AttemptPathKind,
+    object_token: String,
+    identity: Option<PersistentIdentity>,
+    state: ResourceState,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct AttemptRecord {
     version: u8,
-    token: String,
-    root_owned: bool,
-    root_identity: PersistentIdentity,
+    attempt_key: String,
+    attempt_token: String,
     resources: Vec<OwnedResource>,
+    #[serde(default)]
+    quarantine: Option<OwnedResource>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AttemptFaultPoint {
+    PlanDurable,
+    ObjectDurable,
+    PreparedJournalStored,
+    PublishedObjectDurable,
+    PublishedJournalStored,
+    QuarantinePlanDurable,
+    QuarantineObjectStored,
+    QuarantinePublished,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CleanupTestAction {
+    CrashAfterMove,
+    ReplaceQuarantineBeforeDelete,
 }
 
 pub(crate) struct TenantAttemptJournal {
-    root: PathBuf,
-    marker: PathBuf,
+    control_root: PathBuf,
+    quarantine_root: PathBuf,
+    journal_path: PathBuf,
+    allowed_roots: Vec<PathBuf>,
     record: AttemptRecord,
-    root_descriptor: File,
-    descriptors: HashMap<String, File>,
+    #[cfg(test)]
+    fault: Option<AttemptFaultPoint>,
+    #[cfg(test)]
+    cleanup_actions: std::collections::HashMap<PathBuf, CleanupTestAction>,
 }
 
 impl TenantAttemptJournal {
-    pub(crate) async fn begin(root: PathBuf, root_created: bool) -> anyhow::Result<Self> {
-        let carried_root_ownership = recover_stale_attempt(&root).await?;
-        let root_descriptor = open_nofollow(&root, AttemptPathKind::Directory, false)?;
+    pub(crate) async fn begin(
+        control_root: PathBuf,
+        quarantine_root: PathBuf,
+        attempt_key: &str,
+        allowed_roots: Vec<PathBuf>,
+    ) -> anyhow::Result<Self> {
+        validate_attempt_key(attempt_key)?;
+        let control_root = canonical_real_directory(&control_root)?;
+        let quarantine_root = canonical_real_directory(&quarantine_root)?;
+        let allowed_roots = allowed_roots
+            .iter()
+            .map(|path| canonical_real_directory(path))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let journal_path = control_root.join(format!("{attempt_key}.attempt.json"));
+        if journal_path.exists() {
+            let record = read_record(&journal_path)?;
+            anyhow::ensure!(
+                record.attempt_key == attempt_key,
+                "tenant attempt journal key changed"
+            );
+            let mut stale = Self::from_record(
+                control_root.clone(),
+                quarantine_root.clone(),
+                journal_path.clone(),
+                allowed_roots.clone(),
+                record,
+            )?;
+            stale.cleanup().await?;
+        }
         let record = AttemptRecord {
-            version: 1,
-            token: uuid::Uuid::new_v4().to_string(),
-            root_owned: root_created || carried_root_ownership,
-            root_identity: PersistentIdentity::from_file(
-                &root_descriptor,
-                AttemptPathKind::Directory,
-            )?,
+            version: 2,
+            attempt_key: attempt_key.to_string(),
+            attempt_token: uuid::Uuid::new_v4().to_string(),
             resources: Vec::new(),
+            quarantine: None,
         };
-        let marker = root.join(MARKER_NAME);
-        write_record(&marker, &record).await?;
-        Ok(Self {
-            root,
-            marker,
+        write_record(&journal_path, &record)?;
+        Self::from_record(
+            control_root,
+            quarantine_root,
+            journal_path,
+            allowed_roots,
             record,
-            root_descriptor,
-            descriptors: HashMap::new(),
+        )
+    }
+
+    fn from_record(
+        control_root: PathBuf,
+        quarantine_root: PathBuf,
+        journal_path: PathBuf,
+        allowed_roots: Vec<PathBuf>,
+        record: AttemptRecord,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            record.version == 2,
+            "unsupported tenant attempt journal version"
+        );
+        uuid::Uuid::parse_str(&record.attempt_token).context("invalid tenant attempt token")?;
+        for resource in &record.resources {
+            validate_owned_path(&resource.canonical_path, &allowed_roots)?;
+            validate_owned_path(&resource.temporary_path, &allowed_roots)?;
+        }
+        if let Some(resource) = &record.quarantine {
+            validate_quarantine_resource(resource, &quarantine_root)?;
+        }
+        Ok(Self {
+            control_root,
+            quarantine_root,
+            journal_path,
+            allowed_roots,
+            record,
+            #[cfg(test)]
+            fault: None,
+            #[cfg(test)]
+            cleanup_actions: std::collections::HashMap::new(),
         })
     }
 
+    pub(crate) async fn ensure_directory(&mut self, path: &Path) -> anyhow::Result<bool> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                validate_metadata(&metadata, AttemptPathKind::Directory)?;
+                Ok(false)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.create_resource(path, AttemptPathKind::Directory)?;
+                Ok(true)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub(crate) async fn create_owned_file(&mut self, path: &Path) -> anyhow::Result<bool> {
-        if path.parent() != Some(self.root.as_path()) {
-            anyhow::bail!("attempt-owned database must be a direct tenant child");
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                validate_metadata(&metadata, AttemptPathKind::File)?;
+                Ok(false)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.create_resource(path, AttemptPathKind::File)?;
+                Ok(true)
+            }
+            Err(error) => Err(error.into()),
         }
-        let descriptor = match create_file_nofollow(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-            Err(error) => return Err(error.into()),
-        };
-        self.record_descriptor(path, AttemptPathKind::File, descriptor)
-            .await?;
-        Ok(true)
     }
 
-    pub(crate) async fn claim_existing(
-        &mut self,
-        path: &Path,
-        kind: AttemptPathKind,
-    ) -> anyhow::Result<()> {
-        let relative = relative_path(&self.root, path)?;
-        if self
-            .record
-            .resources
-            .iter()
-            .any(|resource| resource.relative_path == relative)
-        {
-            return Ok(());
-        }
-        let descriptor = match open_nofollow(path, kind, false) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
-        self.record_descriptor(path, kind, descriptor).await
-    }
-
-    async fn record_descriptor(
-        &mut self,
-        path: &Path,
-        kind: AttemptPathKind,
-        descriptor: File,
-    ) -> anyhow::Result<()> {
-        let relative = relative_path(&self.root, path)?;
-        let identity = PersistentIdentity::from_file(&descriptor, kind)?;
+    fn create_resource(&mut self, path: &Path, kind: AttemptPathKind) -> anyhow::Result<()> {
+        let parent =
+            canonical_real_directory(path.parent().context("tenant attempt path has no parent")?)?;
+        let canonical_path = parent.join(
+            path.file_name()
+                .context("tenant attempt path has no file name")?,
+        );
+        validate_owned_path(&canonical_path, &self.allowed_roots)?;
+        anyhow::ensure!(
+            std::fs::canonicalize(path.parent().context("tenant attempt path has no parent")?)?
+                == parent,
+            "tenant attempt parent changed"
+        );
+        let object_token = uuid::Uuid::new_v4().to_string();
+        let name = canonical_path
+            .file_name()
+            .context("tenant attempt path has no file name")?
+            .to_string_lossy();
+        let temporary_path = parent.join(format!(".{name}.ga-attempt-{object_token}.tmp"));
+        let quarantine_name = format!("{object_token}.owned");
+        let index = self.record.resources.len();
         self.record.resources.push(OwnedResource {
-            relative_path: relative.clone(),
-            identity,
+            canonical_path: canonical_path.clone(),
+            temporary_path: temporary_path.clone(),
+            quarantine_name,
+            kind,
+            object_token: object_token.clone(),
+            identity: None,
+            state: ResourceState::Planned,
         });
-        if let Err(error) = write_record(&self.marker, &self.record).await {
-            self.record.resources.pop();
-            return Err(error);
-        }
-        self.descriptors.insert(relative, descriptor);
+        self.persist()?;
+        self.fault(AttemptFaultPoint::PlanDurable)?;
+
+        create_private_object(&temporary_path, kind)?;
+        let descriptor = open_nofollow(&temporary_path, kind, true)?;
+        let identity = PersistentIdentity::from_file(&descriptor, kind)?;
+        let binding = ObjectBinding {
+            version: 1,
+            attempt_token: self.record.attempt_token.clone(),
+            object_token,
+            identity: identity.clone(),
+        };
+        write_object_binding(&descriptor, &temporary_path, &binding, false)?;
+        descriptor.sync_all()?;
+        sync_directory(&parent)?;
+        self.fault(AttemptFaultPoint::ObjectDurable)?;
+
+        self.record.resources[index].identity = Some(identity);
+        self.record.resources[index].state = ResourceState::Prepared;
+        self.persist()?;
+        self.fault(AttemptFaultPoint::PreparedJournalStored)?;
+
+        rename_noreplace(&temporary_path, &canonical_path)?;
+        sync_directory(&parent)?;
+        self.fault(AttemptFaultPoint::PublishedObjectDurable)?;
+
+        self.record.resources[index].state = ResourceState::Published;
+        self.persist()?;
+        self.fault(AttemptFaultPoint::PublishedJournalStored)?;
         Ok(())
     }
 
-    pub(crate) async fn commit(&self) -> anyhow::Result<()> {
-        validate_marker_token(&self.marker, &self.record.token).await?;
-        quarantine_marker(&self.marker, &self.record.token).await
+    pub(crate) async fn cleanup(&mut self) -> anyhow::Result<()> {
+        let mut failures = Vec::new();
+        let mut failed_paths = Vec::new();
+        let mut removed_tokens = std::collections::HashSet::new();
+        let mut order = (0..self.record.resources.len()).collect::<Vec<_>>();
+        order.sort_by_key(|index| {
+            std::cmp::Reverse(
+                self.record.resources[*index]
+                    .canonical_path
+                    .components()
+                    .count(),
+            )
+        });
+        for index in order {
+            let resource = self.record.resources[index].clone();
+            if failed_paths
+                .iter()
+                .any(|failed: &PathBuf| failed.starts_with(&resource.canonical_path))
+            {
+                failures.push(anyhow::anyhow!(
+                    "tenant directory retained because child cleanup failed"
+                ));
+                failed_paths.push(resource.canonical_path);
+                continue;
+            }
+            if let Err(error) = self.cleanup_resource(&resource) {
+                failures.push(error);
+                failed_paths.push(resource.canonical_path);
+                continue;
+            }
+            removed_tokens.insert(resource.object_token);
+        }
+        self.record
+            .resources
+            .retain(|resource| !removed_tokens.contains(&resource.object_token));
+        self.persist()
+            .context("tenant cleanup journal update failed")?;
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "tenant cleanup retained {} ownership record(s)",
+                failures.len()
+            );
+        }
+        self.remove_quarantine_if_empty()?;
+        self.remove_journal()?;
+        Ok(())
     }
 
-    pub(crate) async fn cleanup(&self) {
-        if validate_marker_token(&self.marker, &self.record.token)
-            .await
-            .is_err()
-        {
-            tracing::warn!("tenant initialization cleanup skipped after marker mismatch");
-            return;
-        }
-        cleanup_resources(self).await;
-        if self.record.root_owned && root_contains_only_marker(&self.root, &self.marker) {
-            if quarantine_owned_root(self).await.is_ok() {
-                return;
+    fn cleanup_resource(&mut self, resource: &OwnedResource) -> anyhow::Result<()> {
+        let quarantine = self.quarantine_destination(resource);
+        let source = self.locate_resource(resource, &quarantine)?;
+        let Some(source) = source else {
+            return Ok(());
+        };
+        let (opened, binding) = self.validate_bound_object(&source, resource)?;
+        if source != quarantine {
+            let quarantine_dir = self.ensure_quarantine_directory()?;
+            rename_noreplace(&source, &quarantine)?;
+            sync_directory(source.parent().context("tenant source has no parent")?)?;
+            sync_directory(&quarantine_dir)?;
+            #[cfg(test)]
+            if self.cleanup_action(resource) == Some(CleanupTestAction::CrashAfterMove) {
+                anyhow::bail!("injected crash after quarantine move");
             }
-            tracing::warn!("failed to quarantine attempt-owned tenant root");
+            let index = self
+                .record
+                .resources
+                .iter()
+                .position(|candidate| candidate.object_token == resource.object_token)
+                .context("tenant cleanup resource disappeared")?;
+            self.record.resources[index].state = ResourceState::Quarantined;
+            self.record.resources[index].identity = Some(binding.identity.clone());
+            self.persist()?;
         }
-        if let Err(error) = quarantine_marker(&self.marker, &self.record.token).await {
-            tracing::warn!(?error, "failed to clean tenant initialization marker");
+        let (moved, _) = self.validate_bound_object(&quarantine, resource)?;
+        #[cfg(test)]
+        if self.cleanup_action(resource) == Some(CleanupTestAction::ReplaceQuarantineBeforeDelete) {
+            replace_quarantine_for_test(&quarantine, resource.kind)?;
         }
+        let (current, _) = self.validate_bound_object(&quarantine, resource)?;
+        anyhow::ensure!(
+            PersistentIdentity::from_file(&moved, resource.kind)?
+                == PersistentIdentity::from_file(&current, resource.kind)?,
+            "tenant quarantine identity changed before deletion"
+        );
+        drop(opened);
+        remove_private_object(&quarantine, resource.kind, &current)?;
+        sync_directory(
+            quarantine
+                .parent()
+                .context("tenant quarantine has no parent")?,
+        )?;
+        Ok(())
+    }
+
+    fn locate_resource(
+        &self,
+        resource: &OwnedResource,
+        quarantine: &Path,
+    ) -> anyhow::Result<Option<PathBuf>> {
+        let candidates = match resource.state {
+            ResourceState::Quarantined => [
+                quarantine,
+                &resource.canonical_path,
+                &resource.temporary_path,
+            ],
+            ResourceState::Published => [
+                &resource.canonical_path,
+                quarantine,
+                &resource.temporary_path,
+            ],
+            ResourceState::Prepared | ResourceState::Planned => [
+                &resource.temporary_path,
+                &resource.canonical_path,
+                quarantine,
+            ],
+        };
+        for candidate in candidates {
+            match std::fs::symlink_metadata(candidate) {
+                Ok(_) => return Ok(Some(candidate.to_path_buf())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(None)
+    }
+
+    fn validate_bound_object(
+        &self,
+        path: &Path,
+        resource: &OwnedResource,
+    ) -> anyhow::Result<(File, ObjectBinding)> {
+        let descriptor = open_nofollow(path, resource.kind, false)?;
+        let actual = PersistentIdentity::from_file(&descriptor, resource.kind)?;
+        let binding = read_object_binding(&descriptor, path)?;
+        anyhow::ensure!(binding.version == 1, "unsupported tenant object binding");
+        anyhow::ensure!(
+            binding.attempt_token == self.record.attempt_token
+                && binding.object_token == resource.object_token
+                && binding.identity == actual,
+            "tenant object ownership token or identity changed"
+        );
+        if let Some(expected) = &resource.identity {
+            anyhow::ensure!(*expected == actual, "tenant journal identity changed");
+        }
+        Ok((descriptor, binding))
+    }
+
+    fn ensure_quarantine_directory(&mut self) -> anyhow::Result<PathBuf> {
+        let path = self.quarantine_directory();
+        if self.record.quarantine.is_none() {
+            let object_token = uuid::Uuid::new_v4().to_string();
+            self.record.quarantine = Some(OwnedResource {
+                canonical_path: path.clone(),
+                temporary_path: self
+                    .quarantine_root
+                    .join(format!(".{}.{}.tmp", self.record.attempt_key, object_token)),
+                quarantine_name: String::new(),
+                kind: AttemptPathKind::Directory,
+                object_token,
+                identity: None,
+                state: ResourceState::Planned,
+            });
+            self.persist()?;
+            self.fault(AttemptFaultPoint::QuarantinePlanDurable)?;
+        }
+        let mut resource = self
+            .record
+            .quarantine
+            .clone()
+            .context("tenant quarantine ownership record missing")?;
+        if path.exists() {
+            let (_, binding) = self.validate_bound_object(&path, &resource)?;
+            resource.identity = Some(binding.identity);
+            resource.state = ResourceState::Published;
+            self.record.quarantine = Some(resource);
+            self.persist()?;
+            return Ok(path);
+        }
+        if resource.temporary_path.exists() {
+            let (_, binding) = self.validate_bound_object(&resource.temporary_path, &resource)?;
+            resource.identity = Some(binding.identity);
+        } else {
+            anyhow::ensure!(
+                resource.identity.is_none() && resource.state == ResourceState::Planned,
+                "tenant quarantine object disappeared after preparation"
+            );
+            create_private_object(&resource.temporary_path, AttemptPathKind::Directory)?;
+            let descriptor =
+                open_nofollow(&resource.temporary_path, AttemptPathKind::Directory, true)?;
+            let identity = PersistentIdentity::from_file(&descriptor, AttemptPathKind::Directory)?;
+            let binding = ObjectBinding {
+                version: 1,
+                attempt_token: self.record.attempt_token.clone(),
+                object_token: resource.object_token.clone(),
+                identity: identity.clone(),
+            };
+            write_object_binding(&descriptor, &resource.temporary_path, &binding, false)?;
+            descriptor.sync_all()?;
+            sync_directory(&self.quarantine_root)?;
+            resource.identity = Some(identity);
+            self.fault(AttemptFaultPoint::QuarantineObjectStored)?;
+        }
+        resource.state = ResourceState::Prepared;
+        self.record.quarantine = Some(resource.clone());
+        self.persist()?;
+        rename_noreplace(&resource.temporary_path, &path)?;
+        sync_directory(&self.quarantine_root)?;
+        self.fault(AttemptFaultPoint::QuarantinePublished)?;
+        resource.state = ResourceState::Published;
+        self.record.quarantine = Some(resource);
+        self.persist()?;
+        Ok(path)
+    }
+
+    fn remove_quarantine_if_empty(&mut self) -> anyhow::Result<()> {
+        let path = self.quarantine_directory();
+        if !path.exists() {
+            self.record.quarantine = None;
+            self.persist()?;
+            return Ok(());
+        }
+        let resource = self
+            .record
+            .quarantine
+            .clone()
+            .context("tenant quarantine ownership record missing")?;
+        let (descriptor, _) = self.validate_bound_object(&path, &resource)?;
+        anyhow::ensure!(
+            std::fs::read_dir(&path)?.next().is_none(),
+            "tenant quarantine directory is not empty"
+        );
+        remove_private_object(&path, AttemptPathKind::Directory, &descriptor)?;
+        sync_directory(&self.quarantine_root)?;
+        self.record.quarantine = None;
+        self.persist()?;
+        Ok(())
+    }
+
+    pub(crate) async fn commit(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.record
+                .resources
+                .iter()
+                .all(|resource| resource.state == ResourceState::Published),
+            "tenant attempt cannot commit unpublished resources"
+        );
+        anyhow::ensure!(
+            self.record.quarantine.is_none(),
+            "tenant attempt cannot commit cleanup quarantine"
+        );
+        self.remove_journal()
+    }
+
+    fn remove_journal(&self) -> anyhow::Result<()> {
+        let current = read_record(&self.journal_path)?;
+        anyhow::ensure!(
+            current.attempt_token == self.record.attempt_token,
+            "tenant attempt journal token changed"
+        );
+        let retired = self.control_root.join(format!(
+            ".{}.{}.committed",
+            self.record.attempt_key, self.record.attempt_token
+        ));
+        rename_noreplace(&self.journal_path, &retired)?;
+        sync_directory(&self.control_root)?;
+        let moved = read_record(&retired)?;
+        anyhow::ensure!(
+            moved.attempt_token == self.record.attempt_token,
+            "retired tenant journal token changed"
+        );
+        std::fs::remove_file(&retired)?;
+        sync_directory(&self.control_root)?;
+        Ok(())
+    }
+
+    fn persist(&self) -> anyhow::Result<()> {
+        write_record(&self.journal_path, &self.record)
+    }
+
+    fn quarantine_directory(&self) -> PathBuf {
+        self.quarantine_root.join(format!(
+            "{}-{}",
+            self.record.attempt_key, self.record.attempt_token
+        ))
+    }
+
+    fn quarantine_destination(&self, resource: &OwnedResource) -> PathBuf {
+        self.quarantine_directory().join(&resource.quarantine_name)
     }
 
     #[cfg(test)]
-    pub(crate) async fn replace_marker_token_for_test(&self, token: &str) -> anyhow::Result<()> {
-        let mut record = self.record.clone();
-        record.token = token.to_string();
-        write_record(&self.marker, &record).await
-    }
-}
-
-async fn recover_stale_attempt(root: &Path) -> anyhow::Result<bool> {
-    let marker = root.join(MARKER_NAME);
-    let Some(record) = read_record_if_present(&marker).await? else {
-        return Ok(false);
-    };
-    let root_descriptor = open_nofollow(root, AttemptPathKind::Directory, false)?;
-    let journal = TenantAttemptJournal {
-        root: root.to_path_buf(),
-        marker: marker.clone(),
-        record,
-        root_descriptor,
-        descriptors: HashMap::new(),
-    };
-    validate_marker_token(&marker, &journal.record.token).await?;
-    cleanup_resources(&journal).await;
-    let carry = journal.record.root_owned
-        && identity_matches_file(&journal.root_descriptor, &journal.record.root_identity)
-        && root_contains_only_marker(root, &marker);
-    quarantine_marker(&marker, &journal.record.token).await?;
-    Ok(carry)
-}
-
-async fn cleanup_resources(journal: &TenantAttemptJournal) {
-    let mut resources = journal.record.resources.iter().collect::<Vec<_>>();
-    resources
-        .sort_by_key(|resource| std::cmp::Reverse(resource.relative_path.matches('/').count()));
-    for resource in resources {
-        let path = journal.root.join(&resource.relative_path);
-        let descriptor = journal.descriptors.get(&resource.relative_path);
-        if let Err(error) =
-            quarantine_owned_path(&path, &resource.identity, descriptor, &journal.record.token)
-                .await
-        {
-            tracing::warn!(?error, "failed to quarantine attempt-owned tenant path");
+    fn fault(&mut self, point: AttemptFaultPoint) -> anyhow::Result<()> {
+        if self.fault == Some(point) {
+            self.fault = None;
+            anyhow::bail!("injected tenant attempt crash at {point:?}");
         }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    fn fault(&mut self, _point: AttemptFaultPoint) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn cleanup_action(&self, resource: &OwnedResource) -> Option<CleanupTestAction> {
+        self.cleanup_actions.get(&resource.canonical_path).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_once_at_for_test(&mut self, point: AttemptFaultPoint) {
+        self.fault = Some(point);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_cleanup_action_for_test(&mut self, path: PathBuf, action: CleanupTestAction) {
+        self.cleanup_actions.insert(path, action);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn replace_object_token_for_test(
+        &self,
+        path: &Path,
+        token: &str,
+    ) -> anyhow::Result<()> {
+        let resource = self
+            .record
+            .resources
+            .iter()
+            .find(|resource| resource.canonical_path == path)
+            .context("test resource missing")?;
+        let descriptor = open_nofollow(path, resource.kind, true)?;
+        let mut binding = read_object_binding(&descriptor, path)?;
+        binding.object_token = token.to_string();
+        write_object_binding(&descriptor, path, &binding, true)?;
+        descriptor.sync_all()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn occupy_quarantine_destination_for_test(
+        &mut self,
+        path: &Path,
+    ) -> anyhow::Result<()> {
+        let quarantine_name = self.resource_for_test(path)?.quarantine_name.clone();
+        let directory = self.ensure_quarantine_directory()?;
+        std::fs::write(directory.join(quarantine_name), b"occupied")?;
+        sync_directory(&directory)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn quarantine_destination_for_test(&self, path: &Path) -> anyhow::Result<PathBuf> {
+        Ok(self.quarantine_destination(self.resource_for_test(path)?))
+    }
+
+    #[cfg(test)]
+    fn resource_for_test(&self, path: &Path) -> anyhow::Result<&OwnedResource> {
+        self.record
+            .resources
+            .iter()
+            .find(|resource| resource.canonical_path == path)
+            .context("test resource missing")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resource_paths_for_test(&self) -> Vec<PathBuf> {
+        self.record
+            .resources
+            .iter()
+            .map(|resource| resource.canonical_path.clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn journal_exists_for_current_attempt_for_test(&self) -> bool {
+        self.journal_path.exists()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn journal_exists_for_test(control: &Path, key: &str) -> bool {
+        control.join(format!("{key}.attempt.json")).exists()
     }
 }
 
-async fn quarantine_owned_path(
-    path: &Path,
-    identity: &PersistentIdentity,
-    descriptor: Option<&File>,
-    token: &str,
+fn validate_attempt_key(value: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
+        "tenant attempt key must be canonical lowercase ASCII"
+    );
+    Ok(())
+}
+
+fn validate_owned_path(path: &Path, roots: &[PathBuf]) -> anyhow::Result<()> {
+    anyhow::ensure!(path.is_absolute(), "tenant attempt path must be absolute");
+    anyhow::ensure!(
+        roots
+            .iter()
+            .any(|root| path.starts_with(root) && path != root),
+        "tenant attempt path escaped configured roots"
+    );
+    anyhow::ensure!(
+        path.components()
+            .all(|component| !matches!(component, std::path::Component::ParentDir)),
+        "tenant attempt path contains traversal"
+    );
+    Ok(())
+}
+
+fn validate_quarantine_resource(
+    resource: &OwnedResource,
+    quarantine_root: &Path,
 ) -> anyhow::Result<()> {
-    let quarantine = quarantine_path(path, token)?;
-    if !path.exists() {
-        return remove_existing_quarantine(&quarantine, identity, descriptor).await;
-    }
-    if PersistentIdentity::from_path(path, identity.kind)? != *identity
-        || descriptor.is_some_and(|file| !identity_matches_file(file, identity))
-    {
-        return Ok(());
-    }
-    anyhow::ensure!(!quarantine.exists(), "tenant quarantine name is occupied");
-    tokio::fs::rename(path, &quarantine).await?;
-    if PersistentIdentity::from_path(&quarantine, identity.kind)? != *identity
-        || descriptor.is_some_and(|file| !identity_matches_file(file, identity))
-    {
-        restore_quarantine(&quarantine, path).await;
-        anyhow::bail!("tenant path identity changed during quarantine");
-    }
-    remove_path(&quarantine, identity.kind).await
-}
-
-async fn remove_existing_quarantine(
-    quarantine: &Path,
-    identity: &PersistentIdentity,
-    descriptor: Option<&File>,
-) -> anyhow::Result<()> {
-    if !quarantine.exists() {
-        return Ok(());
-    }
-    if PersistentIdentity::from_path(quarantine, identity.kind)? == *identity
-        && descriptor.is_none_or(|file| identity_matches_file(file, identity))
-    {
-        remove_path(quarantine, identity.kind).await?;
-    }
-    Ok(())
-}
-
-async fn quarantine_owned_root(journal: &TenantAttemptJournal) -> anyhow::Result<()> {
     anyhow::ensure!(
-        identity_matches_file(&journal.root_descriptor, &journal.record.root_identity),
-        "tenant root descriptor identity changed"
+        resource.kind == AttemptPathKind::Directory
+            && resource.canonical_path.parent() == Some(quarantine_root)
+            && resource.temporary_path.parent() == Some(quarantine_root),
+        "tenant quarantine journal path escaped configured root"
     );
-    anyhow::ensure!(
-        PersistentIdentity::from_path(&journal.root, AttemptPathKind::Directory)?
-            == journal.record.root_identity,
-        "tenant root path identity changed"
-    );
-    let quarantine = quarantine_path(&journal.root, &journal.record.token)?;
-    anyhow::ensure!(
-        !quarantine.exists(),
-        "tenant root quarantine name is occupied"
-    );
-    tokio::fs::rename(&journal.root, &quarantine).await?;
-    let quarantined_marker = quarantine.join(MARKER_NAME);
-    if PersistentIdentity::from_path(&quarantine, AttemptPathKind::Directory)?
-        != journal.record.root_identity
-        || validate_marker_token(&quarantined_marker, &journal.record.token)
-            .await
-            .is_err()
-    {
-        restore_quarantine(&quarantine, &journal.root).await;
-        anyhow::bail!("tenant root ownership changed during quarantine");
-    }
-    quarantine_marker(&quarantined_marker, &journal.record.token).await?;
-    tokio::fs::remove_dir(&quarantine).await?;
     Ok(())
-}
-
-async fn quarantine_marker(marker: &Path, token: &str) -> anyhow::Result<()> {
-    validate_marker_token(marker, token).await?;
-    let quarantine = marker.with_file_name(format!("{MARKER_NAME}.{token}.quarantine"));
-    anyhow::ensure!(
-        !quarantine.exists(),
-        "tenant marker quarantine name is occupied"
-    );
-    tokio::fs::rename(marker, &quarantine).await?;
-    if validate_marker_token(&quarantine, token).await.is_err() {
-        restore_quarantine(&quarantine, marker).await;
-        anyhow::bail!("tenant initialization marker changed during quarantine");
-    }
-    tokio::fs::remove_file(quarantine).await?;
-    Ok(())
-}
-
-async fn validate_marker_token(marker: &Path, token: &str) -> anyhow::Result<()> {
-    let record = read_record(marker).await?;
-    anyhow::ensure!(record.token == token, "tenant initialization token changed");
-    Ok(())
-}
-
-async fn read_record_if_present(path: &Path) -> anyhow::Result<Option<AttemptRecord>> {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(_) => read_record(path).await.map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-async fn read_record(path: &Path) -> anyhow::Result<AttemptRecord> {
-    let file = open_nofollow(path, AttemptPathKind::File, false)?;
-    anyhow::ensure!(
-        file.metadata()?.len() <= MARKER_LIMIT,
-        "tenant marker is too large"
-    );
-    let bytes = tokio::fs::read(path).await?;
-    anyhow::ensure!(
-        bytes.len() as u64 <= MARKER_LIMIT,
-        "tenant marker is too large"
-    );
-    let record: AttemptRecord = serde_json::from_slice(&bytes)?;
-    anyhow::ensure!(record.version == 1, "unsupported tenant marker version");
-    uuid::Uuid::parse_str(&record.token).context("invalid tenant marker token")?;
-    Ok(record)
-}
-
-async fn write_record(path: &Path, record: &AttemptRecord) -> anyhow::Result<()> {
-    let bytes = serde_json::to_vec(record)?;
-    anyhow::ensure!(
-        bytes.len() as u64 <= MARKER_LIMIT,
-        "tenant marker is too large"
-    );
-    let temporary = path.with_file_name(format!(".{MARKER_NAME}.{}.tmp", uuid::Uuid::new_v4()));
-    let mut file = create_file_nofollow(&temporary)?;
-    use std::io::Write;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    tokio::fs::rename(&temporary, path).await?;
-    Ok(())
-}
-
-fn open_nofollow(path: &Path, kind: AttemptPathKind, write: bool) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(write);
-    set_nofollow(&mut options);
-    let file = options.open(path)?;
-    validate_metadata(&file.metadata()?, kind)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    Ok(file)
-}
-
-fn create_file_nofollow(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    set_nofollow(&mut options);
-    options.open(path)
-}
-
-#[cfg(unix)]
-fn set_nofollow(options: &mut OpenOptions) {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
-}
-
-#[cfg(windows)]
-fn set_nofollow(options: &mut OpenOptions) {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn set_nofollow(_options: &mut OpenOptions) {}
-
-fn validate_metadata(metadata: &std::fs::Metadata, kind: AttemptPathKind) -> anyhow::Result<()> {
-    let valid = !metadata.file_type().is_symlink()
-        && match kind {
-            AttemptPathKind::File => metadata.is_file(),
-            AttemptPathKind::Directory => metadata.is_dir(),
-        };
-    anyhow::ensure!(valid, "tenant attempt path has an invalid type");
-    Ok(())
-}
-
-fn validate_link_count(metadata: &std::fs::Metadata, kind: AttemptPathKind) -> anyhow::Result<()> {
-    if kind != AttemptPathKind::File {
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        anyhow::ensure!(
-            metadata.nlink() == 1,
-            "tenant attempt file must have one link"
-        );
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        anyhow::ensure!(
-            metadata.number_of_links() == 1,
-            "tenant attempt file must have one link"
-        );
-    }
-    Ok(())
-}
-
-fn identity_matches_file(file: &File, expected: &PersistentIdentity) -> bool {
-    PersistentIdentity::from_file(file, expected.kind).is_ok_and(|identity| identity == *expected)
-}
-
-fn relative_path(root: &Path, path: &Path) -> anyhow::Result<String> {
-    let relative = path
-        .strip_prefix(root)
-        .context("attempt-owned path escaped tenant root")?;
-    anyhow::ensure!(
-        !relative.as_os_str().is_empty()
-            && relative
-                .components()
-                .all(|component| matches!(component, std::path::Component::Normal(_))),
-        "attempt-owned path is not canonical"
-    );
-    Ok(relative.to_string_lossy().replace('\\', "/"))
-}
-
-fn quarantine_path(path: &Path, token: &str) -> anyhow::Result<PathBuf> {
-    let name = path
-        .file_name()
-        .context("tenant attempt path has no file name")?
-        .to_string_lossy();
-    Ok(path.with_file_name(format!(".{name}.ga-init-{token}.quarantine")))
-}
-
-fn root_contains_only_marker(root: &Path, marker: &Path) -> bool {
-    std::fs::read_dir(root).is_ok_and(|entries| {
-        let paths = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>();
-        paths.len() == 1 && paths[0] == marker
-    })
-}
-
-async fn remove_path(path: &Path, kind: AttemptPathKind) -> anyhow::Result<()> {
-    match kind {
-        AttemptPathKind::File => tokio::fs::remove_file(path).await?,
-        AttemptPathKind::Directory => tokio::fs::remove_dir(path).await?,
-    }
-    Ok(())
-}
-
-async fn restore_quarantine(quarantine: &Path, original: &Path) {
-    if !original.exists()
-        && let Err(error) = tokio::fs::rename(quarantine, original).await
-    {
-        tracing::warn!(
-            ?error,
-            "failed to restore foreign tenant path from quarantine"
-        );
-    }
 }

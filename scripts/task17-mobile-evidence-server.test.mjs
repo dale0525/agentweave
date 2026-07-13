@@ -1,75 +1,65 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { buildNextTurnEvidence } from "./task17-mobile-evidence-server.mjs";
+import { buildNextTurnCapture } from "./task17-mobile-evidence-server.mjs";
 
-test("binds one provider request to authoritative mobile revision evidence", () => {
-  const marker = "TASK17_UI_ACTIVE_SKILL_EVIDENCE";
-  const requestBody = {
+const marker = "TASK17_UI_ACTIVE_SKILL_EVIDENCE";
+const nonce = "nonce-absolute-1";
+const userText = `task17-mobile prove_active_skill nonce:${nonce}`;
+
+function bodyWithDeveloper(developer) {
+  return JSON.stringify({
     input: [
-      { role: "developer", content: `available: ${marker}` },
-      { role: "user", content: "prove_active_skill" },
+      { role: "developer", content: developer },
+      { role: "user", content: userText },
     ],
-  };
-
-  const evidence = buildNextTurnEvidence(
-    {
-      "x-task17-request-id": "request-1",
-      "x-task17-revision-id": "revision-1",
-      "x-task17-content-hash": "hash-1",
-      "x-task17-marker": marker,
-      "x-task17-user-text": "prove_active_skill",
-      authorization: "Bearer must-not-leak",
-    },
-    requestBody,
-  );
-
-  assert.deepEqual(evidence, {
-    request_id: "request-1",
-    user_text: "prove_active_skill",
-    active_revision_id: "revision-1",
-    content_hash: "hash-1",
-    marker,
-    request_body: requestBody,
+    model: "task17-model",
   });
-  assert.doesNotMatch(JSON.stringify(evidence), /must-not-leak/);
+}
+
+test("captures raw request digest and instruction-only marker location", () => {
+  const raw = Buffer.from(bodyWithDeveloper(
+    `<available_skills count="1">\n- name: Task17 mobile lifecycle\n  description: summary without marker\n</available_skills>\n\n` +
+    `<skill_instructions name="Task17 mobile lifecycle" source="SKILL.md">\n${marker}\n</skill_instructions>`,
+  ));
+
+  const capture = buildNextTurnCapture(raw, { requestId: "server-request-1" });
+
+  assert.equal(capture.request_id, "server-request-1");
+  assert.equal(capture.capture_nonce, nonce);
+  assert.equal(capture.user_text, userText);
+  assert.equal(capture.marker_location, "skill_instructions");
+  assert.equal(capture.raw_request_sha256, createHash("sha256").update(raw).digest("hex"));
+  assert.equal(capture.request_body.input[1].content, userText);
+  assert.equal("active_revision_id" in capture, false);
+  assert.equal("content_hash" in capture, false);
 });
 
-test("rejects a request body without the active marker", () => {
+test("rejects marker present only in available skill summary", () => {
+  const raw = Buffer.from(bodyWithDeveloper(
+    `<available_skills count="1">\n- name: Task17 mobile lifecycle\n  description: ${marker}\n</available_skills>`,
+  ));
+  assert.throws(() => buildNextTurnCapture(raw), /selected skill instructions/);
+});
+
+test("arbitrary authoritative-looking headers cannot satisfy capture", () => {
+  const raw = Buffer.from(bodyWithDeveloper("summary without selected instructions"));
   assert.throws(
-    () => buildNextTurnEvidence(
-      {
-        "x-task17-request-id": "request-1",
-        "x-task17-revision-id": "revision-1",
-        "x-task17-content-hash": "hash-1",
-        "x-task17-marker": "TASK17_UI_ACTIVE_SKILL_EVIDENCE",
-        "x-task17-user-text": "prove_active_skill",
+    () => buildNextTurnCapture(raw, {
+      headers: {
+        "x-task17-revision-id": "forged-revision",
+        "x-task17-content-hash": "forged-hash",
+        "x-task17-marker": marker,
       },
-      { input: [{ role: "user", content: "prove_active_skill" }] },
-    ),
-    /active marker/,
+    }),
+    /selected skill instructions/,
   );
 });
 
-test("accepts Responses input_text user content from the real gateway", () => {
-  const marker = "TASK17_UI_ACTIVE_SKILL_EVIDENCE";
-  const requestBody = {
-    input: [
-      { role: "developer", content: marker },
-      { role: "user", content: [{ type: "input_text", text: "prove_active_skill" }] },
-    ],
-  };
-
-  const evidence = buildNextTurnEvidence(
-    {
-      "x-task17-request-id": "request-structured",
-      "x-task17-revision-id": "revision-structured",
-      "x-task17-content-hash": "hash-structured",
-      "x-task17-marker": marker,
-      "x-task17-user-text": "prove_active_skill",
-    },
-    requestBody,
-  );
-
-  assert.equal(evidence.user_text, "prove_active_skill");
+test("rejects a marker outside the selected lifecycle instruction block", () => {
+  const raw = Buffer.from(bodyWithDeveloper(
+    `<skill_instructions name="another-skill" source="SKILL.md">${marker}</skill_instructions>`,
+  ));
+  assert.throws(() => buildNextTurnCapture(raw), /selected skill instructions/);
 });

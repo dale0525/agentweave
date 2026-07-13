@@ -1,6 +1,5 @@
 use crate::tenant_initialization::{
-    TenantInitializationPaths, acquire_tenant_initialization_lock, cleanup_prepared_directory,
-    prepare_real_directory, prepare_real_tenant_child,
+    TenantInitializationPaths, acquire_tenant_initialization_lock, prepare_real_directory,
 };
 use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::skill_management::OwnerSkillManagementService;
@@ -208,6 +207,7 @@ pub struct FilesystemTenantSkillManagerFactory {
     data_tenants: PathBuf,
     cache_tenants: PathBuf,
     initialization_locks: PathBuf,
+    initialization_quarantine: PathBuf,
     #[cfg(test)]
     fail_migration_once: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -220,11 +220,14 @@ impl FilesystemTenantSkillManagerFactory {
         let cache_tenants = prepare_real_directory(&config.cache_root.join("tenants")).await?;
         let initialization_locks =
             prepare_real_directory(&data_tenants.join(".initialization-locks")).await?;
+        let initialization_quarantine =
+            prepare_real_directory(&data_tenants.join(".initialization-quarantine")).await?;
         Ok(Self {
             config,
             data_tenants,
             cache_tenants,
             initialization_locks,
+            initialization_quarantine,
             #[cfg(test)]
             fail_migration_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -246,34 +249,38 @@ impl TenantSkillManagerFactory for FilesystemTenantSkillManagerFactory {
             acquire_tenant_initialization_lock(&self.initialization_locks, &tenant_id)
                 .await
                 .context("tenant initialization lock failed")?;
-        let data = prepare_real_tenant_child(&self.data_tenants, &tenant_id)
-            .await
-            .context("tenant data root preparation failed")?;
-        let cache = match prepare_real_tenant_child(&self.cache_tenants, &tenant_id).await {
-            Ok(cache) => cache,
-            Err(error) => {
-                cleanup_prepared_directory(&data).await;
-                return Err(error);
-            }
-        };
-        let mut cleanup = TenantInitializationPaths::capture(data, cache)
-            .await
-            .context("tenant initialization ownership capture failed")?;
+        let mut cleanup = TenantInitializationPaths::capture(
+            self.initialization_locks.clone(),
+            self.initialization_quarantine.clone(),
+            &tenant_id,
+            &self.data_tenants,
+            &self.cache_tenants,
+        )
+        .await
+        .context("tenant initialization ownership capture failed")?;
         let result = self.create_runtime(tenant_id, &mut cleanup).await;
         match result {
             Ok(runtime) => {
                 if let Err(error) = cleanup.commit().await {
                     runtime.storage.close().await;
                     drop(runtime);
-                    cleanup.cleanup().await;
-                    return Err(error).context("tenant initialization ownership commit failed");
+                    return match cleanup.cleanup().await {
+                        Ok(()) => {
+                            Err(error).context("tenant initialization ownership commit failed")
+                        }
+                        Err(cleanup_error) => Err(error).context(format!(
+                            "tenant initialization commit failed and owned cleanup was retained: {cleanup_error}"
+                        )),
+                    };
                 }
                 Ok(runtime)
             }
-            Err(error) => {
-                cleanup.cleanup().await;
-                Err(error)
-            }
+            Err(error) => match cleanup.cleanup().await {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(error).context(format!(
+                    "tenant runtime failed and owned cleanup was retained: {cleanup_error}"
+                )),
+            },
         }
     }
 }
@@ -299,17 +306,10 @@ impl FilesystemTenantSkillManagerFactory {
         .await
         {
             Ok(storage) => storage,
-            Err(error) => {
-                let _ = cleanup.record_created_paths().await;
-                return Err(error).context("tenant storage connection failed");
-            }
+            Err(error) => return Err(error).context("tenant storage connection failed"),
         };
         let cleanup_storage = storage.clone();
         let result = async {
-            cleanup
-                .record_created_paths()
-                .await
-                .context("tenant database ownership capture failed")?;
             #[cfg(test)]
             if self
                 .fail_migration_once
@@ -324,13 +324,13 @@ impl FilesystemTenantSkillManagerFactory {
             reject_symlink_or_non_file_if_present(&database_path).await?;
             ensure_parent_identity(&data_root, &database_path).await?;
             let state = SkillStateStore::new(storage.clone());
+            cleanup
+                .prepare_store_paths()
+                .await
+                .context("tenant skill store ownership preparation failed")?;
             let paths = SkillStorePaths::prepare(&data_root.join("app"), &cache_root.join("cache"))
                 .await
                 .context("tenant skill store preparation failed")?;
-            cleanup
-                .record_created_paths()
-                .await
-                .context("tenant store ownership capture failed")?;
             let revisions = SkillRevisionStore::new(paths, state.clone());
             let mut sources = self.config.sources.clone();
             sources.push(Arc::new(ManagedSkillSource::from_store(revisions.clone())));
@@ -354,10 +354,6 @@ impl FilesystemTenantSkillManagerFactory {
                 .startup_reconcile()
                 .await
                 .context("tenant startup reconciliation failed")?;
-            cleanup
-                .record_created_paths()
-                .await
-                .context("tenant final ownership capture failed")?;
             Ok(TenantSkillRuntime {
                 tenant_id,
                 manager,
@@ -372,7 +368,6 @@ impl FilesystemTenantSkillManagerFactory {
         }
         .await;
         if result.is_err() {
-            let _ = cleanup.record_created_paths().await;
             cleanup_storage.close().await;
             #[cfg(test)]
             notify_cleanup_observer(cleanup_storage.is_closed());

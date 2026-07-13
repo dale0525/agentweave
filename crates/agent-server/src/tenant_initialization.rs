@@ -1,4 +1,4 @@
-use crate::tenant_attempt::{AttemptPathKind, TenantAttemptJournal};
+use crate::tenant_attempt::TenantAttemptJournal;
 use anyhow::Context;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -195,292 +195,91 @@ pub(crate) async fn prepare_real_directory(path: &Path) -> anyhow::Result<PathBu
 
 pub(crate) struct PreparedTenantDirectory {
     pub(crate) path: PathBuf,
-    created: Option<CreatedPath>,
-}
-
-pub(crate) async fn prepare_real_tenant_child(
-    parent: &Path,
-    tenant_id: &str,
-) -> anyhow::Result<PreparedTenantDirectory> {
-    let child = parent.join(tenant_id);
-    let created = match tokio::fs::symlink_metadata(&child).await {
-        Ok(metadata) => {
-            ensure_real_directory(&child, &metadata)?;
-            false
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match tokio::fs::create_dir(&child).await {
-                Ok(()) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Err(error) => return Err(error.into()),
-    };
-    ensure_real_directory(&child, &tokio::fs::symlink_metadata(&child).await?)?;
-    let canonical = tokio::fs::canonicalize(&child).await?;
-    anyhow::ensure!(
-        canonical == parent.join(tenant_id),
-        "tenant root has a canonical alias instead of the requested tenant id"
-    );
-    let created = created
-        .then(|| CreatedPath::capture(canonical.clone(), PathKind::Directory))
-        .transpose()?;
-    Ok(PreparedTenantDirectory {
-        path: canonical,
-        created,
-    })
 }
 
 pub(crate) struct TenantInitializationPaths {
     pub(crate) data: PreparedTenantDirectory,
     pub(crate) cache: PreparedTenantDirectory,
-    tracked: Vec<TrackedPath>,
-    data_attempt: TenantAttemptJournal,
-    cache_attempt: TenantAttemptJournal,
+    attempt: TenantAttemptJournal,
 }
 
 impl TenantInitializationPaths {
     pub(crate) async fn capture(
-        data: PreparedTenantDirectory,
-        cache: PreparedTenantDirectory,
+        control_root: PathBuf,
+        quarantine_root: PathBuf,
+        tenant_id: &str,
+        data_parent: &Path,
+        cache_parent: &Path,
     ) -> anyhow::Result<Self> {
-        let data_created = data.created.is_some();
-        let cache_created = cache.created.is_some();
-        let data_attempt = TenantAttemptJournal::begin(data.path.clone(), data_created).await?;
-        let cache_attempt =
-            match TenantAttemptJournal::begin(cache.path.clone(), cache_created).await {
-                Ok(attempt) => attempt,
-                Err(error) => {
-                    data_attempt.cleanup().await;
-                    return Err(error);
-                }
-            };
-        let tracked = [
-            (data.path.join("state.db"), PathKind::File),
-            (data.path.join("state.db-wal"), PathKind::File),
-            (data.path.join("state.db-shm"), PathKind::File),
-            (data.path.join("app"), PathKind::Directory),
-            (data.path.join("app/managed-skills"), PathKind::Directory),
-            (
-                data.path.join("app/managed-skills/.locks"),
-                PathKind::Directory,
-            ),
-            (data.path.join("app/skill-quarantine"), PathKind::Directory),
-            (cache.path.join("cache"), PathKind::Directory),
-            (cache.path.join("cache/skill-staging"), PathKind::Directory),
-        ];
-        let mut paths = Vec::with_capacity(tracked.len());
-        for (path, kind) in tracked {
-            paths.push(TrackedPath::capture(path, kind).await?);
+        let data_path = data_parent.join(tenant_id);
+        let cache_path = cache_parent.join(tenant_id);
+        let mut attempt = TenantAttemptJournal::begin(
+            control_root,
+            quarantine_root,
+            tenant_id,
+            vec![data_parent.to_path_buf(), cache_parent.to_path_buf()],
+        )
+        .await?;
+        let prepared = async {
+            attempt.ensure_directory(&data_path).await?;
+            attempt.ensure_directory(&cache_path).await?;
+            verify_tenant_root(data_parent, &data_path).await?;
+            verify_tenant_root(cache_parent, &cache_path).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = prepared {
+            if let Err(cleanup_error) = attempt.cleanup().await {
+                return Err(error).context(format!(
+                    "tenant root preparation failed and owned cleanup was retained: {cleanup_error}"
+                ));
+            }
+            return Err(error).context("tenant root preparation failed");
         }
         Ok(Self {
-            data,
-            cache,
-            tracked: paths,
-            data_attempt,
-            cache_attempt,
+            data: PreparedTenantDirectory { path: data_path },
+            cache: PreparedTenantDirectory { path: cache_path },
+            attempt,
         })
     }
 
     pub(crate) async fn prepare_database(&mut self) -> anyhow::Result<()> {
-        self.data_attempt
+        self.attempt
             .create_owned_file(&self.data.path.join("state.db"))
             .await?;
-        self.record_created_paths().await
+        Ok(())
     }
 
-    pub(crate) async fn record_created_paths(&mut self) -> anyhow::Result<()> {
-        for tracked in &mut self.tracked {
-            let attempt = if tracked.path.starts_with(&self.data.path) {
-                &mut self.data_attempt
-            } else {
-                &mut self.cache_attempt
-            };
-            tracked.record_created(attempt).await?;
+    pub(crate) async fn prepare_store_paths(&mut self) -> anyhow::Result<()> {
+        for path in [
+            self.data.path.join("app"),
+            self.data.path.join("app/managed-skills"),
+            self.data.path.join("app/managed-skills/.locks"),
+            self.data.path.join("app/skill-quarantine"),
+            self.cache.path.join("cache"),
+            self.cache.path.join("cache/skill-staging"),
+        ] {
+            self.attempt.ensure_directory(&path).await?;
         }
         Ok(())
     }
 
-    pub(crate) async fn cleanup(&self) {
-        self.cache_attempt.cleanup().await;
-        self.data_attempt.cleanup().await;
+    pub(crate) async fn cleanup(&mut self) -> anyhow::Result<()> {
+        self.attempt.cleanup().await
     }
 
-    pub(crate) async fn commit(&self) -> anyhow::Result<()> {
-        self.data_attempt.commit().await?;
-        self.cache_attempt.commit().await?;
-        Ok(())
+    pub(crate) async fn commit(&mut self) -> anyhow::Result<()> {
+        self.attempt.commit().await
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PathKind {
-    File,
-    Directory,
-}
-
-struct TrackedPath {
-    path: PathBuf,
-    kind: PathKind,
-    existed: bool,
-    claimed: bool,
-}
-
-impl TrackedPath {
-    async fn capture(path: PathBuf, kind: PathKind) -> anyhow::Result<Self> {
-        let existed = match tokio::fs::symlink_metadata(&path).await {
-            Ok(_) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error.into()),
-        };
-        Ok(Self {
-            path,
-            kind,
-            existed,
-            claimed: false,
-        })
-    }
-
-    async fn record_created(&mut self, attempt: &mut TenantAttemptJournal) -> anyhow::Result<()> {
-        if self.existed || self.claimed {
-            return Ok(());
-        }
-        match tokio::fs::symlink_metadata(&self.path).await {
-            Ok(metadata) => {
-                validate_kind(&self.path, &metadata, self.kind)?;
-                attempt.claim_existing(&self.path, self.kind.into()).await?;
-                self.claimed = true;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        Ok(())
-    }
-}
-
-impl From<PathKind> for AttemptPathKind {
-    fn from(value: PathKind) -> Self {
-        match value {
-            PathKind::File => Self::File,
-            PathKind::Directory => Self::Directory,
-        }
-    }
-}
-
-struct CreatedPath {
-    path: PathBuf,
-    kind: PathKind,
-    identity: same_file::Handle,
-    _creation_token: uuid::Uuid,
-}
-
-impl CreatedPath {
-    fn capture(path: PathBuf, kind: PathKind) -> anyhow::Result<Self> {
-        let metadata = std::fs::symlink_metadata(&path)?;
-        validate_kind(&path, &metadata, kind)?;
-        let descriptor = File::open(&path)?;
-        validate_one_link_file(&descriptor, kind)?;
-        Ok(Self {
-            path,
-            kind,
-            identity: same_file::Handle::from_file(descriptor)?,
-            _creation_token: uuid::Uuid::new_v4(),
-        })
-    }
-
-    async fn remove_if_same(&self) {
-        let same = tokio::fs::symlink_metadata(&self.path)
-            .await
-            .ok()
-            .filter(|metadata| {
-                validate_kind(&self.path, metadata, self.kind).is_ok()
-                    && validate_path_link_count(metadata, self.kind).is_ok()
-            })
-            .and_then(|_| same_file::Handle::from_path(&self.path).ok())
-            .is_some_and(|identity| identity == self.identity);
-        if !same {
-            return;
-        }
-        let result = match self.kind {
-            PathKind::File => tokio::fs::remove_file(&self.path).await,
-            PathKind::Directory => tokio::fs::remove_dir(&self.path).await,
-        };
-        if let Err(error) = result
-            && !matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-            )
-        {
-            tracing::warn!("failed to clean tenant initialization path");
-        }
-    }
-}
-
-async fn remove_created_directory(directory: &PreparedTenantDirectory) {
-    if let Some(created) = &directory.created {
-        created.remove_if_same().await;
-    }
-}
-
-pub(crate) async fn cleanup_prepared_directory(directory: &PreparedTenantDirectory) {
-    remove_created_directory(directory).await;
-}
-
-fn validate_kind(path: &Path, metadata: &std::fs::Metadata, kind: PathKind) -> anyhow::Result<()> {
-    let valid = !metadata.file_type().is_symlink()
-        && match kind {
-            PathKind::File => metadata.is_file(),
-            PathKind::Directory => metadata.is_dir(),
-        };
+async fn verify_tenant_root(parent: &Path, path: &Path) -> anyhow::Result<()> {
+    ensure_real_directory(path, &tokio::fs::symlink_metadata(path).await?)?;
     anyhow::ensure!(
-        valid,
-        "tenant initialization path has an invalid type: {}",
-        path.display()
+        tokio::fs::canonicalize(path).await?
+            == parent.join(path.file_name().context("tenant root has no name")?),
+        "tenant root has a canonical alias instead of the requested tenant id"
     );
-    Ok(())
-}
-
-fn validate_one_link_file(descriptor: &File, kind: PathKind) -> anyhow::Result<()> {
-    if kind != PathKind::File {
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        anyhow::ensure!(
-            descriptor.metadata()?.nlink() == 1,
-            "tenant file must have one link"
-        );
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        anyhow::ensure!(
-            descriptor.metadata()?.number_of_links() == 1,
-            "tenant file must have one link"
-        );
-    }
-    Ok(())
-}
-
-fn validate_path_link_count(metadata: &std::fs::Metadata, kind: PathKind) -> anyhow::Result<()> {
-    if kind != PathKind::File {
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        anyhow::ensure!(metadata.nlink() == 1, "tenant file must have one link");
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        anyhow::ensure!(
-            metadata.number_of_links() == 1,
-            "tenant file must have one link"
-        );
-    }
     Ok(())
 }
 

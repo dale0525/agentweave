@@ -24,6 +24,9 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 uuid.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 futures.workspace = true
 tempfile = "3"
