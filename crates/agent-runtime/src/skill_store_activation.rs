@@ -274,11 +274,15 @@ fn expectation_record<'a>(
 
 fn is_already_exists(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause
+        let io_error = cause
             .downcast_ref::<std::io::Error>()
-            .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists)
-            || cause
-                .downcast_ref::<rustix::io::Errno>()
-                .is_some_and(|error| *error == rustix::io::Errno::EXIST)
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists);
+        #[cfg(unix)]
+        let native_error = cause
+            .downcast_ref::<rustix::io::Errno>()
+            .is_some_and(|error| *error == rustix::io::Errno::EXIST);
+        #[cfg(not(unix))]
+        let native_error = false;
+        io_error || native_error
     })
 }

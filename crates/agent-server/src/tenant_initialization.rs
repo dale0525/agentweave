@@ -160,10 +160,10 @@ fn validate_lock_file(
 
 #[cfg(windows)]
 fn validate_regular_one_link(descriptor: &File) -> anyhow::Result<()> {
-    use std::os::windows::fs::MetadataExt;
+    use crate::tenant_attempt::{windows_link_count_is_one, windows_number_of_links};
     let metadata = descriptor.metadata()?;
     anyhow::ensure!(
-        metadata.is_file() && metadata.number_of_links() == 1,
+        metadata.is_file() && windows_link_count_is_one(windows_number_of_links(descriptor)?),
         "tenant initialization lock must be a one-link regular file"
     );
     Ok(())

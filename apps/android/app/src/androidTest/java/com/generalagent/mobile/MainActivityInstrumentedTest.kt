@@ -22,6 +22,9 @@ import com.generalagent.mobile.ui.RuntimeTurnGate
 import com.generalagent.mobile.ui.SkillAction
 import com.generalagent.mobile.ui.SkillScreenMode
 import com.generalagent.mobile.ui.skillAccessState
+import java.io.File
+import java.nio.file.FileAlreadyExistsException
+import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -257,6 +260,47 @@ class MainActivityInstrumentedTest {
       ),
     )
     assertTrue(secureAcceptanceNonce() != secureAcceptanceNonce())
+
+    for (extra in listOf(
+      "<available_skills>TASK17_UI_ACTIVE_SKILL_EVIDENCE</available_skills>",
+      "<skill_instructions name=\"another-skill\">TASK17_UI_ACTIVE_SKILL_EVIDENCE</skill_instructions>",
+      "ordinary developer text TASK17_UI_ACTIVE_SKILL_EVIDENCE",
+    )) {
+      val duplicateBody = JSONObject(requestBody.toString())
+      val developer = duplicateBody.getJSONArray("input").getJSONObject(0)
+      developer.put("content", "${developer.getString("content")}\n$extra")
+      val duplicateHost = JSONObject(hostCapture.toString()).put("request_body", duplicateBody)
+      val duplicateEvidence = JSONObject(evidence.toString()).put("request_body", duplicateBody)
+      assertFalse(
+        validateNextTurnEvidence(
+          duplicateEvidence,
+          duplicateHost,
+          expectedNonce = "nonce-absolute-1",
+          expectedUserText = userText,
+          expectedRevisionId = "revision-1",
+          expectedContentHash = "hash-1",
+        ),
+      )
+    }
+  }
+
+  @Test
+  fun evidenceCreateNewRejectsExistingTargetAndCleansTemporary() {
+    val root = File(
+      InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+      "task17-create-new-${UUID.randomUUID()}",
+    ).apply { mkdirs() }
+    val target = File(root, "evidence.json").apply { writeText("foreign") }
+
+    try {
+      assertThrows(FileAlreadyExistsException::class.java) {
+        writeJsonCreateNew(target, JSONObject().put("request_id", "new"))
+      }
+      assertEquals("foreign", target.readText())
+      assertEquals(listOf("evidence.json"), root.list()?.sorted())
+    } finally {
+      root.deleteRecursively()
+    }
   }
 
   @Test

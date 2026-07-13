@@ -25,9 +25,7 @@ import com.generalagent.mobile.ui.ownerSkillInventory
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.net.HttpURLConnection
@@ -376,9 +374,9 @@ internal fun validateNextTurnEvidence(
         } == true
       }
     } == true
-  val selectedInstruction = Regex(
+  val selectedMarkerCount = Regex(
     """<skill_instructions\s+[^>]*name="Task17 mobile lifecycle"[^>]*>([\s\S]*?)</skill_instructions>""",
-  ).findAll(developerText).any { match -> match.groupValues[1].contains(ACTIVE_INSTRUCTION) }
+  ).findAll(developerText).sumOf { match -> markerOccurrences(match.groupValues[1]) }
   val before = evidence.optJSONObject("authoritative_before") ?: return false
   val after = evidence.optJSONObject("authoritative_after") ?: return false
   return evidence.optString("request_id").isNotBlank() &&
@@ -392,10 +390,22 @@ internal fun validateNextTurnEvidence(
     marker == ACTIVE_INSTRUCTION &&
     evidence.optString("marker_location") == "skill_instructions" &&
     evidence.optString("raw_request_sha256").matches(Regex("[0-9a-f]{64}")) &&
-    selectedInstruction &&
+    selectedMarkerCount > 0 &&
+    markerOccurrences(developerText) == selectedMarkerCount &&
     authoritativeStateMatches(before, expectedRevisionId, expectedContentHash) &&
     authoritativeStateMatches(after, expectedRevisionId, expectedContentHash) &&
     userBound
+}
+
+private fun markerOccurrences(text: String): Int {
+  var count = 0
+  var offset = 0
+  while (true) {
+    val match = text.indexOf(ACTIVE_INSTRUCTION, offset)
+    if (match < 0) return count
+    count += 1
+    offset = match + ACTIVE_INSTRUCTION.length
+  }
 }
 
 private fun capturesMatch(left: JSONObject, right: JSONObject): Boolean =
@@ -465,7 +475,7 @@ private fun clearCaptureTarget(target: File) {
   check(!target.exists() || target.delete()) { "stale acceptance capture could not be cleared" }
 }
 
-private fun writeJsonCreateNew(target: File, value: JSONObject) {
+internal fun writeJsonCreateNew(target: File, value: JSONObject) {
   target.parentFile?.mkdirs()
   val temporary = File(target.parentFile, ".${target.name}.${UUID.randomUUID()}.tmp")
   Files.createFile(temporary.toPath())
@@ -474,13 +484,9 @@ private fun writeJsonCreateNew(target: File, value: JSONObject) {
     output.fd.sync()
   }
   try {
-    Files.move(
-      temporary.toPath(),
-      target.toPath(),
-      StandardCopyOption.ATOMIC_MOVE,
-    )
-  } catch (_: AtomicMoveNotSupportedException) {
-    Files.move(temporary.toPath(), target.toPath())
+    Files.createLink(target.toPath(), temporary.toPath())
+  } finally {
+    Files.deleteIfExists(temporary.toPath())
   }
 }
 

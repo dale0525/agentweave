@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 mod fs;
 use fs::{
     canonical_real_directory, clear_owned_directory_contents, create_private_object,
-    open_delete_nofollow, open_nofollow, read_object_binding, read_record, remove_private_object,
-    rename_noreplace, sync_directory, validate_link_count, validate_metadata, write_object_binding,
-    write_record,
+    object_binding_exists, open_delete_nofollow, open_nofollow, read_object_binding, read_record,
+    remove_private_object, rename_noreplace, sync_directory, validate_metadata,
+    validate_opened_link_count, write_object_binding, write_record,
 };
 #[cfg(test)]
 use fs::{replace_quarantine_for_test, replace_temporary_source_for_test};
@@ -19,6 +19,36 @@ use fs::{replace_quarantine_for_test, replace_temporary_source_for_test};
 pub(crate) enum AttemptPathKind {
     File,
     Directory,
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn windows_link_count_is_one(link_count: Option<u32>) -> bool {
+    link_count == Some(1)
+}
+
+#[cfg(windows)]
+fn windows_file_information(
+    file: &File,
+) -> anyhow::Result<windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let result =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut information) };
+    anyhow::ensure!(
+        result != 0,
+        "Windows tenant file information query failed: {}",
+        std::io::Error::last_os_error()
+    );
+    Ok(information)
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_number_of_links(file: &File) -> anyhow::Result<Option<u32>> {
+    Ok(Some(windows_file_information(file)?.nNumberOfLinks))
 }
 
 #[cfg(test)]
@@ -37,6 +67,7 @@ pub(crate) fn windows_open_contract_for_test() -> (u32, u32, u32, u32, u32) {
 #[serde(rename_all = "snake_case")]
 enum ResourceState {
     Planned,
+    Creating,
     Prepared,
     Published,
     Quarantined,
@@ -59,7 +90,7 @@ impl PersistentIdentity {
     fn from_file(file: &File, kind: AttemptPathKind) -> anyhow::Result<Self> {
         let metadata = file.metadata()?;
         validate_metadata(&metadata, kind)?;
-        validate_link_count(&metadata, kind)?;
+        validate_opened_link_count(file, kind)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -71,15 +102,12 @@ impl PersistentIdentity {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::MetadataExt;
+            let information = windows_file_information(file)?;
             Ok(Self {
                 kind,
-                volume: metadata
-                    .volume_serial_number()
-                    .context("tenant path has no volume identity")?,
-                file_index: metadata
-                    .file_index()
-                    .context("tenant path has no file identity")?,
+                volume: information.dwVolumeSerialNumber,
+                file_index: (u64::from(information.nFileIndexHigh) << 32)
+                    | u64::from(information.nFileIndexLow),
             })
         }
         #[cfg(all(not(unix), not(windows)))]
@@ -119,11 +147,13 @@ struct AttemptRecord {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AttemptFaultPoint {
     PlanDurable,
+    ObjectCreatedBeforeBinding,
     ObjectDurable,
     PreparedJournalStored,
     PublishedObjectDurable,
     PublishedJournalStored,
     QuarantinePlanDurable,
+    QuarantineCreatedBeforeBinding,
     QuarantineObjectStored,
     QuarantinePublished,
 }
@@ -291,7 +321,11 @@ impl TenantAttemptJournal {
         self.persist()?;
         self.fault(AttemptFaultPoint::PlanDurable)?;
 
+        ensure_path_absent(&temporary_path)?;
+        self.record.resources[index].state = ResourceState::Creating;
+        self.persist()?;
         create_private_object(&temporary_path, kind)?;
+        self.fault(AttemptFaultPoint::ObjectCreatedBeforeBinding)?;
         let descriptor = open_nofollow(&temporary_path, kind, true)?;
         let identity = PersistentIdentity::from_file(&descriptor, kind)?;
         let binding = ObjectBinding {
@@ -443,7 +477,7 @@ impl TenantAttemptJournal {
                 quarantine,
                 &resource.temporary_path,
             ],
-            ResourceState::Prepared | ResourceState::Planned => [
+            ResourceState::Prepared | ResourceState::Creating | ResourceState::Planned => [
                 &resource.temporary_path,
                 &resource.canonical_path,
                 quarantine,
@@ -456,6 +490,11 @@ impl TenantAttemptJournal {
                     Ok((descriptor, binding)) => {
                         return Ok(Some((candidate.to_path_buf(), descriptor, binding)));
                     }
+                    Err(_) if candidate == resource.temporary_path => {
+                        if !self.remove_unbound_planned_temporary(resource)? {
+                            mismatches += 1;
+                        }
+                    }
                     Err(_) => mismatches += 1,
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -467,6 +506,24 @@ impl TenantAttemptJournal {
             "tenant owned resource candidates exist but none match the journal binding"
         );
         Ok(None)
+    }
+
+    fn remove_unbound_planned_temporary(&self, resource: &OwnedResource) -> anyhow::Result<bool> {
+        if resource.state != ResourceState::Creating || resource.identity.is_some() {
+            return Ok(false);
+        }
+        let descriptor = open_delete_nofollow(&resource.temporary_path, resource.kind)?;
+        if object_binding_exists(&descriptor, &resource.temporary_path)? {
+            return Ok(false);
+        }
+        remove_private_object(&resource.temporary_path, resource.kind, &descriptor)?;
+        sync_directory(
+            resource
+                .temporary_path
+                .parent()
+                .context("tenant planned temporary has no parent")?,
+        )?;
+        Ok(true)
     }
 
     fn is_owned_unit_root(&self, resource: &OwnedResource) -> bool {
@@ -535,15 +592,32 @@ impl TenantAttemptJournal {
             return Ok(path);
         }
         if resource.temporary_path.exists() {
-            let (_, binding) =
-                self.validate_bound_object(&resource.temporary_path, &resource, false)?;
-            resource.identity = Some(binding.identity);
-        } else {
+            match self.validate_bound_object(&resource.temporary_path, &resource, false) {
+                Ok((_, binding)) => resource.identity = Some(binding.identity),
+                Err(error) => {
+                    if !self.remove_unbound_planned_temporary(&resource)? {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        if !resource.temporary_path.exists() {
             anyhow::ensure!(
-                resource.identity.is_none() && resource.state == ResourceState::Planned,
+                resource.identity.is_none()
+                    && matches!(
+                        resource.state,
+                        ResourceState::Planned | ResourceState::Creating
+                    ),
                 "tenant quarantine object disappeared after preparation"
             );
+            if resource.state == ResourceState::Planned {
+                ensure_path_absent(&resource.temporary_path)?;
+                resource.state = ResourceState::Creating;
+                self.record.quarantine = Some(resource.clone());
+                self.persist()?;
+            }
             create_private_object(&resource.temporary_path, AttemptPathKind::Directory)?;
+            self.fault(AttemptFaultPoint::QuarantineCreatedBeforeBinding)?;
             let descriptor =
                 open_nofollow(&resource.temporary_path, AttemptPathKind::Directory, true)?;
             let identity = PersistentIdentity::from_file(&descriptor, AttemptPathKind::Directory)?;
@@ -721,6 +795,20 @@ impl TenantAttemptJournal {
     }
 
     #[cfg(test)]
+    pub(crate) fn temporary_path_for_test(&self, path: &Path) -> anyhow::Result<PathBuf> {
+        Ok(self.resource_for_test(path)?.temporary_path.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn quarantine_temporary_path_for_test(&self) -> anyhow::Result<PathBuf> {
+        self.record
+            .quarantine
+            .as_ref()
+            .map(|resource| resource.temporary_path.clone())
+            .context("test quarantine resource missing")
+    }
+
+    #[cfg(test)]
     fn resource_for_test(&self, path: &Path) -> anyhow::Result<&OwnedResource> {
         self.record
             .resources
@@ -759,6 +847,14 @@ fn validate_attempt_key(value: &str) -> anyhow::Result<()> {
         "tenant attempt key must be canonical lowercase ASCII"
     );
     Ok(())
+}
+
+fn ensure_path_absent(path: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => anyhow::bail!("tenant planned temporary path is already occupied"),
+    }
 }
 
 fn validate_owned_path(path: &Path, roots: &[PathBuf]) -> anyhow::Result<()> {

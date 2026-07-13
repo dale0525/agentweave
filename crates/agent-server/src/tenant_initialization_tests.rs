@@ -1,5 +1,7 @@
 use crate::tenant_attempt::windows_open_contract_for_test;
-use crate::tenant_attempt::{AttemptFaultPoint, CleanupTestAction, TenantAttemptJournal};
+use crate::tenant_attempt::{
+    AttemptFaultPoint, CleanupTestAction, TenantAttemptJournal, windows_link_count_is_one,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -21,6 +23,14 @@ fn windows_access_contract_flushes_and_deletes_with_share_delete_denied() {
     assert_eq!(share & 0x0000_0004, 0);
     assert_ne!(flags & 0x0200_0000, 0);
     assert_ne!(flags & 0x0020_0000, 0);
+}
+
+#[test]
+fn windows_link_count_contract_fails_closed_when_metadata_is_unavailable() {
+    assert!(windows_link_count_is_one(Some(1)));
+    assert!(!windows_link_count_is_one(None));
+    assert!(!windows_link_count_is_one(Some(0)));
+    assert!(!windows_link_count_is_one(Some(2)));
 }
 
 #[cfg(windows)]
@@ -101,6 +111,75 @@ async fn every_resource_publication_crash_point_recovers_and_retries_cleanly() {
 }
 
 #[tokio::test]
+async fn file_created_before_binding_recovers_and_retries_cleanly() {
+    let fixture = JournalFixture::new().await;
+    let tenant = fixture.tenant();
+    tokio::fs::create_dir(&tenant).await.unwrap();
+    let database = tenant.join("state.db");
+    {
+        let mut crashed = fixture.begin().await.unwrap();
+        crashed.fail_once_at_for_test(AttemptFaultPoint::ObjectCreatedBeforeBinding);
+        assert!(crashed.create_owned_file(&database).await.is_err());
+    }
+
+    let mut retry = fixture.begin().await.unwrap();
+    retry.create_owned_file(&database).await.unwrap();
+    retry.commit().await.unwrap();
+    assert!(database.is_file());
+}
+
+#[tokio::test]
+async fn directory_created_before_binding_recovers_and_retries_cleanly() {
+    let fixture = JournalFixture::new().await;
+    {
+        let mut crashed = fixture.begin().await.unwrap();
+        crashed.fail_once_at_for_test(AttemptFaultPoint::ObjectCreatedBeforeBinding);
+        assert!(crashed.ensure_directory(&fixture.tenant()).await.is_err());
+    }
+
+    let mut retry = fixture.begin().await.unwrap();
+    retry.ensure_directory(&fixture.tenant()).await.unwrap();
+    retry.commit().await.unwrap();
+    assert!(fixture.tenant().is_dir());
+}
+
+#[tokio::test]
+async fn planned_file_collision_is_preserved_and_fails_closed() {
+    let fixture = JournalFixture::new().await;
+    let tenant = fixture.tenant();
+    tokio::fs::create_dir(&tenant).await.unwrap();
+    let database = tenant.join("state.db");
+    let temporary;
+    {
+        let mut crashed = fixture.begin().await.unwrap();
+        crashed.fail_once_at_for_test(AttemptFaultPoint::PlanDurable);
+        assert!(crashed.create_owned_file(&database).await.is_err());
+        temporary = crashed.temporary_path_for_test(&database).unwrap();
+    }
+    tokio::fs::write(&temporary, b"foreign").await.unwrap();
+
+    assert!(fixture.begin().await.is_err());
+    assert_eq!(tokio::fs::read(&temporary).await.unwrap(), b"foreign");
+}
+
+#[tokio::test]
+async fn planned_directory_collision_is_preserved_and_fails_closed() {
+    let fixture = JournalFixture::new().await;
+    let tenant = fixture.tenant();
+    let temporary;
+    {
+        let mut crashed = fixture.begin().await.unwrap();
+        crashed.fail_once_at_for_test(AttemptFaultPoint::PlanDurable);
+        assert!(crashed.ensure_directory(&tenant).await.is_err());
+        temporary = crashed.temporary_path_for_test(&tenant).unwrap();
+    }
+    tokio::fs::create_dir(&temporary).await.unwrap();
+
+    assert!(fixture.begin().await.is_err());
+    assert!(temporary.is_dir());
+}
+
+#[tokio::test]
 async fn quarantine_publication_crash_points_recover_and_retry_cleanly() {
     for point in [
         AttemptFaultPoint::QuarantinePlanDurable,
@@ -121,6 +200,41 @@ async fn quarantine_publication_crash_points_recover_and_retry_cleanly() {
         retry.commit().await.unwrap();
         assert!(tenant.is_dir(), "retry failed after {point:?}");
     }
+}
+
+#[tokio::test]
+async fn quarantine_created_before_binding_recovers_and_retries_cleanly() {
+    let fixture = JournalFixture::new().await;
+    let tenant = fixture.tenant();
+    {
+        let mut crashed = fixture.begin().await.unwrap();
+        crashed.ensure_directory(&tenant).await.unwrap();
+        crashed.fail_once_at_for_test(AttemptFaultPoint::QuarantineCreatedBeforeBinding);
+        assert!(crashed.cleanup().await.is_err());
+    }
+
+    let mut retry = fixture.begin().await.unwrap();
+    retry.ensure_directory(&tenant).await.unwrap();
+    retry.commit().await.unwrap();
+    assert!(tenant.is_dir());
+}
+
+#[tokio::test]
+async fn planned_quarantine_collision_is_preserved_and_fails_closed() {
+    let fixture = JournalFixture::new().await;
+    let tenant = fixture.tenant();
+    let temporary;
+    {
+        let mut crashed = fixture.begin().await.unwrap();
+        crashed.ensure_directory(&tenant).await.unwrap();
+        crashed.fail_once_at_for_test(AttemptFaultPoint::QuarantinePlanDurable);
+        assert!(crashed.cleanup().await.is_err());
+        temporary = crashed.quarantine_temporary_path_for_test().unwrap();
+    }
+    tokio::fs::create_dir(&temporary).await.unwrap();
+
+    assert!(fixture.begin().await.is_err());
+    assert!(temporary.is_dir());
 }
 
 #[tokio::test]

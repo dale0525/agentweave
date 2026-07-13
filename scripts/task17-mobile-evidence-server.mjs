@@ -20,8 +20,15 @@ export function buildNextTurnCapture(
   const requestBody = JSON.parse(raw.toString("utf8"));
   const developerText = requestContentForRole(requestBody, "developer").join("\n");
   const selected = selectedInstructionBodies(developerText, SELECTED_SKILL);
-  if (!selected.some((body) => body.includes(ACTIVE_MARKER))) {
+  const selectedMarkerCount = selected.reduce(
+    (count, body) => count + markerOccurrences(body),
+    0,
+  );
+  if (selectedMarkerCount === 0) {
     throw new Error("provider request does not contain the marker in selected skill instructions");
+  }
+  if (markerOccurrences(developerText) !== selectedMarkerCount) {
+    throw new Error("provider request contains the marker outside selected skill instructions");
   }
   const userText = requestContentForRole(requestBody, "user").at(-1) ?? "";
   const nonce = userText.match(NONCE_PATTERN)?.[1];
@@ -39,6 +46,10 @@ export function buildNextTurnCapture(
     raw_request_sha256: createHash("sha256").update(raw).digest("hex"),
     request_body: requestBody,
   };
+}
+
+function markerOccurrences(text) {
+  return text.split(ACTIVE_MARKER).length - 1;
 }
 
 function requestContentForRole(requestBody, role) {

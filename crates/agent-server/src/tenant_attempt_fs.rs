@@ -1,4 +1,6 @@
 use super::{AttemptPathKind, AttemptRecord, ObjectBinding};
+#[cfg(windows)]
+use super::{windows_link_count_is_one, windows_number_of_links};
 use anyhow::Context;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -60,7 +62,7 @@ pub(super) fn create_private_object(path: &Path, kind: AttemptPathKind) -> anyho
 }
 
 pub(super) fn write_object_binding(
-    file: &File,
+    _file: &File,
     path: &Path,
     binding: &ObjectBinding,
     replace: bool,
@@ -74,7 +76,7 @@ pub(super) fn write_object_binding(
         } else {
             XattrFlags::CREATE
         };
-        fsetxattr(file, object_binding_name(), &bytes, flags)?;
+        fsetxattr(_file, object_binding_name(), &bytes, flags)?;
     }
     #[cfg(windows)]
     {
@@ -90,11 +92,11 @@ pub(super) fn write_object_binding(
     Ok(())
 }
 
-pub(super) fn read_object_binding(file: &File, _path: &Path) -> anyhow::Result<ObjectBinding> {
+pub(super) fn read_object_binding(_file: &File, _path: &Path) -> anyhow::Result<ObjectBinding> {
     #[cfg(unix)]
     let bytes = {
         let mut bytes = [0_u8; 4096];
-        let length = rustix::fs::fgetxattr(file, object_binding_name(), &mut bytes)?;
+        let length = rustix::fs::fgetxattr(_file, object_binding_name(), &mut bytes)?;
         bytes[..length].to_vec()
     };
     #[cfg(windows)]
@@ -102,6 +104,43 @@ pub(super) fn read_object_binding(file: &File, _path: &Path) -> anyhow::Result<O
     #[cfg(all(not(unix), not(windows)))]
     anyhow::bail!("tenant object bindings are unsupported on this platform");
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+#[cfg(unix)]
+pub(super) fn object_binding_exists(file: &File, _path: &Path) -> anyhow::Result<bool> {
+    let mut bytes = [0_u8; 4096];
+    match rustix::fs::fgetxattr(file, object_binding_name(), &mut bytes) {
+        Ok(_) => Ok(true),
+        Err(error) if missing_object_binding(error) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn object_binding_exists(_file: &File, path: &Path) -> anyhow::Result<bool> {
+    match OpenOptions::new()
+        .read(true)
+        .open(object_binding_stream(path))
+    {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(super) fn object_binding_exists(_file: &File, _path: &Path) -> anyhow::Result<bool> {
+    anyhow::bail!("tenant object bindings are unsupported on this platform")
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn missing_object_binding(error: rustix::io::Errno) -> bool {
+    matches!(error, rustix::io::Errno::NOATTR | rustix::io::Errno::NODATA)
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn missing_object_binding(error: rustix::io::Errno) -> bool {
+    error == rustix::io::Errno::NODATA
 }
 
 #[cfg(all(unix, target_vendor = "apple"))]
@@ -136,8 +175,7 @@ pub(super) fn open_nofollow(
     }
     set_nofollow(&mut options, kind);
     let file = options.open(path)?;
-    validate_metadata(&file.metadata()?, kind)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    validate_opened_file(&file, kind)?;
     Ok(file)
 }
 
@@ -150,8 +188,7 @@ pub(super) fn open_delete_nofollow(path: &Path, kind: AttemptPathKind) -> std::i
         .share_mode(WINDOWS_SHARE_MODE);
     set_nofollow(&mut options, kind);
     let file = options.open(path)?;
-    validate_metadata(&file.metadata()?, kind)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    validate_opened_file(&file, kind)?;
     Ok(file)
 }
 
@@ -199,7 +236,7 @@ pub(super) fn validate_metadata(
 }
 
 pub(super) fn validate_link_count(
-    metadata: &std::fs::Metadata,
+    _metadata: &std::fs::Metadata,
     kind: AttemptPathKind,
 ) -> anyhow::Result<()> {
     if kind != AttemptPathKind::File {
@@ -209,18 +246,30 @@ pub(super) fn validate_link_count(
     {
         use std::os::unix::fs::MetadataExt;
         anyhow::ensure!(
-            metadata.nlink() == 1,
+            _metadata.nlink() == 1,
             "tenant attempt file must have one link"
         );
+    }
+    Ok(())
+}
+
+fn validate_opened_file(file: &File, kind: AttemptPathKind) -> std::io::Result<()> {
+    validate_metadata(&file.metadata()?, kind)
+        .and_then(|()| validate_opened_link_count(file, kind))
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+pub(super) fn validate_opened_link_count(file: &File, kind: AttemptPathKind) -> anyhow::Result<()> {
+    if kind != AttemptPathKind::File {
+        return Ok(());
     }
     #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        anyhow::ensure!(
-            metadata.number_of_links() == 1,
-            "tenant attempt file must have one link"
-        );
-    }
+    anyhow::ensure!(
+        windows_link_count_is_one(windows_number_of_links(file)?),
+        "tenant attempt file must have one link"
+    );
+    #[cfg(not(windows))]
+    validate_link_count(&file.metadata()?, kind)?;
     Ok(())
 }
 

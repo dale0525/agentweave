@@ -68,6 +68,19 @@ test("rejects a marker outside the selected lifecycle instruction block", () => 
   assert.throws(() => buildNextTurnCapture(raw), /selected skill instructions/);
 });
 
+for (const [location, extra] of [
+  ["available skill summary", `<available_skills>${marker}</available_skills>`],
+  ["another skill block", `<skill_instructions name="another-skill">${marker}</skill_instructions>`],
+  ["ordinary developer text", `ordinary developer text ${marker}`],
+]) {
+  test(`rejects marker duplicated in selected instructions and ${location}`, () => {
+    const raw = Buffer.from(bodyWithDeveloper(
+      `<skill_instructions name="Task17 mobile lifecycle">${marker}</skill_instructions>\n${extra}`,
+    ));
+    assert.throws(() => buildNextTurnCapture(raw), /outside selected skill instructions/);
+  });
+}
+
 test("rejects reuse of a nonce already accepted by this server run", () => {
   const seenNonces = new Set();
   const raw = Buffer.from(bodyWithDeveloper(
