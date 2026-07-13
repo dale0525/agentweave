@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
+use crate::skill_store::SkillRevisionStore;
 use crate::skill_store_faults::{StoreFaultPoint, StoreFaults};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -220,6 +221,15 @@ pub(crate) async fn acquire_revision_lock(
         _process: process,
         _os: os,
     })
+}
+
+impl SkillRevisionStore {
+    pub(crate) async fn acquire_revision_operation_lock(
+        &self,
+        revision_id: &str,
+    ) -> anyhow::Result<RevisionOperationGuard> {
+        acquire_revision_lock(&self.paths.identity, revision_id, &self.faults).await
+    }
 }
 
 #[cfg(test)]

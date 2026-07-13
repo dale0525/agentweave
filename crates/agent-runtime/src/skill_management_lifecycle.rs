@@ -193,6 +193,13 @@ impl OwnerSkillManagementService {
             }
             .into());
         }
+        let revision_guard = self
+            .revisions
+            .acquire_revision_operation_lock(revision_id)
+            .await
+            .map_err(|error| {
+                SkillManagementError::from_store("rollback", "rollback revision", error)
+            })?;
         let target = self
             .managed_revision(package_id, revision_id, "rollback")
             .await?;
@@ -249,6 +256,7 @@ impl OwnerSkillManagementService {
                 revision_id: revision_id.into(),
                 permission_diff: json!({}),
             });
+            drop(revision_guard);
             return Ok(SkillRollbackOutcome::ApprovalRequired(approval));
         }
 
@@ -286,7 +294,7 @@ impl OwnerSkillManagementService {
                 operation: "rollback_managed_skill",
                 package_id,
                 expected_installation: &installation,
-                target: LifecycleTarget::Rollback { revision_id },
+                target: LifecycleTarget::Rollback { revision: &target },
                 approval: resolution.as_ref().map(|approval| LifecycleApproval {
                     approval_id: &approval.approval_id,
                     approver_id: &approval.approver_id,
@@ -308,6 +316,7 @@ impl OwnerSkillManagementService {
             .checkpoint(crate::skill_store_faults::StoreFaultPoint::LifecycleAfterDurableCommit)
             .await;
         let report = publication.publish(candidate);
+        drop(revision_guard);
         let _ = self.events.send(RuntimeEvent::SkillRevisionRolledBack {
             package_id: package_id.as_str().into(),
             revision_id: revision_id.into(),

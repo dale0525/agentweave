@@ -113,6 +113,8 @@ mod skill_recovery_terminal_tests;
 #[cfg(test)]
 mod skill_recovery_tests;
 #[cfg(test)]
+mod skill_rollback_cleanup_tests;
+#[cfg(test)]
 mod turn_managed_lease_tests;
 #[cfg(test)]
 mod turn_observer_tests;

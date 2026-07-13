@@ -1,17 +1,17 @@
 use crate::skill_package::SkillPackageId;
 use crate::skill_state::{
     NewSkillApproval, SkillApprovalRecord, SkillApprovalStatus, SkillCircuitStateRecord,
-    SkillInstallStatus, SkillInstallationRecord, SkillLayerRecord, SkillStateBoundaryError,
-    SkillStateStore,
+    SkillInstallStatus, SkillInstallationRecord, SkillLayerRecord, SkillRevisionRecord,
+    SkillStateBoundaryError, SkillStateStore,
 };
 use crate::skill_state_rows::{
-    APPROVAL_COLUMNS, CIRCUIT_COLUMNS, INSTALLATION_COLUMNS, approval_from_row, circuit_from_row,
-    installation_from_row,
+    APPROVAL_COLUMNS, CIRCUIT_COLUMNS, INSTALLATION_COLUMNS, REVISION_COLUMNS, approval_from_row,
+    circuit_from_row, installation_from_row, revision_from_row,
 };
 use chrono::{Duration, Utc};
 
 pub(crate) enum LifecycleTarget<'a> {
-    Rollback { revision_id: &'a str },
+    Rollback { revision: &'a SkillRevisionRecord },
     Disabled,
     Removed,
 }
@@ -275,17 +275,44 @@ impl SkillStateStore {
             }
 
             let (revision_id, enabled, status) = match input.target {
-                LifecycleTarget::Rollback { revision_id } => {
-                    let owner: Option<String> = sqlx::query_scalar(
-                        "SELECT package_id FROM skill_revisions WHERE revision_id = ? AND lifecycle_status = 'managed'",
-                    )
-                    .bind(revision_id)
+                LifecycleTarget::Rollback { revision } => {
+                    let revision_query = format!(
+                        "SELECT {REVISION_COLUMNS} FROM skill_revisions WHERE revision_id = ?"
+                    );
+                    let current_revision = sqlx::query(&revision_query)
+                    .bind(&revision.revision_id)
                     .fetch_optional(&mut *tx)
-                    .await?;
-                    if owner.as_deref() != Some(input.package_id.as_str()) {
+                    .await?
+                    .map(|row| revision_from_row(&row))
+                    .transpose()?;
+                    if current_revision.as_ref() != Some(revision)
+                        || revision.package_id != *input.package_id
+                    {
                         return Err(state_conflict("rollback revision binding is stale"));
                     }
-                    (Some(revision_id), true, SkillInstallStatus::Active)
+                    let cleanup: Option<String> = sqlx::query_scalar(
+                        "SELECT expected_json FROM skill_revision_cleanup WHERE revision_id = ? AND status = 'pending'",
+                    )
+                    .bind(&revision.revision_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    if let Some(cleanup) = cleanup {
+                        if cleanup
+                            == crate::skill_state_cleanup::cleanup_expectation(revision)?
+                        {
+                            return Err(state_conflict(
+                                "rollback revision has a pending cleanup operation",
+                            ));
+                        }
+                        return Err(state_conflict(
+                            "rollback revision cleanup expectation is stale",
+                        ));
+                    }
+                    (
+                        Some(revision.revision_id.as_str()),
+                        true,
+                        SkillInstallStatus::Active,
+                    )
                 }
                 LifecycleTarget::Disabled => (
                     current.active_revision_id.as_deref(),

@@ -659,11 +659,11 @@ async fn make_file_writable(path: &std::path::Path) {
 #[tokio::test]
 async fn cleanup_rechecks_an_approval_created_after_protection_collection() {
     let faults = SkillStoreTestFaults::default();
-    let gate = faults.gate_once(SkillStoreFaultPoint::CleanupBeforePrepare);
-    let fixture = AuthoringFixture::with_faults(faults).await;
+    let fixture = AuthoringFixture::with_faults(faults.clone()).await;
     let retained = activate_new_revision(&fixture, "1.0.0").await;
     activate_new_revision(&fixture, "2.0.0").await;
     make_revision_cleanup_eligible(&fixture, &retained).await;
+    let gate = faults.gate_once(SkillStoreFaultPoint::RevisionLockAttempt);
     let retained_path = std::path::PathBuf::from(
         fixture
             .state

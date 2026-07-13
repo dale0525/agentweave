@@ -443,7 +443,7 @@ async fn managed_execution_binds_relative_packaged_command_to_private_snapshot()
         "./run.sh",
         Vec::new(),
         &format!(
-            "printf '%s' \"$0\" > '{}'; printf '{{\"ok\":true}}'\n",
+            "cat >/dev/null; printf '%s' \"$0\" > '{}'; printf '{{\"ok\":true}}'\n",
             command_record.display()
         ),
     )

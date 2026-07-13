@@ -131,7 +131,7 @@ impl crate::skill_manager::SkillManager {
             }
             let _revision_guard = backend
                 .revisions
-                .acquire_revision_cleanup_lock(&record.revision_id)
+                .acquire_revision_operation_lock(&record.revision_id)
                 .await?;
             backend
                 .revisions

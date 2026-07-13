@@ -287,7 +287,7 @@ async fn revision_is_durably_protected(
     Ok(false)
 }
 
-fn cleanup_expectation(record: &SkillRevisionRecord) -> anyhow::Result<String> {
+pub(crate) fn cleanup_expectation(record: &SkillRevisionRecord) -> anyhow::Result<String> {
     Ok(serde_json::to_string(&json!({
         "packageId": record.package_id.as_str(),
         "revisionId": record.revision_id,
