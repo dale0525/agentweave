@@ -6,13 +6,16 @@ use std::path::{Path, PathBuf};
 #[path = "tenant_attempt_fs.rs"]
 mod fs;
 use fs::{
-    canonical_real_directory, clear_owned_directory_contents, create_private_object,
-    object_binding_exists, open_delete_nofollow, open_nofollow, read_object_binding, read_record,
-    remove_private_object, rename_noreplace, sync_directory, validate_metadata,
-    validate_opened_link_count, write_object_binding, write_record,
+    ObjectBindingStatus, canonical_real_directory, clear_owned_directory_contents,
+    create_private_object, inspect_object_binding, open_delete_nofollow, open_nofollow,
+    read_object_binding, read_record, remove_private_object, rename_noreplace, sync_directory,
+    validate_metadata, validate_opened_link_count, write_object_binding, write_record,
 };
 #[cfg(test)]
-use fs::{replace_quarantine_for_test, replace_temporary_source_for_test};
+use fs::{
+    replace_quarantine_for_test, replace_temporary_source_for_test,
+    write_incomplete_object_binding_for_test,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -148,12 +151,20 @@ struct AttemptRecord {
 pub(crate) enum AttemptFaultPoint {
     PlanDurable,
     ObjectCreatedBeforeBinding,
+    #[cfg(test)]
+    ObjectBindingEmpty,
+    #[cfg(test)]
+    ObjectBindingPartial,
     ObjectDurable,
     PreparedJournalStored,
     PublishedObjectDurable,
     PublishedJournalStored,
     QuarantinePlanDurable,
     QuarantineCreatedBeforeBinding,
+    #[cfg(test)]
+    QuarantineBindingEmpty,
+    #[cfg(test)]
+    QuarantineBindingPartial,
     QuarantineObjectStored,
     QuarantinePublished,
 }
@@ -334,13 +345,21 @@ impl TenantAttemptJournal {
             object_token,
             identity: identity.clone(),
         };
+        self.record.resources[index].identity = Some(identity.clone());
+        self.persist()?;
+        #[cfg(test)]
+        self.interrupt_binding_for_test(
+            &descriptor,
+            &temporary_path,
+            AttemptFaultPoint::ObjectBindingEmpty,
+            AttemptFaultPoint::ObjectBindingPartial,
+        )?;
         write_object_binding(&descriptor, &temporary_path, &binding, false)?;
         descriptor.sync_all()?;
         sync_directory(&parent)?;
         self.fault(AttemptFaultPoint::ObjectDurable)?;
         drop(descriptor);
 
-        self.record.resources[index].identity = Some(identity);
         self.record.resources[index].state = ResourceState::Prepared;
         self.persist()?;
         self.fault(AttemptFaultPoint::PreparedJournalStored)?;
@@ -491,7 +510,7 @@ impl TenantAttemptJournal {
                         return Ok(Some((candidate.to_path_buf(), descriptor, binding)));
                     }
                     Err(_) if candidate == resource.temporary_path => {
-                        if !self.remove_unbound_planned_temporary(resource)? {
+                        if !self.remove_interrupted_creating_temporary(resource)? {
                             mismatches += 1;
                         }
                     }
@@ -508,12 +527,24 @@ impl TenantAttemptJournal {
         Ok(None)
     }
 
-    fn remove_unbound_planned_temporary(&self, resource: &OwnedResource) -> anyhow::Result<bool> {
-        if resource.state != ResourceState::Creating || resource.identity.is_some() {
+    fn remove_interrupted_creating_temporary(
+        &self,
+        resource: &OwnedResource,
+    ) -> anyhow::Result<bool> {
+        if resource.state != ResourceState::Creating {
             return Ok(false);
         }
         let descriptor = open_delete_nofollow(&resource.temporary_path, resource.kind)?;
-        if object_binding_exists(&descriptor, &resource.temporary_path)? {
+        let actual = PersistentIdentity::from_file(&descriptor, resource.kind)?;
+        let binding = inspect_object_binding(&descriptor, &resource.temporary_path)?;
+        let recoverable = match (&resource.identity, binding) {
+            (None, ObjectBindingStatus::Absent) => true,
+            (Some(expected), ObjectBindingStatus::Absent | ObjectBindingStatus::Malformed) => {
+                *expected == actual
+            }
+            _ => false,
+        };
+        if !recoverable {
             return Ok(false);
         }
         remove_private_object(&resource.temporary_path, resource.kind, &descriptor)?;
@@ -595,13 +626,21 @@ impl TenantAttemptJournal {
             match self.validate_bound_object(&resource.temporary_path, &resource, false) {
                 Ok((_, binding)) => resource.identity = Some(binding.identity),
                 Err(error) => {
-                    if !self.remove_unbound_planned_temporary(&resource)? {
+                    if !self.remove_interrupted_creating_temporary(&resource)? {
                         return Err(error);
                     }
+                    resource.identity = None;
+                    self.record.quarantine = Some(resource.clone());
+                    self.persist()?;
                 }
             }
         }
         if !resource.temporary_path.exists() {
+            if resource.state == ResourceState::Creating && resource.identity.is_some() {
+                resource.identity = None;
+                self.record.quarantine = Some(resource.clone());
+                self.persist()?;
+            }
             anyhow::ensure!(
                 resource.identity.is_none()
                     && matches!(
@@ -627,10 +666,19 @@ impl TenantAttemptJournal {
                 object_token: resource.object_token.clone(),
                 identity: identity.clone(),
             };
+            resource.identity = Some(identity);
+            self.record.quarantine = Some(resource.clone());
+            self.persist()?;
+            #[cfg(test)]
+            self.interrupt_binding_for_test(
+                &descriptor,
+                &resource.temporary_path,
+                AttemptFaultPoint::QuarantineBindingEmpty,
+                AttemptFaultPoint::QuarantineBindingPartial,
+            )?;
             write_object_binding(&descriptor, &resource.temporary_path, &binding, false)?;
             descriptor.sync_all()?;
             sync_directory(&self.quarantine_root)?;
-            resource.identity = Some(identity);
             self.fault(AttemptFaultPoint::QuarantineObjectStored)?;
             drop(descriptor);
         }
@@ -745,6 +793,26 @@ impl TenantAttemptJournal {
     #[cfg(test)]
     pub(crate) fn fail_once_at_for_test(&mut self, point: AttemptFaultPoint) {
         self.fault = Some(point);
+    }
+
+    #[cfg(test)]
+    fn interrupt_binding_for_test(
+        &mut self,
+        descriptor: &File,
+        path: &Path,
+        empty: AttemptFaultPoint,
+        partial: AttemptFaultPoint,
+    ) -> anyhow::Result<()> {
+        let bytes = match self.fault {
+            Some(point) if point == empty => Some((point, &b""[..])),
+            Some(point) if point == partial => Some((point, &b"{\"version\":1"[..])),
+            _ => None,
+        };
+        if let Some((point, bytes)) = bytes {
+            write_incomplete_object_binding_for_test(descriptor, path, bytes)?;
+            self.fault(point)?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]

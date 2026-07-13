@@ -475,15 +475,19 @@ private fun clearCaptureTarget(target: File) {
   check(!target.exists() || target.delete()) { "stale acceptance capture could not be cleared" }
 }
 
-internal fun writeJsonCreateNew(target: File, value: JSONObject) {
+internal fun writeJsonCreateNew(
+  target: File,
+  value: JSONObject,
+  syncTemporary: (FileOutputStream) -> Unit = { output -> output.fd.sync() },
+) {
   target.parentFile?.mkdirs()
   val temporary = File(target.parentFile, ".${target.name}.${UUID.randomUUID()}.tmp")
   Files.createFile(temporary.toPath())
-  FileOutputStream(temporary).use { output ->
-    output.write(value.toString(2).toByteArray(StandardCharsets.UTF_8))
-    output.fd.sync()
-  }
   try {
+    FileOutputStream(temporary).use { output ->
+      output.write(value.toString(2).toByteArray(StandardCharsets.UTF_8))
+      syncTemporary(output)
+    }
     Files.createLink(target.toPath(), temporary.toPath())
   } finally {
     Files.deleteIfExists(temporary.toPath())

@@ -92,45 +92,62 @@ pub(super) fn write_object_binding(
     Ok(())
 }
 
-pub(super) fn read_object_binding(_file: &File, _path: &Path) -> anyhow::Result<ObjectBinding> {
-    #[cfg(unix)]
-    let bytes = {
-        let mut bytes = [0_u8; 4096];
-        let length = rustix::fs::fgetxattr(_file, object_binding_name(), &mut bytes)?;
-        bytes[..length].to_vec()
-    };
-    #[cfg(windows)]
-    let bytes = std::fs::read(object_binding_stream(_path))?;
-    #[cfg(all(not(unix), not(windows)))]
-    anyhow::bail!("tenant object bindings are unsupported on this platform");
-    Ok(serde_json::from_slice(&bytes)?)
+pub(super) enum ObjectBindingStatus {
+    Absent,
+    Malformed,
+    Valid(ObjectBinding),
+}
+
+pub(super) fn read_object_binding(file: &File, path: &Path) -> anyhow::Result<ObjectBinding> {
+    match inspect_object_binding(file, path)? {
+        ObjectBindingStatus::Valid(binding) => Ok(binding),
+        ObjectBindingStatus::Absent => anyhow::bail!("tenant object binding is absent"),
+        ObjectBindingStatus::Malformed => anyhow::bail!("tenant object binding is malformed"),
+    }
 }
 
 #[cfg(unix)]
-pub(super) fn object_binding_exists(file: &File, _path: &Path) -> anyhow::Result<bool> {
+pub(super) fn inspect_object_binding(
+    file: &File,
+    _path: &Path,
+) -> anyhow::Result<ObjectBindingStatus> {
     let mut bytes = [0_u8; 4096];
-    match rustix::fs::fgetxattr(file, object_binding_name(), &mut bytes) {
-        Ok(_) => Ok(true),
-        Err(error) if missing_object_binding(error) => Ok(false),
-        Err(error) => Err(error.into()),
-    }
+    let length = match rustix::fs::fgetxattr(file, object_binding_name(), &mut bytes) {
+        Ok(length) => length,
+        Err(error) if missing_object_binding(error) => return Ok(ObjectBindingStatus::Absent),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(decode_object_binding(&bytes[..length]))
 }
 
 #[cfg(windows)]
-pub(super) fn object_binding_exists(_file: &File, path: &Path) -> anyhow::Result<bool> {
-    match OpenOptions::new()
-        .read(true)
-        .open(object_binding_stream(path))
-    {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
-    }
+pub(super) fn inspect_object_binding(
+    _file: &File,
+    path: &Path,
+) -> anyhow::Result<ObjectBindingStatus> {
+    let bytes = match std::fs::read(object_binding_stream(path)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ObjectBindingStatus::Absent);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(decode_object_binding(&bytes))
 }
 
 #[cfg(all(not(unix), not(windows)))]
-pub(super) fn object_binding_exists(_file: &File, _path: &Path) -> anyhow::Result<bool> {
+pub(super) fn inspect_object_binding(
+    _file: &File,
+    _path: &Path,
+) -> anyhow::Result<ObjectBindingStatus> {
     anyhow::bail!("tenant object bindings are unsupported on this platform")
+}
+
+fn decode_object_binding(bytes: &[u8]) -> ObjectBindingStatus {
+    match serde_json::from_slice(bytes) {
+        Ok(binding) => ObjectBindingStatus::Valid(binding),
+        Err(_) => ObjectBindingStatus::Malformed,
+    }
 }
 
 #[cfg(all(unix, target_vendor = "apple"))]
@@ -583,5 +600,32 @@ pub(super) fn replace_temporary_source_for_test(
         AttemptPathKind::File => std::fs::write(path, b"foreign replacement")?,
         AttemptPathKind::Directory => std::fs::create_dir(path)?,
     }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn write_incomplete_object_binding_for_test(
+    _file: &File,
+    path: &Path,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    rustix::fs::fsetxattr(
+        _file,
+        object_binding_name(),
+        bytes,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+    #[cfg(windows)]
+    {
+        let mut stream = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(object_binding_stream(path))?;
+        stream.write_all(bytes)?;
+        stream.sync_all()?;
+    }
+    let _ = path;
     Ok(())
 }

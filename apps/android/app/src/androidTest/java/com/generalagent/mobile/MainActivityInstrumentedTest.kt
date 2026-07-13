@@ -23,6 +23,7 @@ import com.generalagent.mobile.ui.SkillAction
 import com.generalagent.mobile.ui.SkillScreenMode
 import com.generalagent.mobile.ui.skillAccessState
 import java.io.File
+import java.io.IOException
 import java.nio.file.FileAlreadyExistsException
 import java.util.UUID
 import org.junit.Assert.assertEquals
@@ -298,6 +299,27 @@ class MainActivityInstrumentedTest {
       }
       assertEquals("foreign", target.readText())
       assertEquals(listOf("evidence.json"), root.list()?.sorted())
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun evidenceCreateNewCleansTemporaryWhenSyncFailsBeforeLink() {
+    val root = File(
+      InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+      "task17-create-new-sync-${UUID.randomUUID()}",
+    ).apply { mkdirs() }
+    val target = File(root, "evidence.json")
+
+    try {
+      assertThrows(IOException::class.java) {
+        writeJsonCreateNew(target, JSONObject().put("request_id", "new")) {
+          throw IOException("injected pre-link sync failure")
+        }
+      }
+      assertFalse(target.exists())
+      assertTrue(root.list()?.isEmpty() == true)
     } finally {
       root.deleteRecursively()
     }

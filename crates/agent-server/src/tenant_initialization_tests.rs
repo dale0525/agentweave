@@ -144,6 +144,71 @@ async fn directory_created_before_binding_recovers_and_retries_cleanly() {
 }
 
 #[tokio::test]
+async fn file_empty_and_partial_binding_crashes_recover_and_retry() {
+    for point in [
+        AttemptFaultPoint::ObjectBindingEmpty,
+        AttemptFaultPoint::ObjectBindingPartial,
+    ] {
+        let fixture = JournalFixture::new().await;
+        let tenant = fixture.tenant();
+        tokio::fs::create_dir(&tenant).await.unwrap();
+        let database = tenant.join("state.db");
+        {
+            let mut crashed = fixture.begin().await.unwrap();
+            crashed.fail_once_at_for_test(point);
+            assert!(crashed.create_owned_file(&database).await.is_err());
+        }
+
+        let mut retry = fixture.begin().await.unwrap();
+        retry.create_owned_file(&database).await.unwrap();
+        retry.commit().await.unwrap();
+        assert!(database.is_file(), "retry failed after {point:?}");
+    }
+}
+
+#[tokio::test]
+async fn partial_binding_foreign_replacement_is_preserved() {
+    let fixture = JournalFixture::new().await;
+    let tenant = fixture.tenant();
+    tokio::fs::create_dir(&tenant).await.unwrap();
+    let database = tenant.join("state.db");
+    let temporary;
+    {
+        let mut crashed = fixture.begin().await.unwrap();
+        crashed.fail_once_at_for_test(AttemptFaultPoint::ObjectBindingPartial);
+        assert!(crashed.create_owned_file(&database).await.is_err());
+        temporary = crashed.temporary_path_for_test(&database).unwrap();
+    }
+    tokio::fs::rename(&temporary, temporary.with_extension("owned-displaced"))
+        .await
+        .unwrap();
+    tokio::fs::write(&temporary, b"foreign").await.unwrap();
+
+    assert!(fixture.begin().await.is_err());
+    assert_eq!(tokio::fs::read(&temporary).await.unwrap(), b"foreign");
+}
+
+#[tokio::test]
+async fn directory_empty_and_partial_binding_crashes_recover_and_retry() {
+    for point in [
+        AttemptFaultPoint::ObjectBindingEmpty,
+        AttemptFaultPoint::ObjectBindingPartial,
+    ] {
+        let fixture = JournalFixture::new().await;
+        {
+            let mut crashed = fixture.begin().await.unwrap();
+            crashed.fail_once_at_for_test(point);
+            assert!(crashed.ensure_directory(&fixture.tenant()).await.is_err());
+        }
+
+        let mut retry = fixture.begin().await.unwrap();
+        retry.ensure_directory(&fixture.tenant()).await.unwrap();
+        retry.commit().await.unwrap();
+        assert!(fixture.tenant().is_dir(), "retry failed after {point:?}");
+    }
+}
+
+#[tokio::test]
 async fn planned_file_collision_is_preserved_and_fails_closed() {
     let fixture = JournalFixture::new().await;
     let tenant = fixture.tenant();
@@ -217,6 +282,28 @@ async fn quarantine_created_before_binding_recovers_and_retries_cleanly() {
     retry.ensure_directory(&tenant).await.unwrap();
     retry.commit().await.unwrap();
     assert!(tenant.is_dir());
+}
+
+#[tokio::test]
+async fn quarantine_empty_and_partial_binding_crashes_recover_and_retry() {
+    for point in [
+        AttemptFaultPoint::QuarantineBindingEmpty,
+        AttemptFaultPoint::QuarantineBindingPartial,
+    ] {
+        let fixture = JournalFixture::new().await;
+        let tenant = fixture.tenant();
+        {
+            let mut crashed = fixture.begin().await.unwrap();
+            crashed.ensure_directory(&tenant).await.unwrap();
+            crashed.fail_once_at_for_test(point);
+            assert!(crashed.cleanup().await.is_err());
+        }
+
+        let mut retry = fixture.begin().await.unwrap();
+        retry.ensure_directory(&tenant).await.unwrap();
+        retry.commit().await.unwrap();
+        assert!(tenant.is_dir(), "retry failed after {point:?}");
+    }
 }
 
 #[tokio::test]
