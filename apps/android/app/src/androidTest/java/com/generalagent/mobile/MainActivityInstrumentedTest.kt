@@ -60,6 +60,10 @@ class MainActivityInstrumentedTest {
   fun visualSkillManagementHarness() {
     val arguments = InstrumentationRegistry.getArguments()
     if (arguments.getString("visual_harness") != "true") return
+    if (arguments.getString("real_runtime") == "true") {
+      runRealRuntimeVisualHarness(arguments)
+      return
+    }
     val mode = arguments.getString("skill_mode") ?: "owner_only"
     val grants = if (mode == "owner_only") {
       setOf(
@@ -129,6 +133,11 @@ class MainActivityInstrumentedTest {
     turnGate.close()
     settingsGate.close()
     client.close()
+  }
+
+  @Test
+  fun authoritativeNativeLifecycleTransitionsOnDevice() {
+    runAuthoritativeNativeLifecycleTransitions()
   }
 
   @Test

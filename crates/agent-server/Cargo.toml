@@ -10,7 +10,10 @@ anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
+fs2.workspace = true
 model-gateway = { path = "../model-gateway" }
+rustix.workspace = true
+same-file.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true

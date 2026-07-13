@@ -117,7 +117,7 @@ class RuntimeBridgeTest {
     val resolution = client.resolveSkillApproval("approval-1", approve = true)
 
     assertEquals(listOf("android-requester", "android-approver"), native.initializeActors)
-    assertEquals(listOf(102L, 101L), native.invokeHandles)
+    assertEquals(listOf(102L, 102L, 101L), native.invokeHandles)
     assertEquals("android-approver", client.approverActorId)
     assertTrue(client.approvalAvailable)
     assertEquals("owner", client.approverAccess?.actorContext?.role)
@@ -299,7 +299,13 @@ class RuntimeBridgeTest {
     assertTrue(refreshed.isEmpty())
     assertEquals(1, native.operations.count { it == "resolve_skill_approval" })
     assertEquals(
-      listOf("resolve_skill_approval", "synchronize_skills", "synchronize_skills", "list_skills"),
+      listOf(
+        "synchronize_skills",
+        "resolve_skill_approval",
+        "synchronize_skills",
+        "synchronize_skills",
+        "list_skills",
+      ),
       native.operations,
     )
   }
@@ -319,7 +325,7 @@ class RuntimeBridgeTest {
 
     assertTrue(resolution.synchronizationWarning != null)
     assertEquals(1, native.operations.count { it == "resolve_skill_approval" })
-    assertEquals(2, native.operations.count { it == "synchronize_skills" })
+    assertEquals(3, native.operations.count { it == "synchronize_skills" })
   }
 
   @Test
@@ -419,6 +425,7 @@ class RuntimeBridgeTest {
         "update_skill_draft",
         "validate_skill_draft",
         "request_skill_activation",
+        "synchronize_skills",
         "resolve_skill_approval",
         "synchronize_skills",
         "disable_managed_skill",
@@ -652,7 +659,7 @@ private class SynchronizationFailureNativeRuntime(
       "resolve_skill_approval" ->
         """{"ok":true,"data":{"active_generation":8,"status":"approved"}}"""
       "synchronize_skills" ->
-        if (++synchronizationAttempts == 1 || !recoverySucceeds) {
+        if (handle == 9L && (++synchronizationAttempts == 1 || !recoverySucceeds)) {
           """{"ok":false,"error":{"code":"runtime_error","message":"requester synchronization failed"}}"""
         } else {
           """{"ok":true,"data":{"platform":"android","capabilities":[],"database_ready":true,"skills_ready":true,"model_configured":false,"skill_management_mode":"owner_only","active_snapshot_generation":8,"quarantined_count":0,"last_reload_status":"generation:8"}}"""

@@ -19,7 +19,10 @@ impl Storage {
             .busy_timeout(StdDuration::from_secs(5));
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
         let storage = Self { pool };
-        storage.migrate().await?;
+        if let Err(error) = storage.migrate().await {
+            storage.close().await;
+            return Err(error);
+        }
         Ok(storage)
     }
 
@@ -70,6 +73,14 @@ impl Storage {
 
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.pool.is_closed()
     }
 
     pub async fn create_session(&self, title: &str) -> anyhow::Result<Session> {

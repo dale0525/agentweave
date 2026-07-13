@@ -177,6 +177,7 @@ class RuntimeClient internal constructor(
     if (approval == null) {
       throw RuntimeBridgeException(approvalUnavailableReason ?: "Approval resolution is unavailable")
     }
+    approval.synchronize()
     val mutation = approval.resolve(
       JSONObject()
         .put("operation", "resolve_skill_approval")
@@ -280,6 +281,10 @@ class RuntimeApprovalClient internal constructor(
   private val closed = AtomicBoolean(false)
   val access = RuntimeApproverAccess(actorContext, skillPolicy)
   val actorId: String get() = access.actorContext.actorId
+
+  internal fun synchronize() {
+    responseData(native.invoke(handle, JSONObject().put("operation", "synchronize_skills").toString()))
+  }
 
   internal fun resolve(request: JSONObject): JSONObject =
     responseData(native.invoke(handle, request.toString()))

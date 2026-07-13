@@ -217,6 +217,21 @@ class SkillManagementStateTest {
   }
 
   @Test
+  fun ownerInventoryOmitsRemovedManagedPackages() {
+    val removed = RuntimeSkillPackageSummary(
+      packageId = "com.example.removed",
+      displayName = "Removed",
+      version = "1.0.0",
+      sourceLayer = "managed",
+      status = "removed",
+      reason = "removed",
+      activeRevisionId = null,
+    )
+
+    assertTrue(ownerSkillInventory(emptyList(), listOf(removed)).isEmpty())
+  }
+
+  @Test
   fun ownerInventoryPreservesRuntimeManageability() {
     val immutable = runtimeSkill(activeRevisionId = "revision-active").copy(manageable = false)
     val summary = RuntimeSkillPackageSummary(

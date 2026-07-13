@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,16 +8,13 @@ const CODE_EXTENSIONS = new Set([
 ]);
 const LINE_LIMIT = 1000;
 
-export function parseWcOutput(output) {
-  return output
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => {
-      const match = /^\s*(\d+)\s+(.+)$/.exec(line);
-      if (!match) throw new Error(`unexpected wc output: ${line}`);
-      return { lines: Number(match[1]), path: match[2] };
-    })
-    .filter((entry) => entry.path !== "total");
+export function countPhysicalLines(bytes) {
+  if (bytes.length === 0) return 0;
+  let lines = bytes[bytes.length - 1] === 0x0a ? 0 : 1;
+  for (const byte of bytes) {
+    if (byte === 0x0a) lines += 1;
+  }
+  return lines;
 }
 
 export function overBudgetEntries(entries) {
@@ -39,14 +37,11 @@ export function runSourceLineCheck(
     .filter(isCodeSource);
   if (files.length === 0) return [];
 
-  const counted = spawnSync("wc", ["-l", ...files], {
-    cwd: root,
-    encoding: "utf8",
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  if (counted.error) throw counted.error;
-  if (counted.status !== 0) throw new Error("failed to count project source lines");
-  const failures = overBudgetEntries(parseWcOutput(counted.stdout));
+  const entries = files.map((path) => ({
+    lines: countPhysicalLines(readFileSync(resolve(root, path))),
+    path,
+  }));
+  const failures = overBudgetEntries(entries);
   for (const failure of failures) {
     console.error(`${failure.lines} ${failure.path}`);
   }

@@ -156,6 +156,10 @@ fun ownerSkillInventory(
 ): List<RuntimeSkill> {
   val inventory = effective.associateByTo(linkedMapOf(), RuntimeSkill::packageId)
   managed.forEach { summary ->
+    if (summary.status == "removed") {
+      inventory.remove(summary.packageId)
+      return@forEach
+    }
     val effectiveSkill = inventory[summary.packageId]
     inventory[summary.packageId] = RuntimeSkill(
       packageId = summary.packageId,

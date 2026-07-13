@@ -1,3 +1,7 @@
+use crate::tenant_initialization::{
+    TenantInitializationPaths, acquire_tenant_initialization_lock, cleanup_prepared_directory,
+    prepare_real_directory, prepare_real_tenant_child,
+};
 use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::skill_management::OwnerSkillManagementService;
 use agent_runtime::skill_manager::{SkillManager, SkillManagerConfig};
@@ -7,6 +11,7 @@ use agent_runtime::skill_source::{ManagedSkillSource, SkillSource};
 use agent_runtime::skill_state::SkillStateStore;
 use agent_runtime::skill_store::{SkillRevisionStore, SkillStorePaths};
 use agent_runtime::storage::Storage;
+use anyhow::Context;
 use semver::Version;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -202,6 +207,7 @@ pub struct FilesystemTenantSkillManagerFactory {
     config: TenantSkillManagerConfig,
     data_tenants: PathBuf,
     cache_tenants: PathBuf,
+    initialization_locks: PathBuf,
 }
 
 impl FilesystemTenantSkillManagerFactory {
@@ -210,10 +216,13 @@ impl FilesystemTenantSkillManagerFactory {
         config.cache_root = prepare_real_directory(&config.cache_root).await?;
         let data_tenants = prepare_real_directory(&config.data_root.join("tenants")).await?;
         let cache_tenants = prepare_real_directory(&config.cache_root.join("tenants")).await?;
+        let initialization_locks =
+            prepare_real_directory(&data_tenants.join(".initialization-locks")).await?;
         Ok(Self {
             config,
             data_tenants,
             cache_tenants,
+            initialization_locks,
         })
     }
 }
@@ -222,16 +231,24 @@ impl FilesystemTenantSkillManagerFactory {
 impl TenantSkillManagerFactory for FilesystemTenantSkillManagerFactory {
     async fn create(&self, tenant_id: &str) -> anyhow::Result<TenantSkillRuntime> {
         let tenant_id = validate_tenant_id(tenant_id)?;
-        let data = prepare_real_tenant_child(&self.data_tenants, &tenant_id).await?;
+        let _initialization_lock =
+            acquire_tenant_initialization_lock(&self.initialization_locks, &tenant_id)
+                .await
+                .context("tenant initialization lock failed")?;
+        let data = prepare_real_tenant_child(&self.data_tenants, &tenant_id)
+            .await
+            .context("tenant data root preparation failed")?;
         let cache = match prepare_real_tenant_child(&self.cache_tenants, &tenant_id).await {
             Ok(cache) => cache,
             Err(error) => {
-                cleanup_created_directory(&data).await;
+                cleanup_prepared_directory(&data).await;
                 return Err(error);
             }
         };
-        let cleanup = TenantInitializationPaths::capture(data, cache).await?;
-        let result = self.create_runtime(tenant_id, &cleanup).await;
+        let mut cleanup = TenantInitializationPaths::capture(data, cache)
+            .await
+            .context("tenant initialization ownership capture failed")?;
+        let result = self.create_runtime(tenant_id, &mut cleanup).await;
         if result.is_err() {
             cleanup.cleanup().await;
         }
@@ -243,201 +260,111 @@ impl FilesystemTenantSkillManagerFactory {
     async fn create_runtime(
         &self,
         tenant_id: String,
-        cleanup: &TenantInitializationPaths,
+        cleanup: &mut TenantInitializationPaths,
     ) -> anyhow::Result<TenantSkillRuntime> {
         let data_root = cleanup.data.path.clone();
         let cache_root = cleanup.cache.path.clone();
         let database_path = data_root.join("state.db");
         reject_symlink_or_non_file_if_present(&database_path).await?;
-        let storage =
-            Storage::connect(&format!("sqlite://{}?mode=rwc", database_path.display())).await?;
-        reject_symlink_or_non_file_if_present(&database_path).await?;
-        ensure_parent_identity(&data_root, &database_path).await?;
-        let state = SkillStateStore::new(storage.clone());
-        let paths =
-            SkillStorePaths::prepare(&data_root.join("app"), &cache_root.join("cache")).await?;
-        let revisions = SkillRevisionStore::new(paths, state.clone());
-        let mut sources = self.config.sources.clone();
-        sources.push(Arc::new(ManagedSkillSource::from_store(revisions.clone())));
-        let manager = SkillManager::new_deferred_managed(SkillManagerConfig {
-            sources,
-            platform: self.config.platform,
-            capabilities: self.config.capabilities.clone(),
-            protected_packages: self.config.protected_packages.clone(),
-            allowed_overrides: self.config.allowed_overrides.clone(),
-            runtime_version: self.config.runtime_version.clone(),
-        })
-        .await?;
-        let management = OwnerSkillManagementService::new(
-            manager.clone(),
-            revisions.clone(),
-            state.clone(),
-            self.config.management_policy.clone(),
-        );
-        manager.startup_reconcile().await?;
-        Ok(TenantSkillRuntime {
-            tenant_id,
-            manager,
-            management,
-            state,
-            revisions,
-            storage,
-            data_root,
-            cache_root,
-            database_path,
-        })
-    }
-}
-
-async fn prepare_real_directory(path: &Path) -> anyhow::Result<PathBuf> {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) => ensure_real_directory(path, &metadata)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            tokio::fs::create_dir_all(path).await?;
-            let metadata = tokio::fs::symlink_metadata(path).await?;
-            ensure_real_directory(path, &metadata)?;
+        let storage = Storage::connect(&format!("sqlite://{}?mode=rwc", database_path.display()))
+            .await
+            .context("tenant storage connection failed")?;
+        let cleanup_storage = storage.clone();
+        let result = async {
+            cleanup
+                .record_created_paths()
+                .await
+                .context("tenant database ownership capture failed")?;
+            reject_symlink_or_non_file_if_present(&database_path).await?;
+            ensure_parent_identity(&data_root, &database_path).await?;
+            let state = SkillStateStore::new(storage.clone());
+            let paths = SkillStorePaths::prepare(&data_root.join("app"), &cache_root.join("cache"))
+                .await
+                .context("tenant skill store preparation failed")?;
+            cleanup
+                .record_created_paths()
+                .await
+                .context("tenant store ownership capture failed")?;
+            let revisions = SkillRevisionStore::new(paths, state.clone());
+            let mut sources = self.config.sources.clone();
+            sources.push(Arc::new(ManagedSkillSource::from_store(revisions.clone())));
+            let manager = SkillManager::new_deferred_managed(SkillManagerConfig {
+                sources,
+                platform: self.config.platform,
+                capabilities: self.config.capabilities.clone(),
+                protected_packages: self.config.protected_packages.clone(),
+                allowed_overrides: self.config.allowed_overrides.clone(),
+                runtime_version: self.config.runtime_version.clone(),
+            })
+            .await
+            .context("tenant skill manager construction failed")?;
+            let management = OwnerSkillManagementService::new(
+                manager.clone(),
+                revisions.clone(),
+                state.clone(),
+                self.config.management_policy.clone(),
+            );
+            manager
+                .startup_reconcile()
+                .await
+                .context("tenant startup reconciliation failed")?;
+            cleanup
+                .record_created_paths()
+                .await
+                .context("tenant final ownership capture failed")?;
+            Ok(TenantSkillRuntime {
+                tenant_id,
+                manager,
+                management,
+                state,
+                revisions,
+                storage,
+                data_root,
+                cache_root,
+                database_path,
+            })
         }
-        Err(error) => return Err(error.into()),
-    }
-    Ok(tokio::fs::canonicalize(path).await?)
-}
-
-struct PreparedTenantDirectory {
-    path: PathBuf,
-    created: bool,
-}
-
-async fn prepare_real_tenant_child(
-    parent: &Path,
-    tenant_id: &str,
-) -> anyhow::Result<PreparedTenantDirectory> {
-    let child = parent.join(tenant_id);
-    let mut created = false;
-    match tokio::fs::symlink_metadata(&child).await {
-        Ok(metadata) => ensure_real_directory(&child, &metadata)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match tokio::fs::create_dir(&child).await {
-                Ok(()) => created = true,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
-            let metadata = tokio::fs::symlink_metadata(&child).await?;
-            ensure_real_directory(&child, &metadata)?;
+        .await;
+        if result.is_err() {
+            let _ = cleanup.record_created_paths().await;
+            cleanup_storage.close().await;
+            #[cfg(test)]
+            notify_cleanup_observer(cleanup_storage.is_closed());
         }
-        Err(error) => return Err(error.into()),
+        result
     }
-    let canonical = tokio::fs::canonicalize(&child).await?;
-    let expected = parent.join(tenant_id);
-    anyhow::ensure!(
-        canonical == expected,
-        "tenant root has a canonical alias instead of the requested tenant id"
+}
+
+#[cfg(test)]
+fn cleanup_observer() -> &'static Mutex<Option<tokio::sync::oneshot::Sender<bool>>> {
+    static OBSERVER: std::sync::OnceLock<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>> =
+        std::sync::OnceLock::new();
+    OBSERVER.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn install_cleanup_observer() -> tokio::sync::oneshot::Receiver<bool> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let previous = cleanup_observer()
+        .lock()
+        .expect("tenant cleanup observer lock poisoned")
+        .replace(sender);
+    assert!(
+        previous.is_none(),
+        "tenant cleanup observer already installed"
     );
-    Ok(PreparedTenantDirectory {
-        path: canonical,
-        created,
-    })
+    receiver
 }
 
-struct TrackedPath {
-    path: PathBuf,
-    existed: bool,
-}
-
-struct TenantInitializationPaths {
-    data: PreparedTenantDirectory,
-    cache: PreparedTenantDirectory,
-    files: Vec<TrackedPath>,
-    directories: Vec<TrackedPath>,
-}
-
-impl TenantInitializationPaths {
-    async fn capture(
-        data: PreparedTenantDirectory,
-        cache: PreparedTenantDirectory,
-    ) -> anyhow::Result<Self> {
-        let database = data.path.join("state.db");
-        let files = vec![
-            track_path(database.clone()).await?,
-            track_path(data.path.join("state.db-wal")).await?,
-            track_path(data.path.join("state.db-shm")).await?,
-        ];
-        let directories = [
-            data.path.join("app"),
-            data.path.join("app/managed-skills"),
-            data.path.join("app/managed-skills/.locks"),
-            data.path.join("app/skill-quarantine"),
-            cache.path.join("cache"),
-            cache.path.join("cache/skill-staging"),
-        ];
-        let mut tracked_directories = Vec::new();
-        for path in directories {
-            tracked_directories.push(track_path(path).await?);
-        }
-        Ok(Self {
-            data,
-            cache,
-            files,
-            directories: tracked_directories,
-        })
-    }
-
-    async fn cleanup(&self) {
-        for tracked in &self.files {
-            if !tracked.existed {
-                remove_created_file(&tracked.path).await;
-            }
-        }
-        for tracked in self.directories.iter().rev() {
-            if !tracked.existed {
-                remove_created_empty_directory(&tracked.path).await;
-            }
-        }
-        cleanup_created_directory(&self.cache).await;
-        cleanup_created_directory(&self.data).await;
-    }
-}
-
-async fn track_path(path: PathBuf) -> anyhow::Result<TrackedPath> {
-    let existed = match tokio::fs::symlink_metadata(&path).await {
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error.into()),
-    };
-    Ok(TrackedPath { path, existed })
-}
-
-async fn cleanup_created_directory(directory: &PreparedTenantDirectory) {
-    if directory.created {
-        remove_created_empty_directory(&directory.path).await;
-    }
-}
-
-async fn remove_created_file(path: &Path) {
-    if let Err(error) = tokio::fs::remove_file(path).await
-        && error.kind() != std::io::ErrorKind::NotFound
+#[cfg(test)]
+fn notify_cleanup_observer(closed: bool) {
+    if let Some(observer) = cleanup_observer()
+        .lock()
+        .expect("tenant cleanup observer lock poisoned")
+        .take()
     {
-        tracing::warn!("failed to clean tenant initialization file");
+        let _ = observer.send(closed);
     }
-}
-
-async fn remove_created_empty_directory(path: &Path) {
-    if let Err(error) = tokio::fs::remove_dir(path).await
-        && !matches!(
-            error.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-        )
-    {
-        tracing::warn!("failed to clean tenant initialization directory");
-    }
-}
-
-fn ensure_real_directory(path: &Path, metadata: &std::fs::Metadata) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        metadata.is_dir() && !metadata.file_type().is_symlink(),
-        "tenant storage path must be a real directory: {}",
-        path.display()
-    );
-    Ok(())
 }
 
 async fn reject_symlink_or_non_file_if_present(path: &Path) -> anyhow::Result<()> {
