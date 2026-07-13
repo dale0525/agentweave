@@ -14,19 +14,23 @@ pub struct Storage {
 
 impl Storage {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
-        let options = SqliteConnectOptions::from_str(url)?
-            .foreign_keys(true)
-            .busy_timeout(StdDuration::from_secs(5));
-        let pool = SqlitePoolOptions::new().connect_with(options).await?;
-        let storage = Self { pool };
-        if let Err(error) = storage.migrate().await {
+        let storage = Self::connect_without_migrations(url).await?;
+        if let Err(error) = storage.run_migrations().await {
             storage.close().await;
             return Err(error);
         }
         Ok(storage)
     }
 
-    async fn migrate(&self) -> anyhow::Result<()> {
+    pub async fn connect_without_migrations(url: &str) -> anyhow::Result<Self> {
+        let options = SqliteConnectOptions::from_str(url)?
+            .foreign_keys(true)
+            .busy_timeout(StdDuration::from_secs(5));
+        let pool = SqlitePoolOptions::new().connect_with(options).await?;
+        Ok(Self { pool })
+    }
+
+    pub async fn run_migrations(&self) -> anyhow::Result<()> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (

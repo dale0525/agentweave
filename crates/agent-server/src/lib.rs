@@ -5,7 +5,10 @@ mod dev_api;
 pub mod dev_skills;
 pub mod owner_api;
 pub mod skill_release;
+mod tenant_attempt;
 mod tenant_initialization;
+#[cfg(test)]
+mod tenant_initialization_tests;
 pub mod tenant_skills;
 
 #[cfg(test)]

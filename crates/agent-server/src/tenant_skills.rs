@@ -208,6 +208,8 @@ pub struct FilesystemTenantSkillManagerFactory {
     data_tenants: PathBuf,
     cache_tenants: PathBuf,
     initialization_locks: PathBuf,
+    #[cfg(test)]
+    fail_migration_once: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FilesystemTenantSkillManagerFactory {
@@ -223,7 +225,16 @@ impl FilesystemTenantSkillManagerFactory {
             data_tenants,
             cache_tenants,
             initialization_locks,
+            #[cfg(test)]
+            fail_migration_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_migration_failure_once_for_test(self) -> Self {
+        self.fail_migration_once
+            .store(true, std::sync::atomic::Ordering::Release);
+        self
     }
 }
 
@@ -249,10 +260,21 @@ impl TenantSkillManagerFactory for FilesystemTenantSkillManagerFactory {
             .await
             .context("tenant initialization ownership capture failed")?;
         let result = self.create_runtime(tenant_id, &mut cleanup).await;
-        if result.is_err() {
-            cleanup.cleanup().await;
+        match result {
+            Ok(runtime) => {
+                if let Err(error) = cleanup.commit().await {
+                    runtime.storage.close().await;
+                    drop(runtime);
+                    cleanup.cleanup().await;
+                    return Err(error).context("tenant initialization ownership commit failed");
+                }
+                Ok(runtime)
+            }
+            Err(error) => {
+                cleanup.cleanup().await;
+                Err(error)
+            }
         }
-        result
     }
 }
 
@@ -265,16 +287,40 @@ impl FilesystemTenantSkillManagerFactory {
         let data_root = cleanup.data.path.clone();
         let cache_root = cleanup.cache.path.clone();
         let database_path = data_root.join("state.db");
-        reject_symlink_or_non_file_if_present(&database_path).await?;
-        let storage = Storage::connect(&format!("sqlite://{}?mode=rwc", database_path.display()))
+        cleanup
+            .prepare_database()
             .await
-            .context("tenant storage connection failed")?;
+            .context("tenant database ownership preparation failed")?;
+        reject_symlink_or_non_file_if_present(&database_path).await?;
+        let storage = match Storage::connect_without_migrations(&format!(
+            "sqlite://{}?mode=rwc",
+            database_path.display()
+        ))
+        .await
+        {
+            Ok(storage) => storage,
+            Err(error) => {
+                let _ = cleanup.record_created_paths().await;
+                return Err(error).context("tenant storage connection failed");
+            }
+        };
         let cleanup_storage = storage.clone();
         let result = async {
             cleanup
                 .record_created_paths()
                 .await
                 .context("tenant database ownership capture failed")?;
+            #[cfg(test)]
+            if self
+                .fail_migration_once
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                anyhow::bail!("injected tenant storage migration failure");
+            }
+            storage
+                .run_migrations()
+                .await
+                .context("tenant storage migration failed")?;
             reject_symlink_or_non_file_if_present(&database_path).await?;
             ensure_parent_identity(&data_root, &database_path).await?;
             let state = SkillStateStore::new(storage.clone());
@@ -336,23 +382,21 @@ impl FilesystemTenantSkillManagerFactory {
 }
 
 #[cfg(test)]
-fn cleanup_observer() -> &'static Mutex<Option<tokio::sync::oneshot::Sender<bool>>> {
-    static OBSERVER: std::sync::OnceLock<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>> =
-        std::sync::OnceLock::new();
-    OBSERVER.get_or_init(|| Mutex::new(None))
+fn cleanup_observer()
+-> &'static Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<bool>>> {
+    static OBSERVER: std::sync::OnceLock<
+        Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<bool>>>,
+    > = std::sync::OnceLock::new();
+    OBSERVER.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
 }
 
 #[cfg(test)]
 pub(crate) fn install_cleanup_observer() -> tokio::sync::oneshot::Receiver<bool> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    let previous = cleanup_observer()
+    cleanup_observer()
         .lock()
         .expect("tenant cleanup observer lock poisoned")
-        .replace(sender);
-    assert!(
-        previous.is_none(),
-        "tenant cleanup observer already installed"
-    );
+        .push_back(sender);
     receiver
 }
 
@@ -361,7 +405,7 @@ fn notify_cleanup_observer(closed: bool) {
     if let Some(observer) = cleanup_observer()
         .lock()
         .expect("tenant cleanup observer lock poisoned")
-        .take()
+        .pop_front()
     {
         let _ = observer.send(closed);
     }

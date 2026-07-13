@@ -28,6 +28,24 @@ async fn post_connect_failure_closes_pool_before_cleanup() {
 }
 
 #[tokio::test]
+async fn fresh_migration_failure_closes_cleans_and_retries_immediately() {
+    let root = tempfile::tempdir().unwrap();
+    let closed = install_cleanup_observer();
+    let factory = FilesystemTenantSkillManagerFactory::new(config(root.path(), Vec::new()))
+        .await
+        .unwrap()
+        .with_migration_failure_once_for_test();
+
+    assert!(factory.create("migration-retry").await.is_err());
+    assert!(closed.await.unwrap());
+    assert!(!root.path().join("data/tenants/migration-retry").exists());
+    assert!(!root.path().join("cache/tenants/migration-retry").exists());
+
+    let runtime = factory.create("migration-retry").await.unwrap();
+    assert_eq!(runtime.manager.current_snapshot().generation(), 1);
+}
+
+#[tokio::test]
 async fn subprocess_lock_serializes_registry_initialization() {
     let root = tempfile::tempdir().unwrap();
     let marker = root.path().join("child-locked");

@@ -232,6 +232,32 @@ class SkillManagementStateTest {
   }
 
   @Test
+  fun ownerInventoryPreservesRestoredBuiltinAfterManagedOverrideRemoval() {
+    val restored = runtimeSkill(activeRevisionId = "managed-revision").copy(
+      packageId = "com.example.override",
+      displayName = "Restored builtin",
+      sourceLayer = "builtin",
+      status = "active",
+      available = true,
+      activeRevisionId = null,
+      manageable = false,
+    )
+    val removedOverride = RuntimeSkillPackageSummary(
+      packageId = restored.packageId,
+      displayName = "Removed override",
+      version = "2.0.0",
+      sourceLayer = "managed",
+      status = "removed",
+      reason = "removed",
+      activeRevisionId = null,
+    )
+
+    val inventory = ownerSkillInventory(listOf(restored), listOf(removedOverride))
+
+    assertEquals(listOf(restored), inventory)
+  }
+
+  @Test
   fun ownerInventoryPreservesRuntimeManageability() {
     val immutable = runtimeSkill(activeRevisionId = "revision-active").copy(manageable = false)
     val summary = RuntimeSkillPackageSummary(

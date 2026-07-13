@@ -1,3 +1,4 @@
+use crate::tenant_attempt::{AttemptPathKind, TenantAttemptJournal};
 use anyhow::Context;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -235,6 +236,8 @@ pub(crate) struct TenantInitializationPaths {
     pub(crate) data: PreparedTenantDirectory,
     pub(crate) cache: PreparedTenantDirectory,
     tracked: Vec<TrackedPath>,
+    data_attempt: TenantAttemptJournal,
+    cache_attempt: TenantAttemptJournal,
 }
 
 impl TenantInitializationPaths {
@@ -242,6 +245,17 @@ impl TenantInitializationPaths {
         data: PreparedTenantDirectory,
         cache: PreparedTenantDirectory,
     ) -> anyhow::Result<Self> {
+        let data_created = data.created.is_some();
+        let cache_created = cache.created.is_some();
+        let data_attempt = TenantAttemptJournal::begin(data.path.clone(), data_created).await?;
+        let cache_attempt =
+            match TenantAttemptJournal::begin(cache.path.clone(), cache_created).await {
+                Ok(attempt) => attempt,
+                Err(error) => {
+                    data_attempt.cleanup().await;
+                    return Err(error);
+                }
+            };
         let tracked = [
             (data.path.join("state.db"), PathKind::File),
             (data.path.join("state.db-wal"), PathKind::File),
@@ -264,34 +278,39 @@ impl TenantInitializationPaths {
             data,
             cache,
             tracked: paths,
+            data_attempt,
+            cache_attempt,
         })
+    }
+
+    pub(crate) async fn prepare_database(&mut self) -> anyhow::Result<()> {
+        self.data_attempt
+            .create_owned_file(&self.data.path.join("state.db"))
+            .await?;
+        self.record_created_paths().await
     }
 
     pub(crate) async fn record_created_paths(&mut self) -> anyhow::Result<()> {
         for tracked in &mut self.tracked {
-            tracked.record_created().await?;
+            let attempt = if tracked.path.starts_with(&self.data.path) {
+                &mut self.data_attempt
+            } else {
+                &mut self.cache_attempt
+            };
+            tracked.record_created(attempt).await?;
         }
         Ok(())
     }
 
     pub(crate) async fn cleanup(&self) {
-        for tracked in self
-            .tracked
-            .iter()
-            .filter(|path| path.kind == PathKind::File)
-        {
-            tracked.remove_if_owned().await;
-        }
-        for tracked in self
-            .tracked
-            .iter()
-            .rev()
-            .filter(|path| path.kind == PathKind::Directory)
-        {
-            tracked.remove_if_owned().await;
-        }
-        remove_created_directory(&self.cache).await;
-        remove_created_directory(&self.data).await;
+        self.cache_attempt.cleanup().await;
+        self.data_attempt.cleanup().await;
+    }
+
+    pub(crate) async fn commit(&self) -> anyhow::Result<()> {
+        self.data_attempt.commit().await?;
+        self.cache_attempt.commit().await?;
+        Ok(())
     }
 }
 
@@ -305,7 +324,7 @@ struct TrackedPath {
     path: PathBuf,
     kind: PathKind,
     existed: bool,
-    created: Option<CreatedPath>,
+    claimed: bool,
 }
 
 impl TrackedPath {
@@ -319,35 +338,32 @@ impl TrackedPath {
             path,
             kind,
             existed,
-            created: None,
+            claimed: false,
         })
     }
 
-    async fn record_created(&mut self) -> anyhow::Result<()> {
-        if self.existed || self.created.is_some() {
+    async fn record_created(&mut self, attempt: &mut TenantAttemptJournal) -> anyhow::Result<()> {
+        if self.existed || self.claimed {
             return Ok(());
         }
         match tokio::fs::symlink_metadata(&self.path).await {
             Ok(metadata) => {
                 validate_kind(&self.path, &metadata, self.kind)?;
-                match CreatedPath::capture(self.path.clone(), self.kind) {
-                    Ok(created) => self.created = Some(created),
-                    Err(error)
-                        if error
-                            .downcast_ref::<std::io::Error>()
-                            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
-                    Err(error) => return Err(error),
-                }
+                attempt.claim_existing(&self.path, self.kind.into()).await?;
+                self.claimed = true;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
         Ok(())
     }
+}
 
-    async fn remove_if_owned(&self) {
-        if let Some(created) = &self.created {
-            created.remove_if_same().await;
+impl From<PathKind> for AttemptPathKind {
+    fn from(value: PathKind) -> Self {
+        match value {
+            PathKind::File => Self::File,
+            PathKind::Directory => Self::Directory,
         }
     }
 }

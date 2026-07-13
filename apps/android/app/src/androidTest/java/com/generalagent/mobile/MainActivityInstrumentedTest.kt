@@ -141,6 +141,49 @@ class MainActivityInstrumentedTest {
   }
 
   @Test
+  fun nextTurnEvidenceRequiresSameRequestMarkerRevisionAndContentHash() {
+    val requestBody = JSONObject()
+      .put("input", org.json.JSONArray().put(
+        JSONObject()
+          .put("role", "user")
+          .put(
+            "content",
+            org.json.JSONArray().put(
+              JSONObject().put("type", "input_text").put("text", "prove_active_skill"),
+            ),
+          ),
+      ))
+      .put("developer", "TASK17_UI_ACTIVE_SKILL_EVIDENCE")
+      .toString()
+    val evidence = JSONObject()
+      .put("request_id", "request-1")
+      .put("user_text", "prove_active_skill")
+      .put("active_revision_id", "revision-1")
+      .put("content_hash", "hash-1")
+      .put("marker", "TASK17_UI_ACTIVE_SKILL_EVIDENCE")
+      .put("request_body", JSONObject(requestBody))
+
+    assertTrue(
+      validateNextTurnEvidence(
+        evidence,
+        expectedRequestId = "request-1",
+        expectedUserText = "prove_active_skill",
+        expectedRevisionId = "revision-1",
+        expectedContentHash = "hash-1",
+      ),
+    )
+    assertFalse(
+      validateNextTurnEvidence(
+        JSONObject(evidence.toString()).put("active_revision_id", "revision-2"),
+        expectedRequestId = "request-1",
+        expectedUserText = "prove_active_skill",
+        expectedRevisionId = "revision-1",
+        expectedContentHash = "hash-1",
+      ),
+    )
+  }
+
+  @Test
   fun distinctActorsApproveActivationRollbackAndRemoval() {
     val native = VisualNativeRuntime("owner_only")
     val actor = RuntimeActorContext("android-requester", "owner", grants = listOf("inspect", "activate"))
