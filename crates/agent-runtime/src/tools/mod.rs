@@ -1,6 +1,7 @@
 pub mod builtin;
 pub mod command;
 pub mod discovery;
+mod host_dispatch;
 pub mod patch;
 pub mod path;
 pub mod process;
@@ -234,6 +235,7 @@ pub struct ToolRegistry {
     connector_tools: Option<crate::connector_tools::ConnectorToolRuntime>,
     memory: Option<crate::memory_tools::MemoryToolRuntime>,
     task_tools: Option<crate::task_tools::TaskToolRuntime>,
+    automation_tools: Option<crate::automation_tools::AutomationToolRuntime>,
     workspace_root: PathBuf,
     cwd: PathBuf,
     mode: RuntimeMode,
@@ -256,6 +258,7 @@ impl std::fmt::Debug for ToolRegistry {
             .field("external_tools", &self.external_tools.len())
             .field("has_memory", &self.memory.is_some())
             .field("has_task_tools", &self.task_tools.is_some())
+            .field("has_automation_tools", &self.automation_tools.is_some())
             .field("has_connector_tools", &self.connector_tools.is_some())
             .field("has_management", &self.management.is_some())
             .field("has_execution_observer", &self.execution_observer.is_some())
@@ -299,6 +302,7 @@ impl ToolRegistry {
             connector_tools: None,
             memory: None,
             task_tools: None,
+            automation_tools: None,
             workspace_root: config.workspace_root.clone(),
             cwd: config.cwd.clone(),
             mode: config.mode,
@@ -333,6 +337,14 @@ impl ToolRegistry {
         tasks: crate::task_tools::TaskToolRuntime,
     ) -> anyhow::Result<Self> {
         self.task_tools = Some(tasks);
+        self.validate()
+    }
+
+    pub fn try_with_automation_tools(
+        mut self,
+        automation: crate::automation_tools::AutomationToolRuntime,
+    ) -> anyhow::Result<Self> {
+        self.automation_tools = Some(automation);
         self.validate()
     }
 
@@ -392,6 +404,9 @@ impl ToolRegistry {
         }
         if let Some(tasks) = &self.task_tools {
             definitions.extend(tasks.definitions());
+        }
+        if let Some(automation) = &self.automation_tools {
+            definitions.extend(automation.definitions());
         }
         if let Some(connectors) = &self.connector_tools {
             definitions.extend(connectors.definitions());
@@ -604,45 +619,17 @@ impl ToolRegistry {
             return ToolDispatchOutcome::unobserved(result);
         }
 
-        if let Some(tasks) = &self.task_tools
-            && tasks.handles(name)
+        if let Some(outcome) = self
+            .dispatch_task_tools(name, call_id, &arguments, started)
+            .await
         {
-            let Some(definition) = tasks
-                .definitions()
-                .into_iter()
-                .find(|definition| definition.name == name)
-            else {
-                return ToolDispatchOutcome::unobserved(registry_failure(
-                    name,
-                    call_id,
-                    "unknown_tool",
-                    "Task host tool definition is unavailable",
-                    false,
-                    registry_metadata(started),
-                ));
-            };
-            if !permission_allowed(self.mode, self.command_mode, definition.permission) {
-                return ToolDispatchOutcome::unobserved(registry_failure(
-                    name,
-                    call_id,
-                    "permission_denied",
-                    "Task host tool is not allowed by runtime policy",
-                    false,
-                    registry_metadata(started),
-                ));
-            }
-            let result = match tasks.execute(name, arguments).await {
-                Ok(value) => ToolResult::success(name, call_id, value, registry_metadata(started)),
-                Err(error) => registry_failure(
-                    name,
-                    call_id,
-                    "task_error",
-                    error.to_string(),
-                    false,
-                    registry_metadata(started),
-                ),
-            };
-            return ToolDispatchOutcome::unobserved(result);
+            return outcome;
+        }
+        if let Some(outcome) = self
+            .dispatch_automation_tools(name, call_id, &arguments, started)
+            .await
+        {
+            return outcome;
         }
 
         if let Some(connectors) = &self.connector_tools

@@ -10,6 +10,15 @@ const UUID_OR_ID = /^[A-Za-z0-9._-]+$/;
 const RFC3339_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const TASK_PRIORITIES = new Set(["low", "normal", "high", "urgent"]);
 const TASK_STATUSES = new Set(["open", "completed", "cancelled"]);
+const SCHEDULE_STATUSES = new Set(["active", "paused", "completed", "cancelled"]);
+const NOTIFICATION_STATUSES = new Set([
+  "pending",
+  "delivering",
+  "delivered",
+  "failed",
+  "uncertain",
+  "cancelled",
+]);
 
 type IpcEvent = { sender: { id: number } };
 
@@ -166,6 +175,67 @@ function describeRequest(request: SidecarApiRequest): RequestDescription {
         expectedVersion: fieldInteger(input, "expectedVersion", 1, Number.MAX_SAFE_INTEGER),
       });
     }
+    case "schedules.list": {
+      const input = exactRecord(request.input, ["limit"], true);
+      const limit = optionalInteger(input, "limit", 1, 100) ?? 25;
+      return get(`/foundation/schedules?${new URLSearchParams({ limit: String(limit) })}`);
+    }
+    case "schedules.get":
+      return get(`/foundation/schedules/${identifier(request.input, "id")}`);
+    case "schedules.create": {
+      const input = exactRecord(
+        request.input,
+        ["idempotencyKey", "misfire", "name", "payload", "schedule"],
+      );
+      return json("POST", "/foundation/schedules", {
+        name: nonBlankString(input, "name", 255),
+        schedule: scheduleSpec(recordField(input, "schedule")),
+        misfire: misfirePolicy(recordField(input, "misfire")),
+        payload: boundedJson(input.payload ?? {}, "payload"),
+        idempotencyKey: nonBlankString(input, "idempotencyKey", 512),
+      });
+    }
+    case "schedules.setStatus": {
+      const input = exactRecord(request.input, ["expectedVersion", "id", "status"]);
+      return json("POST", `/foundation/schedules/${identifier(input, "id")}`, {
+        expectedVersion: fieldInteger(input, "expectedVersion", 1, Number.MAX_SAFE_INTEGER),
+        status: fieldEnum(input, "status", SCHEDULE_STATUSES),
+      });
+    }
+    case "notifications.list": {
+      const input = exactRecord(request.input, ["limit", "status"], true);
+      const limit = optionalInteger(input, "limit", 1, 100) ?? 25;
+      const status = optionalEnum(input, "status", NOTIFICATION_STATUSES);
+      return get(`/foundation/notifications?${new URLSearchParams({
+        limit: String(limit),
+        ...(status ? { status } : {}),
+      })}`);
+    }
+    case "notifications.get":
+      return get(`/foundation/notifications/${identifier(request.input, "id")}`);
+    case "notifications.enqueue": {
+      const input = exactRecord(
+        request.input,
+        ["body", "channel", "data", "dedupeKey", "notBefore", "quietHours", "title"],
+      );
+      return json("POST", "/foundation/notifications", {
+        channel: nonBlankString(input, "channel", 512),
+        title: nonBlankString(input, "title", 512),
+        body: fieldString(input, "body", 64 * 1_024, true),
+        dedupeKey: nonBlankString(input, "dedupeKey", 512),
+        notBefore: timestamp(fieldString(input, "notBefore", 64), "notBefore"),
+        ...(Object.hasOwn(input, "quietHours")
+          ? { quietHours: input.quietHours === null ? null : quietHours(input.quietHours) }
+          : {}),
+        data: boundedJson(input.data ?? {}, "data"),
+      });
+    }
+    case "notifications.cancel":
+      return json(
+        "POST",
+        `/foundation/notifications/${identifier(request.input, "id")}/cancel`,
+        {},
+      );
     case "mail.list":
       return get("/foundation/mail/accounts");
     case "mail.status":
@@ -276,6 +346,82 @@ function taskContent(value: unknown): Record<string, unknown> {
   };
 }
 
+function scheduleSpec(value: unknown): Record<string, unknown> {
+  const record = exactRecord(
+    value,
+    ["anchor", "at", "every_seconds", "expression", "kind", "rule", "start", "timezone"],
+  );
+  const kind = fieldString(record, "kind", 32);
+  switch (kind) {
+    case "one_shot":
+      return { kind, at: timestamp(fieldString(record, "at", 64), "at") };
+    case "interval":
+      return {
+        kind,
+        anchor: timestamp(fieldString(record, "anchor", 64), "anchor"),
+        every_seconds: fieldInteger(record, "every_seconds", 1, 366 * 24 * 60 * 60),
+      };
+    case "cron":
+      return {
+        kind,
+        expression: nonBlankString(record, "expression", 4_096),
+        timezone: nonBlankString(record, "timezone", 128),
+      };
+    case "rrule":
+      return {
+        kind,
+        rule: nonBlankString(record, "rule", 4_096),
+        timezone: nonBlankString(record, "timezone", 128),
+        start: timestamp(fieldString(record, "start", 64), "start"),
+      };
+    default:
+      throw new Error("schedule kind is invalid");
+  }
+}
+
+function misfirePolicy(value: unknown): Record<string, unknown> {
+  const record = exactRecord(value, ["grace_seconds", "kind", "max_runs"]);
+  const kind = fieldString(record, "kind", 32);
+  switch (kind) {
+    case "skip":
+      return {
+        kind,
+        grace_seconds: fieldInteger(record, "grace_seconds", 0, Number.MAX_SAFE_INTEGER),
+      };
+    case "fire_once":
+      return { kind };
+    case "catch_up":
+      return { kind, max_runs: fieldInteger(record, "max_runs", 1, 100) };
+    default:
+      throw new Error("misfire kind is invalid");
+  }
+}
+
+function quietHours(value: unknown): Record<string, unknown> {
+  const record = exactRecord(value, ["endMinute", "startMinute", "timezone"]);
+  const startMinute = fieldInteger(record, "startMinute", 0, 1_439);
+  const endMinute = fieldInteger(record, "endMinute", 0, 1_439);
+  if (startMinute === endMinute) throw new Error("quietHours is invalid");
+  return {
+    timezone: nonBlankString(record, "timezone", 128),
+    startMinute,
+    endMinute,
+  };
+}
+
+function boundedJson(value: unknown, name: string): unknown {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new Error(`${name} is invalid`);
+  }
+  if (serialized === undefined || new TextEncoder().encode(serialized).byteLength > 64 * 1_024) {
+    throw new Error(`${name} is invalid`);
+  }
+  return value;
+}
+
 function fieldString(value: unknown, name: string, maximum: number, allowEmpty = false): string {
   const field = recordField(value, name);
   if (typeof field !== "string" || (!allowEmpty && field.length === 0) || field.length > maximum) {
@@ -380,9 +526,9 @@ function exactRecord(
   allowUndefined = false,
 ): Record<string, unknown> {
   if (allowUndefined && value === undefined) return {};
-  if (!isRecord(value) || Array.isArray(value)) throw new Error("Task input is invalid");
+  if (!isRecord(value) || Array.isArray(value)) throw new Error("Sidecar API input is invalid");
   if (Object.keys(value).some((key) => !allowedKeys.includes(key))) {
-    throw new Error("Task input contains unknown fields");
+    throw new Error("Sidecar API input contains unknown fields");
   }
   return value;
 }
@@ -419,6 +565,14 @@ const OPERATIONS = new Set<SidecarApiOperation>([
   "memory.forget",
   "memory.get",
   "memory.list",
+  "notifications.cancel",
+  "notifications.enqueue",
+  "notifications.get",
+  "notifications.list",
+  "schedules.create",
+  "schedules.get",
+  "schedules.list",
+  "schedules.setStatus",
   "sessions.create",
   "sessions.delete",
   "sessions.list",

@@ -4,6 +4,7 @@ pub mod app_definition;
 pub mod app_manifest;
 pub mod approval;
 pub mod automation;
+pub mod automation_tools;
 pub mod calendar;
 pub mod connector;
 pub mod connector_ledger;
