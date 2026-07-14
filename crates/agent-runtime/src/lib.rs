@@ -101,6 +101,8 @@ mod skill_verified;
 pub mod storage;
 pub mod structured_content;
 pub mod subagent;
+pub mod task_sqlite;
+pub mod task_tools;
 pub mod tasks;
 pub mod tools;
 pub mod turn;
