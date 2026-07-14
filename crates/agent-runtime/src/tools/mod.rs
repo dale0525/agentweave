@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod patch;
 pub mod path;
 pub mod process;
+mod registry_support;
 pub mod result;
 pub mod schema;
 pub mod search;
@@ -232,6 +233,7 @@ pub struct ToolRegistry {
     connectors: Vec<ConnectorMetadata>,
     connector_tools: Option<crate::connector_tools::ConnectorToolRuntime>,
     memory: Option<crate::memory_tools::MemoryToolRuntime>,
+    task_tools: Option<crate::task_tools::TaskToolRuntime>,
     workspace_root: PathBuf,
     cwd: PathBuf,
     mode: RuntimeMode,
@@ -253,6 +255,7 @@ impl std::fmt::Debug for ToolRegistry {
             .field("built_in_tools_enabled", &self.built_in_tools_enabled)
             .field("external_tools", &self.external_tools.len())
             .field("has_memory", &self.memory.is_some())
+            .field("has_task_tools", &self.task_tools.is_some())
             .field("has_connector_tools", &self.connector_tools.is_some())
             .field("has_management", &self.management.is_some())
             .field("has_execution_observer", &self.execution_observer.is_some())
@@ -295,6 +298,7 @@ impl ToolRegistry {
             connectors: config.connectors.clone(),
             connector_tools: None,
             memory: None,
+            task_tools: None,
             workspace_root: config.workspace_root.clone(),
             cwd: config.cwd.clone(),
             mode: config.mode,
@@ -321,6 +325,14 @@ impl ToolRegistry {
         memory: crate::memory_tools::MemoryToolRuntime,
     ) -> anyhow::Result<Self> {
         self.memory = Some(memory);
+        self.validate()
+    }
+
+    pub fn try_with_task_tools(
+        mut self,
+        tasks: crate::task_tools::TaskToolRuntime,
+    ) -> anyhow::Result<Self> {
+        self.task_tools = Some(tasks);
         self.validate()
     }
 
@@ -377,6 +389,9 @@ impl ToolRegistry {
         definitions.extend(self.external_definitions.clone());
         if let Some(memory) = &self.memory {
             definitions.extend(memory.definitions());
+        }
+        if let Some(tasks) = &self.task_tools {
+            definitions.extend(tasks.definitions());
         }
         if let Some(connectors) = &self.connector_tools {
             definitions.extend(connectors.definitions());
@@ -442,21 +457,6 @@ impl ToolRegistry {
                 permission: definition.permission,
                 policy: self.approval_policy,
             })
-    }
-
-    pub fn parallel_safe(&self, name: &str) -> bool {
-        if self
-            .connector_tools
-            .as_ref()
-            .is_some_and(|connectors| connectors.parallel_safe(name))
-        {
-            return true;
-        }
-        self.definitions().into_iter().any(|definition| {
-            definition.name == name
-                && definition.permission == ToolPermission::ReadWorkspace
-                && matches!(definition.source, ToolSource::BuiltIn)
-        })
     }
 
     pub fn discovery(&self) -> ToolDiscovery {
@@ -604,6 +604,47 @@ impl ToolRegistry {
             return ToolDispatchOutcome::unobserved(result);
         }
 
+        if let Some(tasks) = &self.task_tools
+            && tasks.handles(name)
+        {
+            let Some(definition) = tasks
+                .definitions()
+                .into_iter()
+                .find(|definition| definition.name == name)
+            else {
+                return ToolDispatchOutcome::unobserved(registry_failure(
+                    name,
+                    call_id,
+                    "unknown_tool",
+                    "Task host tool definition is unavailable",
+                    false,
+                    registry_metadata(started),
+                ));
+            };
+            if !permission_allowed(self.mode, self.command_mode, definition.permission) {
+                return ToolDispatchOutcome::unobserved(registry_failure(
+                    name,
+                    call_id,
+                    "permission_denied",
+                    "Task host tool is not allowed by runtime policy",
+                    false,
+                    registry_metadata(started),
+                ));
+            }
+            let result = match tasks.execute(name, arguments).await {
+                Ok(value) => ToolResult::success(name, call_id, value, registry_metadata(started)),
+                Err(error) => registry_failure(
+                    name,
+                    call_id,
+                    "task_error",
+                    error.to_string(),
+                    false,
+                    registry_metadata(started),
+                ),
+            };
+            return ToolDispatchOutcome::unobserved(result);
+        }
+
         if let Some(connectors) = &self.connector_tools
             && connectors.handles(name)
         {
@@ -712,30 +753,6 @@ impl ToolRegistry {
         }
     }
 
-    fn runtime_timeout_attribution(&self, name: &str) -> Option<ToolExecutionAttribution> {
-        if (self.built_in_tools_enabled && BuiltInTools::handles(name))
-            || self
-                .memory
-                .as_ref()
-                .is_some_and(|memory| memory.handles(name))
-            || self
-                .connector_tools
-                .as_ref()
-                .is_some_and(|connectors| connectors.handles(name))
-            || self.external_tool(name).is_some()
-        {
-            return None;
-        }
-        let binding = self.resolve_runtime_binding(name)?;
-        if !permission_allowed(self.mode, self.command_mode, binding.tool.permission) {
-            return None;
-        }
-        Some(ToolExecutionAttribution {
-            source: binding.source,
-            success: false,
-        })
-    }
-
     async fn observe_execution(&self, source: &ToolSource, success: bool) {
         let Some(observer) = &self.execution_observer else {
             return;
@@ -750,33 +767,6 @@ impl ToolRegistry {
             operation: "tool_execution_observer",
             message: "tool execution observer failed".into(),
         });
-    }
-
-    fn resolve_runtime_binding(&self, name: &str) -> Option<RuntimeToolBinding> {
-        let binding = self.skills.resolve_runtime_tool(name)?;
-        if binding.canonical_id != name && self.runtime_alias_is_shadowed(name) {
-            return None;
-        }
-        Some(binding)
-    }
-
-    fn runtime_alias_is_shadowed(&self, name: &str) -> bool {
-        SkillManagementTools::is_reserved_name(name)
-            || (self.built_in_tools_enabled && BuiltInTools::handles(name))
-            || self
-                .memory
-                .as_ref()
-                .is_some_and(|memory| memory.handles(name))
-            || self
-                .connector_tools
-                .as_ref()
-                .is_some_and(|connectors| connectors.handles(name))
-            || self.external_tool(name).is_some()
-            || self
-                .skills
-                .tools_with_runtime_sources()
-                .iter()
-                .any(|binding| binding.canonical_id == name)
     }
 
     fn push_diagnostic(&self, diagnostic: ToolObserverDiagnostic) {

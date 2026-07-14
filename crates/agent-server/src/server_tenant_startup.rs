@@ -55,6 +55,7 @@ where
 {
     let memory_tools =
         super::server_app::resolve_memory_tools(&runtime.storage, &app_prompt).await?;
+    let task_tools = super::server_app::resolve_task_tools(&runtime.storage, &app_prompt).await?;
     let connector_foundation =
         super::server_app::resolve_connector_tools(&runtime.storage, &app_prompt).await?;
     let connector_tools = connector_foundation
@@ -67,7 +68,7 @@ where
             runtime.manager.clone(),
             runtime_config,
             app_prompt,
-            api::AppFoundationRuntimes::new(memory_tools, connector_tools),
+            api::AppFoundationRuntimes::new(memory_tools, task_tools, connector_tools),
             owner_management,
         )
     } else {
@@ -77,8 +78,7 @@ where
             runtime.manager.clone(),
             runtime_config,
             app_prompt,
-            memory_tools,
-            connector_tools,
+            api::AppFoundationRuntimes::new(memory_tools, task_tools, connector_tools),
         )
     };
     Ok(match connector_foundation {

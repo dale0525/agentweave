@@ -398,7 +398,6 @@
       "stability": "preview",
       "wave": "available",
       "platforms": [
-        "android",
         "desktop",
         "server"
       ],
@@ -414,7 +413,12 @@
         ],
         "connectors": [],
         "hostTools": [
-          "agentweave.host.tasks/v1"
+          "task_list",
+          "task_get",
+          "task_create",
+          "task_update",
+          "task_set_status",
+          "task_delete"
         ]
       },
       "permissions": {

@@ -1,5 +1,21 @@
 import { ModelSettings } from "./types";
-import type { SidecarApiOperation } from "../shared/sidecarApi";
+import type {
+  FoundationTaskContent,
+  FoundationTaskListInput,
+  FoundationTaskPage,
+  FoundationTaskRecord,
+  FoundationTaskStatus,
+  SidecarApiOperation,
+} from "../shared/sidecarApi";
+
+export type {
+  FoundationTaskContent,
+  FoundationTaskListInput,
+  FoundationTaskPage,
+  FoundationTaskPriority,
+  FoundationTaskRecord,
+  FoundationTaskStatus,
+} from "../shared/sidecarApi";
 
 export type ServerSession = {
   created_at: string;
@@ -528,6 +544,93 @@ export async function forgetMemory(id: string, expectedVersion: number): Promise
 
 export async function exportMemories(): Promise<MemoryExport> {
   return requestServer<MemoryExport>("memory.export", undefined, "/foundation/memory/export", { method: "GET" });
+}
+
+export async function listFoundationTasks(
+  input: FoundationTaskListInput = {},
+): Promise<FoundationTaskPage> {
+  const params = new URLSearchParams({ limit: String(input.limit ?? 50) });
+  if (input.status) params.set("status", input.status);
+  if (input.dueAfter) params.set("dueAfter", input.dueAfter);
+  if (input.dueBefore) params.set("dueBefore", input.dueBefore);
+  if (input.tag) params.set("tag", input.tag);
+  if (input.text) params.set("text", input.text);
+  if (input.cursor) params.set("cursor", input.cursor);
+  return requestServer<FoundationTaskPage>(
+    "tasks.list",
+    input,
+    `/foundation/tasks?${params}`,
+    { method: "GET" },
+  );
+}
+
+export async function getFoundationTask(id: string): Promise<FoundationTaskRecord> {
+  return requestServer<FoundationTaskRecord>(
+    "tasks.get",
+    { id },
+    `/foundation/tasks/${encodeURIComponent(id)}`,
+    { method: "GET" },
+  );
+}
+
+export async function createFoundationTask(
+  content: FoundationTaskContent,
+  idempotencyKey: string,
+): Promise<FoundationTaskRecord> {
+  const input = { content, idempotencyKey };
+  return requestServer<FoundationTaskRecord>("tasks.create", input, "/foundation/tasks", {
+    body: JSON.stringify(input),
+    method: "POST",
+  });
+}
+
+export async function updateFoundationTask(
+  id: string,
+  expectedVersion: number,
+  content: FoundationTaskContent,
+): Promise<FoundationTaskRecord> {
+  const input = { content, expectedVersion, id };
+  return requestServer<FoundationTaskRecord>(
+    "tasks.update",
+    input,
+    `/foundation/tasks/${encodeURIComponent(id)}`,
+    {
+      body: JSON.stringify({ content, expectedVersion }),
+      method: "PATCH",
+    },
+  );
+}
+
+export async function setFoundationTaskStatus(
+  id: string,
+  expectedVersion: number,
+  status: FoundationTaskStatus,
+): Promise<FoundationTaskRecord> {
+  const input = { expectedVersion, id, status };
+  return requestServer<FoundationTaskRecord>(
+    "tasks.setStatus",
+    input,
+    `/foundation/tasks/${encodeURIComponent(id)}/status`,
+    {
+      body: JSON.stringify({ expectedVersion, status }),
+      method: "POST",
+    },
+  );
+}
+
+export async function deleteFoundationTask(
+  id: string,
+  expectedVersion: number,
+): Promise<unknown> {
+  return requestServer(
+    "tasks.delete",
+    { expectedVersion, id },
+    `/foundation/tasks/${encodeURIComponent(id)}`,
+    {
+      body: JSON.stringify({ expectedVersion }),
+      method: "DELETE",
+    },
+  );
 }
 
 export async function listMailAccounts(): Promise<MailAccount[]> {
