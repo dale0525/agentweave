@@ -1,6 +1,7 @@
 use agent_runtime::app_definition::{
     AgentAppHostDiscovery, AgentAppRuntimeInventory, ResolvedAgentApp,
 };
+use agent_runtime::automation_tools::{AutomationScope, AutomationToolRuntime};
 use agent_runtime::connector::ConnectorRuntime;
 use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
 use agent_runtime::credential::{ConnectorAccount, CredentialScope};
@@ -110,6 +111,7 @@ fn first_party_capabilities() -> impl Iterator<Item = String> {
         "mail-connector",
         "host-tools",
         "task-provider",
+        "scheduler",
     ]
     .into_iter()
     .map(str::to_string)
@@ -119,6 +121,7 @@ fn first_party_tool_names() -> impl Iterator<Item = String> {
     agent_runtime::memory_tools::MEMORY_TOOL_NAMES
         .into_iter()
         .chain(agent_runtime::task_tools::TASK_TOOL_NAMES)
+        .chain(agent_runtime::automation_tools::AUTOMATION_TOOL_NAMES)
         .chain(MAIL_TOOL_NAMES)
         .map(str::to_string)
 }
@@ -163,6 +166,27 @@ pub(super) async fn resolve_task_tools(
         provider,
         TaskScope::new(&app_prompt.identity.app_id, "local", "local-user")?,
     )?))
+}
+
+pub(super) async fn resolve_automation_tools(
+    storage: &Storage,
+    app_prompt: &AppPromptConfig,
+) -> anyhow::Result<Option<AutomationToolRuntime>> {
+    let enabled = app_prompt
+        .identity
+        .enabled_capabilities
+        .iter()
+        .any(|capability| capability == "scheduler")
+        || std::env::var("AGENTWEAVE_AUTOMATION").as_deref() == Ok("enabled");
+    if !enabled {
+        return Ok(None);
+    }
+    AutomationToolRuntime::from_storage(
+        storage,
+        AutomationScope::new(&app_prompt.identity.app_id, "local", "local-user")?,
+    )
+    .await
+    .map(Some)
 }
 
 pub(super) async fn resolve_connector_tools(

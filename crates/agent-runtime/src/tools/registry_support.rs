@@ -10,6 +10,13 @@ impl ToolRegistry {
             return true;
         }
         if self
+            .automation_tools
+            .as_ref()
+            .is_some_and(|automation| automation.parallel_safe(name))
+        {
+            return true;
+        }
+        if self
             .connector_tools
             .as_ref()
             .is_some_and(|connectors| connectors.parallel_safe(name))
@@ -36,6 +43,10 @@ impl ToolRegistry {
                 .task_tools
                 .as_ref()
                 .is_some_and(|tasks| tasks.handles(name))
+            || self
+                .automation_tools
+                .as_ref()
+                .is_some_and(|automation| automation.handles(name))
             || self
                 .connector_tools
                 .as_ref()
@@ -73,6 +84,10 @@ impl ToolRegistry {
                 .task_tools
                 .as_ref()
                 .is_some_and(|tasks| tasks.handles(name))
+            || self
+                .automation_tools
+                .as_ref()
+                .is_some_and(|automation| automation.handles(name))
             || self
                 .connector_tools
                 .as_ref()

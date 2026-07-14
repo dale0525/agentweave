@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(deprecated))]
 
 pub mod api;
+mod api_foundations;
 mod automation_api;
 mod conversation_api;
 mod dev_api;

@@ -669,7 +669,6 @@
       "stability": "preview",
       "wave": "available",
       "platforms": [
-        "android",
         "desktop",
         "server"
       ],
@@ -686,7 +685,10 @@
         ],
         "connectors": [],
         "hostTools": [
-          "agentweave.host.scheduler/v1"
+          "schedule_list",
+          "schedule_get",
+          "schedule_create",
+          "schedule_set_status"
         ]
       },
       "permissions": {
@@ -734,7 +736,6 @@
       "stability": "preview",
       "wave": "available",
       "platforms": [
-        "android",
         "desktop",
         "server"
       ],
@@ -751,7 +752,10 @@
         ],
         "connectors": [],
         "hostTools": [
-          "agentweave.host.notifications/v1"
+          "notification_list",
+          "notification_get",
+          "notification_enqueue",
+          "notification_cancel"
         ]
       },
       "permissions": {

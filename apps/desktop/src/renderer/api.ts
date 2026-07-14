@@ -1,5 +1,12 @@
 import { ModelSettings } from "./types";
 import type {
+  FoundationMisfirePolicy,
+  FoundationNotificationRecord,
+  FoundationNotificationStatus,
+  FoundationQuietHours,
+  FoundationScheduleRecord,
+  FoundationScheduleSpec,
+  FoundationScheduleStatus,
   FoundationTaskContent,
   FoundationTaskListInput,
   FoundationTaskPage,
@@ -9,6 +16,13 @@ import type {
 } from "../shared/sidecarApi";
 
 export type {
+  FoundationMisfirePolicy,
+  FoundationNotificationRecord,
+  FoundationNotificationStatus,
+  FoundationQuietHours,
+  FoundationScheduleRecord,
+  FoundationScheduleSpec,
+  FoundationScheduleStatus,
   FoundationTaskContent,
   FoundationTaskListInput,
   FoundationTaskPage,
@@ -630,6 +644,102 @@ export async function deleteFoundationTask(
       body: JSON.stringify({ expectedVersion }),
       method: "DELETE",
     },
+  );
+}
+
+export async function listFoundationSchedules(limit = 25): Promise<FoundationScheduleRecord[]> {
+  return requestServer<FoundationScheduleRecord[]>(
+    "schedules.list",
+    { limit },
+    `/foundation/schedules?${new URLSearchParams({ limit: String(limit) })}`,
+    { method: "GET" },
+  );
+}
+
+export async function getFoundationSchedule(id: string): Promise<FoundationScheduleRecord> {
+  return requestServer<FoundationScheduleRecord>(
+    "schedules.get",
+    { id },
+    `/foundation/schedules/${encodeURIComponent(id)}`,
+    { method: "GET" },
+  );
+}
+
+export async function createFoundationSchedule(input: {
+  name: string;
+  schedule: FoundationScheduleSpec;
+  misfire: FoundationMisfirePolicy;
+  payload?: unknown;
+  idempotencyKey: string;
+}): Promise<FoundationScheduleRecord> {
+  return requestServer<FoundationScheduleRecord>("schedules.create", input, "/foundation/schedules", {
+    body: JSON.stringify(input),
+    method: "POST",
+  });
+}
+
+export async function setFoundationScheduleStatus(
+  id: string,
+  expectedVersion: number,
+  status: FoundationScheduleStatus,
+): Promise<FoundationScheduleRecord> {
+  const input = { expectedVersion, id, status };
+  return requestServer<FoundationScheduleRecord>(
+    "schedules.setStatus",
+    input,
+    `/foundation/schedules/${encodeURIComponent(id)}`,
+    { body: JSON.stringify({ expectedVersion, status }), method: "POST" },
+  );
+}
+
+export async function listFoundationNotifications(
+  status?: FoundationNotificationStatus,
+  limit = 25,
+): Promise<FoundationNotificationRecord[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (status) params.set("status", status);
+  return requestServer<FoundationNotificationRecord[]>(
+    "notifications.list",
+    { limit, ...(status ? { status } : {}) },
+    `/foundation/notifications?${params}`,
+    { method: "GET" },
+  );
+}
+
+export async function getFoundationNotification(id: string): Promise<FoundationNotificationRecord> {
+  return requestServer<FoundationNotificationRecord>(
+    "notifications.get",
+    { id },
+    `/foundation/notifications/${encodeURIComponent(id)}`,
+    { method: "GET" },
+  );
+}
+
+export async function enqueueFoundationNotification(input: {
+  channel: string;
+  title: string;
+  body: string;
+  dedupeKey: string;
+  notBefore: string;
+  quietHours?: FoundationQuietHours | null;
+  data?: unknown;
+}): Promise<FoundationNotificationRecord> {
+  return requestServer<FoundationNotificationRecord>(
+    "notifications.enqueue",
+    input,
+    "/foundation/notifications",
+    { body: JSON.stringify(input), method: "POST" },
+  );
+}
+
+export async function cancelFoundationNotification(
+  id: string,
+): Promise<FoundationNotificationRecord> {
+  return requestServer<FoundationNotificationRecord>(
+    "notifications.cancel",
+    { id },
+    `/foundation/notifications/${encodeURIComponent(id)}/cancel`,
+    { body: "{}", method: "POST" },
   );
 }
 
