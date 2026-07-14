@@ -474,7 +474,7 @@ async fn managed_execution_binds_relative_packaged_command_to_private_snapshot()
         "spawned command was {command}"
     );
     assert!(
-        command.contains("general-agent-skill-execution-"),
+        command.contains("agentweave-skill-execution-"),
         "spawned command was {command}"
     );
 }
@@ -847,7 +847,7 @@ async fn write_runtime_package_with_entry(
     let root = tempdir().unwrap();
     let name = id.rsplit('.').next().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": id,
@@ -892,7 +892,7 @@ async fn write_instruction_package(id: &str) -> TempDir {
     let root = tempdir().unwrap();
     let name = id.rsplit('.').next().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": id,

@@ -363,7 +363,7 @@ async fn staged_metadata_mutation_before_publication_keeps_previous_generation_r
 #[tokio::test]
 async fn invalid_first_build_leaves_no_bundle_evidence_and_retry_succeeds() {
     let fixture = BundleReviewFixture::new().await;
-    tokio::fs::write(fixture.package().join("general-agent.json"), b"{")
+    tokio::fs::write(fixture.package().join("agentweave.json"), b"{")
         .await
         .unwrap();
 
@@ -378,7 +378,7 @@ async fn invalid_first_build_leaves_no_bundle_evidence_and_retry_succeeds() {
 #[tokio::test]
 async fn unresolved_first_build_leaves_no_bundle_evidence_and_retry_succeeds() {
     let fixture = BundleReviewFixture::new().await;
-    let descriptor = fixture.package().join("general-agent.json");
+    let descriptor = fixture.package().join("agentweave.json");
     mutate_json(&descriptor, |value| {
         value["requires"]["packages"] = serde_json::json!(["com.example.missing"]);
     })
@@ -432,7 +432,7 @@ async fn bundle_open_rejects_missing_locked_dependency_closure() {
     let generation = tokio::fs::canonicalize(active_generation(&fixture.output).await)
         .await
         .unwrap();
-    let descriptor_path = generation.join("com.example.atomic/general-agent.json");
+    let descriptor_path = generation.join("com.example.atomic/agentweave.json");
     mutate_json(&descriptor_path, |value| {
         value["requires"]["packages"] = serde_json::json!(["com.example.missing"]);
     })
@@ -625,7 +625,7 @@ async fn write_runtime_package(root: &Path) {
         }]
     });
     tokio::fs::write(
-        root.join("general-agent.json"),
+        root.join("agentweave.json"),
         serde_json::to_vec_pretty(&descriptor).unwrap(),
     )
     .await

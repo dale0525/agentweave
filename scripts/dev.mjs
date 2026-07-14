@@ -10,7 +10,7 @@ export function createDevProcesses() {
       command: "cargo",
       args: ["run", "-p", "agent-server", "--bin", "agent-server"],
       env: {
-        GENERAL_AGENT_DEV_API: "1"
+        AGENTWEAVE_DEV_API: "1"
       }
     },
     {
@@ -36,7 +36,7 @@ function runDev() {
   const children = [];
   let shuttingDown = false;
 
-  console.log("Starting GeneralAgent local dev environment...");
+  console.log("Starting AgentWeave local dev environment...");
   console.log(`Desktop: ${LOCAL_DESKTOP_URL}`);
   console.log("API:     http://127.0.0.1:49321");
   console.log("Press Ctrl+C to stop both processes.\n");
@@ -75,7 +75,7 @@ function runDev() {
       }
 
       shuttingDown = true;
-      console.log("\nStopping GeneralAgent local dev environment...");
+      console.log("\nStopping AgentWeave local dev environment...");
       stopChildren(children);
       process.exitCode = 0;
     });

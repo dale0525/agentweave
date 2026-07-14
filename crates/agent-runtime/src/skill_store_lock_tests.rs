@@ -136,10 +136,10 @@ async fn revision_lock_rejects_hard_linked_lock_file() {
 #[test]
 #[ignore]
 fn subprocess_revision_lock_helper() {
-    let app = env::var_os("GENERAL_AGENT_TEST_APP_ROOT").unwrap();
-    let cache = env::var_os("GENERAL_AGENT_TEST_CACHE_ROOT").unwrap();
-    let revision_id = env::var("GENERAL_AGENT_TEST_REVISION_ID").unwrap();
-    let marker = env::var_os("GENERAL_AGENT_TEST_LOCK_MARKER").unwrap();
+    let app = env::var_os("AGENTWEAVE_TEST_APP_ROOT").unwrap();
+    let cache = env::var_os("AGENTWEAVE_TEST_CACHE_ROOT").unwrap();
+    let revision_id = env::var("AGENTWEAVE_TEST_REVISION_ID").unwrap();
+    let marker = env::var_os("AGENTWEAVE_TEST_LOCK_MARKER").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let paths = SkillStorePaths::prepare(app.as_ref(), cache.as_ref())
@@ -156,12 +156,12 @@ fn subprocess_revision_lock_helper() {
 #[test]
 #[ignore]
 fn subprocess_store_operation_helper() {
-    let app = env::var_os("GENERAL_AGENT_TEST_APP_ROOT").unwrap();
-    let cache = env::var_os("GENERAL_AGENT_TEST_CACHE_ROOT").unwrap();
-    let database = env::var("GENERAL_AGENT_TEST_DATABASE_URL").unwrap();
-    let revision_id = env::var("GENERAL_AGENT_TEST_REVISION_ID").unwrap();
-    let operation = env::var("GENERAL_AGENT_TEST_OPERATION").unwrap();
-    let result_path = env::var_os("GENERAL_AGENT_TEST_RESULT").unwrap();
+    let app = env::var_os("AGENTWEAVE_TEST_APP_ROOT").unwrap();
+    let cache = env::var_os("AGENTWEAVE_TEST_CACHE_ROOT").unwrap();
+    let database = env::var("AGENTWEAVE_TEST_DATABASE_URL").unwrap();
+    let revision_id = env::var("AGENTWEAVE_TEST_REVISION_ID").unwrap();
+    let operation = env::var("AGENTWEAVE_TEST_OPERATION").unwrap();
+    let result_path = env::var_os("AGENTWEAVE_TEST_RESULT").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let paths = SkillStorePaths::prepare(app.as_ref(), cache.as_ref())
@@ -298,10 +298,10 @@ fn spawn_lock_helper(
             "skill_store_lock_tests::subprocess_revision_lock_helper",
             "--nocapture",
         ])
-        .env("GENERAL_AGENT_TEST_APP_ROOT", app)
-        .env("GENERAL_AGENT_TEST_CACHE_ROOT", cache)
-        .env("GENERAL_AGENT_TEST_REVISION_ID", revision_id)
-        .env("GENERAL_AGENT_TEST_LOCK_MARKER", marker)
+        .env("AGENTWEAVE_TEST_APP_ROOT", app)
+        .env("AGENTWEAVE_TEST_CACHE_ROOT", cache)
+        .env("AGENTWEAVE_TEST_REVISION_ID", revision_id)
+        .env("AGENTWEAVE_TEST_LOCK_MARKER", marker)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -326,18 +326,18 @@ fn spawn_store_helper(
             "skill_store_lock_tests::subprocess_store_operation_helper",
             "--nocapture",
         ])
-        .env("GENERAL_AGENT_TEST_APP_ROOT", app)
-        .env("GENERAL_AGENT_TEST_CACHE_ROOT", cache)
-        .env("GENERAL_AGENT_TEST_DATABASE_URL", database)
-        .env("GENERAL_AGENT_TEST_REVISION_ID", revision_id)
-        .env("GENERAL_AGENT_TEST_OPERATION", operation)
-        .env("GENERAL_AGENT_TEST_RESULT", result)
+        .env("AGENTWEAVE_TEST_APP_ROOT", app)
+        .env("AGENTWEAVE_TEST_CACHE_ROOT", cache)
+        .env("AGENTWEAVE_TEST_DATABASE_URL", database)
+        .env("AGENTWEAVE_TEST_REVISION_ID", revision_id)
+        .env("AGENTWEAVE_TEST_OPERATION", operation)
+        .env("AGENTWEAVE_TEST_RESULT", result)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some((marker, release)) = gate {
         command
-            .env("GENERAL_AGENT_TEST_AFTER_LOCK_MARKER", marker)
-            .env("GENERAL_AGENT_TEST_AFTER_LOCK_RELEASE", release);
+            .env("AGENTWEAVE_TEST_AFTER_LOCK_MARKER", marker)
+            .env("AGENTWEAVE_TEST_AFTER_LOCK_RELEASE", release);
     }
     command.spawn().unwrap()
 }
@@ -355,7 +355,7 @@ async fn wait_for_path(path: &std::path::Path) {
 async fn write_subprocess_package() -> tempfile::TempDir {
     let root = tempdir().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         serde_json::json!({
             "schemaVersion": 1,
             "id": "com.example.subprocess",

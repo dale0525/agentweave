@@ -37,7 +37,7 @@ async fn restart_restores_verified_lkg_after_active_bytes_are_corrupted() {
     let first = activate(&service, &state, "1.0.0").await;
     let second = activate(&service, &state, "2.0.0").await;
     let second_record = state.get_revision(&second).await.unwrap().unwrap();
-    let descriptor = std::path::Path::new(&second_record.storage_path).join("general-agent.json");
+    let descriptor = std::path::Path::new(&second_record.storage_path).join("agentweave.json");
     make_file_writable(&descriptor).await;
     tokio::fs::write(&descriptor, b"corrupt").await.unwrap();
     drop(service);
@@ -134,7 +134,7 @@ async fn activate(
             &requester,
             &draft.revision_id,
             vec![agent_runtime::skill_management::DraftFileUpdate {
-                path: "general-agent.json".into(),
+                path: "agentweave.json".into(),
                 content: format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
             }],
         )

@@ -324,7 +324,7 @@ async fn draft_test_negative_matrix_persists_stable_classes_without_publication(
     let descriptor_path = connector_fixture
         .imports
         .path()
-        .join("connector-test/general-agent.json");
+        .join("connector-test/agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
     descriptor["kind"] = serde_json::json!("host_tools_only");
@@ -561,7 +561,7 @@ async fn update_descriptor(
         .await
         .unwrap()
         .unwrap();
-    let path = Path::new(&record.storage_path).join("general-agent.json");
+    let path = Path::new(&record.storage_path).join("agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
     update(&mut descriptor);
@@ -571,7 +571,7 @@ async fn update_descriptor(
             &fixture.actor([SkillGrant::EditDraft]),
             revision_id,
             vec![DraftFileUpdate {
-                path: "general-agent.json".into(),
+                path: "agentweave.json".into(),
                 content: format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
             }],
         )

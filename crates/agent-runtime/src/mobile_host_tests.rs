@@ -514,7 +514,7 @@ async fn write_skill_manifest(root: &Path, folder: &str, manifest: Value) {
 async fn write_dynamic_mobile_skill(package_root: &Path, tool_name: &str) {
     tokio::fs::create_dir_all(package_root).await.unwrap();
     tokio::fs::write(
-        package_root.join("general-agent.json"),
+        package_root.join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": "com.example.mobile-dynamic",
@@ -554,7 +554,7 @@ async fn write_dynamic_mobile_skill(package_root: &Path, tool_name: &str) {
 async fn write_mobile_instruction_package(package_root: &Path, body: &str) {
     tokio::fs::create_dir_all(package_root).await.unwrap();
     tokio::fs::write(
-        package_root.join("general-agent.json"),
+        package_root.join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": "com.example.mobile-instructions",

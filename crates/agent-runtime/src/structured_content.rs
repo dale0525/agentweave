@@ -271,7 +271,7 @@ mod tests {
     fn content(revision: u64) -> StructuredContent {
         StructuredContent {
             content_id: "briefing-1".into(),
-            mime_type: "application/vnd.generalagent.card+json".into(),
+            mime_type: "application/vnd.agentweave.card+json".into(),
             schema_version: "1".into(),
             payload: serde_json::json!({"title": "Daily briefing"}),
             fallback_text: "Daily briefing".into(),

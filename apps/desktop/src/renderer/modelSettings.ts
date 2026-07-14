@@ -7,7 +7,7 @@ export const initialModelSettings: ModelSettings = {
   modelName: "local-agent-model"
 };
 
-export const modelSettingsStorageKey = "generalagent.modelSettings.v1";
+export const modelSettingsStorageKey = "agentweave.modelSettings.v1";
 
 export type ModelSettingsSnapshot = {
   apiKeyConfigured: boolean;
@@ -19,7 +19,7 @@ const endpointTypes: EndpointType[] = ["responses", "chat_completions", "complet
 let browserSettings: ModelSettings | null = null;
 
 export async function loadModelSettings(): Promise<ModelSettingsSnapshot> {
-  const bridge = window.generalAgent?.modelSettings;
+  const bridge = window.agentWeave?.modelSettings;
   if (bridge) {
     await migrateLegacySettings(bridge);
     return snapshotFromUnknown(await bridge.load());
@@ -28,13 +28,13 @@ export async function loadModelSettings(): Promise<ModelSettingsSnapshot> {
 }
 
 export async function loadSavedModelSettings(): Promise<ModelSettings | null> {
-  if (window.generalAgent?.modelSettings) return null;
+  if (window.agentWeave?.modelSettings) return null;
   const snapshot = loadBrowserSnapshot();
   return snapshot.saved ? browserSettings : null;
 }
 
 export async function saveModelSettings(settings: ModelSettings): Promise<ModelSettingsSnapshot> {
-  const bridge = window.generalAgent?.modelSettings;
+  const bridge = window.agentWeave?.modelSettings;
   if (bridge) {
     const payload = {
       baseUrl: settings.baseUrl,
@@ -58,7 +58,7 @@ export async function saveModelSettings(settings: ModelSettings): Promise<ModelS
 }
 
 export async function clearSavedModelApiKey(settings: ModelSettings): Promise<ModelSettingsSnapshot> {
-  const bridge = window.generalAgent?.modelSettings;
+  const bridge = window.agentWeave?.modelSettings;
   if (bridge) return snapshotFromUnknown(await bridge.clearApiKey());
   browserSettings = { ...settings, apiKey: "" };
   persistBrowserMetadata(browserSettings);
@@ -85,7 +85,7 @@ function loadBrowserSnapshot(): ModelSettingsSnapshot {
 }
 
 async function migrateLegacySettings(
-  bridge: NonNullable<NonNullable<Window["generalAgent"]>["modelSettings"]>
+  bridge: NonNullable<NonNullable<Window["agentWeave"]>["modelSettings"]>
 ): Promise<void> {
   const legacy = readLocalStorage();
   if (!legacy) return;

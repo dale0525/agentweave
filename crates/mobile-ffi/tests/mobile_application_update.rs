@@ -107,7 +107,7 @@ fn init_config(root: &std::path::Path) -> MobileInitConfig {
         app_data_dir: app_data_dir.display().to_string(),
         app_package_dir: None,
         cache_dir: cache_dir.display().to_string(),
-        database_path: app_data_dir.join("general-agent.db").display().to_string(),
+        database_path: app_data_dir.join("agentweave.db").display().to_string(),
         builtin_skills_dir: builtin_skills_dir.display().to_string(),
         managed_skills_dir: app_data_dir.join("managed-skills").display().to_string(),
         staging_skills_dir: cache_dir.join("skill-staging").display().to_string(),
@@ -131,7 +131,7 @@ fn initial_draft_files() -> Value {
             "content": "---\nname: retained-managed\ndescription: Retained managed evidence.\n---\n\nRETAINED_MANAGED_MOBILE_EVIDENCE"
         },
         {
-            "path": "general-agent.json",
+            "path": "agentweave.json",
             "content": serde_json::to_string_pretty(&json!({
                 "schemaVersion": 1,
                 "id": "com.example.mobile-retained",
@@ -177,7 +177,7 @@ fn write_bundle_instruction_package(root: &std::path::Path, version: &str, instr
     )
     .unwrap();
     std::fs::write(
-        root.join("general-agent.json"),
+        root.join("agentweave.json"),
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
             "id": "com.example.mobile-builtin",

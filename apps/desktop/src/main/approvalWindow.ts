@@ -3,9 +3,9 @@ import type {
   ApprovalObservationResult
 } from "../shared/approvalObservation";
 
-export const APPROVAL_OPEN_CHANNEL = "general-agent:approval:open";
-export const APPROVAL_COMPLETE_CHANNEL = "general-agent:approval:complete";
-export const APPROVAL_CLOSE_CHANNEL = "general-agent:approval:close";
+export const APPROVAL_OPEN_CHANNEL = "agentweave:approval:open";
+export const APPROVAL_COMPLETE_CHANNEL = "agentweave:approval:complete";
+export const APPROVAL_CLOSE_CHANNEL = "agentweave:approval:close";
 
 type IpcEvent = { sender: ApprovalWebContents };
 type IpcHandler = (event: IpcEvent, value: unknown) => unknown;
@@ -82,7 +82,7 @@ export function registerApprovalWindowController(
       modal: true,
       resizable: true,
       show: true,
-      title: "GeneralAgent Approval",
+      title: "AgentWeave Approval",
       width: 720,
       webPreferences: {
         contextIsolation: true,

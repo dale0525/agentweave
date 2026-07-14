@@ -132,7 +132,7 @@ fn owner_grant_does_not_allow_native_runtime_when_kind_is_blocked() {
 
 #[test]
 fn protected_override_is_denied_even_with_allowlist_and_override_grant() {
-    let package = SkillPackageId::parse("generalagent.core.runtime").unwrap();
+    let package = SkillPackageId::parse("agentweave.core.runtime").unwrap();
     let policy = SkillManagementPolicy::owner_only()
         .protect(package.clone())
         .allow_override(package.clone());
@@ -146,7 +146,7 @@ fn protected_override_is_denied_even_with_allowlist_and_override_grant() {
 
 #[test]
 fn generic_allows_never_authorizes_builtin_override() {
-    let package = SkillPackageId::parse("generalagent.core.runtime").unwrap();
+    let package = SkillPackageId::parse("agentweave.core.runtime").unwrap();
     let policy = SkillManagementPolicy::owner_only()
         .protect(package.clone())
         .allow_override(package.clone());
@@ -175,7 +175,7 @@ fn inspect_authorization_is_package_independent() {
 
 #[test]
 fn protected_override_denies_packages_missing_from_allowlist() {
-    let package = SkillPackageId::parse("generalagent.core.runtime").unwrap();
+    let package = SkillPackageId::parse("agentweave.core.runtime").unwrap();
     let policy = SkillManagementPolicy::owner_only().protect(package.clone());
     let actor = ActorContext::owner("owner-1", [SkillGrant::OverrideBuiltin]);
 
@@ -184,7 +184,7 @@ fn protected_override_denies_packages_missing_from_allowlist() {
 
 #[test]
 fn allowlisted_unprotected_override_accepts_owner_grant_and_denies_non_owner() {
-    let package = SkillPackageId::parse("generalagent.core.runtime").unwrap();
+    let package = SkillPackageId::parse("agentweave.core.runtime").unwrap();
     let policy = SkillManagementPolicy::owner_only().allow_override(package.clone());
     let non_owner = ActorContext::anonymous().with_grants([SkillGrant::OverrideBuiltin]);
 
@@ -268,8 +268,8 @@ fn actor_context_grants_serialize_deterministically_and_round_trip() {
 
 #[test]
 fn skill_management_policy_serializes_deterministically_and_round_trips() {
-    let protected_alpha = SkillPackageId::parse("generalagent.core.alpha").unwrap();
-    let protected_runtime = SkillPackageId::parse("generalagent.core.runtime").unwrap();
+    let protected_alpha = SkillPackageId::parse("agentweave.core.alpha").unwrap();
+    let protected_runtime = SkillPackageId::parse("agentweave.core.runtime").unwrap();
     let policy = SkillManagementPolicy {
         mode: SkillManagementMode::OwnerOnly,
         agent_authoring: false,
@@ -289,8 +289,8 @@ fn skill_management_policy_serializes_deterministically_and_round_trips() {
         "mode": "owner_only",
         "agent_authoring": false,
         "allowed_kinds": ["instruction_only", "native_runtime"],
-        "protected_packages": ["generalagent.core.alpha", "generalagent.core.runtime"],
-        "allowed_overrides": ["generalagent.core.runtime"],
+        "protected_packages": ["agentweave.core.alpha", "agentweave.core.runtime"],
+        "allowed_overrides": ["agentweave.core.runtime"],
         "rollback_approval_required": false
     });
 

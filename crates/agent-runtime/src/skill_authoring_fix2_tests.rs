@@ -123,7 +123,7 @@ async fn connector_validation_rejects_noncanonical_invalid_and_duplicate_ids() {
         SkillPackageKind::InstructionOnly,
     )
     .await;
-    let descriptor_path = package_root.join("general-agent.json");
+    let descriptor_path = package_root.join("agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
     descriptor["kind"] = serde_json::json!("host_tools_only");
@@ -192,7 +192,7 @@ async fn unknown_tool_import_is_quarantined_then_fails_persisted_validation() {
         SkillPackageKind::InstructionOnly,
     )
     .await;
-    let descriptor_path = package_root.join("general-agent.json");
+    let descriptor_path = package_root.join("agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
     descriptor["kind"] = serde_json::json!("host_tools_only");
@@ -340,7 +340,7 @@ async fn typed_boundaries_map_malformed_update_to_invalid_request() {
             &fixture.actor([SkillGrant::EditDraft]),
             &draft.revision_id,
             vec![DraftFileUpdate {
-                path: "general-agent.json".into(),
+                path: "agentweave.json".into(),
                 content: "{ malformed descriptor".into(),
             }],
         )
@@ -396,7 +396,7 @@ async fn typed_boundaries_map_import_parser_and_missing_source() {
     let fixture = AuthoringFixture::new().await;
     let malformed = fixture.imports.path().join("malformed-import");
     tokio::fs::create_dir_all(&malformed).await.unwrap();
-    tokio::fs::write(malformed.join("general-agent.json"), b"{ not json")
+    tokio::fs::write(malformed.join("agentweave.json"), b"{ not json")
         .await
         .unwrap();
     tokio::fs::write(malformed.join("SKILL.md"), b"# Imported")

@@ -63,10 +63,10 @@ pub(crate) async fn acquire_bundle_publisher_lock(
 
 #[cfg(test)]
 fn subprocess_after_lock_checkpoint() -> anyhow::Result<()> {
-    let Some(marker) = std::env::var_os("GENERAL_AGENT_TEST_BUNDLE_LOCK_MARKER") else {
+    let Some(marker) = std::env::var_os("AGENTWEAVE_TEST_BUNDLE_LOCK_MARKER") else {
         return Ok(());
     };
-    let release = std::env::var_os("GENERAL_AGENT_TEST_BUNDLE_LOCK_RELEASE")
+    let release = std::env::var_os("AGENTWEAVE_TEST_BUNDLE_LOCK_RELEASE")
         .context("missing subprocess bundle lock release path")?;
     std::fs::write(marker, b"locked")?;
     let started = Instant::now();
@@ -83,12 +83,12 @@ fn subprocess_after_lock_checkpoint() -> anyhow::Result<()> {
 fn wait_for_publisher_lock(descriptor: &mut File, lock_path: &Path) -> anyhow::Result<()> {
     let started = Instant::now();
     #[cfg(test)]
-    write_subprocess_marker("GENERAL_AGENT_TEST_BUNDLE_LOCK_ATTEMPT", b"attempt")?;
+    write_subprocess_marker("AGENTWEAVE_TEST_BUNDLE_LOCK_ATTEMPT", b"attempt")?;
     loop {
         match fs2::FileExt::try_lock_exclusive(descriptor) {
             Ok(()) => {
                 #[cfg(test)]
-                write_subprocess_marker("GENERAL_AGENT_TEST_BUNDLE_LOCK_ACQUIRED", b"acquired")?;
+                write_subprocess_marker("AGENTWEAVE_TEST_BUNDLE_LOCK_ACQUIRED", b"acquired")?;
                 return Ok(());
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

@@ -282,7 +282,7 @@ async fn write_combined_package(
 ) {
     tokio::fs::create_dir_all(package_root).await.unwrap();
     tokio::fs::write(
-        package_root.join("general-agent.json"),
+        package_root.join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": package_id,
@@ -334,7 +334,7 @@ async fn write_combined_package(
 
 fn unique_test_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "general-agent-dev-api-{name}-{}",
+        "agentweave-dev-api-{name}-{}",
         uuid::Uuid::new_v4()
     ))
 }

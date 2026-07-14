@@ -29,7 +29,7 @@ pub(super) async fn resolve_app_prompt(
     manager: &SkillManager,
     runtime_config: &RuntimeConfig,
 ) -> anyhow::Result<AppPromptConfig> {
-    let Ok(root) = std::env::var("GENERAL_AGENT_APP_ROOT") else {
+    let Ok(root) = std::env::var("AGENTWEAVE_APP_ROOT") else {
         return Ok(AppPromptConfig::default());
     };
     let snapshot = manager.current_snapshot();
@@ -116,7 +116,7 @@ pub(super) async fn resolve_memory_tools(
         .enabled_capabilities
         .iter()
         .any(|capability| capability == "memory-provider")
-        || std::env::var("GENERAL_AGENT_MEMORY").as_deref() == Ok("enabled");
+        || std::env::var("AGENTWEAVE_MEMORY").as_deref() == Ok("enabled");
     if !enabled {
         return Ok(None);
     }
@@ -137,7 +137,7 @@ pub(super) async fn resolve_connector_tools(
         .enabled_capabilities
         .iter()
         .any(|capability| capability == "mail-connector")
-        || std::env::var("GENERAL_AGENT_FAKE_MAIL").as_deref() == Ok("enabled");
+        || std::env::var("AGENTWEAVE_FAKE_MAIL").as_deref() == Ok("enabled");
     if !enabled {
         return Ok(None);
     }
@@ -147,7 +147,7 @@ pub(super) async fn resolve_connector_tools(
     );
     let vault = resolve_credential_vault(storage).await?;
     let (mail, display_name, deterministic): (Arc<dyn MailConnector>, &str, bool) =
-        if std::env::var("GENERAL_AGENT_MAIL_CONNECTOR").as_deref() == Ok("imap-smtp") {
+        if std::env::var("AGENTWEAVE_MAIL_CONNECTOR").as_deref() == Ok("imap-smtp") {
             let config = load_imap_smtp_config().await?;
             anyhow::ensure!(
                 config.credential_scope.app_id == app_prompt.identity.app_id,
@@ -159,7 +159,7 @@ pub(super) async fn resolve_connector_tools(
             configured_vault
                 .register_account_persistent(ConnectorAccount {
                     account_id: config.account.id.clone(),
-                    connector_id: "generalagent.connector.mail.imap-smtp".into(),
+                    connector_id: "agentweave.connector.mail.imap-smtp".into(),
                     provider_id: "imap-smtp".into(),
                     secret_id: config.credential_secret_id.clone(),
                     scope: config.credential_scope.clone(),
@@ -219,7 +219,7 @@ pub(super) async fn resolve_connector_tools(
         tools.clone(),
         context,
         scope,
-        "generalagent.foundation-actions.v1",
+        "agentweave.foundation-actions.v1",
     )
     .await?;
     Ok(Some(ResolvedConnectorFoundation { tools, actions }))
@@ -227,8 +227,8 @@ pub(super) async fn resolve_connector_tools(
 
 async fn load_imap_smtp_config() -> anyhow::Result<ImapSmtpMailConfig> {
     let path = PathBuf::from(
-        std::env::var("GENERAL_AGENT_MAIL_ACCOUNT_CONFIG").map_err(|_| {
-            anyhow::anyhow!("GENERAL_AGENT_MAIL_ACCOUNT_CONFIG is required for IMAP/SMTP")
+        std::env::var("AGENTWEAVE_MAIL_ACCOUNT_CONFIG").map_err(|_| {
+            anyhow::anyhow!("AGENTWEAVE_MAIL_ACCOUNT_CONFIG is required for IMAP/SMTP")
         })?,
     );
     let metadata = tokio::fs::symlink_metadata(&path).await?;
@@ -249,13 +249,13 @@ async fn resolve_credential_vault(
     storage: &Storage,
 ) -> anyhow::Result<Option<agent_runtime::credential::CredentialVault>> {
     let configured = match (
-        std::env::var("GENERAL_AGENT_SECRET_ROOT").ok(),
-        std::env::var("GENERAL_AGENT_SECRET_MASTER_KEY_HEX").ok(),
+        std::env::var("AGENTWEAVE_SECRET_ROOT").ok(),
+        std::env::var("AGENTWEAVE_SECRET_MASTER_KEY_HEX").ok(),
     ) {
         (None, None) => return Ok(None),
         (Some(root), Some(key)) => (root, key),
         _ => anyhow::bail!(
-            "GENERAL_AGENT_SECRET_ROOT and GENERAL_AGENT_SECRET_MASTER_KEY_HEX must be configured together"
+            "AGENTWEAVE_SECRET_ROOT and AGENTWEAVE_SECRET_MASTER_KEY_HEX must be configured together"
         ),
     };
     let key = hex::decode(configured.1)?;

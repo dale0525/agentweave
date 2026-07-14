@@ -4,7 +4,7 @@ use jni::sys::{jlong, jstring};
 use serde_json::json;
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_generalagent_mobile_runtime_NativeRuntime_nativeInitialize(
+pub extern "system" fn Java_com_agentweave_mobile_runtime_NativeRuntime_nativeInitialize(
     mut env: JNIEnv,
     _receiver: JObject,
     request_json: JString,
@@ -16,7 +16,7 @@ pub extern "system" fn Java_com_generalagent_mobile_runtime_NativeRuntime_native
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_generalagent_mobile_runtime_NativeRuntime_nativeInvoke(
+pub extern "system" fn Java_com_agentweave_mobile_runtime_NativeRuntime_nativeInvoke(
     mut env: JNIEnv,
     _receiver: JObject,
     handle: jlong,
@@ -29,7 +29,7 @@ pub extern "system" fn Java_com_generalagent_mobile_runtime_NativeRuntime_native
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_generalagent_mobile_runtime_NativeRuntime_nativeSendMessage(
+pub extern "system" fn Java_com_agentweave_mobile_runtime_NativeRuntime_nativeSendMessage(
     mut env: JNIEnv,
     _receiver: JObject,
     handle: jlong,
@@ -50,7 +50,7 @@ pub extern "system" fn Java_com_generalagent_mobile_runtime_NativeRuntime_native
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_generalagent_mobile_runtime_NativeRuntime_nativeClose(
+pub extern "system" fn Java_com_agentweave_mobile_runtime_NativeRuntime_nativeClose(
     mut env: JNIEnv,
     _receiver: JObject,
     handle: jlong,

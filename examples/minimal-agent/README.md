@@ -15,7 +15,7 @@ pixi run scaffold-agent-app -- --validate examples/minimal-agent
 Start the Server and Desktop development page with this App definition:
 
 ```bash
-GENERAL_AGENT_APP_ROOT=examples/minimal-agent pixi run dev
+AGENTWEAVE_APP_ROOT=examples/minimal-agent pixi run dev
 ```
 
 Open <http://127.0.0.1:5173>. The UI can load without a model; sending a message requires model settings that match an available Responses, Chat Completions, or Completion endpoint.

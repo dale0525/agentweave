@@ -3,10 +3,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
-        android:name=".GeneralAgentApplication"
+        android:name=".AgentWeaveApplication"
         android:allowBackup="false"
-        android:label="GeneralAgent"
-        android:theme="@style/Theme.GeneralAgent">
+        android:label="AgentWeave"
+        android:theme="@style/Theme.AgentWeave">
         <activity
             android:name=".MainActivity"
             android:exported="true">

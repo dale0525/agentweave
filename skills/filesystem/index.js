@@ -6,8 +6,8 @@ const MAX_MATCH_TEXT_BYTES = 4096;
 
 function main() {
   const input = readInput();
-  const tool = process.env.GENERAL_AGENT_TOOL_NAME;
-  const workspaceRoot = requiredEnvPath("GENERAL_AGENT_WORKSPACE_ROOT");
+  const tool = process.env.AGENTWEAVE_TOOL_NAME;
+  const workspaceRoot = requiredEnvPath("AGENTWEAVE_WORKSPACE_ROOT");
   const realRoot = fs.realpathSync(workspaceRoot);
 
   let result;

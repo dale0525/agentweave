@@ -220,7 +220,7 @@ impl SkillPackageDescriptor {
             );
         }
 
-        let descriptor_bytes = read_optional_file(&package_root.join("general-agent.json")).await?;
+        let descriptor_bytes = read_optional_file(&package_root.join("agentweave.json")).await?;
         if let Some(bytes) = &descriptor_bytes {
             let value: serde_json::Value = serde_json::from_slice(bytes)?;
             if value.get("schemaVersion").is_some() {
@@ -326,7 +326,7 @@ fn load_legacy_descriptor_from_files(
         root: package_root.to_path_buf(),
         descriptor,
         source: DescriptorSource::LegacySynthesized,
-        warnings: vec!["legacy package descriptor synthesized; add general-agent.json".into()],
+        warnings: vec!["legacy package descriptor synthesized; add agentweave.json".into()],
     })
 }
 

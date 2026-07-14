@@ -86,7 +86,7 @@ async fn cli_builds_exact_verified_package_and_canonical_runtime_tool_loads() {
     assert!(generation.join(SKILL_BUNDLE_LOCK_FILE).is_file());
     assert!(
         generation
-            .join("com.example.echo/general-agent.json")
+            .join("com.example.echo/agentweave.json")
             .is_file()
     );
     assert!(generation.join("com.example.echo/skill.json").is_file());
@@ -151,7 +151,7 @@ async fn write_runtime_package(root: &Path, id: &str) {
         }
     });
     tokio::fs::write(
-        root.join("general-agent.json"),
+        root.join("agentweave.json"),
         serde_json::to_vec_pretty(&descriptor).unwrap(),
     )
     .await
@@ -182,7 +182,7 @@ async fn write_runtime_package(root: &Path, id: &str) {
 }
 
 fn unique_test_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("general-agent-{name}-{}", uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!("agentweave-{name}-{}", uuid::Uuid::new_v4()))
 }
 
 async fn active_generation(output: &Path) -> PathBuf {

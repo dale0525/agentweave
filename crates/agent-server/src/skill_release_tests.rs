@@ -34,7 +34,7 @@ struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "general-agent-release-snapshot-{}",
+            "agentweave-release-snapshot-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&path).unwrap();
@@ -55,7 +55,7 @@ impl Drop for TestDir {
 async fn write_runtime_package(root: &Path) {
     tokio::fs::create_dir_all(root).await.unwrap();
     tokio::fs::write(
-        root.join("general-agent.json"),
+        root.join("agentweave.json"),
         serde_json::json!({
             "schemaVersion": 1,
             "id": "com.example.release-snapshot",

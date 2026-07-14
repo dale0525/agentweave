@@ -35,7 +35,7 @@ function hostCatalog(locale) {
   return readCatalog(join(HOST_CATALOG_ROOT, `${selected}.json`), `host locale '${selected}'`);
 }
 
-export function buildDesktopLocalization(appRootInput = process.env.GENERAL_AGENT_APP_ROOT) {
+export function buildDesktopLocalization(appRootInput = process.env.AGENTWEAVE_APP_ROOT) {
   const english = hostCatalog("en");
   if (!appRootInput) {
     return {

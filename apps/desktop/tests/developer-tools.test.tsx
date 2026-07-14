@@ -23,13 +23,13 @@ afterEach(() => {
 
 describe("developer skill prompts", () => {
   it("builds a create prompt for Codex skill-creator", () => {
-    const prompt = buildCreateSkillPrompt("/home/developer/projects/GeneralAgent/skills");
+    const prompt = buildCreateSkillPrompt("/home/developer/projects/AgentWeave/skills");
 
     expect(prompt).toContain("Use the existing skill-creator skill");
     expect(prompt).toContain("skills/");
     expect(prompt).not.toContain("/home/developer");
     expect(prompt).toContain("SKILL.md is a development authoring asset");
-    expect(prompt).toContain("skill.json is the GeneralAgent runtime contract");
+    expect(prompt).toContain("skill.json is the AgentWeave runtime contract");
   });
 
   it("builds a modify prompt with package diagnostics", () => {
@@ -58,7 +58,7 @@ describe("developer skill prompts", () => {
     };
 
     const prompt = buildModifySkillPrompt(
-      "/home/developer/projects/GeneralAgent/skills",
+      "/home/developer/projects/AgentWeave/skills",
       skillPackage
     );
 

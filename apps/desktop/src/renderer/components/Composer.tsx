@@ -28,11 +28,11 @@ export function Composer({
         </p>
       ) : null}
       <div className="composer-input-row">
-        <label className="sr-only" htmlFor="generalagent-message">
+        <label className="sr-only" htmlFor="agentweave-message">
           {t("composer.message")}
         </label>
         <input
-          id="generalagent-message"
+          id="agentweave-message"
           aria-label={t("composer.message")}
           value={draft}
           onChange={(event) => onChange(event.target.value)}

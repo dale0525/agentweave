@@ -465,7 +465,7 @@ mod tests {
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!("agentweave-{name}-{}", uuid::Uuid::new_v4()))
     }
 
     fn remove_test_dir(path: PathBuf) {

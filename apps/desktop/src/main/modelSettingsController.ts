@@ -11,11 +11,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-export const MODEL_SETTINGS_LOAD_CHANNEL = "general-agent:model-settings:load";
-export const MODEL_SETTINGS_SAVE_CHANNEL = "general-agent:model-settings:save";
-export const MODEL_SETTINGS_CLEAR_KEY_CHANNEL = "general-agent:model-settings:clear-key";
-export const MODEL_SETTINGS_TEST_CHANNEL = "general-agent:model-settings:test";
-export const MODEL_SETTINGS_MESSAGE_CHANNEL = "general-agent:model-settings:message";
+export const MODEL_SETTINGS_LOAD_CHANNEL = "agentweave:model-settings:load";
+export const MODEL_SETTINGS_SAVE_CHANNEL = "agentweave:model-settings:save";
+export const MODEL_SETTINGS_CLEAR_KEY_CHANNEL = "agentweave:model-settings:clear-key";
+export const MODEL_SETTINGS_TEST_CHANNEL = "agentweave:model-settings:test";
+export const MODEL_SETTINGS_MESSAGE_CHANNEL = "agentweave:model-settings:message";
 
 const endpointTypes = new Set(["responses", "chat_completions", "completion"]);
 
@@ -263,6 +263,6 @@ async function postJson(serverBaseUrl: string | undefined, pathname: string, bod
     method: "POST",
   });
   const payload = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(`GeneralAgent server returned HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`AgentWeave server returned HTTP ${response.status}`);
   return payload;
 }

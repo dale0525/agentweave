@@ -372,7 +372,7 @@ fn definition(
         output_schema: None,
         permission,
         source: ToolSource::HostCapability {
-            capability: "generalagent.host.memory/v1".into(),
+            capability: "agentweave.host.memory/v1".into(),
         },
     }
 }
@@ -511,7 +511,7 @@ mod tests {
         assert!(runtime.definitions().iter().all(|tool| matches!(
             tool.source,
             ToolSource::HostCapability { ref capability }
-            if capability == "generalagent.host.memory/v1"
+            if capability == "agentweave.host.memory/v1"
         )));
     }
 }

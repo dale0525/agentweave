@@ -24,7 +24,7 @@ pub(crate) async fn activate_new_revision(fixture: &AuthoringFixture, version: &
             &fixture.actor([SkillGrant::EditDraft]),
             &draft.revision_id,
             vec![update(
-                "general-agent.json",
+                "agentweave.json",
                 format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
             )],
         )
@@ -326,7 +326,7 @@ async fn corrupted_active_revision_restores_verified_last_known_good_idempotentl
     let first = activate_new_revision(&fixture, "1.0.0").await;
     let second = activate_new_revision(&fixture, "2.0.0").await;
     let record = fixture.state.get_revision(&second).await.unwrap().unwrap();
-    let descriptor = std::path::Path::new(&record.storage_path).join("general-agent.json");
+    let descriptor = std::path::Path::new(&record.storage_path).join("agentweave.json");
     make_file_writable(&descriptor).await;
     tokio::fs::write(&descriptor, b"corrupt").await.unwrap();
 
@@ -498,7 +498,7 @@ async fn startup_reconcile_emits_distinct_restored_and_current_events() {
     activate_new_revision(&fixture, "1.0.0").await;
     let second = activate_new_revision(&fixture, "2.0.0").await;
     let record = fixture.state.get_revision(&second).await.unwrap().unwrap();
-    let descriptor = std::path::Path::new(&record.storage_path).join("general-agent.json");
+    let descriptor = std::path::Path::new(&record.storage_path).join("agentweave.json");
     make_file_writable(&descriptor).await;
     tokio::fs::write(descriptor, b"corrupt").await.unwrap();
     let mut events = fixture.service.subscribe_events();

@@ -1,6 +1,6 @@
 # IMAP/SMTP Mail Connector 配置
 
-GeneralAgent 默认使用 Fake Mail Connector。启用 IMAP/SMTP 时，账号配置文件仍然只保存 opaque secret ID；邮箱密码不会写入 Agent App Manifest、模型输入、Renderer 状态或普通日志。
+AgentWeave 默认使用 Fake Mail Connector。启用 IMAP/SMTP 时，账号配置文件仍然只保存 opaque secret ID；邮箱密码不会写入 Agent App Manifest、模型输入、Renderer 状态或普通日志。
 
 ## 1. 安全前提
 
@@ -34,14 +34,14 @@ GeneralAgent 默认使用 Fake Mail Connector。启用 IMAP/SMTP 时，账号配
 生成 32 字节主密钥，并把它交给部署环境的 secret manager；不要提交到 Git：
 
 ```bash
-export GENERAL_AGENT_SECRET_ROOT="$HOME/.generalagent/secrets"
-export GENERAL_AGENT_SECRET_MASTER_KEY_HEX="$(openssl rand -hex 32)"
+export AGENTWEAVE_SECRET_ROOT="$HOME/.agentweave/secrets"
+export AGENTWEAVE_SECRET_MASTER_KEY_HEX="$(openssl rand -hex 32)"
 ```
 
 将邮箱密码或应用密码从标准输入写入 Vault。以下命令不会把 secret 值写进参数或输出：
 
 ```bash
-password-manager read generalagent/mail-primary | \
+password-manager read agentweave/mail-primary | \
   pixi run store-server-secret -- \
     --app-id com.example.secretary-agent \
     --secret-id mail.primary.password
@@ -50,7 +50,7 @@ password-manager read generalagent/mail-primary | \
 轮换已有 secret：
 
 ```bash
-password-manager read generalagent/mail-primary-new | \
+password-manager read agentweave/mail-primary-new | \
   pixi run store-server-secret -- \
     --app-id com.example.secretary-agent \
     --secret-id mail.primary.password \
@@ -62,11 +62,11 @@ password-manager read generalagent/mail-primary-new | \
 ## 4. 启动 Server
 
 ```bash
-export GENERAL_AGENT_APP_ROOT="examples/secretary-agent"
-export GENERAL_AGENT_MAIL_CONNECTOR="imap-smtp"
-export GENERAL_AGENT_MAIL_ACCOUNT_CONFIG="examples/secretary-agent/mail-account.json"
-export GENERAL_AGENT_SECRET_ROOT="$HOME/.generalagent/secrets"
-export GENERAL_AGENT_SECRET_MASTER_KEY_HEX="<从部署 secret manager 注入>"
+export AGENTWEAVE_APP_ROOT="examples/secretary-agent"
+export AGENTWEAVE_MAIL_CONNECTOR="imap-smtp"
+export AGENTWEAVE_MAIL_ACCOUNT_CONFIG="examples/secretary-agent/mail-account.json"
+export AGENTWEAVE_SECRET_ROOT="$HOME/.agentweave/secrets"
+export AGENTWEAVE_SECRET_MASTER_KEY_HEX="<从部署 secret manager 注入>"
 
 pixi run server
 ```

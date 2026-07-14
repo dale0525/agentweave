@@ -19,7 +19,7 @@ export function ApprovalSurface(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const api = window.generalAgentApproval;
+    const api = window.agentWeaveApproval;
     if (!api || !approvalId) {
       setError("Independent approval service is unavailable");
       return;
@@ -36,7 +36,7 @@ export function ApprovalSurface(): JSX.Element {
   }, [approvalId]);
 
   const decide = async (decision: "approve" | "reject") => {
-    const api = window.generalAgentApproval;
+    const api = window.agentWeaveApproval;
     if (!api || !approvalId || !review) return;
     setBusy(decision);
     setError(null);
@@ -50,7 +50,7 @@ export function ApprovalSurface(): JSX.Element {
   };
 
   const closeObservation = async () => {
-    const api = window.generalAgentApproval;
+    const api = window.agentWeaveApproval;
     if (!api || !approvalId) return;
     setError(null);
     try {

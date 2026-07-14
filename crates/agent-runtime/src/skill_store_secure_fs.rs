@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::{Arc, Mutex, OnceLock};
 
-const TREE_HASH_DOMAIN: &[u8] = b"general-agent.skill-package-tree";
+const TREE_HASH_DOMAIN: &[u8] = b"agentweave.skill-package-tree";
 const TREE_HASH_VERSION: u32 = 1;
 const TREE_HASH_FILE_ENTRY: u8 = 1;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
@@ -476,7 +476,7 @@ fn scan_relative_files(
         hasher.update(opened.expected_bytes.to_be_bytes());
         let capture = matches!(
             opened.canonical.as_slice(),
-            b"general-agent.json" | b"skill.json" | b"SKILL.md"
+            b"agentweave.json" | b"skill.json" | b"SKILL.md"
         );
         let mut captured = capture.then(Vec::new);
         let mut file = File::from(descriptor);
@@ -502,7 +502,7 @@ fn scan_relative_files(
             );
         }
         match opened.canonical.as_slice() {
-            b"general-agent.json" => descriptor_bytes = captured,
+            b"agentweave.json" => descriptor_bytes = captured,
             b"skill.json" => runtime_manifest = captured,
             b"SKILL.md" => instructions_file = captured,
             _ => {}
@@ -779,7 +779,7 @@ fn scan_windows_opened(
         hasher.update(u64::try_from(file.bytes.len())?.to_be_bytes());
         hasher.update(&file.bytes);
         match file.canonical.as_slice() {
-            b"general-agent.json" => descriptor_bytes = Some(file.bytes),
+            b"agentweave.json" => descriptor_bytes = Some(file.bytes),
             b"skill.json" => runtime_manifest = Some(file.bytes),
             b"SKILL.md" => instructions_file = Some(file.bytes),
             _ => {}
@@ -916,7 +916,7 @@ fn scan_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureTre
         hasher.update(entry.expected_bytes.to_be_bytes());
         let capture = matches!(
             entry.canonical.as_slice(),
-            b"general-agent.json" | b"skill.json" | b"SKILL.md"
+            b"agentweave.json" | b"skill.json" | b"SKILL.md"
         );
         let mut captured = capture.then(Vec::new);
         let mut buffer = vec![0_u8; READ_BUFFER_BYTES];
@@ -941,7 +941,7 @@ fn scan_fallback(root: &Path, limits: PackageLimits) -> anyhow::Result<SecureTre
             );
         }
         match entry.canonical.as_slice() {
-            b"general-agent.json" => descriptor_bytes = captured,
+            b"agentweave.json" => descriptor_bytes = captured,
             b"skill.json" => runtime_manifest = captured,
             b"SKILL.md" => instructions_file = captured,
             _ => {}

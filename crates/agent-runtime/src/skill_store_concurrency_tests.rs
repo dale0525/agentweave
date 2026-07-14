@@ -508,7 +508,7 @@ fn independent_store(
 async fn write_package() -> TempDir {
     let root = tempdir().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": "com.example.lock",

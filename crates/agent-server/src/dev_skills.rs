@@ -11,7 +11,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const PACKAGE_METADATA_FILE: &str = "general-agent.json";
+const PACKAGE_METADATA_FILE: &str = "agentweave.json";
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -694,7 +694,7 @@ mod tests {
             packages["planning"]
                 .readiness_issues
                 .iter()
-                .any(|issue| issue.contains("missing general-agent.json metadata"))
+                .any(|issue| issue.contains("missing agentweave.json metadata"))
         );
         remove_test_dir(root).await;
     }
@@ -937,14 +937,14 @@ mod tests {
     async fn write_package_metadata(root: &Path, folder: &str, metadata: serde_json::Value) {
         let skill_dir = root.join(folder);
         fs::create_dir_all(&skill_dir).await.unwrap();
-        fs::write(skill_dir.join("general-agent.json"), metadata.to_string())
+        fs::write(skill_dir.join("agentweave.json"), metadata.to_string())
             .await
             .unwrap();
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "general-agent-dev-skills-{name}-{}",
+            "agentweave-dev-skills-{name}-{}",
             uuid::Uuid::new_v4()
         ))
     }

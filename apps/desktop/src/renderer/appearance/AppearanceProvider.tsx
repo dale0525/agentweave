@@ -13,7 +13,7 @@ import { installPackagedFonts } from "./fontFaces";
 import { isHighContrastTheme, isLightTheme, themeCssVariables } from "./themePalette";
 import type { DesktopAppearanceBundle, DesktopThemeDefinition } from "./types";
 
-const STORAGE_KEY = "generalagent.appearance.theme.v1";
+const STORAGE_KEY = "agentweave.appearance.theme.v1";
 const appearanceBundle = bundledAppearance();
 const fallbackTheme = appearanceBundle.themes[0];
 
@@ -97,8 +97,8 @@ function applyTheme(theme: DesktopThemeDefinition): void {
 }
 
 function bundledAppearance(): DesktopAppearanceBundle {
-  if (typeof __GENERAL_AGENT_APPEARANCE__ !== "undefined") {
-    const configured = __GENERAL_AGENT_APPEARANCE__;
+  if (typeof __AGENTWEAVE_APPEARANCE__ !== "undefined") {
+    const configured = __AGENTWEAVE_APPEARANCE__;
     if (configured.themes.length > 0) {
       const defaultAvailable = configured.themes.some(
         (theme) => theme.id === configured.defaultTheme

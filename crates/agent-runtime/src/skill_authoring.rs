@@ -59,7 +59,7 @@ fn allowed_draft_path(path: &std::path::Path) -> bool {
         return false;
     }
     match first.to_str() {
-        Some("general-agent.json" | "SKILL.md") => components.next().is_none(),
+        Some("agentweave.json" | "SKILL.md") => components.next().is_none(),
         Some("references" | "assets") => components.next().is_some(),
         _ => false,
     }
@@ -128,7 +128,7 @@ pub fn build_package_draft(
     Ok(AuthoredSkillPackage {
         files: vec![
             StagingSkillFile {
-                path: PathBuf::from("general-agent.json"),
+                path: PathBuf::from("agentweave.json"),
                 bytes: descriptor_bytes,
             },
             StagingSkillFile {

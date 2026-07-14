@@ -38,7 +38,7 @@ fn mobile_config(root: &std::path::Path) -> MobileInitConfig {
         app_data_dir: app_data_dir.display().to_string(),
         app_package_dir: None,
         cache_dir: cache_dir.display().to_string(),
-        database_path: app_data_dir.join("general-agent.db").display().to_string(),
+        database_path: app_data_dir.join("agentweave.db").display().to_string(),
         builtin_skills_dir: builtin_skills_dir.display().to_string(),
         managed_skills_dir: app_data_dir.join("managed-skills").display().to_string(),
         staging_skills_dir: cache_dir.join("skill-staging").display().to_string(),
@@ -65,7 +65,7 @@ fn write_instruction_package(
     let package_root = skills_root.join(folder);
     std::fs::create_dir_all(&package_root).unwrap();
     std::fs::write(
-        package_root.join("general-agent.json"),
+        package_root.join("agentweave.json"),
         serde_json::json!({
             "schemaVersion": 1,
             "id": id,
@@ -463,7 +463,7 @@ fn seed_managed_skill(
             .update_skill_draft(
                 &draft.revision_id,
                 vec![DraftFileUpdate {
-                    path: "general-agent.json".into(),
+                    path: "agentweave.json".into(),
                     content: descriptor,
                 }],
             )
@@ -558,7 +558,7 @@ mod unix_symlink_tests {
         symlink(outside_dir.path(), &escape_link).unwrap();
 
         let mut config = android_config(dir.path());
-        config.database_path = escape_link.join("general-agent.db").display().to_string();
+        config.database_path = escape_link.join("agentweave.db").display().to_string();
         let error = MobileRuntime::initialize(config)
             .err()
             .expect("database path via symlink escape should fail");

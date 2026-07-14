@@ -451,7 +451,7 @@ pub(crate) async fn activate_package(
             &fixture.actor([SkillGrant::EditDraft]),
             &draft.revision_id,
             vec![update(
-                "general-agent.json",
+                "agentweave.json",
                 format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
             )],
         )
@@ -485,7 +485,7 @@ async fn corrupt_descriptor(fixture: &AuthoringFixture, revision_id: &str) {
         .await
         .unwrap()
         .unwrap();
-    let path = std::path::Path::new(&record.storage_path).join("general-agent.json");
+    let path = std::path::Path::new(&record.storage_path).join("agentweave.json");
     make_file_writable(&path).await;
     tokio::fs::write(path, b"corrupt").await.unwrap();
 }

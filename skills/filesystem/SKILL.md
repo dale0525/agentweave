@@ -1,6 +1,6 @@
 ---
 name: filesystem
-description: Use when GeneralAgent needs to create, inspect, read, write, search, or patch files in the workspace through the packaged filesystem runtime tools.
+description: Use when AgentWeave needs to create, inspect, read, write, search, or patch files in the workspace through the packaged filesystem runtime tools.
 ---
 
 # Filesystem
@@ -17,4 +17,4 @@ Available tools:
 - `search_files`: search text inside workspace files.
 - `apply_patch`: apply minimal patch blocks inside the workspace.
 
-All paths are resolved inside `GENERAL_AGENT_WORKSPACE_ROOT`. Do not use these tools for paths outside the active workspace.
+All paths are resolved inside `AGENTWEAVE_WORKSPACE_ROOT`. Do not use these tools for paths outside the active workspace.

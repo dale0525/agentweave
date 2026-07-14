@@ -127,10 +127,10 @@ async fn subprocess_crash_protects_old_revision_until_durable_lease_expires() {
         .arg("--exact")
         .arg("skill_manager_convergence_tests::subprocess_durable_lease_helper")
         .arg("--nocapture")
-        .env("GENERAL_AGENT_LEASE_APP_ROOT", &app_root)
-        .env("GENERAL_AGENT_LEASE_CACHE_ROOT", &cache_root)
-        .env("GENERAL_AGENT_LEASE_READY", &ready)
-        .env("GENERAL_AGENT_LEASE_RELEASE", &release)
+        .env("AGENTWEAVE_LEASE_APP_ROOT", &app_root)
+        .env("AGENTWEAVE_LEASE_CACHE_ROOT", &cache_root)
+        .env("AGENTWEAVE_LEASE_READY", &ready)
+        .env("AGENTWEAVE_LEASE_RELEASE", &release)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -172,14 +172,13 @@ async fn subprocess_crash_protects_old_revision_until_durable_lease_expires() {
 
 #[test]
 fn subprocess_durable_lease_helper() {
-    let Some(app_root) = std::env::var_os("GENERAL_AGENT_LEASE_APP_ROOT") else {
+    let Some(app_root) = std::env::var_os("AGENTWEAVE_LEASE_APP_ROOT") else {
         return;
     };
     let cache_root =
-        std::path::PathBuf::from(std::env::var_os("GENERAL_AGENT_LEASE_CACHE_ROOT").unwrap());
-    let ready = std::path::PathBuf::from(std::env::var_os("GENERAL_AGENT_LEASE_READY").unwrap());
-    let release =
-        std::path::PathBuf::from(std::env::var_os("GENERAL_AGENT_LEASE_RELEASE").unwrap());
+        std::path::PathBuf::from(std::env::var_os("AGENTWEAVE_LEASE_CACHE_ROOT").unwrap());
+    let ready = std::path::PathBuf::from(std::env::var_os("AGENTWEAVE_LEASE_READY").unwrap());
+    let release = std::path::PathBuf::from(std::env::var_os("AGENTWEAVE_LEASE_RELEASE").unwrap());
     let app_root = std::path::PathBuf::from(app_root);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {

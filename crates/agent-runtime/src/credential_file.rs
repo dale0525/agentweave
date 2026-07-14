@@ -195,7 +195,7 @@ impl SecretStore for EncryptedFileSecretStore {
 
 fn associated_data(scope: &CredentialScope, secret_id: &SecretId) -> anyhow::Result<Vec<u8>> {
     Ok(serde_json::to_vec(&(
-        "generalagent.secret.v1",
+        "agentweave.secret.v1",
         &scope.app_id,
         &scope.tenant_id,
         &scope.user_id,

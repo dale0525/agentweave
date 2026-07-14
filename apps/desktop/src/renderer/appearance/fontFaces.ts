@@ -1,10 +1,10 @@
 import type { PackagedFontFace } from "./types";
 
-const STYLE_ELEMENT_ID = "general-agent-packaged-fonts";
+const STYLE_ELEMENT_ID = "agentweave-packaged-fonts";
 const FONT_FAMILIES = {
-  display: "GeneralAgent Display",
-  mono: "GeneralAgent Mono",
-  ui: "GeneralAgent UI"
+  display: "AgentWeave Display",
+  mono: "AgentWeave Mono",
+  ui: "AgentWeave UI"
 } as const;
 
 export function installPackagedFonts(fontFaces: PackagedFontFace[]): void {

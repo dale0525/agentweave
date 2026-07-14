@@ -18,7 +18,7 @@ export const desktopWindowConfig: DesktopWindowConfig = {
   minWidth: 1024,
   // Electron hosts should point BrowserWindow at the compiled preload bundle.
   preload: "dist/preload/index.js",
-  title: "GeneralAgent",
+  title: "AgentWeave",
   width: 1280,
   webPreferences: {
     contextIsolation: true,

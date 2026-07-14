@@ -220,7 +220,7 @@ fn approval_value(approval: &crate::skill_state::SkillApprovalRecord) -> anyhow:
 fn definition(name: &str, description: &str, input_schema: Value) -> ToolDefinition {
     ToolDefinition {
         name: name.into(),
-        namespace: Some("generalagent_skill_management".into()),
+        namespace: Some("agentweave_skill_management".into()),
         description: description.into(),
         input_schema,
         output_schema: None,

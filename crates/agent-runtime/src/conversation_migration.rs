@@ -28,7 +28,7 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
         anyhow::bail!("conversation schema is newer than this runtime");
     }
 
-    ensure_scope_column(&mut tx, "app_id", "dev.generalagent.default").await?;
+    ensure_scope_column(&mut tx, "app_id", "dev.agentweave.default").await?;
     ensure_scope_column(&mut tx, "agent_id", "default").await?;
     ensure_scope_column(&mut tx, "tenant_id", "local").await?;
     ensure_scope_column(&mut tx, "user_id", "local-user").await?;

@@ -91,7 +91,7 @@ async fn task10_service_errors_map_to_stable_http_boundaries_without_leaks() {
             &format!("/owner/skills/drafts/{revision_id}"),
             token,
             Some(json!({"files": [{
-                "path": "general-agent.json",
+                "path": "agentweave.json",
                 "content": "{ private malformed descriptor"
             }]})),
         ))
@@ -104,7 +104,7 @@ async fn task10_service_errors_map_to_stable_http_boundaries_without_leaks() {
 
     let malformed_import_root = test.roots.import_root.join("malformed");
     std::fs::create_dir_all(&malformed_import_root).unwrap();
-    std::fs::write(malformed_import_root.join("general-agent.json"), "{ bad").unwrap();
+    std::fs::write(malformed_import_root.join("agentweave.json"), "{ bad").unwrap();
     std::fs::write(malformed_import_root.join("SKILL.md"), "# Bad").unwrap();
     let invalid_import = test
         .app

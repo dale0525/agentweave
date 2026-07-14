@@ -50,12 +50,12 @@ test("Agent App release packaging is deterministic and locks selected packages",
     const lock = validateAgentAppRelease(first);
     assert.equal(lock.app.appId, "com.example.secretary-agent");
     assert.deepEqual(lock.packages.map((entry) => entry.id), [
+      "agentweave.foundation.mail",
+      "agentweave.foundation.memory",
       "com.example.secretary.routines",
-      "generalagent.foundation.mail",
-      "generalagent.foundation.memory",
     ]);
     assert.deepEqual(lock.hostRequirements.connectors, [
-      { id: "generalagent-mail", runtimeVersion: "0.1.0" },
+      { id: "agentweave-mail", runtimeVersion: "0.1.0" },
     ]);
     assert.deepEqual(lock.hostRequirements.providers, [
       { id: "memory-provider", runtimeVersion: "0.1.0" },

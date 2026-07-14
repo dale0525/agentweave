@@ -9,13 +9,13 @@ use std::path::Path;
 
 const RESERVED_URIS: &[&str] = &[
     "app://builtin-skills/skill-bundle.json",
-    "app://managed-skills/com.example.calendar/general-agent.json",
+    "app://managed-skills/com.example.calendar/agentweave.json",
     "app://skill-staging/rev-1/SKILL.md",
     "app://skill-quarantine/rev-2/SKILL.md",
     "app://skill-state/database",
     "APP://BUILTIN-SKILLS/skill-bundle.json",
     "app://%62uiltin-skills/skill-bundle.json",
-    "app://managed-skills%2fcom.example.calendar/general-agent.json",
+    "app://managed-skills%2fcom.example.calendar/agentweave.json",
 ];
 
 #[test]

@@ -43,7 +43,7 @@ impl ConversationScope {
 
 impl Default for ConversationScope {
     fn default() -> Self {
-        Self::local("dev.generalagent.default")
+        Self::local("dev.agentweave.default")
     }
 }
 

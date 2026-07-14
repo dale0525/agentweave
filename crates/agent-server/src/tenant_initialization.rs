@@ -16,7 +16,7 @@ pub(crate) async fn acquire_tenant_initialization_lock(
     lock_root: &Path,
     tenant_id: &str,
 ) -> anyhow::Result<TenantInitializationLock> {
-    // Every cooperating GeneralAgent process must hold this lock through init and cleanup.
+    // Every cooperating AgentWeave process must hold this lock through init and cleanup.
     // A same-UID writer bypassing it is a host compromise, not a recoverable protocol peer.
     let root = DirectoryIdentity::capture(lock_root.to_path_buf())
         .context("tenant lock root identity capture failed")?;

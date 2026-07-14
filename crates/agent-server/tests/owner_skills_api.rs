@@ -67,7 +67,7 @@ struct TestRoots {
 impl TestRoots {
     fn new() -> Self {
         let base =
-            std::env::temp_dir().join(format!("general-agent-owner-api-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("agentweave-owner-api-{}", uuid::Uuid::new_v4()));
         let app_root = base.join("app");
         let cache_root = base.join("cache");
         let import_root = base.join("imports");

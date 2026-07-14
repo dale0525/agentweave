@@ -282,7 +282,7 @@ async fn serve_imap(stream: TcpStream, raw_message: &[u8]) {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     write
-        .write_all(b"* OK GeneralAgent IMAP fixture ready\r\n")
+        .write_all(b"* OK AgentWeave IMAP fixture ready\r\n")
         .await
         .unwrap();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -371,7 +371,7 @@ async fn serve_smtp(stream: TcpStream, messages: Arc<Mutex<Vec<Vec<u8>>>>) {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     write
-        .write_all(b"220 localhost GeneralAgent SMTP fixture\r\n")
+        .write_all(b"220 localhost AgentWeave SMTP fixture\r\n")
         .await
         .unwrap();
     let mut data = Vec::new();

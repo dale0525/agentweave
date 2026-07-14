@@ -13,7 +13,7 @@ import type {
   TranslationValues
 } from "./types";
 
-const STORAGE_KEY = "generalagent.localization.locale.v1";
+const STORAGE_KEY = "agentweave.localization.locale.v1";
 const localizationBundle = bundledLocalization();
 const fallbackMessages = localizationBundle.locales.find(
   (entry) => entry.id === localizationBundle.defaultLocale
@@ -103,8 +103,8 @@ function interpolate(message: string, values: TranslationValues): string {
 }
 
 function bundledLocalization(): DesktopLocalizationBundle {
-  if (typeof __GENERAL_AGENT_LOCALIZATION__ !== "undefined") {
-    const configured = __GENERAL_AGENT_LOCALIZATION__;
+  if (typeof __AGENTWEAVE_LOCALIZATION__ !== "undefined") {
+    const configured = __AGENTWEAVE_LOCALIZATION__;
     if (configured.locales.length > 0) return configured;
   }
   return {
@@ -113,7 +113,7 @@ function bundledLocalization(): DesktopLocalizationBundle {
       id: "en",
       label: "English",
       messages: {
-        "app.name": "GeneralAgent",
+        "app.name": "AgentWeave",
         "app.tagline": "Ask naturally. The agent will handle the work."
       }
     }]

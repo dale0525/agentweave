@@ -16,7 +16,7 @@ describe("approval surface", () => {
   it("loads trusted review context and requires an explicit decision", async () => {
     const resolve = vi.fn(async () => ({ status: "approved" }));
     const complete = vi.fn(async () => ({}));
-    window.generalAgentApproval = {
+    window.agentWeaveApproval = {
       principal: vi.fn(async () => ({ actorId: "approver-2", role: "owner" })),
       approval: vi.fn(async () => approvalReview()),
       resolve,
@@ -44,7 +44,7 @@ describe("approval surface", () => {
 
   it("supports explicit rejection without exposing requester APIs", async () => {
     const resolve = vi.fn(async () => ({ status: "rejected" }));
-    window.generalAgentApproval = {
+    window.agentWeaveApproval = {
       principal: vi.fn(async () => ({ actorId: "approver-2", role: "owner" })),
       approval: vi.fn(async () => approvalReview()),
       resolve,
@@ -57,13 +57,13 @@ describe("approval surface", () => {
     await user.click(await screen.findByRole("button", { name: "Reject" }));
 
     await waitFor(() => expect(resolve).toHaveBeenCalledWith(APPROVAL_ID, "reject"));
-    expect("owner" in window.generalAgentApproval).toBe(false);
+    expect("owner" in window.agentWeaveApproval).toBe(false);
   });
 
   it("lets the approver close observation without making a decision", async () => {
     const resolve = vi.fn(async () => ({ status: "approved" }));
     const close = vi.fn(async () => ({}));
-    window.generalAgentApproval = {
+    window.agentWeaveApproval = {
       principal: vi.fn(async () => ({ actorId: "approver-2", role: "owner" })),
       approval: vi.fn(async () => approvalReview()),
       resolve,

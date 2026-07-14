@@ -98,7 +98,7 @@ function localPackageSources(appRoot) {
   for (const entry of readdirSync(packagesRoot, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
     const root = join(packagesRoot, entry.name);
-    const manifestPath = join(root, "general-agent.json");
+    const manifestPath = join(root, "agentweave.json");
     if (!existsSync(manifestPath)) continue;
     const manifest = readJson(manifestPath, `${entry.name} package manifest`);
     if (result.has(manifest.id)) fail(`Agent App contains duplicate package '${manifest.id}'`);
@@ -195,7 +195,7 @@ export function packageAgentApp({
   const packages = selectedPackageSources(appRoot, app, catalog)
     .map((source) => {
       const inspection = inspectTree(source.root);
-      const manifest = readJson(join(source.root, "general-agent.json"), `${source.id} package manifest`);
+      const manifest = readJson(join(source.root, "agentweave.json"), `${source.id} package manifest`);
       if (manifest.id !== source.id) fail(`${source.id} package source has mismatched identity`);
       return {
         ...source,
@@ -289,7 +289,7 @@ export function validateAgentAppRelease(input) {
   if (JSON.stringify(expectedIds) !== JSON.stringify(lockedIds)) fail("locked package inventory mismatch");
   for (const entry of lock.packages) {
     const packageRoot = requireReleasePath(releaseRoot, entry.path, `${entry.id} locked path`);
-    const manifest = readJson(join(packageRoot, "general-agent.json"), `${entry.id} package manifest`);
+    const manifest = readJson(join(packageRoot, "agentweave.json"), `${entry.id} package manifest`);
     if (manifest.id !== entry.id || manifest.version !== entry.version) {
       fail(`${entry.id} locked package identity mismatch`);
     }

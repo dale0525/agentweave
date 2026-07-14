@@ -529,7 +529,7 @@ impl UpgradeFixture {
                 },
                 vec![
                     DraftFileUpdate {
-                        path: "general-agent.json".into(),
+                        path: "agentweave.json".into(),
                         content: format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
                     },
                     DraftFileUpdate {
@@ -603,7 +603,7 @@ async fn write_instruction_package(root: &Path, id: &str, version: &str, body: &
         "requires": {"packages": [], "capabilities": [], "runtimeTools": [], "connectors": []}
     });
     tokio::fs::write(
-        root.join("general-agent.json"),
+        root.join("agentweave.json"),
         serde_json::to_vec_pretty(&descriptor).unwrap(),
     )
     .await

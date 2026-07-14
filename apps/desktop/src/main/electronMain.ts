@@ -14,7 +14,7 @@ let disposeModelSettings: (() => void) | null = null;
 let disposeNotifications: (() => void) | null = null;
 
 app.whenReady().then(async () => {
-  const rendererBase = process.env.GENERAL_AGENT_DESKTOP_URL;
+  const rendererBase = process.env.AGENTWEAVE_DESKTOP_URL;
   mainWindow = new BrowserWindow({
     ...getDesktopWindowConfig(),
     webPreferences: {
@@ -45,7 +45,7 @@ app.whenReady().then(async () => {
     ipcMain,
     requesterWebContents: mainWindow.webContents,
     safeStorage,
-    serverBaseUrl: process.env.GENERAL_AGENT_SERVER_URL,
+    serverBaseUrl: process.env.AGENTWEAVE_SERVER_URL,
     storagePath: path.join(app.getPath("userData"), "model-settings.v1.json")
   });
   disposeNotifications = startDesktopNotificationWorker({
@@ -60,7 +60,7 @@ app.whenReady().then(async () => {
       };
     },
     isSupported: () => Notification.isSupported(),
-    serverBaseUrl: process.env.GENERAL_AGENT_SERVER_URL
+    serverBaseUrl: process.env.AGENTWEAVE_SERVER_URL
   });
   await mainWindow.loadURL(mainUrl);
 });

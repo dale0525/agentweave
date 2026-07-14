@@ -327,11 +327,11 @@ impl SkillRegistry {
         let mut child = Command::new(command)
             .args(args)
             .current_dir(execution_root)
-            .env("GENERAL_AGENT_TOOL_NAME", &binding.local_name)
-            .env("GENERAL_AGENT_WORKSPACE_ROOT", &context.workspace_root)
-            .env("GENERAL_AGENT_CWD", &context.cwd)
+            .env("AGENTWEAVE_TOOL_NAME", &binding.local_name)
+            .env("AGENTWEAVE_WORKSPACE_ROOT", &context.workspace_root)
+            .env("AGENTWEAVE_CWD", &context.cwd)
             .env(
-                "GENERAL_AGENT_OUTPUT_LIMIT_BYTES",
+                "AGENTWEAVE_OUTPUT_LIMIT_BYTES",
                 context.output_limit_bytes.to_string(),
             )
             .stdin(std::process::Stdio::piped())
@@ -985,7 +985,7 @@ mod tests {
             .unwrap();
     }
     fn unique_test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!("agentweave-{name}-{}", uuid::Uuid::new_v4()))
     }
     #[cfg(unix)]
     fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {

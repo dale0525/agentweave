@@ -616,7 +616,7 @@ async fn send_preview_is_complete_stable_and_bound_to_draft_revision() {
     assert_eq!(first.preview_hash.len(), 64);
     assert_eq!(first.attachments.len(), 1);
     assert!(first.internet_message_id.starts_with('<'));
-    assert!(first.internet_message_id.ends_with("@generalagent.local>"));
+    assert!(first.internet_message_id.ends_with("@agentweave.local>"));
 
     let mut changed = draft.content;
     changed.subject = "Changed after preview".into();

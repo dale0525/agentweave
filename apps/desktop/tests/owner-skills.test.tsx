@@ -51,7 +51,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   window.history.replaceState(null, "", "/");
-  delete window.generalAgent;
+  delete window.agentWeave;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -585,7 +585,7 @@ function installBridge(options: {
       permission_diff: {}, requested_by: "owner-1", revision_id: "22222222-2222-4222-8222-222222222222", status: "pending"
     }))
   };
-  window.generalAgent = { owner: api, approval: { open: openApproval } };
+  window.agentWeave = { owner: api, approval: { open: openApproval } };
   return { ...api, openApproval };
 }
 

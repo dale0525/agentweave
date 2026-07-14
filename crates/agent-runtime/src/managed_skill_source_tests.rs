@@ -108,7 +108,7 @@ async fn invalid_descriptor_quarantine_persists_actual_hash_and_parse_error() {
         .active("com.example.invalid-descriptor-actual")
         .await;
     make_writable(&managed.path).await;
-    tokio::fs::write(managed.path.join("general-agent.json"), "{invalid")
+    tokio::fs::write(managed.path.join("agentweave.json"), "{invalid")
         .await
         .unwrap();
     let actual_hash = hash_package_tree(&managed.path).await.unwrap();
@@ -164,7 +164,7 @@ async fn write_package(id: &str) -> TempDir {
     let root = tempdir().unwrap();
     let name = id.rsplit('.').next().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": id,

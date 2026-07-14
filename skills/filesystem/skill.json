@@ -1,6 +1,6 @@
 {
   "name": "filesystem",
-  "description": "Workspace filesystem operations packaged as GeneralAgent runtime skills.",
+  "description": "Workspace filesystem operations packaged as AgentWeave runtime skills.",
   "version": "0.1.0",
   "entry": {
     "type": "command",

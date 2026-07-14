@@ -86,7 +86,7 @@ async fn release_check_aggregates_dependency_capability_connector_and_tool_error
         &["unknown.capability"],
     )
     .await;
-    let descriptor_path = root.join("consumer/general-agent.json");
+    let descriptor_path = root.join("consumer/agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
     descriptor["requires"]["connectors"] = serde_json::json!(["missing-connector"]);
@@ -116,13 +116,13 @@ async fn release_check_aggregates_bad_siblings_and_cross_root_requirements() {
     tokio::fs::create_dir_all(first.join("bad-a"))
         .await
         .unwrap();
-    tokio::fs::write(first.join("bad-a/general-agent.json"), "{")
+    tokio::fs::write(first.join("bad-a/agentweave.json"), "{")
         .await
         .unwrap();
     tokio::fs::create_dir_all(first.join("bad-b"))
         .await
         .unwrap();
-    tokio::fs::write(first.join("bad-b/general-agent.json"), "[]")
+    tokio::fs::write(first.join("bad-b/agentweave.json"), "[]")
         .await
         .unwrap();
     write_runtime_package(&second.join("provider"), "com.example.provider", "read").await;
@@ -177,9 +177,9 @@ async fn legacy_synthesis_is_a_warning_not_a_release_error() {
     assert!(stderr.contains("warning: legacy package descriptor synthesized"));
     assert!(stderr.contains("migration: synthesized package id legacy.local.legacy"));
     assert!(stderr.contains("inferred kind native_runtime"));
-    assert!(stderr.contains("recommended general-agent.json"));
+    assert!(stderr.contains("recommended agentweave.json"));
     assert!(stderr.contains("\"schemaVersion\":1"));
-    assert!(!root.join("legacy/general-agent.json").exists());
+    assert!(!root.join("legacy/agentweave.json").exists());
     remove_test_dir(root).await;
 }
 
@@ -292,7 +292,7 @@ async fn write_instruction_package(
 
 async fn write_descriptor(root: &Path, value: serde_json::Value) {
     tokio::fs::write(
-        root.join("general-agent.json"),
+        root.join("agentweave.json"),
         serde_json::to_vec_pretty(&value).unwrap(),
     )
     .await
@@ -300,7 +300,7 @@ async fn write_descriptor(root: &Path, value: serde_json::Value) {
 }
 
 fn unique_test_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("general-agent-{name}-{}", uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!("agentweave-{name}-{}", uuid::Uuid::new_v4()))
 }
 
 async fn remove_test_dir(path: PathBuf) {

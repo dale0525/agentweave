@@ -29,7 +29,7 @@ use tokio::{
     time::timeout,
 };
 
-const CONNECTOR_ID: &str = "generalagent.connector.mail.imap-smtp";
+const CONNECTOR_ID: &str = "agentweave.connector.mail.imap-smtp";
 
 #[path = "mail_imap_smtp_support.rs"]
 mod support;

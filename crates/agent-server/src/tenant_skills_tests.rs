@@ -54,9 +54,9 @@ async fn cooperating_processes_serialize_all_tenant_initialization() {
         .arg("tenant_skills_tests::subprocess_holds_tenant_initialization_lock")
         .arg("--exact")
         .arg("--nocapture")
-        .env("GENERAL_AGENT_TEST_TENANT_ROOT", root.path())
-        .env("GENERAL_AGENT_TEST_TENANT_LOCKED", &marker)
-        .env("GENERAL_AGENT_TEST_TENANT_RELEASE", &release)
+        .env("AGENTWEAVE_TEST_TENANT_ROOT", root.path())
+        .env("AGENTWEAVE_TEST_TENANT_LOCKED", &marker)
+        .env("AGENTWEAVE_TEST_TENANT_RELEASE", &release)
         .spawn()
         .unwrap();
     wait_for_path(&marker).await;
@@ -78,11 +78,11 @@ async fn cooperating_processes_serialize_all_tenant_initialization() {
 
 #[tokio::test]
 async fn subprocess_holds_tenant_initialization_lock() {
-    let Some(root) = std::env::var_os("GENERAL_AGENT_TEST_TENANT_ROOT") else {
+    let Some(root) = std::env::var_os("AGENTWEAVE_TEST_TENANT_ROOT") else {
         return;
     };
-    let marker = PathBuf::from(std::env::var_os("GENERAL_AGENT_TEST_TENANT_LOCKED").unwrap());
-    let release = PathBuf::from(std::env::var_os("GENERAL_AGENT_TEST_TENANT_RELEASE").unwrap());
+    let marker = PathBuf::from(std::env::var_os("AGENTWEAVE_TEST_TENANT_LOCKED").unwrap());
+    let release = PathBuf::from(std::env::var_os("AGENTWEAVE_TEST_TENANT_RELEASE").unwrap());
     let factory = FilesystemTenantSkillManagerFactory::new(config(
         Path::new(&root),
         vec![Arc::new(ProcessBlockingSource { marker, release })],

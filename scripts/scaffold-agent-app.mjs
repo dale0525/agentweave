@@ -765,7 +765,7 @@ function collectAppLocalPackages(appRoot) {
     if (entry.isSymbolicLink()) fail(`Agent App package '${entry.name}' must not be a symlink`);
     if (!entry.isDirectory()) continue;
     const root = resolveConfinedPath(packagesRoot, entry.name, `Agent App package '${entry.name}'`);
-    const manifestPath = resolveConfinedPath(root, "general-agent.json", `${entry.name} manifest`);
+    const manifestPath = resolveConfinedPath(root, "agentweave.json", `${entry.name} manifest`);
     if (!existsSync(manifestPath)) continue;
     const manifest = readJson(manifestPath, `${entry.name} manifest`);
     rejectEmbeddedSecrets(manifest);

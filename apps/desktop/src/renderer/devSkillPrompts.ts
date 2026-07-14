@@ -4,18 +4,18 @@ export function buildCreateSkillPrompt(root: string): string {
   const safeRoot = safeSkillRootLabel(root);
 
   return [
-    "Use the existing skill-creator skill to create a new GeneralAgent skill package.",
+    "Use the existing skill-creator skill to create a new AgentWeave skill package.",
     "",
     `Target skills directory: ${safeRoot}/`,
     "",
     "Requirements:",
     "- Create the package under the target skills directory.",
     "- SKILL.md is a development authoring asset for Codex guidance.",
-    "- skill.json is the GeneralAgent runtime contract for packaged tools.",
+    "- skill.json is the AgentWeave runtime contract for packaged tools.",
     "- Add or update skill.json only when the package needs runtime tools.",
     "- Keep generated source files focused and under 1000 physical lines.",
     "",
-    "After creating the package, run the GeneralAgent development skill validation."
+    "After creating the package, run the AgentWeave development skill validation."
   ].join("\n");
 }
 
@@ -47,7 +47,7 @@ export function buildModifySkillPrompt(
       : "- none";
 
   return [
-    "Use the existing skill-creator skill to modify this GeneralAgent skill package.",
+    "Use the existing skill-creator skill to modify this AgentWeave skill package.",
     "",
     `Package path: ${safePackagePath}`,
     `Package name: ${skillPackage.name}`,
@@ -71,7 +71,7 @@ export function buildModifySkillPrompt(
     "Validation warnings:",
     warnings,
     "",
-    "Remember: SKILL.md is a development authoring asset; skill.json is the GeneralAgent runtime contract."
+    "Remember: SKILL.md is a development authoring asset; skill.json is the AgentWeave runtime contract."
   ].join("\n");
 }
 

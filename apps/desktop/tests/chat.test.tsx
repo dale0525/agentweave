@@ -43,13 +43,13 @@ describe("Chat", () => {
     render(<Chat />);
 
     await user.type(
-      screen.getByLabelText("Message GeneralAgent"),
+      screen.getByLabelText("Message AgentWeave"),
       "Run the renderer smoke test"
     );
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(screen.getByText("Run the renderer smoke test")).toBeInTheDocument();
-    expect(screen.getByLabelText("Message GeneralAgent")).toHaveValue("");
+    expect(screen.getByLabelText("Message AgentWeave")).toHaveValue("");
     expect(
       await screen.findByText("MVP agent received: Run the renderer smoke test")
     ).toBeInTheDocument();
@@ -124,7 +124,7 @@ describe("Chat", () => {
     render(<Chat />);
 
     await user.type(
-      screen.getByLabelText("Message GeneralAgent"),
+      screen.getByLabelText("Message AgentWeave"),
       "Show the whole agent turn"
     );
     await user.click(screen.getByRole("button", { name: "Send message" }));
@@ -157,7 +157,7 @@ describe("Chat", () => {
 
     render(<Chat />);
 
-    await user.type(screen.getByLabelText("Message GeneralAgent"), "Long task");
+    await user.type(screen.getByLabelText("Message AgentWeave"), "Long task");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(await screen.findByText("Long task")).toBeInTheDocument();
@@ -238,7 +238,7 @@ describe("Chat", () => {
       modelName: "qwen2.5"
     };
     window.localStorage.setItem(
-      "generalagent.modelSettings.v1",
+      "agentweave.modelSettings.v1",
       JSON.stringify(savedSettings)
     );
     const fetchMock = mockFetch([
@@ -255,7 +255,7 @@ describe("Chat", () => {
 
     render(<Chat />);
 
-    await user.type(screen.getByLabelText("Message GeneralAgent"), "Use my provider");
+    await user.type(screen.getByLabelText("Message AgentWeave"), "Use my provider");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(await screen.findByText("configured model response")).toBeInTheDocument();
@@ -272,7 +272,7 @@ describe("Chat", () => {
 
     render(<Chat />);
 
-    await user.type(screen.getByLabelText("Message GeneralAgent"), "   ");
+    await user.type(screen.getByLabelText("Message AgentWeave"), "   ");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(screen.queryByText("you")).not.toBeInTheDocument();
@@ -293,7 +293,7 @@ describe("Chat", () => {
     render(<Chat />);
 
     await user.type(
-      screen.getByLabelText("Message GeneralAgent"),
+      screen.getByLabelText("Message AgentWeave"),
       "Trigger an API failure"
     );
     await user.click(screen.getByRole("button", { name: "Send message" }));
@@ -344,7 +344,7 @@ describe("Chat", () => {
 
     render(<Chat />);
 
-    await user.type(screen.getByLabelText("Message GeneralAgent"), "Clear this");
+    await user.type(screen.getByLabelText("Message AgentWeave"), "Clear this");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     expect(screen.getByText("Clear this")).toBeInTheDocument();
 
@@ -368,7 +368,7 @@ describe("Chat", () => {
 
     render(<Chat />);
 
-    await user.type(screen.getByLabelText("Message GeneralAgent"), "Old request");
+    await user.type(screen.getByLabelText("Message AgentWeave"), "Old request");
     await user.click(screen.getByRole("button", { name: "Send message" }));
     await screen.findByText("Old request");
 
@@ -445,7 +445,7 @@ describe("App navigation", () => {
     window.dispatchEvent(new HashChangeEvent("hashchange"));
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
+      expect(screen.getByLabelText("Message AgentWeave")).toBeInTheDocument();
     });
   });
 
@@ -460,7 +460,7 @@ describe("App navigation", () => {
     expect(
       screen.getByRole("button", { name: "Open conversations" })
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
+    expect(screen.getByLabelText("Message AgentWeave")).toBeInTheDocument();
     expect(screen.queryByText("Skills")).not.toBeInTheDocument();
     expect(screen.queryByText(/active skill/i)).not.toBeInTheDocument();
   });
@@ -476,7 +476,7 @@ describe("App navigation", () => {
 
     await user.click(screen.getByRole("button", { name: "Back to chat" }));
 
-    expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
+    expect(screen.getByLabelText("Message AgentWeave")).toBeInTheDocument();
   });
 
   it("shows only model connection settings to end users", () => {
@@ -593,7 +593,7 @@ describe("App navigation", () => {
     expect(
       screen.getByRole("button", { name: "Open conversations" })
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Message GeneralAgent")).toBeInTheDocument();
+    expect(screen.getByLabelText("Message AgentWeave")).toBeInTheDocument();
   });
 });
 

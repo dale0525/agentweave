@@ -406,7 +406,7 @@ function draftFiles(skill: OwnerSkillPackage, revision: OwnerSkillRevision, inst
       connectors: revision.requirements.connectors
     }
   };
-  return [{ path: "SKILL.md", content: instructions }, { path: "general-agent.json", content: `${JSON.stringify(descriptor, null, 2)}\n` }];
+  return [{ path: "SKILL.md", content: instructions }, { path: "agentweave.json", content: `${JSON.stringify(descriptor, null, 2)}\n` }];
 }
 
 function splitValues(value: string): string[] { return value.split(",").map((item) => item.trim()).filter(Boolean); }

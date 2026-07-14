@@ -1,6 +1,6 @@
 # Secretary Agent Reference App
 
-这是一个用于证明 GeneralAgent Framework 可组合性的参考应用，不是核心 Runtime 的特殊模式。应用身份、中文 system prompt、Memory、Mail 和 `secretary-routines` 自定义 Skill 都通过 App package 配置提供。
+这是一个用于证明 AgentWeave Framework 可组合性的参考应用，不是核心 Runtime 的特殊模式。应用身份、中文 system prompt、Memory、Mail 和 `secretary-routines` 自定义 Skill 都通过 App package 配置提供。
 
 默认 Mail 实现是本地 Fake Connector，不需要账号或凭据；所有写操作仍然经过 Runtime 的审批和幂等边界。Memory 使用与会话数据库同 scope 的本地 SQLite provider。
 
@@ -16,13 +16,13 @@ pixi run check-skills
 同时启动本地 Server 与 Desktop 开发页面：
 
 ```bash
-GENERAL_AGENT_APP_ROOT=examples/secretary-agent pixi run dev
+AGENTWEAVE_APP_ROOT=examples/secretary-agent pixi run dev
 ```
 
 只启动 Server：
 
 ```bash
-GENERAL_AGENT_APP_ROOT=examples/secretary-agent pixi run server
+AGENTWEAVE_APP_ROOT=examples/secretary-agent pixi run server
 ```
 
 开发页面位于 <http://127.0.0.1:5173>，Server 健康检查位于 <http://127.0.0.1:49321/health>。Fake Mail 和本地 Memory 不需要账号，但实际对话仍需要配置可用的模型端点。

@@ -5,11 +5,11 @@ import type { ApprovalObservationResult } from "../shared/approvalObservation";
 export {};
 
 declare global {
-  const __GENERAL_AGENT_APPEARANCE__: import("./appearance/types").DesktopAppearanceBundle;
-  const __GENERAL_AGENT_LOCALIZATION__: import("./i18n/types").DesktopLocalizationBundle;
+  const __AGENTWEAVE_APPEARANCE__: import("./appearance/types").DesktopAppearanceBundle;
+  const __AGENTWEAVE_LOCALIZATION__: import("./i18n/types").DesktopLocalizationBundle;
 
   interface Window {
-    generalAgent?: {
+    agentWeave?: {
       owner: {
         principal(): Promise<unknown>;
         listSkills(): Promise<unknown>;
@@ -33,7 +33,7 @@ declare global {
         testConnection(): Promise<unknown>;
       };
     };
-    generalAgentApproval?: {
+    agentWeaveApproval?: {
       principal(): Promise<unknown>;
       approval(approvalId: string): Promise<unknown>;
       resolve(approvalId: string, decision: "approve" | "reject"): Promise<unknown>;

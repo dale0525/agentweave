@@ -23,10 +23,10 @@ async fn main() {
 
 async fn run(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
     let args = parse_args(args)?;
-    let root = std::env::var("GENERAL_AGENT_SECRET_ROOT")
-        .map_err(|_| anyhow::anyhow!("GENERAL_AGENT_SECRET_ROOT is required"))?;
-    let key = std::env::var("GENERAL_AGENT_SECRET_MASTER_KEY_HEX")
-        .map_err(|_| anyhow::anyhow!("GENERAL_AGENT_SECRET_MASTER_KEY_HEX is required"))?;
+    let root = std::env::var("AGENTWEAVE_SECRET_ROOT")
+        .map_err(|_| anyhow::anyhow!("AGENTWEAVE_SECRET_ROOT is required"))?;
+    let key = std::env::var("AGENTWEAVE_SECRET_MASTER_KEY_HEX")
+        .map_err(|_| anyhow::anyhow!("AGENTWEAVE_SECRET_MASTER_KEY_HEX is required"))?;
     let key = hex::decode(key)?;
     anyhow::ensure!(key.len() == 32, "secret master key must decode to 32 bytes");
     let scope = CredentialScope {

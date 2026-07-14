@@ -562,7 +562,7 @@ async fn dev_reload_rejects_invalid_candidate_and_keeps_previous_snapshot() {
             ),
     );
     let app = crate::api::router_with_dev_routes(state);
-    tokio::fs::write(package_root.join("general-agent.json"), "{invalid")
+    tokio::fs::write(package_root.join("agentweave.json"), "{invalid")
         .await
         .unwrap();
 
@@ -735,7 +735,7 @@ async fn write_dynamic_package(
 ) {
     tokio::fs::create_dir_all(package_root).await.unwrap();
     tokio::fs::write(
-        package_root.join("general-agent.json"),
+        package_root.join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": "com.example.dynamic",
@@ -787,7 +787,7 @@ async fn write_dynamic_package(
 
 fn unique_test_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "general-agent-dev-api-{name}-{}",
+        "agentweave-dev-api-{name}-{}",
         uuid::Uuid::new_v4()
     ))
 }

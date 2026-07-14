@@ -707,7 +707,7 @@ impl MailConnector for FakeMailConnector {
             content_hash
         ));
         let outbox_id = format!("outbox-{}", &token[..24]);
-        let internet_message_id = format!("<{}@generalagent.local>", &token[..32]);
+        let internet_message_id = format!("<{}@agentweave.local>", &token[..32]);
         let preview_hash = sha256_hex(format!("{token}\0{outbox_id}\0{internet_message_id}"));
         let preview = SendPreview {
             id: format!("preview-{}", &token[..24]),

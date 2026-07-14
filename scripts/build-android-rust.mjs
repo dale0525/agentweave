@@ -143,9 +143,9 @@ function prepareAndroidSkillAssets() {
     );
   });
   const appResult = prepareAndroidAppAssetsAt(projectRoot, {
-    defaultLocale: process.env.GENERAL_AGENT_APP_DEFAULT_LOCALE,
-    input: process.env.GENERAL_AGENT_APP_ROOT,
-    locales: process.env.GENERAL_AGENT_APP_LOCALES,
+    defaultLocale: process.env.AGENTWEAVE_APP_DEFAULT_LOCALE,
+    input: process.env.AGENTWEAVE_APP_ROOT,
+    locales: process.env.AGENTWEAVE_APP_LOCALES,
   });
   console.log(`Prepared verified Android skill assets at ${result.assetRoot}`);
   console.log(`Prepared verified Android Agent App at ${appResult.packageRoot}`);
@@ -257,7 +257,7 @@ function stageAndroidSkillSource(skillsRoot, outputRoot) {
       throw new Error(`Android skill source contains a symlink: ${packageRoot}`);
     }
     if (!metadata.isDirectory()) continue;
-    const descriptorPath = join(packageRoot, "general-agent.json");
+    const descriptorPath = join(packageRoot, "agentweave.json");
     if (!existsSync(descriptorPath)) continue;
     const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8"));
     const platforms = descriptor?.compatibility?.platforms;
@@ -294,7 +294,7 @@ function buildAndroidRustNative() {
     platform: process.platform,
     targetLibdir: resolveTargetLibdir(),
   });
-  const profile = process.env.GENERAL_AGENT_ANDROID_RUST_PROFILE === "release"
+  const profile = process.env.AGENTWEAVE_ANDROID_RUST_PROFILE === "release"
     ? "release"
     : "debug";
   const cargoArgs = ["build", "-p", "mobile-ffi", "--target", target];

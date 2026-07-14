@@ -54,21 +54,21 @@ test("foundation catalog validates local packages and declares staged candidates
   const catalog = validateCatalogFile();
   const byId = new Map(catalog.skills.map((skill) => [skill.id, skill]));
 
-  assert.equal(byId.get("generalagent.core.filesystem").consumerDefault, true);
-  assert.deepEqual(byId.get("generalagent.core.skill-creator").audience, ["developer"]);
-  assert.equal(byId.get("generalagent.core.skill-creator").consumerDefault, false);
-  assert.equal(byId.get("generalagent.foundation.memory").wave, "available");
-  assert.equal(byId.get("generalagent.foundation.mail").wave, "available");
+  assert.equal(byId.get("agentweave.core.filesystem").consumerDefault, true);
+  assert.deepEqual(byId.get("agentweave.core.skill-creator").audience, ["developer"]);
+  assert.equal(byId.get("agentweave.core.skill-creator").consumerDefault, false);
+  assert.equal(byId.get("agentweave.foundation.memory").wave, "available");
+  assert.equal(byId.get("agentweave.foundation.mail").wave, "available");
   for (const id of [
-    "generalagent.foundation.calendar",
-    "generalagent.foundation.tasks",
-    "generalagent.foundation.web-research",
-    "generalagent.foundation.documents",
-    "generalagent.foundation.contacts",
-    "generalagent.foundation.scheduler",
-    "generalagent.foundation.notifications",
-    "generalagent.foundation.notes",
-    "generalagent.foundation.messaging",
+    "agentweave.foundation.calendar",
+    "agentweave.foundation.tasks",
+    "agentweave.foundation.web-research",
+    "agentweave.foundation.documents",
+    "agentweave.foundation.contacts",
+    "agentweave.foundation.scheduler",
+    "agentweave.foundation.notifications",
+    "agentweave.foundation.notes",
+    "agentweave.foundation.messaging",
   ]) {
     assert.equal(byId.get(id).wave, "available");
     assert.equal(byId.get(id).stability, "preview");
@@ -98,7 +98,7 @@ test("checked-in template and minimal example validate", () => {
     "themes/README.md",
   ]);
   const { app } = validateAgentApp(join(PROJECT_ROOT, "examples", "minimal-agent"));
-  assert.deepEqual(app.requires.packages.map((skill) => skill.id), ["generalagent.core.filesystem"]);
+  assert.deepEqual(app.requires.packages.map((skill) => skill.id), ["agentweave.core.filesystem"]);
 });
 
 test("scaffold output is deterministic and excludes developer-only defaults", () => {
@@ -125,7 +125,7 @@ test("scaffold output is deterministic and excludes developer-only defaults", ()
     assert.equal(manifest.appearance.themes.builtins.length, 19);
     assert.deepEqual(manifest.appearance.themes.custom, []);
     assert.deepEqual(manifest.requires.packages.map((skill) => skill.id), [
-      "generalagent.core.filesystem",
+      "agentweave.core.filesystem",
     ]);
     assert.doesNotMatch(JSON.stringify(manifest), /skill-creator|api.?key|password/i);
   } finally {
@@ -242,7 +242,7 @@ test("validation rejects path escape and future schemas", () => {
 
 test("catalog validation detects local package incompatibility", () => {
   const catalog = structuredClone(readJson(FOUNDATION_CATALOG_PATH));
-  const filesystem = catalog.skills.find((skill) => skill.id === "generalagent.core.filesystem");
+  const filesystem = catalog.skills.find((skill) => skill.id === "agentweave.core.filesystem");
   filesystem.version = "9.0.0";
   assert.throws(
     () => validateCatalogData(catalog),

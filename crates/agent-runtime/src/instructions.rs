@@ -403,12 +403,7 @@ mod tests {
 
         assert_eq!(input.len(), 3);
         assert_eq!(input[0]["role"], "system");
-        assert!(
-            input[0]["content"]
-                .as_str()
-                .unwrap()
-                .contains("GeneralAgent")
-        );
+        assert!(input[0]["content"].as_str().unwrap().contains("AgentWeave"));
         assert_eq!(input[1]["role"], "developer");
         let developer = input[1]["content"].as_str().unwrap();
         assert!(developer.contains("Use tools"));

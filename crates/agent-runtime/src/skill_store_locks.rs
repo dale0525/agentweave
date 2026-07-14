@@ -234,10 +234,10 @@ impl SkillRevisionStore {
 
 #[cfg(test)]
 async fn subprocess_after_lock_checkpoint() -> anyhow::Result<()> {
-    let Some(marker) = std::env::var_os("GENERAL_AGENT_TEST_AFTER_LOCK_MARKER") else {
+    let Some(marker) = std::env::var_os("AGENTWEAVE_TEST_AFTER_LOCK_MARKER") else {
         return Ok(());
     };
-    let release = std::env::var_os("GENERAL_AGENT_TEST_AFTER_LOCK_RELEASE")
+    let release = std::env::var_os("AGENTWEAVE_TEST_AFTER_LOCK_RELEASE")
         .context("missing subprocess lock release path")?;
     tokio::fs::write(marker, b"locked").await?;
     while !Path::new(&release).exists() {

@@ -179,7 +179,7 @@ impl AuthoringFixture {
         let package_root = builtin.path().join("host-runtime");
         tokio::fs::create_dir_all(&package_root).await.unwrap();
         tokio::fs::write(
-            package_root.join("general-agent.json"),
+            package_root.join("agentweave.json"),
             serde_json::json!({
                 "schemaVersion": 1,
                 "id": "com.example.host-runtime",
@@ -327,7 +327,7 @@ pub(crate) async fn write_package(root: &std::path::Path, id: &str, kind: SkillP
             .unwrap();
     }
     if kind == SkillPackageKind::NativeRuntime {
-        let descriptor_path = root.join("general-agent.json");
+        let descriptor_path = root.join("agentweave.json");
         let mut value: serde_json::Value =
             serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
         value["kind"] = json!("native_runtime");
@@ -649,7 +649,7 @@ async fn validation_reports_catalog_dependency_capability_and_protected_policy_e
             &draft.revision_id,
             vec![
                 update(
-                    "general-agent.json",
+                    "agentweave.json",
                     format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
                 ),
                 update("SKILL.md", "not valid front matter\n"),
@@ -836,7 +836,7 @@ async fn side_effecting_management_tool_uses_host_actor_and_bypasses_post_commit
         json!({
             "revision_id": draft.revision_id,
             "files": [{
-                "path": "general-agent.json",
+                "path": "agentweave.json",
                 "content": "{ private malformed descriptor"
             }]
         }),

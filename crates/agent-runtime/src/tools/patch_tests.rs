@@ -366,7 +366,7 @@ async fn add_through_symlink_parent_escape_rejected_and_outside_target_not_writt
     remove_test_dir(outside);
 }
 fn unique_test_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!("agentweave-{name}-{}", uuid::Uuid::new_v4()))
 }
 
 fn remove_test_dir(path: PathBuf) {

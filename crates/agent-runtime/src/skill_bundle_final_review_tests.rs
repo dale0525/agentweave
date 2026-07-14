@@ -348,9 +348,9 @@ async fn subprocess_lock_is_attempted_before_source_canonicalization() {
 #[test]
 #[ignore]
 fn subprocess_bundle_builder_helper() {
-    let source = std::env::var_os("GENERAL_AGENT_TEST_BUNDLE_SOURCE").unwrap();
-    let output = std::env::var_os("GENERAL_AGENT_TEST_BUNDLE_OUTPUT").unwrap();
-    let result = std::env::var_os("GENERAL_AGENT_TEST_BUNDLE_RESULT").unwrap();
+    let source = std::env::var_os("AGENTWEAVE_TEST_BUNDLE_SOURCE").unwrap();
+    let output = std::env::var_os("AGENTWEAVE_TEST_BUNDLE_OUTPUT").unwrap();
+    let result = std::env::var_os("AGENTWEAVE_TEST_BUNDLE_RESULT").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let build = runtime.block_on(build_skill_bundle(BuildSkillBundleRequest {
         source_roots: vec![PathBuf::from(source)],
@@ -780,20 +780,20 @@ fn spawn_bundle_builder_helper(
         .arg("--exact")
         .arg("skill_bundle_final_review_tests::subprocess_bundle_builder_helper")
         .arg("--nocapture")
-        .env("GENERAL_AGENT_TEST_BUNDLE_SOURCE", source)
-        .env("GENERAL_AGENT_TEST_BUNDLE_OUTPUT", output)
-        .env("GENERAL_AGENT_TEST_BUNDLE_RESULT", result)
+        .env("AGENTWEAVE_TEST_BUNDLE_SOURCE", source)
+        .env("AGENTWEAVE_TEST_BUNDLE_OUTPUT", output)
+        .env("AGENTWEAVE_TEST_BUNDLE_RESULT", result)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some((marker, release)) = lock_gate {
         command
-            .env("GENERAL_AGENT_TEST_BUNDLE_LOCK_MARKER", marker)
-            .env("GENERAL_AGENT_TEST_BUNDLE_LOCK_RELEASE", release);
+            .env("AGENTWEAVE_TEST_BUNDLE_LOCK_MARKER", marker)
+            .env("AGENTWEAVE_TEST_BUNDLE_LOCK_RELEASE", release);
     }
     if let Some((attempt, acquired)) = lock_markers {
         command
-            .env("GENERAL_AGENT_TEST_BUNDLE_LOCK_ATTEMPT", attempt)
-            .env("GENERAL_AGENT_TEST_BUNDLE_LOCK_ACQUIRED", acquired);
+            .env("AGENTWEAVE_TEST_BUNDLE_LOCK_ATTEMPT", attempt)
+            .env("AGENTWEAVE_TEST_BUNDLE_LOCK_ACQUIRED", acquired);
     }
     command.spawn().unwrap()
 }
@@ -859,7 +859,7 @@ impl FinalReviewFixture {
 async fn write_package(root: &Path) {
     tokio::fs::create_dir_all(root).await.unwrap();
     tokio::fs::write(
-        root.join("general-agent.json"),
+        root.join("agentweave.json"),
         serde_json::json!({
             "schemaVersion": 1,
             "id": "com.example.final",

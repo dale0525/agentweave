@@ -963,7 +963,7 @@ Use checklists.
 
     fn unique_test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "general-agent-skill-catalog-{name}-{}",
+            "agentweave-skill-catalog-{name}-{}",
             uuid::Uuid::new_v4()
         ))
     }

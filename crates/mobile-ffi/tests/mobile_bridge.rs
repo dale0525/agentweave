@@ -34,7 +34,7 @@ fn init_config(root: &std::path::Path) -> MobileInitConfig {
         app_data_dir: app_data_dir.display().to_string(),
         app_package_dir: None,
         cache_dir: cache_dir.display().to_string(),
-        database_path: app_data_dir.join("general-agent.db").display().to_string(),
+        database_path: app_data_dir.join("agentweave.db").display().to_string(),
         builtin_skills_dir: builtin_skills_dir.display().to_string(),
         managed_skills_dir: app_data_dir.join("managed-skills").display().to_string(),
         staging_skills_dir: cache_dir.join("skill-staging").display().to_string(),
@@ -537,7 +537,7 @@ fn initial_draft_files(package_id: &str, display_name: &str, instructions: &str)
             "content": instructions
         },
         {
-            "path": "general-agent.json",
+            "path": "agentweave.json",
             "content": serde_json::to_string_pretty(&json!({
                 "schemaVersion": 1,
                 "id": package_id,

@@ -36,7 +36,7 @@ async fn foundation_mail_approval_api_resumes_exactly_once() {
         .await
         .unwrap();
     let scope = CredentialScope {
-        app_id: "generalagent.default".into(),
+        app_id: "agentweave.default".into(),
         tenant_id: "local".into(),
         user_id: "local-user".into(),
     };

@@ -47,7 +47,7 @@ async fn create_legacy_instruction_package(parent: &Path, folder: &str) -> PathB
 
 async fn write_package_metadata(package: &Path, value: serde_json::Value) {
     tokio::fs::write(
-        package.join("general-agent.json"),
+        package.join("agentweave.json"),
         serde_json::to_vec(&value).unwrap(),
     )
     .await
@@ -199,7 +199,7 @@ fn programmatic_instruction_only_validation_rejects_host_tool_requirements() {
 async fn loads_versioned_package_descriptor() {
     let root = tempdir().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         r#"{
           "schemaVersion": 1,
           "id": "com.example.calendar",
@@ -262,7 +262,7 @@ async fn loads_current_legacy_metadata_without_schema_version() {
     .await
     .unwrap();
     tokio::fs::write(
-        package.join("general-agent.json"),
+        package.join("agentweave.json"),
         r#"{
           "package": {
             "includeInstructions": true,
@@ -545,7 +545,7 @@ async fn empty_legacy_package_root_is_rejected() {
 async fn descriptor_filesystem_errors_are_propagated() {
     let root = tempdir().unwrap();
     let package = create_legacy_instruction_package(root.path(), "broken-metadata").await;
-    tokio::fs::create_dir(package.join("general-agent.json"))
+    tokio::fs::create_dir(package.join("agentweave.json"))
         .await
         .unwrap();
 
@@ -570,18 +570,18 @@ mod unix_symlink_tests {
     }
 
     #[tokio::test]
-    async fn symlink_general_agent_metadata_is_rejected() {
+    async fn symlink_agentweave_metadata_is_rejected() {
         let root = tempdir().unwrap();
         let outside = tempdir().unwrap();
         let package = create_legacy_instruction_package(root.path(), "linked-metadata").await;
-        let outside_metadata = outside.path().join("general-agent.json");
+        let outside_metadata = outside.path().join("agentweave.json");
         tokio::fs::write(
             &outside_metadata,
             r#"{"package":{"includeInstructions":true,"includeRuntime":false},"requires":{}}"#,
         )
         .await
         .unwrap();
-        symlink(&outside_metadata, package.join("general-agent.json")).unwrap();
+        symlink(&outside_metadata, package.join("agentweave.json")).unwrap();
 
         assert!(SkillPackageDescriptor::load(&package).await.is_err());
     }

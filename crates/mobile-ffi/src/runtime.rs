@@ -956,7 +956,7 @@ async fn resolve_mobile_mail(
         tools.clone(),
         context,
         scope,
-        "generalagent.mobile.foundation-actions.v1",
+        "agentweave.mobile.foundation-actions.v1",
     )
     .await?;
     Ok(Some((tools, actions)))

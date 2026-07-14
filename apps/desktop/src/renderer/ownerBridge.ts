@@ -33,15 +33,15 @@ export async function getOwnerPolicy(): Promise<OwnerPolicy> {
   return principalPolicy(principal);
 }
 
-export function getOwnerApi(): NonNullable<Window["generalAgent"]>["owner"] {
+export function getOwnerApi(): NonNullable<Window["agentWeave"]>["owner"] {
   const useDevServer = import.meta.env.DEV
     && new URLSearchParams(window.location.search).get("ownerServer") === "1";
-  const owner = window.generalAgent?.owner ?? (useDevServer ? devBrowserOwnerApi : null);
+  const owner = window.agentWeave?.owner ?? (useDevServer ? devBrowserOwnerApi : null);
   if (!owner) throw new Error("Owner skill management is disabled");
   return owner;
 }
 
-const devBrowserOwnerApi: NonNullable<Window["generalAgent"]>["owner"] = {
+const devBrowserOwnerApi: NonNullable<Window["agentWeave"]>["owner"] = {
   principal: () => devRequest("requester", "/owner/principal", "GET"),
   listSkills: () => devRequest("requester", "/owner/skills", "GET"),
   skillDetail: (packageId) => devRequest("requester", `/owner/skills/${packageId}/detail`, "GET"),
@@ -57,7 +57,7 @@ const devBrowserOwnerApi: NonNullable<Window["generalAgent"]>["owner"] = {
 export async function requestApprovalSurface(
   approvalId: string
 ): Promise<ApprovalObservationResult> {
-  const approval = window.generalAgent?.approval;
+  const approval = window.agentWeave?.approval;
   if (!approval) throw new Error("Independent approval surface is unavailable");
   return requireApprovalObservation(await approval.open(approvalId), approvalId);
 }

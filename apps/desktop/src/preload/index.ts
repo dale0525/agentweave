@@ -4,7 +4,7 @@ import { createOwnerTransport } from "./ownerTransport";
 
 type DesktopRuntimeInfo = {
   platform: string;
-  shell: "generalagent-desktop";
+  shell: "agentweave-desktop";
 };
 
 export type DesktopPreloadApi = {
@@ -22,12 +22,12 @@ export type DesktopPreloadApi = {
   };
 };
 
-const ownerToken = process.env.GENERAL_AGENT_OWNER_TOKEN ?? "";
+const ownerToken = process.env.AGENTWEAVE_OWNER_TOKEN ?? "";
 const owner = createOwnerTransport({ requesterToken: ownerToken });
 
 const runtimeInfo: DesktopRuntimeInfo = {
   platform: typeof process === "undefined" ? "browser" : process.platform,
-  shell: "generalagent-desktop"
+  shell: "agentweave-desktop"
 };
 
 export const desktopPreloadApi: DesktopPreloadApi = Object.freeze({
@@ -38,22 +38,22 @@ export const desktopPreloadApi: DesktopPreloadApi = Object.freeze({
       if (!/^[0-9a-f-]+$/.test(approvalId)) {
         return Promise.reject(new Error("Approval identifier is not allowed"));
       }
-      return ipcRenderer.invoke("general-agent:approval:open", approvalId) as Promise<ApprovalObservationResult>;
+      return ipcRenderer.invoke("agentweave:approval:open", approvalId) as Promise<ApprovalObservationResult>;
     }
   }),
   modelSettings: Object.freeze({
-    clearApiKey: () => ipcRenderer.invoke("general-agent:model-settings:clear-key") as Promise<unknown>,
-    load: () => ipcRenderer.invoke("general-agent:model-settings:load") as Promise<unknown>,
+    clearApiKey: () => ipcRenderer.invoke("agentweave:model-settings:clear-key") as Promise<unknown>,
+    load: () => ipcRenderer.invoke("agentweave:model-settings:load") as Promise<unknown>,
     postSessionMessage: (sessionId: string, content: string) =>
-      ipcRenderer.invoke("general-agent:model-settings:message", { sessionId, content }) as Promise<unknown>,
+      ipcRenderer.invoke("agentweave:model-settings:message", { sessionId, content }) as Promise<unknown>,
     save: (settings: unknown) =>
-      ipcRenderer.invoke("general-agent:model-settings:save", settings) as Promise<unknown>,
-    testConnection: () => ipcRenderer.invoke("general-agent:model-settings:test") as Promise<unknown>
+      ipcRenderer.invoke("agentweave:model-settings:save", settings) as Promise<unknown>,
+    testConnection: () => ipcRenderer.invoke("agentweave:model-settings:test") as Promise<unknown>
   })
 });
 
 if (typeof process !== "undefined" && process.contextIsolated) {
-  contextBridge.exposeInMainWorld("generalAgent", desktopPreloadApi);
+  contextBridge.exposeInMainWorld("agentWeave", desktopPreloadApi);
 }
 
 export function getDesktopRuntimeInfo(): DesktopRuntimeInfo {

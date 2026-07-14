@@ -136,7 +136,7 @@ test("Gradle always regenerates skill assets before native and package tasks", (
 });
 
 test("Android asset preparation removes stale output and round-trips staged bundle hash", () => {
-  const root = mkdtempSync(join(tmpdir(), "general-agent-android-assets-"));
+  const root = mkdtempSync(join(tmpdir(), "agentweave-android-assets-"));
   try {
     const skills = join(root, "skills");
     writeSkillFixture(skills, "android-skill", ["android"]);
@@ -149,7 +149,7 @@ test("Android asset preparation removes stale output and round-trips staged bund
     writeFileSync(stale, "stale");
 
     const result = prepareAndroidSkillAssetsAt(root, ({ sourceRoot, bundleRoot }) => {
-      assert.equal(existsSync(join(sourceRoot, "android-skill/general-agent.json")), true);
+      assert.equal(existsSync(join(sourceRoot, "android-skill/agentweave.json")), true);
       assert.equal(existsSync(join(sourceRoot, "desktop-skill")), false);
       const generation = join(bundleRoot, "generations/test-generation");
       mkdirSync(generation, { recursive: true });
@@ -179,7 +179,7 @@ test("Android asset preparation removes stale output and round-trips staged bund
 function writeSkillFixture(skillsRoot, name, platforms) {
   const root = join(skillsRoot, name);
   mkdirSync(root, { recursive: true });
-  writeFileSync(join(root, "general-agent.json"), JSON.stringify({
+  writeFileSync(join(root, "agentweave.json"), JSON.stringify({
     schemaVersion: 1,
     id: `com.example.${name}`,
     version: "1.0.0",

@@ -162,17 +162,17 @@ fn missing_object_binding(error: rustix::io::Errno) -> bool {
 
 #[cfg(all(unix, target_vendor = "apple"))]
 fn object_binding_name() -> &'static str {
-    "com.generalagent.tenant-attempt"
+    "com.agentweave.tenant-attempt"
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
 fn object_binding_name() -> &'static str {
-    "user.general-agent-tenant-attempt"
+    "user.agentweave-tenant-attempt"
 }
 
 #[cfg(windows)]
 fn object_binding_stream(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}:general-agent-tenant-attempt", path.display()))
+    PathBuf::from(format!("{}:agentweave-tenant-attempt", path.display()))
 }
 
 pub(super) fn open_nofollow(

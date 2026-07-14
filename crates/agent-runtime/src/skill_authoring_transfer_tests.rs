@@ -225,7 +225,7 @@ async fn connector_only_validation_uses_host_catalog_and_reports_permission_diff
         SkillPackageKind::InstructionOnly,
     )
     .await;
-    let descriptor_path = package_root.join("general-agent.json");
+    let descriptor_path = package_root.join("agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
     descriptor["kind"] = serde_json::json!("host_tools_only");
@@ -325,7 +325,7 @@ async fn connector_only_validation_rejects_unknown_connector() {
         SkillPackageKind::InstructionOnly,
     )
     .await;
-    let descriptor_path = package_root.join("general-agent.json");
+    let descriptor_path = package_root.join("agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
     descriptor["kind"] = serde_json::json!("host_tools_only");
@@ -411,7 +411,7 @@ async fn export_copies_exact_active_revision_without_mutating_state() {
         .unwrap();
 
     assert_eq!(exported, fixture.exports.path().join("calendar"));
-    assert!(exported.join("general-agent.json").is_file());
+    assert!(exported.join("agentweave.json").is_file());
     assert_eq!(
         fixture
             .state

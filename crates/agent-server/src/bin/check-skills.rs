@@ -23,7 +23,7 @@ async fn main() {
         let descriptor = serde_json::to_string(&migration.recommended_descriptor)
             .expect("recommended legacy descriptor must serialize");
         eprintln!(
-            "migration: synthesized package id {} at {}; inferred kind {}; recommended general-agent.json: {}",
+            "migration: synthesized package id {} at {}; inferred kind {}; recommended agentweave.json: {}",
             migration.synthesized_package_id.as_str(),
             migration.package_path.display(),
             package_kind_name(migration.inferred_kind),

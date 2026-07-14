@@ -122,7 +122,7 @@ async fn invalid_candidate_descriptor_never_changes_authoritative_tree() {
         .store
         .write_staging_file(
             &staged.revision_id,
-            Path::new("general-agent.json"),
+            Path::new("agentweave.json"),
             b"{invalid",
         )
         .await
@@ -186,7 +186,7 @@ async fn candidate_cleanup_failure_records_issue_without_hiding_write_error() {
         .store
         .write_staging_file(
             &staged.revision_id,
-            Path::new("general-agent.json"),
+            Path::new("agentweave.json"),
             b"{invalid",
         )
         .await
@@ -292,7 +292,7 @@ fn initial_skill() -> &'static [u8] {
 async fn write_package() -> TempDir {
     let root = tempdir().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": "com.example.recovery",

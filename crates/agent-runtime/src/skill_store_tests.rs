@@ -645,16 +645,16 @@ async fn managed_source_discovers_valid_revision_and_quarantines_corrupt_peer_wi
 async fn managed_source_skips_descriptor_mismatch_path_escape_and_missing_path_with_issues() {
     let fixture = StoreFixture::new().await;
     let descriptor = stage_promote_activate(&fixture, "com.example.descriptor").await;
-    make_file_writable(&descriptor.path.join("general-agent.json")).await;
+    make_file_writable(&descriptor.path.join("agentweave.json")).await;
     let mut descriptor_json: serde_json::Value = serde_json::from_slice(
-        &tokio::fs::read(descriptor.path.join("general-agent.json"))
+        &tokio::fs::read(descriptor.path.join("agentweave.json"))
             .await
             .unwrap(),
     )
     .unwrap();
     descriptor_json["id"] = json!("com.example.changed");
     tokio::fs::write(
-        descriptor.path.join("general-agent.json"),
+        descriptor.path.join("agentweave.json"),
         descriptor_json.to_string(),
     )
     .await
@@ -792,7 +792,7 @@ async fn write_package(id: &str, body: &str) -> TempDir {
     let root = tempdir().unwrap();
     let name = id.rsplit('.').next().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": id,

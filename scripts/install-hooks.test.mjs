@@ -18,7 +18,7 @@ pixi run check-skills
 });
 
 test("install hook writes an executable pre-commit hook", async () => {
-  const root = await mkdtemp(join(tmpdir(), "general-agent-hooks-"));
+  const root = await mkdtemp(join(tmpdir(), "agentweave-hooks-"));
 
   const hookPath = await installPreCommitHook(root);
 

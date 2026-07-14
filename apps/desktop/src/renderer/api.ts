@@ -310,7 +310,7 @@ export async function postSessionMessage(
   content: string,
   modelSettings?: ModelSettings | null
 ): Promise<PostMessageResponse> {
-  const secureBridge = window.generalAgent?.modelSettings;
+  const secureBridge = window.agentWeave?.modelSettings;
   if (secureBridge) {
     return secureBridge.postSessionMessage(sessionId, content) as Promise<PostMessageResponse>;
   }
@@ -326,7 +326,7 @@ export async function postSessionMessage(
 export async function testModelConnection(
   settings: ModelSettings
 ): Promise<ModelConnectionTestResponse> {
-  const secureBridge = window.generalAgent?.modelSettings;
+  const secureBridge = window.agentWeave?.modelSettings;
   if (secureBridge) {
     return secureBridge.testConnection() as Promise<ModelConnectionTestResponse>;
   }

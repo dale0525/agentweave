@@ -249,7 +249,7 @@ impl SkillRevisionStore {
         let managed_directory =
             open_prepared_directory(self.paths.managed_identity(), &relative).await?;
         let temporary = tempfile::Builder::new()
-            .prefix("general-agent-skill-execution-")
+            .prefix("agentweave-skill-execution-")
             .tempdir()?;
         copy_prepared_package_tree_into_reserved(
             &managed_directory,
@@ -312,7 +312,7 @@ pub(crate) async fn prepare_bundle_execution(
     crate::skill_bundle::verify_bundle_generation_binding(&binding.generation).await?;
     binding.directory.verify()?;
     let temporary = tempfile::Builder::new()
-        .prefix("general-agent-bundle-execution-")
+        .prefix("agentweave-bundle-execution-")
         .tempdir()?;
     copy_prepared_package_tree_into_reserved(
         &binding.directory,

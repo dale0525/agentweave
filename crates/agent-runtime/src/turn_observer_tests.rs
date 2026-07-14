@@ -48,10 +48,8 @@ impl ToolExecutionObserver for FailingObserver {
 
 #[tokio::test]
 async fn production_turn_surfaces_sanitized_observer_diagnostic() {
-    let root = std::env::temp_dir().join(format!(
-        "generalagent-turn-observer-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("agentweave-turn-observer-{}", uuid::Uuid::new_v4()));
     write_skill(&root).await;
     let skills = SkillRegistry::load_development(&root).await.unwrap();
     let runner = TurnRunner::new_with_config(

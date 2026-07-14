@@ -773,7 +773,7 @@ async fn write_runtime_package(
 ) -> TempDir {
     let root = tempdir().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": PACKAGE_ID,

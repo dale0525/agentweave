@@ -33,11 +33,11 @@ describe("desktop localization", () => {
     expect(screen.getByRole("heading", { name: "模型连接" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "测试连接" })).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute("lang", "zh-CN");
-    expect(window.localStorage.getItem("generalagent.localization.locale.v1")).toBe("zh-CN");
+    expect(window.localStorage.getItem("agentweave.localization.locale.v1")).toBe("zh-CN");
   });
 
   it("localizes the developer workbench shell", async () => {
-    window.localStorage.setItem("generalagent.localization.locale.v1", "zh-CN");
+    window.localStorage.setItem("agentweave.localization.locale.v1", "zh-CN");
     window.history.replaceState(null, "", "/#developer");
     render(<App />);
 

@@ -404,10 +404,10 @@ async fn real_process_crash_recovers_sqlite_sidecars_and_preserves_foreign_canon
         .arg("tenant_initialization_tests::subprocess_crashes_after_sqlite_root_move")
         .arg("--exact")
         .arg("--nocapture")
-        .env("GENERAL_AGENT_TEST_ATTEMPT_CONTROL", &fixture.control)
-        .env("GENERAL_AGENT_TEST_ATTEMPT_QUARANTINE", &fixture.quarantine)
-        .env("GENERAL_AGENT_TEST_ATTEMPT_TENANTS", &fixture.tenants)
-        .env("GENERAL_AGENT_TEST_ATTEMPT_CRASH_READY", &marker)
+        .env("AGENTWEAVE_TEST_ATTEMPT_CONTROL", &fixture.control)
+        .env("AGENTWEAVE_TEST_ATTEMPT_QUARANTINE", &fixture.quarantine)
+        .env("AGENTWEAVE_TEST_ATTEMPT_TENANTS", &fixture.tenants)
+        .env("AGENTWEAVE_TEST_ATTEMPT_CRASH_READY", &marker)
         .spawn()
         .unwrap();
     wait_for_path(&marker).await;
@@ -432,13 +432,12 @@ async fn real_process_crash_recovers_sqlite_sidecars_and_preserves_foreign_canon
 #[tokio::test]
 #[cfg(unix)]
 async fn subprocess_crashes_after_sqlite_root_move() {
-    let Some(control) = std::env::var_os("GENERAL_AGENT_TEST_ATTEMPT_CONTROL") else {
+    let Some(control) = std::env::var_os("AGENTWEAVE_TEST_ATTEMPT_CONTROL") else {
         return;
     };
-    let quarantine =
-        PathBuf::from(std::env::var_os("GENERAL_AGENT_TEST_ATTEMPT_QUARANTINE").unwrap());
-    let tenants = PathBuf::from(std::env::var_os("GENERAL_AGENT_TEST_ATTEMPT_TENANTS").unwrap());
-    let marker = PathBuf::from(std::env::var_os("GENERAL_AGENT_TEST_ATTEMPT_CRASH_READY").unwrap());
+    let quarantine = PathBuf::from(std::env::var_os("AGENTWEAVE_TEST_ATTEMPT_QUARANTINE").unwrap());
+    let tenants = PathBuf::from(std::env::var_os("AGENTWEAVE_TEST_ATTEMPT_TENANTS").unwrap());
+    let marker = PathBuf::from(std::env::var_os("AGENTWEAVE_TEST_ATTEMPT_CRASH_READY").unwrap());
     let tenant = tenants.join("tenant-a");
     let database = tenant.join("state.db");
     let mut attempt = TenantAttemptJournal::begin(

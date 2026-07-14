@@ -526,7 +526,7 @@ async fn inspect_packages(source_roots: &[PathBuf]) -> anyhow::Result<Vec<Inspec
                     .await?;
             anyhow::ensure!(
                 snapshot.descriptor.source == DescriptorSource::Explicit,
-                "bundle packages require an explicit general-agent.json descriptor: {}",
+                "bundle packages require an explicit agentweave.json descriptor: {}",
                 path.display()
             );
             validate_declared_content(&snapshot)?;

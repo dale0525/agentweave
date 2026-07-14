@@ -422,7 +422,7 @@ async fn wait_for_gate(gate: &crate::skill_store_faults::StoreTestGate, message:
 async fn write_runtime_package(label: &str, version: &str) -> TempDir {
     let root = tempdir().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": PACKAGE_ID,

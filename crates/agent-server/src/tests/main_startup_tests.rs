@@ -239,9 +239,9 @@ async fn production_owner_initialization_fails_closed_when_reconciliation_fails(
 
 fn test_owner_host() -> OwnerHostConfig {
     owner_host_config_from_lookup(|name| match name {
-        "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
-        "GENERAL_AGENT_OWNER_TOKEN" => Some("owner-token".into()),
-        "GENERAL_AGENT_APPROVER_TOKEN" => Some("approver-token".into()),
+        "AGENTWEAVE_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
+        "AGENTWEAVE_OWNER_TOKEN" => Some("owner-token".into()),
+        "AGENTWEAVE_APPROVER_TOKEN" => Some("approver-token".into()),
         _ => None,
     })
     .unwrap()
@@ -418,7 +418,7 @@ async fn production_loader_does_not_mutate_corrupt_active_before_lkg_reconcile()
         .unwrap();
     state.record_snapshot_activation(2).await.unwrap();
     make_test_tree_writable(&bad.path).await;
-    tokio::fs::write(bad.path.join("general-agent.json"), b"{}")
+    tokio::fs::write(bad.path.join("agentweave.json"), b"{}")
         .await
         .unwrap();
     let package_id = SkillPackageId::parse("com.example.lkg-first").unwrap();

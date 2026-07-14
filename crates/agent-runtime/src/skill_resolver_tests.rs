@@ -641,7 +641,7 @@ async fn package_tree_hash_matches_canonical_cross_platform_vector() {
 
     assert_eq!(
         hash_package_tree(temporary.path()).await.unwrap(),
-        "1ebf9a1719bd82b56780b7cf26f4799c73df44f177dcf34e7d7ee087cfe380d7"
+        "91d72d68611bb1df80dd2d5b15290e00019e6892e957a3da6298efec69677bae"
     );
 }
 
@@ -874,7 +874,7 @@ async fn write_explicit_instruction_package(root: &Path, folder: &str, id: &str)
         }
     });
     tokio::fs::write(
-        package_root.join("general-agent.json"),
+        package_root.join("agentweave.json"),
         serde_json::to_vec(&descriptor).unwrap(),
     )
     .await

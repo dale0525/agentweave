@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "agentweave.foundation.messaging",
+  "version": "0.1.0",
+  "displayName": "Messaging",
+  "kind": "host_tools_only",
+  "package": { "includeInstructions": true, "includeRuntime": false },
+  "compatibility": { "platforms": ["android", "desktop", "server"] },
+  "requires": {
+    "packages": ["agentweave.foundation.contacts"],
+    "capabilities": ["approval-engine", "credential-vault", "durable-actions", "host-tools"],
+    "runtimeTools": [],
+    "connectors": ["agentweave.connector.messaging/v1"]
+  }
+}

@@ -13,7 +13,7 @@ async fn automation_api_manages_scoped_schedules_and_notification_delivery() {
     let notification = notifications
         .enqueue(
             NotificationRequest {
-                app_id: "dev.generalagent.default".into(),
+                app_id: "dev.agentweave.default".into(),
                 tenant_id: "local".into(),
                 user_id: "local-user".into(),
                 channel: "desktop".into(),
@@ -39,7 +39,7 @@ async fn automation_api_manages_scoped_schedules_and_notification_delivery() {
         .oneshot(json_request(
             "/foundation/schedules",
             json!({
-                "app_id": "dev.generalagent.default",
+                "app_id": "dev.agentweave.default",
                 "tenant_id": "local",
                 "user_id": "local-user",
                 "name": "Morning brief",

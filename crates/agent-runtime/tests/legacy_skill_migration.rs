@@ -30,7 +30,7 @@ async fn legacy_scan_reports_recommended_descriptor_without_rewriting_source() {
             .unwrap(),
         before
     );
-    assert!(!diagnostic.package_path.join("general-agent.json").exists());
+    assert!(!diagnostic.package_path.join("agentweave.json").exists());
 }
 
 #[cfg(unix)]
@@ -48,5 +48,5 @@ async fn legacy_scan_is_bounded_and_does_not_follow_package_symlinks() {
     let diagnostics = scan_legacy_packages(root.path()).await.unwrap();
 
     assert!(diagnostics.is_empty());
-    assert!(!outside.path().join("general-agent.json").exists());
+    assert!(!outside.path().join("agentweave.json").exists());
 }

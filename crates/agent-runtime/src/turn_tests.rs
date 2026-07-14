@@ -174,7 +174,7 @@ fn skills_root() -> std::path::PathBuf {
 }
 
 fn test_workspace(name: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!("general-agent-turn-{name}-{}", Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("agentweave-turn-{name}-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
     root
 }
@@ -708,7 +708,7 @@ async fn first_request_includes_instruction_context_and_tool_schemas() {
         first.input[0]["content"]
             .as_str()
             .unwrap()
-            .contains("GeneralAgent is a Codex-like runtime")
+            .contains("AgentWeave is a Codex-like runtime")
     );
     assert_eq!(first.input[1]["role"], "developer");
     let developer = first.input[1]["content"].as_str().unwrap();
@@ -835,8 +835,7 @@ impl ModelClient for SnapshotSwapModel {
             0 => {
                 assert!(request_has_tool(&request, "first_tool"));
                 if self.fail_reload {
-                    tokio::fs::write(self.package_root.join("general-agent.json"), "{invalid")
-                        .await?;
+                    tokio::fs::write(self.package_root.join("agentweave.json"), "{invalid").await?;
                     assert!(self.manager.reload().await.is_err());
                 } else {
                     write_turn_runtime_package(&self.package_root, "second_tool").await;
@@ -938,7 +937,7 @@ async fn turn_skill_manager(root: &Path) -> SkillManager {
 async fn write_turn_runtime_package(package_root: &Path, tool_name: &str) {
     tokio::fs::create_dir_all(package_root).await.unwrap();
     tokio::fs::write(
-        package_root.join("general-agent.json"),
+        package_root.join("agentweave.json"),
         serde_json::json!({
             "schemaVersion": 1,
             "id": "com.example.turn-runtime",
@@ -977,7 +976,7 @@ async fn write_turn_runtime_package(package_root: &Path, tool_name: &str) {
     .unwrap();
     tokio::fs::write(
         package_root.join("index.js"),
-        "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ tool: process.env.GENERAL_AGENT_TOOL_NAME })));\n",
+        "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ tool: process.env.AGENTWEAVE_TOOL_NAME })));\n",
     )
     .await
     .unwrap();

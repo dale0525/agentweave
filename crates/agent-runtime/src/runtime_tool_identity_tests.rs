@@ -453,7 +453,7 @@ async fn activate_managed_runtime_skills(
         .join(format!("managed-runtime-{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&source).await.unwrap();
     tokio::fs::write(
-        source.join("general-agent.json"),
+        source.join("agentweave.json"),
         serde_json::json!({
             "schemaVersion": 1,
             "id": package_id.as_str(),
@@ -557,7 +557,7 @@ async fn write_skill(root: &std::path::Path, package: &str, local: &str, owner: 
     tokio::fs::write(
         skill_root.join("index.js"),
         format!(
-            "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({{ owner: '{owner}', tool: process.env.GENERAL_AGENT_TOOL_NAME }})));\n"
+            "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({{ owner: '{owner}', tool: process.env.AGENTWEAVE_TOOL_NAME }})));\n"
         ),
     )
     .await
@@ -565,7 +565,7 @@ async fn write_skill(root: &std::path::Path, package: &str, local: &str, owner: 
 }
 
 fn unique_test_dir(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!("agentweave-{name}-{}", uuid::Uuid::new_v4()))
 }
 
 async fn remove_test_dir(path: std::path::PathBuf) {

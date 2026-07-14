@@ -25,7 +25,7 @@ const MAX_FONT_FILES = 24;
 const MAX_FONT_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_FONT_BYTES = 32 * 1024 * 1024;
 
-export function buildDesktopAppearance(appRootInput = process.env.GENERAL_AGENT_APP_ROOT) {
+export function buildDesktopAppearance(appRootInput = process.env.AGENTWEAVE_APP_ROOT) {
   if (!appRootInput) {
     return {
       defaultTheme: DEFAULT_THEME_ID,

@@ -94,7 +94,7 @@ async fn disallowed_kind_change_preserves_original_tree_and_row() {
             &ActorContext::owner("owner-1", [SkillGrant::EditDraft]),
             &draft.revision_id,
             vec![DraftFileUpdate {
-                path: PathBuf::from("general-agent.json"),
+                path: PathBuf::from("agentweave.json"),
                 content: format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
             }],
         )

@@ -110,7 +110,7 @@ async fn skill_process_receives_workspace_environment() {
     .await;
     tokio::fs::write(
         root.join("env").join("index.js"),
-        "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ workspaceRoot: process.env.GENERAL_AGENT_WORKSPACE_ROOT, cwd: process.env.GENERAL_AGENT_CWD })));\n",
+        "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ workspaceRoot: process.env.AGENTWEAVE_WORKSPACE_ROOT, cwd: process.env.AGENTWEAVE_CWD })));\n",
     )
     .await
     .unwrap();
@@ -161,7 +161,7 @@ async fn skill_process_receives_called_tool_name() {
     .await;
     tokio::fs::write(
         root.join("multi").join("index.js"),
-        "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ tool: process.env.GENERAL_AGENT_TOOL_NAME })));\n",
+        "process.stdin.resume();\nprocess.stdin.on('end', () => process.stdout.write(JSON.stringify({ tool: process.env.AGENTWEAVE_TOOL_NAME })));\n",
     )
     .await
     .unwrap();
@@ -257,7 +257,7 @@ async fn write_skill_manifest(root: &Path, folder: &str, manifest: Value) {
 }
 
 fn unique_test_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("generalagent-{name}-{}", uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!("agentweave-{name}-{}", uuid::Uuid::new_v4()))
 }
 
 async fn remove_test_dir(path: PathBuf) {

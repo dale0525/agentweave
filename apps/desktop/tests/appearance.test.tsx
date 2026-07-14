@@ -60,7 +60,7 @@ describe("desktop appearance", () => {
     });
     expect(document.documentElement).toHaveAttribute("data-appearance", "light");
     expect(document.documentElement.style.getPropertyValue("--color-background")).toBe("#FFFFFF");
-    expect(window.localStorage.getItem("generalagent.appearance.theme.v1")).toBe(
+    expect(window.localStorage.getItem("agentweave.appearance.theme.v1")).toBe(
       "vscode.light-2026"
     );
   });

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "catalogId": "generalagent.foundation-skills",
+  "catalogId": "agentweave.foundation-skills",
   "catalogVersion": "0.1.0",
   "replacementPolicy": {
     "selection": "app_manifest",
@@ -22,7 +22,7 @@
   },
   "skills": [
     {
-      "id": "generalagent.core.filesystem",
+      "id": "agentweave.core.filesystem",
       "version": "0.1.0",
       "displayName": "Filesystem",
       "description": "Workspace-scoped file inspection and mutation primitives.",
@@ -64,7 +64,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.filesystem",
+        "id": "agentweave.foundation.filesystem",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -76,14 +76,14 @@
       },
       "localPackage": {
         "path": "skills/filesystem",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.core.skill-creator",
+      "id": "agentweave.core.skill-creator",
       "version": "0.1.0",
       "displayName": "Skill Creator",
-      "description": "Developer workflow for authoring and validating GeneralAgent skills.",
+      "description": "Developer workflow for authoring and validating AgentWeave skills.",
       "audience": [
         "developer"
       ],
@@ -96,7 +96,7 @@
       ],
       "dependencies": {
         "packages": [
-          "generalagent.core.filesystem"
+          "agentweave.core.filesystem"
         ],
         "runtimeFeatures": [
           "skill-package-lifecycle"
@@ -120,7 +120,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.skill-authoring",
+        "id": "agentweave.foundation.skill-authoring",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -132,11 +132,11 @@
       },
       "localPackage": {
         "path": "skills/skill-creator",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.memory",
+      "id": "agentweave.foundation.memory",
       "version": "0.1.0",
       "displayName": "Memory",
       "description": "Provider-neutral workflows for querying, proposing, correcting, exporting, and forgetting memory.",
@@ -199,7 +199,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.memory",
+        "id": "agentweave.foundation.memory",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -211,11 +211,11 @@
       },
       "localPackage": {
         "path": "skills/foundation-memory",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.mail",
+      "id": "agentweave.foundation.mail",
       "version": "0.1.0",
       "displayName": "Mail",
       "description": "Provider-neutral inbox, thread, draft, reply, forwarding, and follow-up workflows.",
@@ -247,7 +247,7 @@
           "host-tools"
         ],
         "connectors": [
-          "generalagent-mail"
+          "agentweave-mail"
         ],
         "hostTools": [
           "mail_accounts_list",
@@ -297,7 +297,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.mail",
+        "id": "agentweave.foundation.mail",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -309,11 +309,11 @@
       },
       "localPackage": {
         "path": "skills/foundation-mail",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.calendar",
+      "id": "agentweave.foundation.calendar",
       "version": "0.1.0",
       "displayName": "Calendar",
       "description": "Calendar lookup, free-busy, proposal, creation, update, and cancellation workflows.",
@@ -345,7 +345,7 @@
           "host-tools"
         ],
         "connectors": [
-          "generalagent.connector.calendar/v1"
+          "agentweave.connector.calendar/v1"
         ],
         "hostTools": []
       },
@@ -370,7 +370,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.calendar",
+        "id": "agentweave.foundation.calendar",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -382,11 +382,11 @@
       },
       "localPackage": {
         "path": "skills/foundation-calendar",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.tasks",
+      "id": "agentweave.foundation.tasks",
       "version": "0.1.0",
       "displayName": "Tasks and Reminders",
       "description": "Task capture, status, due dates, recurrence, completion, and reminder association.",
@@ -414,7 +414,7 @@
         ],
         "connectors": [],
         "hostTools": [
-          "generalagent.host.tasks/v1"
+          "agentweave.host.tasks/v1"
         ]
       },
       "permissions": {
@@ -437,7 +437,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.tasks",
+        "id": "agentweave.foundation.tasks",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -449,11 +449,11 @@
       },
       "localPackage": {
         "path": "skills/foundation-tasks",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.web-research",
+      "id": "agentweave.foundation.web-research",
       "version": "0.1.0",
       "displayName": "Web Research",
       "description": "Search, page reading, source tracking, citation, and multi-source synthesis workflows.",
@@ -481,7 +481,7 @@
           "network.http"
         ],
         "connectors": [
-          "generalagent.connector.web/v1"
+          "agentweave.connector.web/v1"
         ],
         "hostTools": []
       },
@@ -503,7 +503,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.web-research",
+        "id": "agentweave.foundation.web-research",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -515,11 +515,11 @@
       },
       "localPackage": {
         "path": "skills/foundation-web-research",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.documents",
+      "id": "agentweave.foundation.documents",
       "version": "0.1.0",
       "displayName": "Documents",
       "description": "Document reading, extraction, rendering, conversion, creation, and visual quality checks.",
@@ -536,7 +536,7 @@
       ],
       "dependencies": {
         "packages": [
-          "generalagent.core.filesystem"
+          "agentweave.core.filesystem"
         ],
         "runtimeFeatures": [
           "artifact-store",
@@ -548,7 +548,7 @@
         ],
         "connectors": [],
         "hostTools": [
-          "generalagent.host.documents/v1"
+          "agentweave.host.documents/v1"
         ]
       },
       "permissions": {
@@ -569,7 +569,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.documents",
+        "id": "agentweave.foundation.documents",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -581,11 +581,11 @@
       },
       "localPackage": {
         "path": "skills/foundation-documents",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.contacts",
+      "id": "agentweave.foundation.contacts",
       "version": "0.1.0",
       "displayName": "Contacts",
       "description": "Contact resolution, reading, relationship context, and controlled updates.",
@@ -614,7 +614,7 @@
           "host-tools"
         ],
         "connectors": [
-          "generalagent.connector.contacts/v1"
+          "agentweave.connector.contacts/v1"
         ],
         "hostTools": []
       },
@@ -637,7 +637,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.contacts",
+        "id": "agentweave.foundation.contacts",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -649,11 +649,11 @@
       },
       "localPackage": {
         "path": "skills/foundation-contacts",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.scheduler",
+      "id": "agentweave.foundation.scheduler",
       "version": "0.1.0",
       "displayName": "Scheduler",
       "description": "Persistent one-shot, interval, cron, and RRULE trigger workflows with recovery and misfire policy.",
@@ -682,7 +682,7 @@
         ],
         "connectors": [],
         "hostTools": [
-          "generalagent.host.scheduler/v1"
+          "agentweave.host.scheduler/v1"
         ]
       },
       "permissions": {
@@ -702,7 +702,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.scheduler",
+        "id": "agentweave.foundation.scheduler",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -714,11 +714,11 @@
       },
       "localPackage": {
         "path": "skills/foundation-scheduler",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.notifications",
+      "id": "agentweave.foundation.notifications",
       "version": "0.1.0",
       "displayName": "Notifications",
       "description": "Notification delivery, cancellation, quiet hours, and delivery-status workflows.",
@@ -747,7 +747,7 @@
         ],
         "connectors": [],
         "hostTools": [
-          "generalagent.host.notifications/v1"
+          "agentweave.host.notifications/v1"
         ]
       },
       "permissions": {
@@ -766,7 +766,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.notifications",
+        "id": "agentweave.foundation.notifications",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -778,11 +778,11 @@
       },
       "localPackage": {
         "path": "skills/foundation-notifications",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.notes",
+      "id": "agentweave.foundation.notes",
       "version": "0.1.0",
       "displayName": "Notes and Knowledge",
       "description": "User-owned notes, knowledge pages, and explicit knowledge-base workflows.",
@@ -809,7 +809,7 @@
           "host-tools"
         ],
         "connectors": [
-          "generalagent.connector.notes/v1"
+          "agentweave.connector.notes/v1"
         ],
         "hostTools": []
       },
@@ -832,7 +832,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.notes",
+        "id": "agentweave.foundation.notes",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -844,11 +844,11 @@
       },
       "localPackage": {
         "path": "skills/foundation-notes",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     },
     {
-      "id": "generalagent.foundation.messaging",
+      "id": "agentweave.foundation.messaging",
       "version": "0.1.0",
       "displayName": "Messaging",
       "description": "Provider-neutral channel reading, drafting, and approved sending workflows.",
@@ -866,7 +866,7 @@
       ],
       "dependencies": {
         "packages": [
-          "generalagent.foundation.contacts"
+          "agentweave.foundation.contacts"
         ],
         "runtimeFeatures": [
           "connector-runtime",
@@ -881,7 +881,7 @@
           "host-tools"
         ],
         "connectors": [
-          "generalagent.connector.messaging/v1"
+          "agentweave.connector.messaging/v1"
         ],
         "hostTools": []
       },
@@ -905,7 +905,7 @@
         ]
       },
       "replacementContract": {
-        "id": "generalagent.foundation.messaging",
+        "id": "agentweave.foundation.messaging",
         "majorVersion": 1,
         "replaceable": true,
         "canDisable": true,
@@ -917,7 +917,7 @@
       },
       "localPackage": {
         "path": "skills/foundation-messaging",
-        "manifest": "general-agent.json"
+        "manifest": "agentweave.json"
       }
     }
   ]

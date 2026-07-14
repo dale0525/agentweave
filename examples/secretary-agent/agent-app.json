@@ -16,11 +16,11 @@
   "requires": {
     "packages": [
       {
-        "id": "generalagent.foundation.memory",
+        "id": "agentweave.foundation.memory",
         "version": "=0.1.0"
       },
       {
-        "id": "generalagent.foundation.mail",
+        "id": "agentweave.foundation.mail",
         "version": "=0.1.0"
       },
       {
@@ -72,7 +72,7 @@
       "mail_delivery_status"
     ],
     "connectors": [
-      "generalagent-mail"
+      "agentweave-mail"
     ]
   },
   "features": [
@@ -89,7 +89,7 @@
   "branding": {
     "displayName": "私人秘书",
     "shortName": "秘书",
-    "description": "由 GeneralAgent Framework 组合 Mail、Memory 与应用自定义 Skill 的参考 Agent App。",
+    "description": "由 AgentWeave Framework 组合 Mail、Memory 与应用自定义 Skill 的参考 Agent App。",
     "accentColor": "#315C49"
   },
   "appearance": {

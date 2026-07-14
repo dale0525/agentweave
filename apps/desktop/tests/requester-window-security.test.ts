@@ -9,12 +9,12 @@ describe("requester window security", () => {
     const webContents = fakeWebContents();
     configureRequesterWindowSecurity({
       openExternal: vi.fn(),
-      trustedUrl: "file:///Applications/GeneralAgent/dist/index.html",
+      trustedUrl: "file:///Applications/AgentWeave/dist/index.html",
       webContents
     });
 
-    expect(navigate(webContents, "file:///Applications/GeneralAgent/dist/index.html")).toBe(false);
-    expect(navigate(webContents, "file:///Applications/GeneralAgent/dist/approval.html")).toBe(true);
+    expect(navigate(webContents, "file:///Applications/AgentWeave/dist/index.html")).toBe(false);
+    expect(navigate(webContents, "file:///Applications/AgentWeave/dist/approval.html")).toBe(true);
     expect(navigate(webContents, "https://example.com/")).toBe(true);
   });
 

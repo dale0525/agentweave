@@ -110,7 +110,7 @@ export function Accounts({ onBack }: AccountsProps): JSX.Element {
               </Flex>
               <div className="foundation-rule" />
               <dl className="foundation-facts">
-                <Fact label="Connector contract" value="generalagent-mail / v1" />
+                <Fact label="Connector contract" value="agentweave-mail / v1" />
                 <Fact label="Account reference" value={selected.id} />
                 <Fact label="Credential access" value="Host vault only" />
                 <Fact label="Send policy" value="Exact preview approval" />

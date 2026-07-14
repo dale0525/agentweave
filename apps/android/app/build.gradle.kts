@@ -4,15 +4,15 @@ plugins {
 }
 
 val generatedSkillAssets = layout.buildDirectory.dir("generated/skillAssets/main")
-val packagedAgentAppRoot = providers.environmentVariable("GENERAL_AGENT_APP_ROOT")
+val packagedAgentAppRoot = providers.environmentVariable("AGENTWEAVE_APP_ROOT")
   .orElse(rootProject.projectDir.resolve("../../examples/secretary-agent").absolutePath)
 
 android {
-  namespace = "com.generalagent.mobile"
+  namespace = "com.agentweave.mobile"
   compileSdk = 37
 
   defaultConfig {
-    applicationId = "com.generalagent.mobile"
+    applicationId = "com.agentweave.mobile"
     minSdk = 31
     targetSdk = 36
     versionCode = 1
@@ -75,11 +75,11 @@ val prepareAndroidSkillAssets by tasks.registering(Exec::class) {
   inputs.dir(packagedAgentAppRoot)
   inputs.property(
     "agentAppLocales",
-    providers.environmentVariable("GENERAL_AGENT_APP_LOCALES").orElse(""),
+    providers.environmentVariable("AGENTWEAVE_APP_LOCALES").orElse(""),
   )
   inputs.property(
     "agentAppDefaultLocale",
-    providers.environmentVariable("GENERAL_AGENT_APP_DEFAULT_LOCALE").orElse(""),
+    providers.environmentVariable("AGENTWEAVE_APP_DEFAULT_LOCALE").orElse(""),
   )
   inputs.file(rootProject.projectDir.resolve("../../scripts/build-android-rust.mjs"))
   outputs.dir(generatedSkillAssets)
@@ -89,14 +89,14 @@ val prepareAndroidSkillAssets by tasks.registering(Exec::class) {
 val buildRustNativeDebug by tasks.registering(Exec::class) {
   workingDir(rootProject.projectDir.resolve("../.."))
   commandLine("node", "scripts/build-android-rust.mjs", "--rust-only")
-  environment("GENERAL_AGENT_ANDROID_RUST_PROFILE", "debug")
+  environment("AGENTWEAVE_ANDROID_RUST_PROFILE", "debug")
   dependsOn(prepareAndroidSkillAssets)
 }
 
 val buildRustNativeRelease by tasks.registering(Exec::class) {
   workingDir(rootProject.projectDir.resolve("../.."))
   commandLine("node", "scripts/build-android-rust.mjs", "--rust-only")
-  environment("GENERAL_AGENT_ANDROID_RUST_PROFILE", "release")
+  environment("AGENTWEAVE_ANDROID_RUST_PROFILE", "release")
   dependsOn(prepareAndroidSkillAssets)
 }
 

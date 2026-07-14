@@ -57,7 +57,7 @@ async fn initial_publication_loser_rebuilds_the_durable_winner() {
         crate::skill_package::SkillPackageKind::InstructionOnly,
     )
     .await;
-    let descriptor_path = source.path().join("general-agent.json");
+    let descriptor_path = source.path().join("agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
     descriptor["compatibility"]["platforms"] = serde_json::json!(["server"]);
@@ -386,7 +386,7 @@ async fn activate_server_only_revision(fixture: &AuthoringFixture) -> String {
             &fixture.actor([SkillGrant::EditDraft]),
             &draft.revision_id,
             vec![update(
-                "general-agent.json",
+                "agentweave.json",
                 format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
             )],
         )
@@ -585,7 +585,7 @@ async fn startup_preserves_a_revision_repaired_after_failed_verification() {
         .unwrap()
         .unwrap();
     let path = std::path::PathBuf::from(&record.storage_path);
-    let descriptor = path.join("general-agent.json");
+    let descriptor = path.join("agentweave.json");
     let original = tokio::fs::read(&descriptor).await.unwrap();
     make_file_writable(&descriptor).await;
     tokio::fs::write(&descriptor, b"{}").await.unwrap();

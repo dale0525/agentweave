@@ -60,7 +60,7 @@ async fn failed_reload_keeps_the_previous_snapshot() {
     tokio::fs::create_dir_all(root.path().join("broken"))
         .await
         .unwrap();
-    tokio::fs::write(root.path().join("broken/general-agent.json"), "{invalid")
+    tokio::fs::write(root.path().join("broken/agentweave.json"), "{invalid")
         .await
         .unwrap();
 
@@ -802,7 +802,7 @@ async fn write_instruction_package(
     let package_root = root.join(folder);
     tokio::fs::create_dir_all(&package_root).await.unwrap();
     tokio::fs::write(
-        package_root.join("general-agent.json"),
+        package_root.join("agentweave.json"),
         serde_json::json!({
             "schemaVersion": 1,
             "id": id,
@@ -834,7 +834,7 @@ async fn write_instruction_package_with_platforms(
 ) -> std::path::PathBuf {
     let package_root = write_instruction_package(root, folder, id, name, body).await;
     tokio::fs::write(
-        package_root.join("general-agent.json"),
+        package_root.join("agentweave.json"),
         serde_json::json!({
             "schemaVersion": 1,
             "id": id,
@@ -875,7 +875,7 @@ async fn write_runtime_package_with_capabilities(
     let package_root = root.join(folder);
     tokio::fs::create_dir_all(&package_root).await.unwrap();
     tokio::fs::write(
-        package_root.join("general-agent.json"),
+        package_root.join("agentweave.json"),
         serde_json::json!({
             "schemaVersion": 1,
             "id": id,

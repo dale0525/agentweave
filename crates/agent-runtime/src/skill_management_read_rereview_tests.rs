@@ -64,7 +64,7 @@ async fn builtin_only_capability_failure_remains_the_authoritative_effective_lay
         SkillPackageKind::InstructionOnly,
     )
     .await;
-    let descriptor_path = package_root.join("general-agent.json");
+    let descriptor_path = package_root.join("agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
     descriptor["requires"]["capabilities"] = json!(["network.http"]);

@@ -28,7 +28,7 @@ async fn startup_verifies_lkg_before_the_first_managed_mutation() {
         .await
         .unwrap()
         .unwrap();
-    let descriptor = std::path::Path::new(&record.storage_path).join("general-agent.json");
+    let descriptor = std::path::Path::new(&record.storage_path).join("agentweave.json");
     make_file_writable(&descriptor).await;
     tokio::fs::write(&descriptor, b"{}\n").await.unwrap();
     let restarted = manager_for_store(&fixture).await;
@@ -75,7 +75,7 @@ async fn startup_without_any_verified_authority_preserves_all_managed_state() {
         .await
         .unwrap()
         .unwrap();
-    let descriptor = std::path::Path::new(&record.storage_path).join("general-agent.json");
+    let descriptor = std::path::Path::new(&record.storage_path).join("agentweave.json");
     make_file_writable(&descriptor).await;
     tokio::fs::write(&descriptor, b"{}\n").await.unwrap();
     let before = startup_managed_fingerprint(&fixture).await;

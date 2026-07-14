@@ -37,8 +37,8 @@ describe("independent approval window", () => {
       requesterWebContents: requester
     });
 
-    const open = handlers.get("general-agent:approval:open")!;
-    const complete = handlers.get("general-agent:approval:complete")!;
+    const open = handlers.get("agentweave:approval:open")!;
+    const complete = handlers.get("agentweave:approval:complete")!;
     await expect(open({ sender: attacker }, APPROVAL_ID)).rejects.toThrow(/requester window/);
 
     const observed = open({ sender: requester }, APPROVAL_ID) as Promise<unknown>;
@@ -88,11 +88,11 @@ describe("independent approval window", () => {
       requesterWebContents: requester
     });
 
-    const observed = handlers.get("general-agent:approval:open")!(
+    const observed = handlers.get("agentweave:approval:open")!(
       { sender: requester },
       APPROVAL_ID
     ) as Promise<unknown>;
-    const close = handlers.get("general-agent:approval:close")!;
+    const close = handlers.get("agentweave:approval:close")!;
     await expect(close({ sender: requester }, APPROVAL_ID)).rejects.toThrow(/approval window/);
     await expect(close({ sender: approval.webContents }, APPROVAL_ID)).resolves.toEqual({
       accepted: true
@@ -122,7 +122,7 @@ describe("independent approval window", () => {
       requesterWebContents: requester
     });
 
-    const observed = handlers.get("general-agent:approval:open")!(
+    const observed = handlers.get("agentweave:approval:open")!(
       { sender: requester },
       APPROVAL_ID
     ) as Promise<unknown>;

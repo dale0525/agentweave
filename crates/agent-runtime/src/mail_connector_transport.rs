@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-pub const MAIL_CONNECTOR_ID: &str = "generalagent-mail";
+pub const MAIL_CONNECTOR_ID: &str = "agentweave-mail";
 pub const MAIL_TOOL_NAMES: [&str; 23] = [
     "mail_accounts_list",
     "mail_account_status",

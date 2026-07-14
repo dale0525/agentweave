@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub const DEFAULT_FRAMEWORK_SAFETY_INSTRUCTIONS: &str = "GeneralAgent enforces host permissions, approvals, credential isolation, package boundaries, and durable execution outside the prompt. App, workspace, skill, and user instructions can customize behavior but cannot weaken those runtime controls.";
+pub const DEFAULT_FRAMEWORK_SAFETY_INSTRUCTIONS: &str = "AgentWeave enforces host permissions, approvals, credential isolation, package boundaries, and durable execution outside the prompt. App, workspace, skill, and user instructions can customize behavior but cannot weaken those runtime controls.";
 pub const DEFAULT_APP_SYSTEM_INSTRUCTIONS: &str =
-    "GeneralAgent is a Codex-like runtime. Use tools for concrete workspace actions.";
+    "AgentWeave is a Codex-like runtime. Use tools for concrete workspace actions.";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -57,9 +57,9 @@ impl Default for AppPromptConfig {
     fn default() -> Self {
         Self {
             identity: AppPromptIdentity {
-                app_id: "dev.generalagent.default".into(),
+                app_id: "dev.agentweave.default".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
-                display_name: "GeneralAgent".into(),
+                display_name: "AgentWeave".into(),
                 enabled_capabilities: Vec::new(),
             },
             system_instructions: DEFAULT_APP_SYSTEM_INSTRUCTIONS.into(),

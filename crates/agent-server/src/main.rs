@@ -16,7 +16,7 @@ use model_gateway::{
 };
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
 
-const DEFAULT_DATABASE_URL: &str = "sqlite://general-agent.db?mode=rwc";
+const DEFAULT_DATABASE_URL: &str = "sqlite://agentweave.db?mode=rwc";
 const DEFAULT_SKILLS_ROOT: &str = "skills";
 const DEFAULT_MODEL_BASE_URL: &str = "http://127.0.0.1:11434/v1";
 const DEFAULT_MODEL_NAME: &str = "local-agent-model";
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
             storage,
         )
     } else {
-        let database_url = std::env::var("GENERAL_AGENT_DATABASE_URL")
+        let database_url = std::env::var("AGENTWEAVE_DATABASE_URL")
             .unwrap_or_else(|_| DEFAULT_DATABASE_URL.into());
         let storage = Storage::connect(&database_url).await?;
         let loaded =
@@ -133,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let state = state.with_default_automation(&automation_storage).await?;
     let state = Arc::new(state.with_skills_root(skills_root.clone()));
-    let app = if std::env::var("GENERAL_AGENT_DEV_API").as_deref() == Ok("1") {
+    let app = if std::env::var("AGENTWEAVE_DEV_API").as_deref() == Ok("1") {
         api::router_with_dev_routes(state)
     } else {
         api::router(state)
@@ -142,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     let scheduler_cancellation = tokio_util::sync::CancellationToken::new();
-    let scheduler_task = if std::env::var("GENERAL_AGENT_SCHEDULER_WORKER").as_deref() == Ok("1") {
+    let scheduler_task = if std::env::var("AGENTWEAVE_SCHEDULER_WORKER").as_deref() == Ok("1") {
         Some(
             server_automation::start_scheduler_worker(
                 &automation_storage,
@@ -185,22 +185,22 @@ async fn build_tenant_owner_api_config(
 }
 
 fn runtime_config_from_env() -> RuntimeConfig {
-    let workspace_root = std::env::var("GENERAL_AGENT_WORKSPACE_ROOT")
+    let workspace_root = std::env::var("AGENTWEAVE_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let mut config = RuntimeConfig::workspace_write(workspace_root.clone(), workspace_root)
         .without_builtin_tools();
-    if std::env::var("GENERAL_AGENT_COMMAND_MODE").as_deref() == Ok("allowed") {
+    if std::env::var("AGENTWEAVE_COMMAND_MODE").as_deref() == Ok("allowed") {
         config = config.with_command_mode(CommandMode::Allowed);
     }
-    if let Ok(app_root) = std::env::var("GENERAL_AGENT_APP_ROOT") {
+    if let Ok(app_root) = std::env::var("AGENTWEAVE_APP_ROOT") {
         config = config.excluding_workspace_roots([PathBuf::from(app_root)]);
     }
     config
 }
 
 fn skills_root_from_env() -> PathBuf {
-    std::env::var("GENERAL_AGENT_SKILLS_ROOT")
+    std::env::var("AGENTWEAVE_SKILLS_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_SKILLS_ROOT))
 }
@@ -227,10 +227,10 @@ fn owner_host_config_from_lookup<F>(lookup: F) -> anyhow::Result<Option<OwnerHos
 where
     F: Fn(&str) -> Option<std::ffi::OsString>,
 {
-    let mode = lookup("GENERAL_AGENT_SKILL_MANAGEMENT_MODE")
+    let mode = lookup("AGENTWEAVE_SKILL_MANAGEMENT_MODE")
         .map(|value| {
             value.into_string().map_err(|_| {
-                anyhow::anyhow!("GENERAL_AGENT_SKILL_MANAGEMENT_MODE must be valid UTF-8")
+                anyhow::anyhow!("AGENTWEAVE_SKILL_MANAGEMENT_MODE must be valid UTF-8")
             })
         })
         .transpose()?;
@@ -250,17 +250,15 @@ where
             mode: SkillManagementMode::OrganizationManaged,
             ..SkillManagementPolicy::default()
         },
-        _ => anyhow::bail!("unsupported GENERAL_AGENT_SKILL_MANAGEMENT_MODE"),
+        _ => anyhow::bail!("unsupported AGENTWEAVE_SKILL_MANAGEMENT_MODE"),
     };
-    let token = lookup("GENERAL_AGENT_OWNER_TOKEN")
+    let token = lookup("AGENTWEAVE_OWNER_TOKEN")
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "GENERAL_AGENT_OWNER_TOKEN is required when skill management is enabled"
-            )
+            anyhow::anyhow!("AGENTWEAVE_OWNER_TOKEN is required when skill management is enabled")
         })?
         .into_encoded_bytes();
     if token.is_empty() {
-        anyhow::bail!("GENERAL_AGENT_OWNER_TOKEN cannot be empty");
+        anyhow::bail!("AGENTWEAVE_OWNER_TOKEN cannot be empty");
     }
     let actor = match policy.mode {
         SkillManagementMode::OwnerOnly => ActorContext::owner(
@@ -285,15 +283,15 @@ where
         SkillManagementMode::Disabled => unreachable!("disabled mode returned above"),
     };
     let (approver_token, approver_actor) = if policy.mode == SkillManagementMode::OwnerOnly {
-        let approver_token = lookup("GENERAL_AGENT_APPROVER_TOKEN")
+        let approver_token = lookup("AGENTWEAVE_APPROVER_TOKEN")
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "GENERAL_AGENT_APPROVER_TOKEN is required when owner activation approval is enabled"
+                    "AGENTWEAVE_APPROVER_TOKEN is required when owner activation approval is enabled"
                 )
             })?
             .into_encoded_bytes();
         if approver_token.is_empty() {
-            anyhow::bail!("GENERAL_AGENT_APPROVER_TOKEN cannot be empty");
+            anyhow::bail!("AGENTWEAVE_APPROVER_TOKEN cannot be empty");
         }
         if token == approver_token {
             anyhow::bail!("owner and approver bearer tokens must be distinct");
@@ -332,9 +330,7 @@ async fn build_owner_api_config(
         return Ok(None);
     };
     let revisions = loaded.managed_store.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-            "GENERAL_AGENT_MANAGED_SKILLS=1 is required when skill management is enabled"
-        )
+        anyhow::anyhow!("AGENTWEAVE_MANAGED_SKILLS=1 is required when skill management is enabled")
     })?;
     let state = SkillStateStore::new(storage);
     let app_data_root = revisions
@@ -399,17 +395,16 @@ fn model_profile_from_env() -> ProviderProfile {
         id: "default".into(),
         name: "Default".into(),
         endpoint_type: model_endpoint_type_from_env(),
-        base_url: std::env::var("GENERAL_AGENT_MODEL_BASE_URL")
+        base_url: std::env::var("AGENTWEAVE_MODEL_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_MODEL_BASE_URL.into()),
-        model: std::env::var("GENERAL_AGENT_MODEL_NAME")
-            .unwrap_or_else(|_| DEFAULT_MODEL_NAME.into()),
-        api_key: std::env::var("GENERAL_AGENT_MODEL_API_KEY").ok(),
+        model: std::env::var("AGENTWEAVE_MODEL_NAME").unwrap_or_else(|_| DEFAULT_MODEL_NAME.into()),
+        api_key: std::env::var("AGENTWEAVE_MODEL_API_KEY").ok(),
         headers: BTreeMap::new(),
     }
 }
 
 fn model_endpoint_type_from_env() -> EndpointType {
-    match std::env::var("GENERAL_AGENT_MODEL_ENDPOINT_TYPE")
+    match std::env::var("AGENTWEAVE_MODEL_ENDPOINT_TYPE")
         .unwrap_or_else(|_| "chat_completions".into())
         .as_str()
     {
@@ -474,18 +469,18 @@ mod tests {
     #[test]
     fn managed_skills_opt_in_requires_both_roots_without_global_env_mutation() {
         let error = managed_skills_config_from_lookup(|name| match name {
-            "GENERAL_AGENT_MANAGED_SKILLS" => Some("1".into()),
-            "GENERAL_AGENT_APP_DATA_ROOT" => Some("/tmp/app".into()),
+            "AGENTWEAVE_MANAGED_SKILLS" => Some("1".into()),
+            "AGENTWEAVE_APP_DATA_ROOT" => Some("/tmp/app".into()),
             _ => None,
         })
         .err()
         .unwrap();
-        assert!(error.to_string().contains("GENERAL_AGENT_CACHE_ROOT"));
+        assert!(error.to_string().contains("AGENTWEAVE_CACHE_ROOT"));
 
         let config = managed_skills_config_from_lookup(|name| match name {
-            "GENERAL_AGENT_MANAGED_SKILLS" => Some("1".into()),
-            "GENERAL_AGENT_APP_DATA_ROOT" => Some("/tmp/app".into()),
-            "GENERAL_AGENT_CACHE_ROOT" => Some("/tmp/cache".into()),
+            "AGENTWEAVE_MANAGED_SKILLS" => Some("1".into()),
+            "AGENTWEAVE_APP_DATA_ROOT" => Some("/tmp/app".into()),
+            "AGENTWEAVE_CACHE_ROOT" => Some("/tmp/cache".into()),
             _ => None,
         })
         .unwrap()
@@ -517,7 +512,7 @@ mod tests {
     #[test]
     fn owner_management_policy_is_not_enabled_by_a_token_alone() {
         let config = owner_host_config_from_lookup(|name| match name {
-            "GENERAL_AGENT_OWNER_TOKEN" => Some("secret-token".into()),
+            "AGENTWEAVE_OWNER_TOKEN" => Some("secret-token".into()),
             _ => None,
         })
         .unwrap();
@@ -528,16 +523,16 @@ mod tests {
     #[test]
     fn enabled_owner_management_requires_a_nonempty_token() {
         let missing = owner_host_config_from_lookup(|name| match name {
-            "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
+            "AGENTWEAVE_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
             _ => None,
         })
         .err()
         .unwrap();
-        assert!(missing.to_string().contains("GENERAL_AGENT_OWNER_TOKEN"));
+        assert!(missing.to_string().contains("AGENTWEAVE_OWNER_TOKEN"));
 
         let empty = owner_host_config_from_lookup(|name| match name {
-            "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("diagnostics_only".into()),
-            "GENERAL_AGENT_OWNER_TOKEN" => Some("".into()),
+            "AGENTWEAVE_SKILL_MANAGEMENT_MODE" => Some("diagnostics_only".into()),
+            "AGENTWEAVE_OWNER_TOKEN" => Some("".into()),
             _ => None,
         })
         .err()
@@ -548,9 +543,9 @@ mod tests {
     #[test]
     fn owner_host_context_is_fixed_and_minimally_granted() {
         let config = owner_host_config_from_lookup(|name| match name {
-            "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
-            "GENERAL_AGENT_OWNER_TOKEN" => Some("secret-token".into()),
-            "GENERAL_AGENT_APPROVER_TOKEN" => Some("approver-token".into()),
+            "AGENTWEAVE_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
+            "AGENTWEAVE_OWNER_TOKEN" => Some("secret-token".into()),
+            "AGENTWEAVE_APPROVER_TOKEN" => Some("approver-token".into()),
             _ => None,
         })
         .unwrap()
@@ -600,19 +595,17 @@ mod tests {
     #[test]
     fn owner_only_requires_a_distinct_approver_token() {
         let missing = owner_host_config_from_lookup(|name| match name {
-            "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
-            "GENERAL_AGENT_OWNER_TOKEN" => Some("owner-token".into()),
+            "AGENTWEAVE_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
+            "AGENTWEAVE_OWNER_TOKEN" => Some("owner-token".into()),
             _ => None,
         })
         .err()
         .unwrap();
-        assert!(missing.to_string().contains("GENERAL_AGENT_APPROVER_TOKEN"));
+        assert!(missing.to_string().contains("AGENTWEAVE_APPROVER_TOKEN"));
 
         let duplicate = owner_host_config_from_lookup(|name| match name {
-            "GENERAL_AGENT_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
-            "GENERAL_AGENT_OWNER_TOKEN" | "GENERAL_AGENT_APPROVER_TOKEN" => {
-                Some("same-token".into())
-            }
+            "AGENTWEAVE_SKILL_MANAGEMENT_MODE" => Some("owner_only".into()),
+            "AGENTWEAVE_OWNER_TOKEN" | "AGENTWEAVE_APPROVER_TOKEN" => Some("same-token".into()),
             _ => None,
         })
         .err()
@@ -672,7 +665,7 @@ mod tests {
         let package_root = source_root.join("runtime");
         write_runtime_package(&package_root, "bundle_tool").await;
         tokio::fs::write(
-            package_root.join("general-agent.json"),
+            package_root.join("agentweave.json"),
             serde_json::json!({
                 "schemaVersion": 1,
                 "id": "com.example.bundle",
@@ -755,7 +748,7 @@ mod tests {
             .err()
             .unwrap();
 
-        assert!(format!("{error:#}").contains("requires GENERAL_AGENT_BUILTIN_SKILLS_MODE=bundle"));
+        assert!(format!("{error:#}").contains("requires AGENTWEAVE_BUILTIN_SKILLS_MODE=bundle"));
         tokio::fs::remove_file(root.join("skill-bundle.json"))
             .await
             .unwrap();
@@ -871,7 +864,7 @@ mod tests {
     async fn write_runtime_package(package_root: &Path, tool_name: &str) {
         tokio::fs::create_dir_all(package_root).await.unwrap();
         tokio::fs::write(
-            package_root.join("general-agent.json"),
+            package_root.join("agentweave.json"),
             serde_json::json!({
                 "schemaVersion": 1,
                 "id": "com.example.server-runtime",
@@ -917,7 +910,7 @@ mod tests {
         tokio::fs::create_dir_all(package_root).await.unwrap();
         let name = id.rsplit('.').next().unwrap();
         tokio::fs::write(
-            package_root.join("general-agent.json"),
+            package_root.join("agentweave.json"),
             serde_json::json!({
                 "schemaVersion": 1,
                 "id": id,
@@ -956,10 +949,7 @@ mod tests {
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "general-agent-main-{name}-{}",
-            uuid::Uuid::new_v4()
-        ))
+        std::env::temp_dir().join(format!("agentweave-main-{name}-{}", uuid::Uuid::new_v4()))
     }
 
     async fn remove_test_dir(path: PathBuf) {

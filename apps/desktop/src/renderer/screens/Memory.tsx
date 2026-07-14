@@ -65,7 +65,7 @@ export function Memory({ onBack }: MemoryProps): JSX.Element {
       const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
       const link = document.createElement("a");
       link.href = url;
-      link.download = `generalagent-memory-${new Date().toISOString().slice(0, 10)}.json`;
+      link.download = `agentweave-memory-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
       URL.revokeObjectURL(url);
     } catch (reason) {

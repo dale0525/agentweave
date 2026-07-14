@@ -306,7 +306,7 @@ async fn staging_write_rejects_revision_replacement_before_temp_open() {
     let original = candidate.with_extension("original");
     tokio::fs::rename(&candidate, &original).await.unwrap();
     tokio::fs::create_dir(&candidate).await.unwrap();
-    for name in ["general-agent.json", "SKILL.md"] {
+    for name in ["agentweave.json", "SKILL.md"] {
         tokio::fs::copy(original.join(name), candidate.join(name))
             .await
             .unwrap();
@@ -906,7 +906,7 @@ async fn write_package(id: &str) -> TempDir {
     let root = tempdir().unwrap();
     let name = id.rsplit('.').next().unwrap();
     tokio::fs::write(
-        root.path().join("general-agent.json"),
+        root.path().join("agentweave.json"),
         json!({
             "schemaVersion": 1,
             "id": id,

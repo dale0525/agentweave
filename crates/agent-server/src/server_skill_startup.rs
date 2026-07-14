@@ -54,21 +54,21 @@ pub(super) fn managed_skills_config_from_lookup<F>(
 where
     F: Fn(&str) -> Option<std::ffi::OsString>,
 {
-    if lookup("GENERAL_AGENT_MANAGED_SKILLS").as_deref() != Some(std::ffi::OsStr::new("1")) {
+    if lookup("AGENTWEAVE_MANAGED_SKILLS").as_deref() != Some(std::ffi::OsStr::new("1")) {
         return Ok(None);
     }
     let required_root = |name: &str| -> anyhow::Result<PathBuf> {
         let value = lookup(name).ok_or_else(|| {
-            anyhow::anyhow!("{name} is required when GENERAL_AGENT_MANAGED_SKILLS=1")
+            anyhow::anyhow!("{name} is required when AGENTWEAVE_MANAGED_SKILLS=1")
         })?;
         if value.is_empty() {
-            anyhow::bail!("{name} cannot be empty when GENERAL_AGENT_MANAGED_SKILLS=1");
+            anyhow::bail!("{name} cannot be empty when AGENTWEAVE_MANAGED_SKILLS=1");
         }
         Ok(PathBuf::from(value))
     };
     Ok(Some(ManagedSkillsConfig {
-        app_data_root: required_root("GENERAL_AGENT_APP_DATA_ROOT")?,
-        cache_root: required_root("GENERAL_AGENT_CACHE_ROOT")?,
+        app_data_root: required_root("AGENTWEAVE_APP_DATA_ROOT")?,
+        cache_root: required_root("AGENTWEAVE_CACHE_ROOT")?,
     }))
 }
 
@@ -76,17 +76,17 @@ pub(super) fn builtin_skills_mode_from_lookup<F>(lookup: F) -> anyhow::Result<Bu
 where
     F: Fn(&str) -> Option<std::ffi::OsString>,
 {
-    let Some(value) = lookup("GENERAL_AGENT_BUILTIN_SKILLS_MODE") else {
+    let Some(value) = lookup("AGENTWEAVE_BUILTIN_SKILLS_MODE") else {
         return Ok(BuiltinSkillsMode::Auto);
     };
     let value = value
         .into_string()
-        .map_err(|_| anyhow::anyhow!("GENERAL_AGENT_BUILTIN_SKILLS_MODE must be valid UTF-8"))?;
+        .map_err(|_| anyhow::anyhow!("AGENTWEAVE_BUILTIN_SKILLS_MODE must be valid UTF-8"))?;
     match value.as_str() {
         "auto" => Ok(BuiltinSkillsMode::Auto),
         "directory" => Ok(BuiltinSkillsMode::Directory),
         "bundle" => Ok(BuiltinSkillsMode::Bundle),
-        _ => anyhow::bail!("GENERAL_AGENT_BUILTIN_SKILLS_MODE must be auto, directory, or bundle"),
+        _ => anyhow::bail!("AGENTWEAVE_BUILTIN_SKILLS_MODE must be auto, directory, or bundle"),
     }
 }
 
@@ -148,7 +148,7 @@ pub(super) async fn load_skill_manager_with_mode(
 
 pub(super) async fn load_app_package_source_from_env()
 -> anyhow::Result<Option<Arc<dyn SkillSource>>> {
-    let Ok(app_root) = std::env::var("GENERAL_AGENT_APP_ROOT") else {
+    let Ok(app_root) = std::env::var("AGENTWEAVE_APP_ROOT") else {
         return Ok(None);
     };
     let packages = PathBuf::from(app_root).join("packages");
@@ -182,9 +182,7 @@ pub(super) async fn load_builtin_skill_source(
         }
         BuiltinSkillsMode::Auto if evidence.generation_container => true,
         BuiltinSkillsMode::Auto if evidence.direct_metadata => {
-            anyhow::bail!(
-                "direct bundle startup requires GENERAL_AGENT_BUILTIN_SKILLS_MODE=bundle"
-            );
+            anyhow::bail!("direct bundle startup requires AGENTWEAVE_BUILTIN_SKILLS_MODE=bundle");
         }
         BuiltinSkillsMode::Auto => false,
     };

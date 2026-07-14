@@ -11,7 +11,7 @@ struct TestDir(std::path::PathBuf);
 impl TestDir {
     fn new(name: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "general-agent-startup-{name}-{}",
+            "agentweave-startup-{name}-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&path).unwrap();
@@ -205,7 +205,7 @@ async fn automatic_startup_rejects_direct_bundle_without_authoritative_mode() {
     .err()
     .unwrap();
 
-    assert!(format!("{error:#}").contains("requires GENERAL_AGENT_BUILTIN_SKILLS_MODE=bundle"));
+    assert!(format!("{error:#}").contains("requires AGENTWEAVE_BUILTIN_SKILLS_MODE=bundle"));
 }
 
 async fn copy_direct_bundle(generation: &Path, direct: &Path) {
@@ -216,7 +216,7 @@ async fn copy_direct_bundle(generation: &Path, direct: &Path) {
             .await
             .unwrap();
     }
-    for name in ["general-agent.json", "skill.json", "index.js"] {
+    for name in ["agentweave.json", "skill.json", "index.js"] {
         tokio::fs::copy(
             generation.join("com.example.startup").join(name),
             package.join(name),
@@ -271,7 +271,7 @@ async fn assert_bundle_startup_error(name: &str, contents: &str) {
 async fn write_package(root: &Path) {
     tokio::fs::create_dir_all(root).await.unwrap();
     tokio::fs::write(
-        root.join("general-agent.json"),
+        root.join("agentweave.json"),
         serde_json::json!({
             "schemaVersion": 1,
             "id": "com.example.startup",

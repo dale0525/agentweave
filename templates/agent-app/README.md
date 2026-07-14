@@ -1,6 +1,6 @@
 # {{APP_NAME}}
 
-This directory is a GeneralAgent Agent App scaffold for `{{APP_ID}}`.
+This directory is a AgentWeave Agent App scaffold for `{{APP_ID}}`.
 
 The application manifest is `agent-app.json`. Prompts live under `prompts/`, UTF-8 localization catalogs under `locales/`, optional app-local packages under `packages/`, VS Code-compatible themes under `themes/`, and packaged fonts under `fonts/`.
 
@@ -10,7 +10,7 @@ English and Simplified Chinese catalogs are included initially. Keep their messa
 
 The default security posture is deny-by-default. Credentials stay in the host vault, and external side effects require host approval.
 
-Validate this scaffold from the GeneralAgent repository root:
+Validate this scaffold from the AgentWeave repository root:
 
 ```bash
 pixi run scaffold-agent-app -- --validate <path-to-this-directory>
@@ -19,7 +19,7 @@ pixi run scaffold-agent-app -- --validate <path-to-this-directory>
 Run the App in the local Server and Desktop development hosts:
 
 ```bash
-GENERAL_AGENT_APP_ROOT=<path-to-this-directory> pixi run dev
+AGENTWEAVE_APP_ROOT=<path-to-this-directory> pixi run dev
 ```
 
 Before adding a package, declare its version, capabilities, runtime tools, and connectors in `agent-app.json`. Prompt instructions can shape behavior but cannot grant permissions or bypass host approval.

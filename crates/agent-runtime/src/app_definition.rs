@@ -154,7 +154,7 @@ mod tests {
               "package": {"id": "com.example.secretary.app", "version": "1.0.0"},
               "compatibility": {"runtime": ">=0.1.0, <1.0.0", "platforms": ["server"]},
               "requires": {
-                "packages": [{"id": "generalagent.foundation.memory", "version": "^0.1"}],
+                "packages": [{"id": "agentweave.foundation.memory", "version": "^0.1"}],
                 "capabilities": ["memory.read"],
                 "runtimeTools": ["memory.search"],
                 "connectors": ["mail.fake"]
@@ -178,7 +178,7 @@ mod tests {
             runtime_version: "0.1.0".parse().unwrap(),
             platform: PlatformId::Server,
             packages: BTreeMap::from([(
-                "generalagent.foundation.memory".into(),
+                "agentweave.foundation.memory".into(),
                 "0.1.2".parse().unwrap(),
             )]),
             capabilities: BTreeSet::from(["memory.read".into()]),

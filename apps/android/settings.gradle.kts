@@ -14,5 +14,5 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "GeneralAgentAndroid"
+rootProject.name = "AgentWeaveAndroid"
 include(":app")

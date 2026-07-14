@@ -12,4 +12,4 @@ Declare each theme in `agent-app.json`:
 }
 ```
 
-Add the entry to `appearance.themes.custom`, then use its `id` as `appearance.defaultTheme` if it should be the initial theme. GeneralAgent maps VS Code workbench colors to the App surface; syntax token colors remain valid theme data but do not affect chat typography.
+Add the entry to `appearance.themes.custom`, then use its `id` as `appearance.defaultTheme` if it should be the initial theme. AgentWeave maps VS Code workbench colors to the App surface; syntax token colors remain valid theme data but do not affect chat typography.

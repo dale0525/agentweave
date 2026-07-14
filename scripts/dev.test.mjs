@@ -12,7 +12,7 @@ test("dev command starts the API server and desktop app", () => {
       command: "cargo",
       args: ["run", "-p", "agent-server", "--bin", "agent-server"],
       env: {
-        GENERAL_AGENT_DEV_API: "1"
+        AGENTWEAVE_DEV_API: "1"
       }
     },
     {

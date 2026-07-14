@@ -143,7 +143,7 @@ async fn builder_rejects_duplicate_ids_across_roots() {
 #[tokio::test]
 async fn builder_rejects_an_unresolved_package_set() {
     let fixture = BundleFixture::with_packages(&["com.example.alpha"]).await;
-    let descriptor_path = fixture.source_roots[0].join("com.example.alpha/general-agent.json");
+    let descriptor_path = fixture.source_roots[0].join("com.example.alpha/agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
     descriptor["requires"]["packages"] = serde_json::json!(["com.example.missing"]);
@@ -185,7 +185,7 @@ async fn builder_rejects_source_output_overlap_in_both_directions() {
 #[tokio::test]
 async fn builder_rejects_content_excluded_by_include_flags() {
     let fixture = BundleFixture::with_packages(&["com.example.alpha"]).await;
-    let descriptor_path = fixture.source_roots[0].join("com.example.alpha/general-agent.json");
+    let descriptor_path = fixture.source_roots[0].join("com.example.alpha/agentweave.json");
     let mut descriptor: serde_json::Value =
         serde_json::from_slice(&tokio::fs::read(&descriptor_path).await.unwrap()).unwrap();
     descriptor["package"]["includeRuntime"] = serde_json::Value::Bool(false);
@@ -488,7 +488,7 @@ async fn write_runtime_package(root: &Path, id: &str) {
         }
     });
     tokio::fs::write(
-        root.join("general-agent.json"),
+        root.join("agentweave.json"),
         serde_json::to_vec_pretty(&descriptor).unwrap(),
     )
     .await

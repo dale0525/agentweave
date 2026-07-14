@@ -12,8 +12,8 @@ const desktopLocalization = buildDesktopLocalization();
 export default defineConfig({
   base: "./",
   define: {
-    __GENERAL_AGENT_APPEARANCE__: JSON.stringify(desktopAppearance),
-    __GENERAL_AGENT_LOCALIZATION__: JSON.stringify(desktopLocalization)
+    __AGENTWEAVE_APPEARANCE__: JSON.stringify(desktopAppearance),
+    __AGENTWEAVE_LOCALIZATION__: JSON.stringify(desktopLocalization)
   },
   build: {
     rollupOptions: {
@@ -26,7 +26,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/__owner/requester": ownerProxy(process.env.GENERAL_AGENT_OWNER_TOKEN),
+      "/__owner/requester": ownerProxy(process.env.AGENTWEAVE_OWNER_TOKEN),
     }
   },
   test: {
