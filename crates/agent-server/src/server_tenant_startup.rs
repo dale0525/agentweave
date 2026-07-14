@@ -1,5 +1,6 @@
 use crate::api;
 use agent_runtime::platform::{CapabilitySet, PlatformId};
+use agent_runtime::prompt_composer::AppPromptConfig;
 use agent_runtime::skill_policy::SkillManagementPolicy;
 use agent_runtime::tools::RuntimeConfig;
 use agent_runtime::turn::ModelClient;
@@ -12,7 +13,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::server_skill_startup::{
-    BuiltinSkillsMode, ManagedSkillsConfig, load_builtin_skill_source,
+    BuiltinSkillsMode, ManagedSkillsConfig, load_app_package_source_from_env,
+    load_builtin_skill_source,
 };
 
 pub(super) async fn build_managed_tenant_registry(
@@ -22,10 +24,14 @@ pub(super) async fn build_managed_tenant_registry(
     management_policy: SkillManagementPolicy,
 ) -> anyhow::Result<TenantSkillManagerRegistry> {
     let builtin = load_builtin_skill_source(skills_root, builtin_mode).await?;
+    let mut sources = vec![builtin];
+    if let Some(app_packages) = load_app_package_source_from_env().await? {
+        sources.push(app_packages);
+    }
     let factory = FilesystemTenantSkillManagerFactory::new(TenantSkillManagerConfig {
         data_root: managed.app_data_root,
         cache_root: managed.cache_root,
-        sources: vec![builtin],
+        sources,
         platform: PlatformId::Desktop,
         capabilities: CapabilitySet::desktop_runtime(),
         protected_packages: Vec::new(),
@@ -37,29 +43,46 @@ pub(super) async fn build_managed_tenant_registry(
     Ok(TenantSkillManagerRegistry::new(factory))
 }
 
-pub(super) fn build_tenant_app_state<C>(
+pub(super) async fn build_tenant_app_state<C>(
     runtime: Arc<TenantSkillRuntime>,
     model: C,
     runtime_config: RuntimeConfig,
+    app_prompt: AppPromptConfig,
     owner_management: Option<OwnerApiConfig>,
-) -> api::AppState
+) -> anyhow::Result<api::AppState>
 where
     C: ModelClient + 'static,
 {
-    if let Some(owner_management) = owner_management {
-        api::AppState::new_with_model_skill_manager_and_owner(
+    let memory_tools =
+        super::server_app::resolve_memory_tools(&runtime.storage, &app_prompt).await?;
+    let connector_foundation =
+        super::server_app::resolve_connector_tools(&runtime.storage, &app_prompt).await?;
+    let connector_tools = connector_foundation
+        .as_ref()
+        .map(|foundation| foundation.tools.clone());
+    let state = if let Some(owner_management) = owner_management {
+        api::AppState::new_with_model_app_foundations_skill_manager_and_owner(
             runtime.storage.clone(),
             model,
             runtime.manager.clone(),
             runtime_config,
+            app_prompt,
+            api::AppFoundationRuntimes::new(memory_tools, connector_tools),
             owner_management,
         )
     } else {
-        api::AppState::new_with_model_and_skill_manager(
+        api::AppState::new_with_model_app_foundations_and_skill_manager(
             runtime.storage.clone(),
             model,
             runtime.manager.clone(),
             runtime_config,
+            app_prompt,
+            memory_tools,
+            connector_tools,
         )
-    }
+    };
+    Ok(match connector_foundation {
+        Some(foundation) => state.with_mail_actions(foundation.actions),
+        None => state,
+    })
 }

@@ -6,9 +6,27 @@ use crate::types::{
     MobileDiagnostics, MobileInitConfig, MobileMessageDto, MobileModelConfigDto, MobileSessionDto,
     MobileSkillDto, MobileTurnDto,
 };
+use agent_runtime::app_definition::ResolvedAgentApp;
+use agent_runtime::automation::{
+    DeclarativeScheduledRunExecutor, NotificationDeliveryOutcome, NotificationRecord,
+    NotificationStore, SchedulerRunner,
+};
+use agent_runtime::connector::ConnectorRuntime;
+use agent_runtime::connector_ledger::SqliteConnectorActionLedger;
+use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
+use agent_runtime::credential::{CredentialScope, CredentialVault, InMemorySecretStore};
+use agent_runtime::foundation_actions::MailActionService;
+use agent_runtime::mail::{MailAccount, MailAddress};
+use agent_runtime::mail_connector_transport::MailConnectorTransport;
+use agent_runtime::mail_fake::FakeMailConnector;
+use agent_runtime::memory::{MemoryProvider, MemoryScope};
+use agent_runtime::memory_tools::MemoryToolRuntime;
 use agent_runtime::mobile_host::{HttpMobileRuntimeHost, MobileRuntimeInit, SecretResolver};
 use agent_runtime::model_config::StoredModelConfig;
 use agent_runtime::platform::{CapabilitySet, PlatformId};
+use agent_runtime::prompt_composer::AppPromptConfig;
+use agent_runtime::scheduler::{ScheduledJob, ScheduledJobRequest, SchedulerStore};
+use agent_runtime::session::ConversationScope;
 use agent_runtime::skill_bundle::BundleSkillSource;
 use agent_runtime::skill_management::{
     CreateSkillDraftRequest, DraftFileUpdate, OwnerSkillManagementService, SkillActionFacts,
@@ -20,12 +38,15 @@ use agent_runtime::skill_policy::{
     ActorContext, SkillManagementMode, SkillManagementPolicy, SkillOperation,
 };
 use agent_runtime::skill_recovery::RecoveryStatus;
-use agent_runtime::skill_source::{ManagedSkillSource, SkillLayer, SkillSource};
+use agent_runtime::skill_source::{
+    DirectorySkillSource, ManagedSkillSource, SkillLayer, SkillSource,
+};
 use agent_runtime::skill_state::{SkillApprovalRecord, SkillSnapshotStatus, SkillStateStore};
 use agent_runtime::skill_store::{SkillRevisionStore, SkillStorePaths};
 use agent_runtime::storage::Storage;
 use agent_runtime::tools::RuntimeConfig;
 use anyhow::{Context, Result};
+use chrono::{Duration as ChronoDuration, Utc};
 use model_gateway::provider::EndpointType;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -35,6 +56,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+#[path = "runtime_support.rs"]
+mod support;
+use support::*;
 
 pub struct MobileRuntime {
     tokio: Runtime,
@@ -51,6 +77,13 @@ pub struct MobileRuntime {
     reload_status: MonotonicReloadStatus,
     model_configured: AtomicBool,
     cancellation: CancellationToken,
+    app_prompt: AppPromptConfig,
+    conversation_scope: ConversationScope,
+    memory_tools: Option<MemoryToolRuntime>,
+    connector_tools: Option<ConnectorToolRuntime>,
+    mail_actions: Option<MailActionService>,
+    scheduler: SchedulerStore,
+    notifications: NotificationStore,
 }
 
 impl MobileRuntime {
@@ -61,6 +94,13 @@ impl MobileRuntime {
         let app_data_dir = prepare_private_root(&config.app_data_dir)?;
         let cache_dir = prepare_private_root(&config.cache_dir)?;
         let allowed_roots = [app_data_dir.clone(), cache_dir.clone()];
+        let app_package_path = config
+            .app_package_dir
+            .as_deref()
+            .map(|path| {
+                resolve_private_path(path, &app_data_dir, &allowed_roots, "App package directory")
+            })
+            .transpose()?;
         let builtin_skills_path = resolve_private_path(
             &config.builtin_skills_dir,
             &app_data_dir,
@@ -142,7 +182,17 @@ impl MobileRuntime {
         let revisions = SkillRevisionStore::new(store_paths, state.clone());
         let builtin = tokio.block_on(BundleSkillSource::open(&builtin_skills_path))?;
         let managed = ManagedSkillSource::from_store(revisions.clone());
-        let sources: Vec<Arc<dyn SkillSource>> = vec![Arc::new(builtin), Arc::new(managed)];
+        let mut sources: Vec<Arc<dyn SkillSource>> = vec![Arc::new(builtin)];
+        if let Some(app_package_path) = &app_package_path {
+            let packages = app_package_path.join("packages");
+            if packages.is_dir() {
+                sources.push(Arc::new(DirectorySkillSource::new(
+                    SkillLayer::Session,
+                    packages,
+                )));
+            }
+        }
+        sources.push(Arc::new(managed));
         let skill_manager =
             tokio.block_on(SkillManager::new_deferred_managed(SkillManagerConfig {
                 sources,
@@ -172,15 +222,36 @@ impl MobileRuntime {
             .block_on(skill_manager.startup_reconcile())
             .context("managed skill startup reconciliation failed")?;
         let model_configured = tokio.block_on(storage.load_model_config())?.is_some();
+        let mut excluded_roots = vec![
+            prepared_builtin,
+            managed_skills_path,
+            staging_skills_path,
+            quarantine_skills_path,
+            database_path,
+        ];
+        if let Some(path) = &app_package_path {
+            excluded_roots.push(path.clone());
+        }
         let runtime_config = RuntimeConfig::workspace_write(&app_data_dir, &app_data_dir)
-            .excluding_workspace_roots([
-                prepared_builtin,
-                managed_skills_path,
-                staging_skills_path,
-                quarantine_skills_path,
-                database_path,
-            ]);
-
+            .excluding_workspace_roots(excluded_roots);
+        let app_prompt = if let Some(path) = app_package_path {
+            let inventory =
+                crate::mobile_app::runtime_inventory(&skill_manager, &init, &runtime_config)?;
+            tokio
+                .block_on(ResolvedAgentApp::load(&path, &inventory, 64 * 1024))?
+                .prompt
+        } else {
+            AppPromptConfig::default()
+        };
+        let conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
+        let memory_tools = tokio.block_on(resolve_mobile_memory(&storage, &app_prompt))?;
+        let connector_foundation = tokio.block_on(resolve_mobile_mail(&storage, &app_prompt))?;
+        let connector_tools = connector_foundation
+            .as_ref()
+            .map(|foundation| foundation.0.clone());
+        let mail_actions = connector_foundation.map(|foundation| foundation.1);
+        let scheduler = tokio.block_on(SchedulerStore::from_storage(&storage))?;
+        let notifications = tokio.block_on(NotificationStore::from_storage(&storage))?;
         Ok(Self {
             tokio,
             storage,
@@ -199,7 +270,55 @@ impl MobileRuntime {
             ),
             model_configured: AtomicBool::new(model_configured),
             cancellation: CancellationToken::new(),
+            app_prompt,
+            conversation_scope,
+            memory_tools,
+            connector_tools,
+            mail_actions,
+            scheduler,
+            notifications,
         })
+    }
+
+    pub fn create_scheduled_job(&self, request: ScheduledJobRequest) -> Result<ScheduledJob> {
+        self.tokio
+            .block_on(self.scheduler.create_job(request, Utc::now()))
+    }
+
+    pub fn run_scheduler_tick(&self, limit: usize) -> Result<usize> {
+        let runner = SchedulerRunner::new(
+            self.scheduler.clone(),
+            self.notifications.clone(),
+            DeclarativeScheduledRunExecutor,
+            format!("android:{}", std::process::id()),
+            ChronoDuration::seconds(60),
+        )?;
+        self.tokio.block_on(runner.tick(Utc::now(), limit))
+    }
+
+    pub fn claim_notifications(
+        &self,
+        worker: &str,
+        limit: usize,
+    ) -> Result<Vec<NotificationRecord>> {
+        self.tokio.block_on(self.notifications.claim_due(
+            worker,
+            Utc::now(),
+            ChronoDuration::seconds(60),
+            limit,
+        ))
+    }
+
+    pub fn finish_notification(
+        &self,
+        notification_id: &str,
+        worker: &str,
+        outcome: NotificationDeliveryOutcome,
+    ) -> Result<bool> {
+        self.tokio.block_on(
+            self.notifications
+                .finish(notification_id, worker, outcome, Utc::now()),
+        )
     }
 
     pub fn diagnostics(&self) -> Result<MobileDiagnostics> {
@@ -208,6 +327,9 @@ impl MobileRuntime {
             .tokio
             .block_on(self.skill_state.count_quarantined_revisions())?;
         Ok(MobileDiagnostics {
+            app_id: self.app_prompt.identity.app_id.clone(),
+            app_version: self.app_prompt.identity.version.clone(),
+            app_display_name: self.app_prompt.identity.display_name.clone(),
             platform: platform_name(self.init.platform).to_string(),
             capabilities: self.init.capabilities.names().to_vec(),
             database_ready: self.database_ready,
@@ -527,24 +649,37 @@ impl MobileRuntime {
             anyhow::bail!("session title is required");
         }
         self.tokio
-            .block_on(self.storage.create_session(title))
+            .block_on(
+                self.storage
+                    .create_scoped_session(&self.conversation_scope, title),
+            )
             .map(Into::into)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<MobileSessionDto>> {
         self.tokio
-            .block_on(self.storage.list_sessions())
+            .block_on(self.storage.list_scoped_sessions(&self.conversation_scope))
             .map(|sessions| sessions.into_iter().map(Into::into).collect())
     }
 
     pub fn get_messages(&self, session_id: &str) -> Result<Vec<MobileMessageDto>> {
         self.tokio
-            .block_on(self.storage.list_messages(session_id))
+            .block_on(
+                self.storage
+                    .list_scoped_messages(&self.conversation_scope, session_id),
+            )
             .map(|messages| messages.into_iter().map(Into::into).collect())
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
-        self.tokio.block_on(self.storage.delete_session(session_id))
+        if let Some(memory) = &self.memory_tools {
+            self.tokio
+                .block_on(memory.on_session_end(session_id, Vec::new()))?;
+        }
+        self.tokio.block_on(
+            self.storage
+                .delete_scoped_session(&self.conversation_scope, session_id),
+        )
     }
 
     pub fn save_model_config(&self, config: MobileModelConfigDto) -> Result<()> {
@@ -561,6 +696,123 @@ impl MobileRuntime {
             .map(|config| config.map(Into::into))
     }
 
+    pub fn list_memories(&self, query: &str, limit: usize) -> Result<serde_json::Value> {
+        let memory = self
+            .memory_tools
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Memory Foundation is disabled"))?;
+        self.tokio.block_on(memory.execute(
+            "memory_search",
+            serde_json::json!({"query": query, "limit": limit}),
+        ))
+    }
+
+    pub fn forget_memory(
+        &self,
+        memory_id: &str,
+        expected_version: u64,
+    ) -> Result<serde_json::Value> {
+        let memory = self
+            .memory_tools
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Memory Foundation is disabled"))?;
+        self.tokio.block_on(memory.execute(
+            "memory_forget",
+            serde_json::json!({
+                "id": memory_id,
+                "expectedVersion": expected_version,
+                "reason": "user_request"
+            }),
+        ))
+    }
+
+    pub fn export_memories(&self) -> Result<serde_json::Value> {
+        let memory = self
+            .memory_tools
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Memory Foundation is disabled"))?;
+        self.tokio.block_on(memory.execute(
+            "memory_export",
+            serde_json::json!({"includeProposals": false, "includeTombstones": false}),
+        ))
+    }
+
+    pub fn list_mail_accounts(&self) -> Result<serde_json::Value> {
+        self.execute_mail("mail_accounts_list", serde_json::json!({}), false)
+    }
+
+    pub fn mail_account_status(&self, account_id: &str) -> Result<serde_json::Value> {
+        self.execute_mail(
+            "mail_account_status",
+            serde_json::json!({"accountId": account_id}),
+            false,
+        )
+    }
+
+    pub fn connect_mail_account(&self, account_id: &str) -> Result<serde_json::Value> {
+        self.execute_mail(
+            "mail_account_connect",
+            serde_json::json!({"accountId": account_id}),
+            true,
+        )
+    }
+
+    pub fn disconnect_mail_account(&self, account_id: &str) -> Result<serde_json::Value> {
+        self.execute_mail(
+            "mail_account_disconnect",
+            serde_json::json!({"accountId": account_id}),
+            true,
+        )
+    }
+
+    pub fn list_foundation_actions(
+        &self,
+    ) -> Result<Vec<agent_runtime::foundation_actions::PendingFoundationAction>> {
+        self.tokio.block_on(
+            self.mail_actions
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Foundation action service is disabled"))?
+                .list_actions(),
+        )
+    }
+
+    pub fn resolve_foundation_action(
+        &self,
+        approval_id: &str,
+        decision: agent_runtime::approval::ApprovalDecision,
+    ) -> Result<agent_runtime::foundation_actions::FoundationActionResolution> {
+        self.tokio.block_on(
+            self.mail_actions
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Foundation action service is disabled"))?
+                .resolve(approval_id, decision, "local-user", chrono::Utc::now()),
+        )
+    }
+
+    fn execute_mail(
+        &self,
+        tool: &str,
+        arguments: serde_json::Value,
+        trusted_host_action: bool,
+    ) -> Result<serde_json::Value> {
+        let tools = self
+            .connector_tools
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Mail Foundation is disabled"))?;
+        let call_id = Uuid::new_v4().to_string();
+        let envelope = if trusted_host_action {
+            self.tokio
+                .block_on(tools.execute_trusted_host_action(tool, &call_id, arguments))?
+        } else {
+            self.tokio
+                .block_on(tools.execute(tool, &call_id, arguments))?
+        };
+        envelope
+            .get("output")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("connector output is missing"))
+    }
+
     pub fn send_message(
         &self,
         session_id: &str,
@@ -571,15 +823,18 @@ impl MobileRuntime {
             anyhow::bail!("runtime closed");
         }
         self.tokio.block_on(async {
-            if !self.storage.session_exists(session_id).await? {
+            if !self
+                .storage
+                .session_exists_scoped(&self.conversation_scope, session_id)
+                .await?
+            {
                 anyhow::bail!("session not found");
             }
             self.storage
-                .append_message(session_id, "user", content)
+                .append_scoped_message(&self.conversation_scope, session_id, "user", content)
                 .await?;
             Ok::<_, anyhow::Error>(())
         })?;
-
         let cancellation = self.cancellation.clone();
         let result = self.tokio.block_on(async {
             let turn = async {
@@ -605,6 +860,8 @@ impl MobileRuntime {
                     config,
                     TransientSecretResolver::new(api_key),
                 )?
+                .with_app_prompt(self.app_prompt.clone())
+                .with_foundations(self.memory_tools.clone(), self.connector_tools.clone())
                 .with_owner_turn_context(self.skill_management.clone(), self.actor_context.clone());
                 host.send_message_after_user_persisted(session_id, content)
                     .await
@@ -628,316 +885,79 @@ impl MobileRuntime {
     }
 }
 
-struct MonotonicReloadStatus {
-    generation: AtomicU64,
-    status: Mutex<String>,
-}
-
-impl MonotonicReloadStatus {
-    fn new(generation: u64, status: impl Into<String>) -> Self {
-        Self {
-            generation: AtomicU64::new(generation),
-            status: Mutex::new(status.into()),
-        }
-    }
-
-    fn record(&self, generation: u64) {
-        let mut current = self.generation.load(Ordering::Acquire);
-        loop {
-            if generation <= current {
-                return;
-            }
-            match self.generation.compare_exchange_weak(
-                current,
-                generation,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(observed) => current = observed,
-            }
-        }
-        if let Ok(mut status) = self.status.lock()
-            && self.generation.load(Ordering::Acquire) == generation
-        {
-            *status = format!("published_generation_{generation}");
-        }
-    }
-
-    fn snapshot(&self) -> String {
-        self.status
-            .lock()
-            .map(|status| status.clone())
-            .unwrap_or_else(|_| "unavailable".into())
-    }
-}
-
-struct TransientSecretResolver {
-    secret: Mutex<Option<String>>,
-}
-
-impl TransientSecretResolver {
-    fn new(secret: Option<String>) -> Self {
-        Self {
-            secret: Mutex::new(secret),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl SecretResolver for TransientSecretResolver {
-    async fn resolve_secret(&self, _secret_id: &str) -> Result<Option<String>> {
-        Ok(self
-            .secret
-            .lock()
-            .map_err(|_| anyhow::anyhow!("model secret lock is unavailable"))?
-            .take())
-    }
-}
-
-impl From<agent_runtime::session::Session> for MobileSessionDto {
-    fn from(session: agent_runtime::session::Session) -> Self {
-        Self {
-            id: session.id,
-            title: session.title,
-            created_at: session.created_at.to_rfc3339(),
-            updated_at: session.updated_at.to_rfc3339(),
-        }
-    }
-}
-
-impl From<agent_runtime::session::Message> for MobileMessageDto {
-    fn from(message: agent_runtime::session::Message) -> Self {
-        Self {
-            id: message.id,
-            session_id: message.session_id,
-            role: message.role,
-            content: message.content,
-            created_at: message.created_at.to_rfc3339(),
-        }
-    }
-}
-
-impl TryFrom<MobileModelConfigDto> for StoredModelConfig {
-    type Error = anyhow::Error;
-
-    fn try_from(config: MobileModelConfigDto) -> Result<Self> {
-        let endpoint_type = match config.endpoint_type.as_str() {
-            "responses" => EndpointType::Responses,
-            "chat_completions" => EndpointType::ChatCompletions,
-            "completion" => EndpointType::Completion,
-            value => anyhow::bail!("unsupported endpoint type: {value}"),
-        };
-        let stored = Self {
-            provider_id: config.provider_id,
-            provider_name: config.provider_name,
-            endpoint_type,
-            base_url: config.base_url,
-            model_name: config.model_name,
-            secret_id: config.secret_id,
-            headers: config.headers,
-        };
-        stored.validate().map_err(anyhow::Error::msg)?;
-        Ok(stored)
-    }
-}
-
-impl From<StoredModelConfig> for MobileModelConfigDto {
-    fn from(config: StoredModelConfig) -> Self {
-        Self {
-            provider_id: config.provider_id,
-            provider_name: config.provider_name,
-            endpoint_type: match config.endpoint_type {
-                EndpointType::Responses => "responses",
-                EndpointType::ChatCompletions => "chat_completions",
-                EndpointType::Completion => "completion",
-            }
-            .into(),
-            base_url: config.base_url,
-            model_name: config.model_name,
-            secret_id: config.secret_id,
-            headers: config.headers,
-        }
-    }
-}
-
-fn parse_platform(value: &str) -> Result<PlatformId> {
-    match value {
-        "android" => Ok(PlatformId::Android),
-        "desktop" => Ok(PlatformId::Desktop),
-        "ios" => Ok(PlatformId::Ios),
-        "web" => Ok(PlatformId::Web),
-        "server" => Ok(PlatformId::Server),
-        _ => anyhow::bail!("unsupported platform: {value}"),
-    }
-}
-
-fn platform_name(platform: PlatformId) -> &'static str {
-    match platform {
-        PlatformId::Android => "android",
-        PlatformId::Desktop => "desktop",
-        PlatformId::Ios => "ios",
-        PlatformId::Web => "web",
-        PlatformId::Server => "server",
-    }
-}
-
-fn management_mode_name(mode: SkillManagementMode) -> &'static str {
-    match mode {
-        SkillManagementMode::Disabled => "disabled",
-        SkillManagementMode::DiagnosticsOnly => "diagnostics_only",
-        SkillManagementMode::OwnerOnly => "owner_only",
-        SkillManagementMode::OrganizationManaged => "organization_managed",
-    }
-}
-
-fn recovery_status_name(status: RecoveryStatus) -> &'static str {
-    match status {
-        RecoveryStatus::CurrentSnapshotValid => "current_snapshot_valid",
-        RecoveryStatus::NewSnapshotPublished => "new_snapshot_published",
-        RecoveryStatus::LastKnownGoodRestored => "last_known_good_restored",
-    }
-}
-
-fn reload_report_value(
-    report: &agent_runtime::skill_manager::SkillReloadReport,
-) -> serde_json::Value {
-    serde_json::json!({
-        "previous_generation": report.previous_generation,
-        "active_generation": report.active_generation,
-        "active_packages": report.active_packages,
-        "inactive_packages": report.inactive_packages,
-    })
-}
-
-fn approval_value(approval: &SkillApprovalRecord) -> serde_json::Value {
-    serde_json::json!({
-        "approval_id": approval.approval_id,
-        "package_id": approval.package_id.as_str(),
-        "permission_diff": approval.permission_diff,
-        "requested_by": approval.requested_by,
-        "revision_id": approval.revision_id,
-        "status": approval.status.as_str(),
-    })
-}
-
-fn ensure_distinct_roots(roots: &[&Path]) -> Result<()> {
-    for (index, left) in roots.iter().enumerate() {
-        for right in roots.iter().skip(index + 1) {
-            if left.starts_with(right) || right.starts_with(left) {
-                anyhow::bail!("skill layer roots must be separate app-private directories");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn ensure_database_outside_skill_roots(database: &Path, roots: &[&Path]) -> Result<()> {
-    if roots.iter().any(|root| database.starts_with(root)) {
-        anyhow::bail!("database path must stay outside skill roots");
-    }
-    Ok(())
-}
-
-fn ensure_configured_store_root(configured: &Path, prepared: &Path, label: &str) -> Result<()> {
-    let configured = configured
-        .canonicalize()
-        .with_context(|| format!("failed to canonicalize {label}"))?;
-    let prepared = prepared
-        .canonicalize()
-        .with_context(|| format!("failed to canonicalize prepared {label}"))?;
-    if configured != prepared {
-        anyhow::bail!("{label} must use the app-private managed skill layout");
-    }
-    Ok(())
-}
-
-fn prepare_private_root(path: &str) -> Result<PathBuf> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path)
-        && (metadata.file_type().is_symlink() || !metadata.is_dir())
-    {
-        anyhow::bail!("app-private root must be a real directory: {path}");
-    }
-    std::fs::create_dir_all(path)?;
-    Path::new(path)
-        .canonicalize()
-        .with_context(|| format!("failed to canonicalize app-private root: {path}"))
-}
-
-fn resolve_private_path(
-    raw_path: &str,
-    default_root: &Path,
-    allowed_roots: &[PathBuf],
-    label: &str,
-) -> Result<PathBuf> {
-    let candidate = Path::new(raw_path);
-    let absolute_candidate = if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        default_root.join(candidate)
-    };
-    let resolved_path = canonicalize_existing_ancestors(&absolute_candidate)?;
-
-    if allowed_roots
+async fn resolve_mobile_memory(
+    storage: &Storage,
+    app_prompt: &AppPromptConfig,
+) -> Result<Option<MemoryToolRuntime>> {
+    if !app_prompt
+        .identity
+        .enabled_capabilities
         .iter()
-        .any(|root| resolved_path.starts_with(root))
+        .any(|capability| capability == "memory-provider")
     {
-        Ok(resolved_path)
-    } else {
-        anyhow::bail!("{label} must stay inside app-private storage")
+        return Ok(None);
     }
+    let provider = Arc::new(storage.local_memory_provider());
+    provider.initialize().await?;
+    Ok(Some(MemoryToolRuntime::new(
+        provider,
+        MemoryScope::new(&app_prompt.identity.app_id, "local", "local-user")?,
+    )?))
 }
 
-fn canonicalize_existing_ancestors(path: &Path) -> Result<PathBuf> {
-    let mut resolved = PathBuf::new();
-
-    for component in path.components() {
-        match component {
-            std::path::Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
-            std::path::Component::RootDir => resolved.push(component.as_os_str()),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                anyhow::bail!("path must stay inside app-private storage")
-            }
-            std::path::Component::Normal(part) => {
-                let next = resolved.join(part);
-                if next.exists() {
-                    resolved = next.canonicalize().with_context(|| {
-                        format!("failed to canonicalize existing path: {}", next.display())
-                    })?;
-                } else {
-                    resolved = next;
-                }
-            }
-        }
+async fn resolve_mobile_mail(
+    storage: &Storage,
+    app_prompt: &AppPromptConfig,
+) -> Result<Option<(ConnectorToolRuntime, MailActionService)>> {
+    if !app_prompt
+        .identity
+        .enabled_capabilities
+        .iter()
+        .any(|capability| capability == "mail-connector")
+    {
+        return Ok(None);
     }
-
-    Ok(resolved)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::MonotonicReloadStatus;
-    use std::sync::Arc;
-
-    #[test]
-    fn concurrent_reload_status_never_regresses_generation() {
-        let status = Arc::new(MonotonicReloadStatus::new(1, "startup"));
-        let (published, wait_for_publish) = std::sync::mpsc::channel();
-        let newer = status.clone();
-        let newer_thread = std::thread::spawn(move || {
-            newer.record(5);
-            published.send(()).unwrap();
-        });
-        let older = status.clone();
-        let older_thread = std::thread::spawn(move || {
-            wait_for_publish.recv().unwrap();
-            older.record(4);
-        });
-
-        newer_thread.join().unwrap();
-        older_thread.join().unwrap();
-
-        assert_eq!(status.snapshot(), "published_generation_5");
-    }
+    let mail = Arc::new(FakeMailConnector::new());
+    mail.add_account(MailAccount {
+        id: "primary".into(),
+        display_name: "Example Mail".into(),
+        primary_address: MailAddress {
+            name: Some("Local User".into()),
+            address: "local@example.test".into(),
+        },
+        addresses: Vec::new(),
+        provider_reference: None,
+    })?;
+    let ledger = Arc::new(SqliteConnectorActionLedger::from_storage(storage).await?);
+    let vault = CredentialVault::new(Arc::new(InMemorySecretStore::default()));
+    let runtime = Arc::new(ConnectorRuntime::new_with_ledger(
+        Some(vault),
+        ledger,
+        256 * 1024,
+    )?);
+    runtime
+        .register(
+            MailConnectorTransport::descriptor("Fake Mail", true),
+            Arc::new(MailConnectorTransport::new(mail)),
+        )
+        .await?;
+    let scope = CredentialScope {
+        app_id: app_prompt.identity.app_id.clone(),
+        tenant_id: "local".into(),
+        user_id: "local-user".into(),
+    };
+    let context = Arc::new(EphemeralConnectorContextProvider::fail_closed(
+        scope.clone(),
+        Duration::from_secs(30),
+    )?);
+    let tools = ConnectorToolRuntime::load(runtime, context.clone())?;
+    let actions = MailActionService::new(
+        storage,
+        tools.clone(),
+        context,
+        scope,
+        "generalagent.mobile.foundation-actions.v1",
+    )
+    .await?;
+    Ok(Some((tools, actions)))
 }

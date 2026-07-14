@@ -3,7 +3,7 @@ use agent_runtime::{
     skill::SkillRegistry,
     skill_catalog::SkillCatalog,
     skill_migration::{LegacySkillMigrationDiagnostic, diagnostics_from_packages},
-    skill_package::SkillPackageId,
+    skill_package::{SkillPackageId, SkillPackageKind},
     skill_source::{DirectorySkillSource, DiscoveredSkillPackage, SkillLayer},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -315,29 +315,91 @@ fn validate_requirements(
                 ));
             }
         }
-        for capability in &package.descriptor.requires.capabilities {
-            if !capabilities.contains(capability) {
+        if package.descriptor.kind == SkillPackageKind::HostToolsOnly
+            && package
+                .descriptor
+                .requires
+                .capabilities
+                .iter()
+                .any(|capability| capability == "host-tools")
+        {
+            validate_host_requirements(package, errors);
+        } else {
+            for capability in &package.descriptor.requires.capabilities {
+                if !capabilities.contains(capability) {
+                    errors.push(package_error(
+                        package,
+                        format!("unresolved capability: {capability}"),
+                    ));
+                }
+            }
+            for connector in &package.descriptor.requires.connectors {
                 errors.push(package_error(
                     package,
-                    format!("unresolved capability: {capability}"),
+                    format!("unresolved connector: {connector}"),
                 ));
             }
-        }
-        for connector in &package.descriptor.requires.connectors {
-            errors.push(package_error(
-                package,
-                format!("unresolved connector: {connector}"),
-            ));
-        }
-        for tool in &package.descriptor.requires.runtime_tools {
-            if !canonical_tool_identity_is_valid(tool) || !runtime_tools.contains(tool) {
-                errors.push(package_error(
-                    package,
-                    format!("unresolved canonical runtime tool: {tool}"),
-                ));
+            for tool in &package.descriptor.requires.runtime_tools {
+                if !canonical_tool_identity_is_valid(tool) || !runtime_tools.contains(tool) {
+                    errors.push(package_error(
+                        package,
+                        format!("unresolved canonical runtime tool: {tool}"),
+                    ));
+                }
             }
         }
     }
+}
+
+fn validate_host_requirements(
+    package: &DiscoveredSkillPackage,
+    errors: &mut Vec<SkillReleaseDiagnostic>,
+) {
+    for capability in &package.descriptor.requires.capabilities {
+        if !host_requirement_name_is_valid(capability, 128) {
+            errors.push(package_error(
+                package,
+                format!("invalid host capability identity: {capability}"),
+            ));
+        }
+    }
+    for connector in &package.descriptor.requires.connectors {
+        if !host_requirement_name_is_valid(connector, 128) {
+            errors.push(package_error(
+                package,
+                format!("invalid host connector identity: {connector}"),
+            ));
+        }
+    }
+    for tool in &package.descriptor.requires.runtime_tools {
+        if !host_requirement_name_is_valid(tool, 64) {
+            errors.push(package_error(
+                package,
+                format!("invalid host tool identity: {tool}"),
+            ));
+        }
+    }
+}
+
+fn host_requirement_name_is_valid(value: &str, maximum: usize) -> bool {
+    if value.is_empty() || value.len() > maximum {
+        return false;
+    }
+    let (name, version) = match value.split_once('/') {
+        Some((name, version)) if !version.contains('/') => (name, Some(version)),
+        Some(_) => return false,
+        None => (value, None),
+    };
+    let name_is_valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
+    let version_is_valid = version.is_none_or(|version| {
+        version.strip_prefix('v').is_some_and(|digits| {
+            !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+        })
+    });
+    name_is_valid && version_is_valid
 }
 
 fn known_capabilities() -> BTreeSet<String> {

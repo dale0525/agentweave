@@ -37,6 +37,25 @@ pub enum RuntimeEvent {
         revision_id: String,
         generation: u64,
     },
+    SkillSelected {
+        skill_name: String,
+        reason: crate::skill_catalog::SkillSelectionReason,
+    },
+    MemoryRecalled {
+        memory_ids: Vec<String>,
+    },
+    MemoryRecallFailed {
+        message: String,
+    },
+    MemoryCandidatesProposed {
+        memory_ids: Vec<String>,
+    },
+    MemoryCandidateExtractionFailed {
+        message: String,
+    },
+    MemoryCompactionSynced {
+        memory_ids: Vec<String>,
+    },
     SkillRecoveryCompleted {
         status: crate::skill_recovery::RecoveryStatus,
         generation: u64,
@@ -64,6 +83,17 @@ pub enum RuntimeEvent {
         original_items: usize,
         compacted_items: usize,
         budget_bytes: usize,
+    },
+    StructuredContentPublished {
+        content: crate::structured_content::StructuredContent,
+    },
+    StructuredContentDeleted {
+        content_id: String,
+        owner: String,
+        revision: u64,
+    },
+    StructuredContentActionAccepted {
+        receipt: crate::structured_content::StructuredActionReceipt,
     },
     SubagentStarted {
         subagent_id: String,

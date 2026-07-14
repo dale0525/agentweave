@@ -1,13 +1,17 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Notification, safeStorage, shell } from "electron";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { registerApprovalWindowController } from "./approvalWindow";
 import { getDesktopWindowConfig } from "./index";
+import { registerModelSettingsController } from "./modelSettingsController";
+import { startDesktopNotificationWorker } from "./notificationWorker";
 import { configureRequesterWindowSecurity } from "./requesterWindowSecurity";
 
 let mainWindow: BrowserWindow | null = null;
 let disposeApproval: (() => void) | null = null;
+let disposeModelSettings: (() => void) | null = null;
+let disposeNotifications: (() => void) | null = null;
 
 app.whenReady().then(async () => {
   const rendererBase = process.env.GENERAL_AGENT_DESKTOP_URL;
@@ -37,12 +41,37 @@ app.whenReady().then(async () => {
     ipcMain,
     requesterWebContents: mainWindow.webContents
   });
+  disposeModelSettings = registerModelSettingsController({
+    ipcMain,
+    requesterWebContents: mainWindow.webContents,
+    safeStorage,
+    serverBaseUrl: process.env.GENERAL_AGENT_SERVER_URL,
+    storagePath: path.join(app.getPath("userData"), "model-settings.v1.json")
+  });
+  disposeNotifications = startDesktopNotificationWorker({
+    createNotification: (options) => {
+      const notification = new Notification(options);
+      return {
+        once: (event, listener) => {
+          if (event === "show") notification.once("show", () => listener());
+          else notification.once("failed", (_event, error) => listener(new Error(error)));
+        },
+        show: () => notification.show()
+      };
+    },
+    isSupported: () => Notification.isSupported(),
+    serverBaseUrl: process.env.GENERAL_AGENT_SERVER_URL
+  });
   await mainWindow.loadURL(mainUrl);
 });
 
 app.on("window-all-closed", () => {
   disposeApproval?.();
   disposeApproval = null;
+  disposeModelSettings?.();
+  disposeModelSettings = null;
+  disposeNotifications?.();
+  disposeNotifications = null;
   mainWindow = null;
   if (process.platform !== "darwin") app.quit();
 });

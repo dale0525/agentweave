@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundation Messaging"
+  short_description: "Draft and send channel messages safely"
+  default_prompt: "Use $foundation-messaging to draft this reply and show me the exact send preview."

@@ -14,12 +14,15 @@ import { DeleteSkillDialog } from "../components/developer/DeleteSkillDialog";
 import { SkillCreatorPromptDialog } from "../components/developer/SkillCreatorPromptDialog";
 import { SkillPackageDetail } from "../components/developer/SkillPackageDetail";
 import { SkillPackageList } from "../components/developer/SkillPackageList";
+import { useI18n } from "../i18n/I18nProvider";
 
 type DeveloperToolsProps = {
   onBack: () => void;
 };
 
 export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
+  const { t } = useI18n();
+  const actionFailureMessage = t("developer.actionFailed");
   const [inventory, setInventory] = useState<DevSkillInventory | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -91,19 +94,19 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
         }
         if (options?.preserveInventoryOnError && inventoryRef.current) {
           setActionError(
-            options.failureMessage ?? "Action failed. Keep the current inventory and try again."
+            options.failureMessage ?? actionFailureMessage
           );
           return;
         }
 
         setInventory(null);
         setSelectedId(null);
-        setLoadError("Development API is not available");
+        setLoadError(t("developer.apiUnavailable"));
       } finally {
         finishOperation(operationId);
       }
     },
-    [beginOperation, finishOperation]
+    [actionFailureMessage, beginOperation, finishOperation, t]
   );
 
   useEffect(() => {
@@ -127,12 +130,12 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
       if (operationId !== operationSequenceRef.current) {
         return;
       }
-      setActionError("Action failed. Keep the current inventory and try again.");
+      setActionError(actionFailureMessage);
       setDeletePackage(null);
     } finally {
       finishOperation(operationId);
     }
-  }, [beginOperation, finishOperation]);
+  }, [actionFailureMessage, beginOperation, finishOperation]);
 
   const handleReload = useCallback(async () => {
     const operationId = beginOperation();
@@ -158,29 +161,29 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
       if (operationId !== operationSequenceRef.current) {
         return;
       }
-      setActionError("Action failed. Keep the current inventory and try again.");
+      setActionError(actionFailureMessage);
     } finally {
       finishOperation(operationId);
     }
-  }, [beginOperation, finishOperation]);
+  }, [actionFailureMessage, beginOperation, finishOperation]);
 
   return (
-    <main className="developer-screen" aria-label="Developer Tools">
+    <main className="developer-screen" aria-label={t("developer.ariaLabel")}>
       <header className="top-bar developer-top-bar">
-        <AppIconButton label="Back to settings" onClick={onBack}>
+        <AppIconButton label={t("common.backToSettings")} onClick={onBack}>
           <ArrowLeft aria-hidden="true" size={18} />
         </AppIconButton>
         <div className="top-bar-title">
-          <h1>Developer Tools</h1>
-          <p>{loadError ? "Development API disconnected" : "Development API connected"}</p>
+          <h1>{t("developer.title")}</h1>
+          <p>{loadError ? t("developer.apiDisconnected") : t("developer.apiConnected")}</p>
         </div>
         <div className="developer-top-bar-actions">
           <AppIconButton
             disabled={isLoading}
-            label="Refresh skill packages"
+            label={t("developer.refresh")}
             onClick={() => {
               void loadInventory(listDevSkills, {
-                failureMessage: "Action failed. Keep the current inventory and try again.",
+                failureMessage: actionFailureMessage,
                 preserveInventoryOnError: inventory !== null
               });
             }}
@@ -189,10 +192,10 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
           </AppIconButton>
           <AppIconButton
             disabled={isLoading}
-            label="Validate all skill packages"
+            label={t("developer.validateAll")}
             onClick={() => {
               void loadInventory(validateDevSkills, {
-                failureMessage: "Action failed. Keep the current inventory and try again.",
+                failureMessage: actionFailureMessage,
                 preserveInventoryOnError: true
               });
             }}
@@ -205,7 +208,7 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
       {actionError || activeSnapshotGeneration !== null ? (
         <div aria-live="polite" className="developer-status-banner" role="status">
           {activeSnapshotGeneration !== null ? (
-            <span>Active snapshot {activeSnapshotGeneration}</span>
+            <span>{t("developer.activeSnapshot", { generation: activeSnapshotGeneration })}</span>
           ) : null}
           {actionError ? (
             <>
@@ -219,8 +222,8 @@ export function DeveloperTools({ onBack }: DeveloperToolsProps): JSX.Element {
       <section className="developer-workbench" aria-busy={isLoading}>
         {loadError ? (
           <div className="developer-empty-state">
-            <h2>Development API is not available</h2>
-            <p>Start the server with GENERAL_AGENT_DEV_API=1 to manage local skills.</p>
+            <h2>{t("developer.apiUnavailable")}</h2>
+            <p>{t("developer.apiUnavailableHint")}</p>
           </div>
         ) : (
           <>

@@ -122,6 +122,11 @@ pub enum ToolPermission {
     ReadWorkspace,
     WriteWorkspace,
     ExecuteCommand,
+    ReadSensitive,
+    PersistData,
+    ExternalWrite,
+    DestructiveWrite,
+    CredentialAccess,
     ManageSkills,
 }
 
@@ -139,6 +144,9 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ToolSource {
     BuiltIn,
+    HostCapability {
+        capability: String,
+    },
     RuntimeSkill {
         skill_name: String,
         package_id: String,
@@ -205,6 +213,11 @@ pub fn permission_allowed(
         ToolPermission::ExecuteCommand => {
             mode == RuntimeMode::WorkspaceWrite && command_mode == CommandMode::Allowed
         }
+        ToolPermission::ReadSensitive
+        | ToolPermission::PersistData
+        | ToolPermission::ExternalWrite
+        | ToolPermission::DestructiveWrite
+        | ToolPermission::CredentialAccess => true,
         ToolPermission::ManageSkills => false,
     }
 }
@@ -217,6 +230,8 @@ pub struct ToolRegistry {
     external_definitions: Vec<ToolDefinition>,
     external_discovery: Vec<ToolDiscoveryItem>,
     connectors: Vec<ConnectorMetadata>,
+    connector_tools: Option<crate::connector_tools::ConnectorToolRuntime>,
+    memory: Option<crate::memory_tools::MemoryToolRuntime>,
     workspace_root: PathBuf,
     cwd: PathBuf,
     mode: RuntimeMode,
@@ -237,6 +252,8 @@ impl std::fmt::Debug for ToolRegistry {
             .debug_struct("ToolRegistry")
             .field("built_in_tools_enabled", &self.built_in_tools_enabled)
             .field("external_tools", &self.external_tools.len())
+            .field("has_memory", &self.memory.is_some())
+            .field("has_connector_tools", &self.connector_tools.is_some())
             .field("has_management", &self.management.is_some())
             .field("has_execution_observer", &self.execution_observer.is_some())
             .finish_non_exhaustive()
@@ -276,6 +293,8 @@ impl ToolRegistry {
             external_definitions,
             external_discovery,
             connectors: config.connectors.clone(),
+            connector_tools: None,
+            memory: None,
             workspace_root: config.workspace_root.clone(),
             cwd: config.cwd.clone(),
             mode: config.mode,
@@ -295,6 +314,22 @@ impl ToolRegistry {
     pub fn with_execution_observer(mut self, observer: Arc<dyn ToolExecutionObserver>) -> Self {
         self.execution_observer = Some(observer);
         self
+    }
+
+    pub fn try_with_memory_tools(
+        mut self,
+        memory: crate::memory_tools::MemoryToolRuntime,
+    ) -> anyhow::Result<Self> {
+        self.memory = Some(memory);
+        self.validate()
+    }
+
+    pub fn try_with_connector_tools(
+        mut self,
+        connectors: crate::connector_tools::ConnectorToolRuntime,
+    ) -> anyhow::Result<Self> {
+        self.connector_tools = Some(connectors);
+        self.validate()
     }
 
     pub(crate) fn with_turn_execution_lease(
@@ -340,6 +375,12 @@ impl ToolRegistry {
             Vec::new()
         };
         definitions.extend(self.external_definitions.clone());
+        if let Some(memory) = &self.memory {
+            definitions.extend(memory.definitions());
+        }
+        if let Some(connectors) = &self.connector_tools {
+            definitions.extend(connectors.definitions());
+        }
 
         let mut runtime_tools = self.skills.tools_with_runtime_sources();
         runtime_tools.sort_by(|left, right| left.canonical_id.cmp(&right.canonical_id));
@@ -404,6 +445,13 @@ impl ToolRegistry {
     }
 
     pub fn parallel_safe(&self, name: &str) -> bool {
+        if self
+            .connector_tools
+            .as_ref()
+            .is_some_and(|connectors| connectors.parallel_safe(name))
+        {
+            return true;
+        }
         self.definitions().into_iter().any(|definition| {
             definition.name == name
                 && definition.permission == ToolPermission::ReadWorkspace
@@ -515,6 +563,64 @@ impl ToolRegistry {
             );
         }
 
+        if let Some(memory) = &self.memory
+            && memory.handles(name)
+        {
+            let Some(definition) = memory
+                .definitions()
+                .into_iter()
+                .find(|definition| definition.name == name)
+            else {
+                return ToolDispatchOutcome::unobserved(registry_failure(
+                    name,
+                    call_id,
+                    "unknown_tool",
+                    "Memory host tool definition is unavailable",
+                    false,
+                    registry_metadata(started),
+                ));
+            };
+            if !permission_allowed(self.mode, self.command_mode, definition.permission) {
+                return ToolDispatchOutcome::unobserved(registry_failure(
+                    name,
+                    call_id,
+                    "permission_denied",
+                    "Memory host tool is not allowed by runtime policy",
+                    false,
+                    registry_metadata(started),
+                ));
+            }
+            let result = match memory.execute(name, arguments).await {
+                Ok(value) => ToolResult::success(name, call_id, value, registry_metadata(started)),
+                Err(error) => registry_failure(
+                    name,
+                    call_id,
+                    "memory_error",
+                    error.to_string(),
+                    false,
+                    registry_metadata(started),
+                ),
+            };
+            return ToolDispatchOutcome::unobserved(result);
+        }
+
+        if let Some(connectors) = &self.connector_tools
+            && connectors.handles(name)
+        {
+            let result = match connectors.execute(name, call_id, arguments).await {
+                Ok(value) => ToolResult::success(name, call_id, value, registry_metadata(started)),
+                Err(error) => registry_failure(
+                    name,
+                    call_id,
+                    crate::connector_tools::connector_authorization_error_code(&error),
+                    error.to_string(),
+                    error.to_string().contains("timed out"),
+                    registry_metadata(started),
+                ),
+            };
+            return ToolDispatchOutcome::unobserved(result);
+        }
+
         if let Some(tool) = self.external_tool(name) {
             if self.commands_blocked_by_exclusions
                 && tool
@@ -608,6 +714,14 @@ impl ToolRegistry {
 
     fn runtime_timeout_attribution(&self, name: &str) -> Option<ToolExecutionAttribution> {
         if (self.built_in_tools_enabled && BuiltInTools::handles(name))
+            || self
+                .memory
+                .as_ref()
+                .is_some_and(|memory| memory.handles(name))
+            || self
+                .connector_tools
+                .as_ref()
+                .is_some_and(|connectors| connectors.handles(name))
             || self.external_tool(name).is_some()
         {
             return None;
@@ -649,6 +763,14 @@ impl ToolRegistry {
     fn runtime_alias_is_shadowed(&self, name: &str) -> bool {
         SkillManagementTools::is_reserved_name(name)
             || (self.built_in_tools_enabled && BuiltInTools::handles(name))
+            || self
+                .memory
+                .as_ref()
+                .is_some_and(|memory| memory.handles(name))
+            || self
+                .connector_tools
+                .as_ref()
+                .is_some_and(|connectors| connectors.handles(name))
             || self.external_tool(name).is_some()
             || self
                 .skills

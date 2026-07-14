@@ -44,7 +44,7 @@ class RuntimeBridgeTest {
     assertEquals("disabled", request.getJSONObject("skill_policy").getString("mode"))
     assertEquals("anonymous", request.getJSONObject("actor_context").getString("actor_id"))
     assertEquals("android", request.getString("platform"))
-    assertEquals(4, request.getJSONArray("capabilities").length())
+    assertEquals(androidMvpCapabilities().size, request.getJSONArray("capabilities").length())
     assertFalse(native.initializeRequest.contains("api_key", ignoreCase = true))
   }
 
@@ -508,6 +508,49 @@ class RuntimeBridgeTest {
         secretId = null,
       ),
     )
+  }
+
+  @Test
+  fun automationOperationsPreserveLimitsClaimsAndDeliveryOutcomes() {
+    val requests = mutableListOf<JSONObject>()
+    val native = object : NativeRuntimeApi {
+      override fun initialize(requestJson: String): String = error("not used")
+
+      override fun invoke(handle: Long, requestJson: String): String {
+        val request = JSONObject(requestJson)
+        requests += request
+        val data = when (request.getString("operation")) {
+          "run_scheduler_tick" -> "2"
+          "claim_notifications" ->
+            """[{"notification_id":"notification-1","request":{"channel":"android","title":"Daily brief","body":"Two updates","data":{"route":"briefing"}},"status":"delivering","attempt_count":1}]"""
+          "finish_notification" -> "true"
+          else -> error("unexpected operation")
+        }
+        return """{"ok":true,"data":$data}"""
+      }
+
+      override fun sendMessage(handle: Long, requestJson: String, apiKey: String?): String =
+        error("not used")
+
+      override fun close(handle: Long): String = """{"ok":true,"data":null}"""
+    }
+    val client = RuntimeClient(9L, native)
+
+    assertEquals(2, client.runSchedulerTick(limit = 7))
+    val notification = client.claimNotifications(worker = "worker-1", limit = 3).single()
+    assertEquals("notification-1", notification.notificationId)
+    assertEquals("Daily brief", notification.title)
+    assertEquals("{\"route\":\"briefing\"}", notification.dataJson)
+    assertTrue(client.finishNotificationDelivered("notification-1", "worker-1", "android:42"))
+    assertTrue(client.finishNotificationUncertain("notification-2", "worker-1", "delivery failed"))
+
+    assertEquals(7, requests[0].getInt("limit"))
+    assertEquals("worker-1", requests[1].getString("worker"))
+    assertEquals(3, requests[1].getInt("limit"))
+    assertEquals("delivered", requests[2].getJSONObject("outcome").getString("kind"))
+    assertEquals("android:42", requests[2].getJSONObject("outcome").getString("delivery_id"))
+    assertEquals("uncertain", requests[3].getJSONObject("outcome").getString("kind"))
+    assertEquals("delivery failed", requests[3].getJSONObject("outcome").getString("message"))
   }
 
   @Test

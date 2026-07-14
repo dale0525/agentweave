@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundation Notifications"
+  short_description: "Deliver quiet-hours-aware notifications"
+  default_prompt: "Use $foundation-notifications to notify me when this result is ready."

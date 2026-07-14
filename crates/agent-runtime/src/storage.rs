@@ -1,7 +1,8 @@
+use crate::events::RuntimeEvent;
 use crate::model_config::StoredModelConfig;
-use crate::session::{Message, Session};
+use crate::session::{ConversationEventRecord, ConversationScope, Message, Session};
 use chrono::{DateTime, Duration, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{Executor, Row, Sqlite, SqlitePool};
 use std::str::FromStr;
 use std::time::Duration as StdDuration;
@@ -71,12 +72,17 @@ impl Storage {
         .await?;
 
         crate::skill_state::migrate(self.pool()).await?;
+        crate::conversation_migration::migrate(self.pool()).await?;
 
         Ok(())
     }
 
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub fn local_memory_provider(&self) -> crate::memory_sqlite::SqliteMemoryProvider {
+        crate::memory_sqlite::SqliteMemoryProvider::from_pool(self.pool.clone())
     }
 
     pub async fn close(&self) {
@@ -88,6 +94,16 @@ impl Storage {
     }
 
     pub async fn create_session(&self, title: &str) -> anyhow::Result<Session> {
+        self.create_scoped_session(&ConversationScope::default(), title)
+            .await
+    }
+
+    pub async fn create_scoped_session(
+        &self,
+        scope: &ConversationScope,
+        title: &str,
+    ) -> anyhow::Result<Session> {
+        scope.validate()?;
         let now = Utc::now();
         let session = Session {
             id: Uuid::new_v4().to_string(),
@@ -96,11 +112,16 @@ impl Storage {
             updated_at: now,
         };
 
-        sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)")
+        sqlx::query("INSERT INTO sessions (id, title, created_at, updated_at, app_id, agent_id, tenant_id, user_id, device_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(&session.id)
             .bind(&session.title)
             .bind(session.created_at.to_rfc3339())
             .bind(session.updated_at.to_rfc3339())
+            .bind(&scope.app_id)
+            .bind(&scope.agent_id)
+            .bind(&scope.tenant_id)
+            .bind(&scope.user_id)
+            .bind(&scope.device_id)
             .execute(&self.pool)
             .await?;
 
@@ -113,6 +134,22 @@ impl Storage {
         role: &str,
         content: &str,
     ) -> anyhow::Result<Message> {
+        self.append_scoped_message(&ConversationScope::default(), session_id, role, content)
+            .await
+    }
+
+    pub async fn append_scoped_message(
+        &self,
+        scope: &ConversationScope,
+        session_id: &str,
+        role: &str,
+        content: &str,
+    ) -> anyhow::Result<Message> {
+        scope.validate()?;
+        anyhow::ensure!(
+            self.session_exists_scoped(scope, session_id).await?,
+            "session not found in conversation scope"
+        );
         let created_at = Utc::now();
         let message = build_message(session_id, role, content, created_at);
         let mut tx = self.pool.begin().await?;
@@ -129,6 +166,35 @@ impl Storage {
         user_content: &str,
         assistant_content: &str,
     ) -> anyhow::Result<(Message, Message)> {
+        self.append_scoped_turn(
+            &ConversationScope::default(),
+            session_id,
+            user_content,
+            assistant_content,
+        )
+        .await
+    }
+
+    pub async fn append_scoped_turn(
+        &self,
+        scope: &ConversationScope,
+        session_id: &str,
+        user_content: &str,
+        assistant_content: &str,
+    ) -> anyhow::Result<(Message, Message)> {
+        self.append_scoped_turn_with_events(scope, session_id, user_content, assistant_content, &[])
+            .await
+    }
+
+    pub async fn append_scoped_turn_with_events(
+        &self,
+        scope: &ConversationScope,
+        session_id: &str,
+        user_content: &str,
+        assistant_content: &str,
+        events: &[RuntimeEvent],
+    ) -> anyhow::Result<(Message, Message)> {
+        scope.validate()?;
         let user_created_at = Utc::now();
         let assistant_created_at = user_created_at + Duration::microseconds(1);
         let user_message = build_message(session_id, "user", user_content, user_created_at);
@@ -140,17 +206,61 @@ impl Storage {
         );
         let mut tx = self.pool.begin().await?;
 
+        anyhow::ensure!(
+            scoped_session_exists(&mut *tx, scope, session_id).await?,
+            "session not found in conversation scope"
+        );
+
         insert_message(&mut *tx, &user_message).await?;
         insert_message(&mut *tx, &assistant_message).await?;
+        insert_runtime_events(&mut tx, session_id, events, assistant_created_at).await?;
         touch_session(&mut *tx, session_id, assistant_created_at).await?;
         tx.commit().await?;
 
         Ok((user_message, assistant_message))
     }
 
+    pub async fn append_scoped_assistant_with_events(
+        &self,
+        scope: &ConversationScope,
+        session_id: &str,
+        assistant_content: &str,
+        events: &[RuntimeEvent],
+    ) -> anyhow::Result<Message> {
+        scope.validate()?;
+        let created_at = Utc::now();
+        let assistant_message =
+            build_message(session_id, "assistant", assistant_content, created_at);
+        let mut tx = self.pool.begin().await?;
+        anyhow::ensure!(
+            scoped_session_exists(&mut *tx, scope, session_id).await?,
+            "session not found in conversation scope"
+        );
+        insert_message(&mut *tx, &assistant_message).await?;
+        insert_runtime_events(&mut tx, session_id, events, created_at).await?;
+        touch_session(&mut *tx, session_id, created_at).await?;
+        tx.commit().await?;
+        Ok(assistant_message)
+    }
+
     pub async fn session_exists(&self, session_id: &str) -> anyhow::Result<bool> {
-        let exists: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
+        self.session_exists_scoped(&ConversationScope::default(), session_id)
+            .await
+    }
+
+    pub async fn session_exists_scoped(
+        &self,
+        scope: &ConversationScope,
+        session_id: &str,
+    ) -> anyhow::Result<bool> {
+        scope.validate()?;
+        let exists: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND app_id = ? AND agent_id = ? AND tenant_id = ? AND user_id = ? AND device_id = ?)")
             .bind(session_id)
+            .bind(&scope.app_id)
+            .bind(&scope.agent_id)
+            .bind(&scope.tenant_id)
+            .bind(&scope.user_id)
+            .bind(&scope.device_id)
             .fetch_one(&self.pool)
             .await?;
 
@@ -158,10 +268,25 @@ impl Storage {
     }
 
     pub async fn list_messages(&self, session_id: &str) -> anyhow::Result<Vec<Message>> {
+        self.list_scoped_messages(&ConversationScope::default(), session_id)
+            .await
+    }
+
+    pub async fn list_scoped_messages(
+        &self,
+        scope: &ConversationScope,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<Message>> {
+        scope.validate()?;
         let rows = sqlx::query(
-            "SELECT id, session_id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC, id ASC",
+            "SELECT m.id, m.session_id, m.role, m.content, m.created_at FROM messages m INNER JOIN sessions s ON s.id = m.session_id WHERE m.session_id = ? AND s.app_id = ? AND s.agent_id = ? AND s.tenant_id = ? AND s.user_id = ? AND s.device_id = ? ORDER BY m.created_at ASC, m.id ASC",
         )
         .bind(session_id)
+        .bind(&scope.app_id)
+        .bind(&scope.agent_id)
+        .bind(&scope.tenant_id)
+        .bind(&scope.user_id)
+        .bind(&scope.device_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -181,9 +306,23 @@ impl Storage {
     }
 
     pub async fn list_sessions(&self) -> anyhow::Result<Vec<Session>> {
+        self.list_scoped_sessions(&ConversationScope::default())
+            .await
+    }
+
+    pub async fn list_scoped_sessions(
+        &self,
+        scope: &ConversationScope,
+    ) -> anyhow::Result<Vec<Session>> {
+        scope.validate()?;
         let rows = sqlx::query(
-            "SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC, created_at DESC, id ASC",
+            "SELECT id, title, created_at, updated_at FROM sessions WHERE app_id = ? AND agent_id = ? AND tenant_id = ? AND user_id = ? AND device_id = ? ORDER BY updated_at DESC, created_at DESC, id ASC",
         )
+        .bind(&scope.app_id)
+        .bind(&scope.agent_id)
+        .bind(&scope.tenant_id)
+        .bind(&scope.user_id)
+        .bind(&scope.device_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -202,7 +341,24 @@ impl Storage {
     }
 
     pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<()> {
+        self.delete_scoped_session(&ConversationScope::default(), session_id)
+            .await
+    }
+
+    pub async fn delete_scoped_session(
+        &self,
+        scope: &ConversationScope,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        scope.validate()?;
         let mut tx = self.pool.begin().await?;
+        if !scoped_session_exists(&mut *tx, scope, session_id).await? {
+            return Ok(());
+        }
+        sqlx::query("DELETE FROM conversation_events WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM messages WHERE session_id = ?")
             .bind(session_id)
             .execute(&mut *tx)
@@ -213,6 +369,70 @@ impl Storage {
             .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn list_conversation_events(
+        &self,
+        scope: &ConversationScope,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<ConversationEventRecord>> {
+        scope.validate()?;
+        let rows = sqlx::query(
+            "SELECT e.id, e.session_id, e.event_index, e.kind, e.payload_json, e.created_at FROM conversation_events e INNER JOIN sessions s ON s.id = e.session_id WHERE e.session_id = ? AND s.app_id = ? AND s.agent_id = ? AND s.tenant_id = ? AND s.user_id = ? AND s.device_id = ? ORDER BY e.event_index",
+        )
+        .bind(session_id)
+        .bind(&scope.app_id)
+        .bind(&scope.agent_id)
+        .bind(&scope.tenant_id)
+        .bind(&scope.user_id)
+        .bind(&scope.device_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let created_at: String = row.try_get("created_at")?;
+                let payload_json: String = row.try_get("payload_json")?;
+                Ok(ConversationEventRecord {
+                    id: row.try_get("id")?,
+                    session_id: row.try_get("session_id")?,
+                    event_index: row.try_get("event_index")?,
+                    kind: row.try_get("kind")?,
+                    payload: serde_json::from_str(&payload_json)?,
+                    created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+                })
+            })
+            .collect()
+    }
+
+    pub async fn search_scoped_messages(
+        &self,
+        scope: &ConversationScope,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        scope.validate()?;
+        anyhow::ensure!(
+            !query.trim().is_empty(),
+            "conversation search query is required"
+        );
+        anyhow::ensure!(
+            (1..=100).contains(&limit),
+            "conversation search limit is invalid"
+        );
+        let pattern = format!("%{}%", query.trim());
+        let rows = sqlx::query(
+            "SELECT m.id, m.session_id, m.role, m.content, m.created_at FROM messages m INNER JOIN sessions s ON s.id = m.session_id WHERE s.app_id = ? AND s.agent_id = ? AND s.tenant_id = ? AND s.user_id = ? AND s.device_id = ? AND m.content LIKE ? ORDER BY m.created_at DESC, m.id ASC LIMIT ?",
+        )
+        .bind(&scope.app_id)
+        .bind(&scope.agent_id)
+        .bind(&scope.tenant_id)
+        .bind(&scope.user_id)
+        .bind(&scope.device_id)
+        .bind(pattern)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(message_from_row).collect()
     }
 
     pub async fn save_model_config(&self, config: &StoredModelConfig) -> anyhow::Result<()> {
@@ -275,6 +495,72 @@ where
     Ok(())
 }
 
+fn message_from_row(row: SqliteRow) -> anyhow::Result<Message> {
+    let created_at: String = row.try_get("created_at")?;
+    Ok(Message {
+        id: row.try_get("id")?,
+        session_id: row.try_get("session_id")?,
+        role: row.try_get("role")?,
+        content: row.try_get("content")?,
+        created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+    })
+}
+
+async fn scoped_session_exists<'a, E>(
+    executor: E,
+    scope: &ConversationScope,
+    session_id: &str,
+) -> anyhow::Result<bool>
+where
+    E: Executor<'a, Database = Sqlite>,
+{
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND app_id = ? AND agent_id = ? AND tenant_id = ? AND user_id = ? AND device_id = ?)",
+    )
+    .bind(session_id)
+    .bind(&scope.app_id)
+    .bind(&scope.agent_id)
+    .bind(&scope.tenant_id)
+    .bind(&scope.user_id)
+    .bind(&scope.device_id)
+    .fetch_one(executor)
+    .await?;
+    Ok(exists != 0)
+}
+
+async fn insert_runtime_events(
+    executor: &mut sqlx::SqliteConnection,
+    session_id: &str,
+    events: &[RuntimeEvent],
+    created_at: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let first_index: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(event_index) + 1, 0) FROM conversation_events WHERE session_id = ?",
+    )
+    .bind(session_id)
+    .fetch_one(&mut *executor)
+    .await?;
+    for (offset, event) in events.iter().enumerate() {
+        let payload = serde_json::to_value(event)?;
+        let kind = payload
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("runtime event is missing a type"))?;
+        sqlx::query(
+            "INSERT INTO conversation_events(id, session_id, event_index, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(session_id)
+        .bind(first_index + offset as i64)
+        .bind(kind)
+        .bind(serde_json::to_string(&payload)?)
+        .bind((created_at + Duration::microseconds(offset as i64)).to_rfc3339())
+        .execute(&mut *executor)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn touch_session<'a, E>(
     executor: E,
     session_id: &str,
@@ -291,6 +577,10 @@ where
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "storage_conversation_tests.rs"]
+mod conversation_tests;
 
 #[cfg(test)]
 mod tests {

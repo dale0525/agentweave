@@ -1,7 +1,8 @@
 use crate::events::RuntimeEvent;
 use crate::model_config::StoredModelConfig;
 use crate::platform::{CapabilitySet, PlatformId};
-use crate::session::{Message, Session};
+use crate::prompt_composer::AppPromptConfig;
+use crate::session::{ConversationScope, Message, Session, messages_to_model_history};
 use crate::skill::SkillRegistry;
 use crate::skill_catalog::SkillCatalog;
 use crate::skill_management::OwnerSkillManagementService;
@@ -59,6 +60,10 @@ pub struct MobileRuntimeHost<C> {
     skill_manager: SkillManager,
     runtime_config: RuntimeConfig,
     init: MobileRuntimeInit,
+    app_prompt: AppPromptConfig,
+    conversation_scope: ConversationScope,
+    memory: Option<crate::memory_tools::MemoryToolRuntime>,
+    connector_tools: Option<crate::connector_tools::ConnectorToolRuntime>,
 }
 
 impl<C> MobileRuntimeHost<C>
@@ -92,29 +97,62 @@ where
     ) -> anyhow::Result<Self> {
         validate_mobile_manager_context(&init, &skill_manager)?;
         let runtime_config = mobile_safe_runtime_config(&init, runtime_config);
+        let app_prompt = AppPromptConfig::default();
+        let conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
         Ok(Self {
             storage,
             model: Arc::new(model),
             skill_manager,
             runtime_config,
             init,
+            app_prompt,
+            conversation_scope,
+            memory: None,
+            connector_tools: None,
         })
     }
 
+    pub fn with_app_prompt(mut self, app_prompt: AppPromptConfig) -> Self {
+        self.conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
+        self.app_prompt = app_prompt;
+        self
+    }
+
+    pub fn with_foundations(
+        mut self,
+        memory: Option<crate::memory_tools::MemoryToolRuntime>,
+        connector_tools: Option<crate::connector_tools::ConnectorToolRuntime>,
+    ) -> Self {
+        self.memory = memory;
+        self.connector_tools = connector_tools;
+        self
+    }
+
     pub async fn create_session(&self, title: &str) -> anyhow::Result<Session> {
-        self.storage.create_session(title).await
+        self.storage
+            .create_scoped_session(&self.conversation_scope, title)
+            .await
     }
 
     pub async fn list_sessions(&self) -> anyhow::Result<Vec<Session>> {
-        self.storage.list_sessions().await
+        self.storage
+            .list_scoped_sessions(&self.conversation_scope)
+            .await
     }
 
     pub async fn get_messages(&self, session_id: &str) -> anyhow::Result<Vec<Message>> {
-        self.storage.list_messages(session_id).await
+        self.storage
+            .list_scoped_messages(&self.conversation_scope, session_id)
+            .await
     }
 
     pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<()> {
-        self.storage.delete_session(session_id).await
+        if let Some(memory) = &self.memory {
+            memory.on_session_end(session_id, Vec::new()).await?;
+        }
+        self.storage
+            .delete_scoped_session(&self.conversation_scope, session_id)
+            .await
     }
 
     pub fn init(&self) -> &MobileRuntimeInit {
@@ -132,22 +170,69 @@ where
         session_id: &str,
         content: &str,
     ) -> anyhow::Result<MobileTurnResult> {
-        if !self.storage.session_exists(session_id).await? {
+        if !self
+            .storage
+            .session_exists_scoped(&self.conversation_scope, session_id)
+            .await?
+        {
             anyhow::bail!("session not found");
         }
         self.storage
-            .append_message(session_id, "user", content)
+            .append_scoped_message(&self.conversation_scope, session_id, "user", content)
             .await?;
+        self.send_message_after_user_persisted(session_id, content)
+            .await
+    }
+
+    pub async fn send_message_after_user_persisted(
+        &self,
+        session_id: &str,
+        content: &str,
+    ) -> anyhow::Result<MobileTurnResult> {
+        let mut messages = self
+            .storage
+            .list_scoped_messages(&self.conversation_scope, session_id)
+            .await?;
+        let current = messages
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("persisted user message is missing"))?;
+        anyhow::ensure!(
+            current.role == "user" && current.content == content,
+            "persisted user message does not match the active turn"
+        );
+        let history = messages_to_model_history(&messages)?;
         let skill_manager = mobile_safe_snapshot_manager(&self.init, &self.skill_manager);
-        let runner = TurnRunner::new_with_manager_and_config(
+        let mut runner = TurnRunner::new_with_manager_and_config(
             self.model.clone(),
             skill_manager,
             self.runtime_config.clone(),
-        );
-        let events = runner.run(content).await?;
+        )
+        .with_app_prompt(self.app_prompt.clone());
+        if let Some(memory) = &self.memory {
+            runner = runner
+                .with_memory_tools(memory.clone())
+                .with_memory_candidate_extractor(Arc::new(
+                    crate::memory_lifecycle::ExplicitMemoryCandidateExtractor,
+                ));
+        }
+        if let Some(connectors) = &self.connector_tools {
+            runner = runner.with_connector_tools(connectors.clone());
+        }
+        let events = runner
+            .run_request(
+                crate::turn_request::TurnRequest::new(content)
+                    .with_session_id(session_id)
+                    .with_conversation_history(history),
+            )
+            .await?;
         let assistant_text = assistant_text_from_events(&events);
         self.storage
-            .append_message(session_id, "assistant", &assistant_text)
+            .append_scoped_assistant_with_events(
+                &self.conversation_scope,
+                session_id,
+                &assistant_text,
+                &events,
+            )
             .await?;
         Ok(MobileTurnResult {
             assistant_text,
@@ -164,6 +249,10 @@ pub struct HttpMobileRuntimeHost<R> {
     model_config: StoredModelConfig,
     secret_resolver: R,
     management: Option<(OwnerSkillManagementService, ActorContext)>,
+    app_prompt: AppPromptConfig,
+    conversation_scope: ConversationScope,
+    memory: Option<crate::memory_tools::MemoryToolRuntime>,
+    connector_tools: Option<crate::connector_tools::ConnectorToolRuntime>,
 }
 
 impl<R> HttpMobileRuntimeHost<R>
@@ -207,6 +296,8 @@ where
     ) -> anyhow::Result<Self> {
         validate_mobile_manager_context(&init, &skill_manager)?;
         let runtime_config = mobile_safe_runtime_config(&init, runtime_config);
+        let app_prompt = AppPromptConfig::default();
+        let conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
         Ok(Self {
             storage,
             skill_manager,
@@ -215,7 +306,27 @@ where
             model_config,
             secret_resolver,
             management: None,
+            app_prompt,
+            conversation_scope,
+            memory: None,
+            connector_tools: None,
         })
+    }
+
+    pub fn with_app_prompt(mut self, app_prompt: AppPromptConfig) -> Self {
+        self.conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
+        self.app_prompt = app_prompt;
+        self
+    }
+
+    pub fn with_foundations(
+        mut self,
+        memory: Option<crate::memory_tools::MemoryToolRuntime>,
+        connector_tools: Option<crate::connector_tools::ConnectorToolRuntime>,
+    ) -> Self {
+        self.memory = memory;
+        self.connector_tools = connector_tools;
+        self
     }
 
     pub fn with_owner_turn_context(
@@ -230,19 +341,30 @@ where
     }
 
     pub async fn create_session(&self, title: &str) -> anyhow::Result<Session> {
-        self.storage.create_session(title).await
+        self.storage
+            .create_scoped_session(&self.conversation_scope, title)
+            .await
     }
 
     pub async fn list_sessions(&self) -> anyhow::Result<Vec<Session>> {
-        self.storage.list_sessions().await
+        self.storage
+            .list_scoped_sessions(&self.conversation_scope)
+            .await
     }
 
     pub async fn get_messages(&self, session_id: &str) -> anyhow::Result<Vec<Message>> {
-        self.storage.list_messages(session_id).await
+        self.storage
+            .list_scoped_messages(&self.conversation_scope, session_id)
+            .await
     }
 
     pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<()> {
-        self.storage.delete_session(session_id).await
+        if let Some(memory) = &self.memory {
+            memory.on_session_end(session_id, Vec::new()).await?;
+        }
+        self.storage
+            .delete_scoped_session(&self.conversation_scope, session_id)
+            .await
     }
 
     pub fn init(&self) -> &MobileRuntimeInit {
@@ -260,11 +382,15 @@ where
         session_id: &str,
         content: &str,
     ) -> anyhow::Result<MobileTurnResult> {
-        if !self.storage.session_exists(session_id).await? {
+        if !self
+            .storage
+            .session_exists_scoped(&self.conversation_scope, session_id)
+            .await?
+        {
             anyhow::bail!("session not found");
         }
         self.storage
-            .append_message(session_id, "user", content)
+            .append_scoped_message(&self.conversation_scope, session_id, "user", content)
             .await?;
         self.send_message_after_user_persisted(session_id, content)
             .await
@@ -275,6 +401,18 @@ where
         session_id: &str,
         content: &str,
     ) -> anyhow::Result<MobileTurnResult> {
+        let mut messages = self
+            .storage
+            .list_scoped_messages(&self.conversation_scope, session_id)
+            .await?;
+        let current = messages
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("persisted user message is missing"))?;
+        anyhow::ensure!(
+            current.role == "user" && current.content == content,
+            "persisted user message does not match the active turn"
+        );
+        let history = messages_to_model_history(&messages)?;
         self.model_config
             .validate()
             .map_err(|message| anyhow::anyhow!(message))?;
@@ -285,21 +423,45 @@ where
             model_gateway::responses::GatewayHttpClient::new(profile),
             skill_manager,
             self.runtime_config.clone(),
-        );
+        )
+        .with_app_prompt(self.app_prompt.clone());
+        if let Some(memory) = &self.memory {
+            runner = runner
+                .with_memory_tools(memory.clone())
+                .with_memory_candidate_extractor(Arc::new(
+                    crate::memory_lifecycle::ExplicitMemoryCandidateExtractor,
+                ));
+        }
+        if let Some(connectors) = &self.connector_tools {
+            runner = runner.with_connector_tools(connectors.clone());
+        }
         let events = if let Some((service, actor)) = &self.management {
             runner = runner.with_skill_management(service.clone());
             runner
                 .run_request(
                     crate::turn_request::TurnRequest::new(content)
+                        .with_session_id(session_id)
+                        .with_conversation_history(history)
                         .with_actor_context(actor.clone()),
                 )
                 .await?
         } else {
-            runner.run(content).await?
+            runner
+                .run_request(
+                    crate::turn_request::TurnRequest::new(content)
+                        .with_session_id(session_id)
+                        .with_conversation_history(history),
+                )
+                .await?
         };
         let assistant_text = assistant_text_from_events(&events);
         self.storage
-            .append_message(session_id, "assistant", &assistant_text)
+            .append_scoped_assistant_with_events(
+                &self.conversation_scope,
+                session_id,
+                &assistant_text,
+                &events,
+            )
             .await?;
         Ok(MobileTurnResult {
             assistant_text,

@@ -408,10 +408,11 @@ describe("Chat", () => {
     expect(entryCss).toContain('@import "./chat.css";');
     expect(entryCss).toContain('@import "./drawer.css";');
     expect(entryCss).toContain('@import "./settings.css";');
-    expect(css).toMatch(/--color-primary:\s*#0d9488/);
+    expect(entryCss).toContain('@import "./appearance.css";');
+    expect(css).toMatch(/--color-background:\s*#121314/);
+    expect(css).toMatch(/--color-user-message:\s*#ffffff13/);
     expect(css).toMatch(/\.chat-shell[\s\S]*?\{/);
-    expect(css).toMatch(/\.chat-shell[\s\S]*?color-scheme:\s*light/);
-    expect(css).toMatch(/\.chat-shell[\s\S]*?--color-background:\s*#ffffff/);
+    expect(css).not.toMatch(/\.chat-shell[\s\S]*?--color-background:/);
     expect(css).toMatch(/\.top-bar[\s\S]*?\{/);
     expect(css).toMatch(/\.top-bar-title[\s\S]*?\{/);
     expect(css).toMatch(/\.message-list[\s\S]*?\{/);
@@ -513,6 +514,8 @@ describe("App navigation", () => {
 
     render(<App />);
 
+    await screen.findByText("No API key stored");
+
     await user.click(screen.getByRole("button", { name: "Chat Completions" }));
     await user.clear(screen.getByLabelText("Base URL"));
     await user.type(screen.getByLabelText("Base URL"), "http://127.0.0.1:11434/v1");
@@ -544,6 +547,7 @@ describe("App navigation", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await screen.findByText("No API key stored");
     await user.click(screen.getByRole("button", { name: "Chat Completions" }));
     await user.clear(screen.getByLabelText("Base URL"));
     await user.type(screen.getByLabelText("Base URL"), "http://127.0.0.1:11434/v1");
@@ -555,6 +559,7 @@ describe("App navigation", () => {
     await user.click(screen.getByRole("button", { name: "Back to chat" }));
     await user.click(screen.getByRole("button", { name: "Open settings" }));
 
+    expect(await screen.findByText("API key stored with operating-system encryption")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Chat Completions" })).toHaveAttribute(
       "aria-pressed",
       "true"
@@ -562,7 +567,7 @@ describe("App navigation", () => {
     expect(screen.getByLabelText("Base URL")).toHaveValue(
       "http://127.0.0.1:11434/v1"
     );
-    expect(screen.getByLabelText("API key")).toHaveValue("local-secret");
+    expect(screen.getByLabelText("API key")).toHaveValue("");
     expect(screen.getByLabelText("Model name")).toHaveValue("qwen2.5");
   });
 

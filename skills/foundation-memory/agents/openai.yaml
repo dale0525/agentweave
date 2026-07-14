@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundation Memory"
+  short_description: "Safely recall and manage durable memory"
+  default_prompt: "Use $foundation-memory to recall or manage durable user and app memory safely."

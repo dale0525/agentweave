@@ -16,9 +16,11 @@ impl TurnGoal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnRequest {
     pub user_text: String,
+    pub conversation_history: Vec<serde_json::Value>,
     pub goal: Option<TurnGoal>,
     pub token_budget: Option<u64>,
     pub context_budget_bytes: Option<usize>,
+    pub session_id: Option<String>,
     pub actor_context: ActorContext,
 }
 
@@ -26,15 +28,25 @@ impl TurnRequest {
     pub fn new(user_text: impl Into<String>) -> Self {
         Self {
             user_text: user_text.into(),
+            conversation_history: Vec::new(),
             goal: None,
             token_budget: None,
             context_budget_bytes: None,
+            session_id: None,
             actor_context: ActorContext::anonymous(),
         }
     }
 
     pub fn with_goal(mut self, goal: TurnGoal) -> Self {
         self.goal = Some(goal);
+        self
+    }
+
+    pub fn with_conversation_history(
+        mut self,
+        conversation_history: Vec<serde_json::Value>,
+    ) -> Self {
+        self.conversation_history = conversation_history;
         self
     }
 
@@ -45,6 +57,11 @@ impl TurnRequest {
 
     pub fn with_context_budget_bytes(mut self, context_budget_bytes: usize) -> Self {
         self.context_budget_bytes = Some(context_budget_bytes);
+        self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
     }
 

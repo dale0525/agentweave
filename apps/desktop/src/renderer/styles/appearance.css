@@ -1,0 +1,203 @@
+.appearance-panel {
+  gap: 18px;
+}
+
+.appearance-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.appearance-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.theme-radio-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.theme-choice.rt-RadioCardsItem {
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  min-height: 92px;
+  gap: 12px;
+  padding: 10px;
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  box-shadow: none;
+}
+
+.theme-choice.rt-RadioCardsItem:hover {
+  border-color: var(--color-primary);
+  background: var(--color-surface-muted);
+}
+
+.theme-choice.rt-RadioCardsItem[data-state="checked"] {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 9%, var(--color-surface));
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+
+.theme-preview {
+  display: grid;
+  grid-template-columns: 23px 1fr;
+  width: 108px;
+  height: 68px;
+  overflow: hidden;
+  border: 1px solid var(--theme-preview-border);
+  border-radius: 3px;
+  background: var(--theme-preview-background);
+  box-shadow: 0 3px 10px color-mix(in srgb, #000 18%, transparent);
+}
+
+.theme-preview-rail {
+  border-right: 1px solid var(--theme-preview-border);
+  background:
+    linear-gradient(var(--theme-preview-accent), var(--theme-preview-accent)) 7px 9px / 8px 8px no-repeat,
+    linear-gradient(var(--theme-preview-muted), var(--theme-preview-muted)) 8px 27px / 6px 6px no-repeat,
+    var(--theme-preview-surface);
+}
+
+.theme-preview-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 11px 9px;
+}
+
+.theme-preview-line {
+  width: 56%;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--theme-preview-muted);
+}
+
+.theme-preview-line.long {
+  width: 82%;
+  background: var(--theme-preview-text);
+}
+
+.theme-preview-message {
+  width: 62%;
+  height: 17px;
+  margin-top: 3px;
+  margin-left: auto;
+  border-left: 2px solid var(--theme-preview-accent);
+  border-radius: 2px;
+  background: var(--theme-preview-user);
+}
+
+.theme-choice-copy,
+.theme-choice-title {
+  min-width: 0;
+}
+
+.theme-choice-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.theme-choice-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.theme-choice-title strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-choice-title svg {
+  flex: 0 0 auto;
+  color: var(--color-primary-text);
+}
+
+.theme-choice-meta {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.appearance-footnote {
+  margin: -2px 0 0;
+}
+
+.language-panel {
+  gap: 16px;
+}
+
+.language-radio-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.language-choice.rt-RadioCardsItem {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 14px;
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  box-shadow: none;
+}
+
+.language-choice.rt-RadioCardsItem[data-state="checked"] {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 9%, var(--color-surface));
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+
+.language-choice-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.language-choice-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.language-choice-copy small {
+  color: var(--color-text-muted);
+}
+
+html[data-high-contrast="true"] .theme-choice.rt-RadioCardsItem[data-state="checked"] {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .theme-radio-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 420px) {
+  .appearance-heading {
+    align-items: flex-start;
+  }
+
+  .theme-choice.rt-RadioCardsItem {
+    grid-template-columns: 92px minmax(0, 1fr);
+  }
+
+  .theme-preview {
+    width: 92px;
+  }
+}

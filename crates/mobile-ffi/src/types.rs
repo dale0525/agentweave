@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MobileInitConfig {
     pub app_data_dir: String,
+    #[serde(default)]
+    pub app_package_dir: Option<String>,
     pub cache_dir: String,
     pub database_path: String,
     pub builtin_skills_dir: String,
@@ -20,6 +22,9 @@ pub struct MobileInitConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MobileDiagnostics {
+    pub app_id: String,
+    pub app_version: String,
+    pub app_display_name: String,
     pub platform: String,
     pub capabilities: Vec<String>,
     pub database_ready: bool,

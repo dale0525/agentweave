@@ -1,4 +1,4 @@
-import { FormEvent, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Menu, Settings } from "lucide-react";
 
 import {
@@ -13,6 +13,7 @@ import { MessageList } from "../components/MessageList";
 import { starterMessages } from "../data/fixtures";
 import { loadSavedModelSettings } from "../modelSettings";
 import { ChatMessage } from "../types";
+import { useI18n } from "../i18n/I18nProvider";
 
 type ChatProps = {
   onOpenSettings?: () => void;
@@ -29,6 +30,7 @@ function createMessageId(): string {
 export function Chat({
   onOpenSettings = () => undefined
 }: ChatProps): JSX.Element {
+  const { t } = useI18n();
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>(starterMessages);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -37,9 +39,15 @@ export function Chat({
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const requestGenerationRef = useRef(0);
 
+  useEffect(() => {
+    setMessages((current) => current.map((message) => (
+      message.id === "starter-assistant" ? { ...message, body: t("chat.starter") } : message
+    )));
+  }, [t]);
+
   const handleNewChat = () => {
     requestGenerationRef.current += 1;
-    setMessages(starterMessages);
+    setMessages(starterMessages.map((message) => ({ ...message, body: t("chat.starter") })));
     setSessionId(null);
     setApiError(null);
     setIsSending(false);
@@ -67,7 +75,7 @@ export function Chat({
         kind: "reasoning",
         role: "assistant",
         status: "running",
-        text: "Working on your request."
+        text: t("chat.working")
       }
     ]);
     setDraft("");
@@ -91,7 +99,7 @@ export function Chat({
       const response = await postSessionMessage(
         activeSessionId,
         text,
-        loadSavedModelSettings()
+        await loadSavedModelSettings()
       );
       if (!isCurrentRequest()) {
         return;
@@ -106,7 +114,7 @@ export function Chat({
         setMessages((current) =>
           current.filter((message) => message.id !== pendingReasoningId)
         );
-        setApiError("Could not send message. Check your model or service connection.");
+        setApiError(t("chat.sendError"));
       }
     } finally {
       if (isCurrentRequest()) {
@@ -116,7 +124,7 @@ export function Chat({
   };
 
   return (
-    <main className="chat-shell" aria-label="GeneralAgent chat">
+    <main className="chat-shell" aria-label={t("chat.ariaLabel")}>
       <ConversationDrawer
         isOpen={isDrawerOpen}
         onNewChat={handleNewChat}
@@ -124,16 +132,16 @@ export function Chat({
       />
       <header className="top-bar chat-top-bar">
         <AppIconButton
-          label="Open conversations"
+          label={t("chat.openConversations")}
           onClick={() => setIsDrawerOpen(true)}
         >
           <Menu size={18} aria-hidden="true" />
         </AppIconButton>
         <div className="top-bar-title">
-          <h1>GeneralAgent</h1>
-          <p>Ask naturally. The agent will handle the work.</p>
+          <h1>{t("app.name")}</h1>
+          <p>{t("app.tagline")}</p>
         </div>
-        <AppIconButton label="Open settings" onClick={onOpenSettings}>
+        <AppIconButton label={t("chat.openSettings")} onClick={onOpenSettings}>
           <Settings size={18} aria-hidden="true" />
         </AppIconButton>
       </header>

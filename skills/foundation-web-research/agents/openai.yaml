@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundation Web Research"
+  short_description: "Research the web with inspectable sources"
+  default_prompt: "Use $foundation-web-research to compare current sources and cite the result."

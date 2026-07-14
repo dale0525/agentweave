@@ -2,6 +2,7 @@ package com.generalagent.mobile.runtime
 
 data class RuntimeInitRequest(
   val appDataDir: String,
+  val appPackageDir: String? = null,
   val cacheDir: String,
   val databasePath: String,
   val builtinSkillsDir: String,
@@ -32,6 +33,9 @@ data class RuntimeActorContext(
 )
 
 data class RuntimeDiagnostics(
+  val appId: String = "dev.generalagent.default",
+  val appVersion: String = "0.1.0",
+  val appDisplayName: String = "GeneralAgent",
   val platform: String,
   val capabilities: List<String>,
   val databaseReady: Boolean,
@@ -257,3 +261,93 @@ data class RuntimeModelConfig(
 )
 
 data class RuntimeTurn(val assistantText: String)
+
+data class RuntimeMemoryEvidence(
+  val source: String,
+  val sourceId: String?,
+  val excerpt: String?,
+  val observedAt: String,
+)
+
+data class RuntimeMemory(
+  val id: String,
+  val kind: String,
+  val text: String,
+  val attributes: Map<String, String>,
+  val evidence: List<RuntimeMemoryEvidence>,
+  val confidence: Int,
+  val sensitivity: String,
+  val retention: String,
+  val state: String,
+  val version: Long,
+  val updatedAt: String,
+)
+
+data class RuntimeMailAddress(
+  val name: String?,
+  val address: String,
+)
+
+data class RuntimeMailAccount(
+  val id: String,
+  val displayName: String,
+  val primaryAddress: RuntimeMailAddress,
+  val addresses: List<RuntimeMailAddress>,
+)
+
+data class RuntimeMailAccountStatus(
+  val account: RuntimeMailAccount,
+  val state: String,
+  val detail: String?,
+)
+
+data class RuntimeMailPreview(
+  val id: String,
+  val accountId: String,
+  val draftId: String,
+  val draftRevision: Long,
+  val from: RuntimeMailAddress,
+  val to: List<RuntimeMailAddress>,
+  val cc: List<RuntimeMailAddress>,
+  val bcc: List<RuntimeMailAddress>,
+  val subject: String,
+  val previewHash: String,
+  val attachmentCount: Int,
+)
+
+data class RuntimeFoundationApproval(
+  val approvalId: String,
+  val status: String,
+  val actionName: String,
+  val resourceTarget: String,
+  val riskSummary: String,
+  val argumentsSha256: String,
+)
+
+data class RuntimeFoundationAction(
+  val actionId: String,
+  val status: String,
+  val lastError: String?,
+  val resultJson: String?,
+)
+
+data class RuntimePendingFoundationAction(
+  val approval: RuntimeFoundationApproval,
+  val action: RuntimeFoundationAction,
+  val preview: RuntimeMailPreview?,
+)
+
+data class RuntimeFoundationActionResolution(
+  val approval: RuntimeFoundationApproval,
+  val action: RuntimeFoundationAction,
+)
+
+data class RuntimeNotification(
+  val notificationId: String,
+  val channel: String,
+  val title: String,
+  val body: String,
+  val status: String,
+  val attemptCount: Int,
+  val dataJson: String,
+)

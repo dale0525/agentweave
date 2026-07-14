@@ -17,8 +17,13 @@ class RuntimeBridge(
   fun initRequest(actorContext: RuntimeActorContext = configuredActorContext): RuntimeInitRequest {
     val filesDir = context.filesDir
     val installedBundle = SkillAssetInstaller(filesDir, skillAssets, publicationFileSystem).installVerifiedBundle()
+    val installedApp = AgentAppAssetInstaller(
+      filesDir,
+      AndroidAgentAppAssetSource(context.assets),
+    ).install()
     return RuntimeInitRequest(
       appDataDir = filesDir.absolutePath,
+      appPackageDir = installedApp?.absolutePath,
       cacheDir = context.cacheDir.absolutePath,
       databasePath = filesDir.resolve("general-agent.db").absolutePath,
       builtinSkillsDir = installedBundle.root.absolutePath,
@@ -239,6 +244,119 @@ class RuntimeClient internal constructor(
     return if (data == null || data == JSONObject.NULL) null else (data as JSONObject).toModelConfig()
   }
 
+  fun listMemories(query: String = "", limit: Int = 50): List<RuntimeMemory> =
+    invokeArray(
+      JSONObject()
+        .put("operation", "list_memories")
+        .put("query", query)
+        .put("limit", limit),
+    ).objects().map { it.toMemory() }
+
+  fun forgetMemory(memoryId: String, expectedVersion: Long) {
+    invoke(
+      JSONObject()
+        .put("operation", "forget_memory")
+        .put("memory_id", memoryId)
+        .put("expected_version", expectedVersion),
+    )
+  }
+
+  fun exportMemories(): String =
+    invoke(JSONObject().put("operation", "export_memories")).toString(2)
+
+  fun listMailAccounts(): List<RuntimeMailAccount> =
+    invokeArray(JSONObject().put("operation", "list_mail_accounts"))
+      .objects()
+      .map { it.toMailAccount() }
+
+  fun mailAccountStatus(accountId: String): RuntimeMailAccountStatus =
+    invoke(
+      JSONObject()
+        .put("operation", "mail_account_status")
+        .put("account_id", accountId),
+    ).toMailAccountStatus()
+
+  fun connectMailAccount(accountId: String): RuntimeMailAccountStatus =
+    invoke(
+      JSONObject()
+        .put("operation", "connect_mail_account")
+        .put("account_id", accountId),
+    ).toMailAccountStatus()
+
+  fun disconnectMailAccount(accountId: String): RuntimeMailAccountStatus =
+    invoke(
+      JSONObject()
+        .put("operation", "disconnect_mail_account")
+        .put("account_id", accountId),
+    ).toMailAccountStatus()
+
+  fun listFoundationActions(): List<RuntimePendingFoundationAction> =
+    invokeArray(JSONObject().put("operation", "list_foundation_actions"))
+      .objects()
+      .map { it.toPendingFoundationAction() }
+
+  fun resolveFoundationAction(
+    approvalId: String,
+    approve: Boolean,
+  ): RuntimeFoundationActionResolution =
+    invoke(
+      JSONObject()
+        .put("operation", "resolve_foundation_action")
+        .put("approval_id", approvalId)
+        .put("decision", if (approve) "approve_once" else "reject"),
+    ).toFoundationActionResolution()
+
+  fun runSchedulerTick(limit: Int = 25): Int =
+    invokeValue(
+      JSONObject()
+        .put("operation", "run_scheduler_tick")
+        .put("limit", limit),
+    ) as Int
+
+  fun claimNotifications(worker: String, limit: Int = 25): List<RuntimeNotification> =
+    invokeArray(
+      JSONObject()
+        .put("operation", "claim_notifications")
+        .put("worker", worker)
+        .put("limit", limit),
+    ).objects().map { it.toRuntimeNotification() }
+
+  fun finishNotificationDelivered(
+    notificationId: String,
+    worker: String,
+    deliveryId: String,
+  ): Boolean =
+    invokeValue(
+      JSONObject()
+        .put("operation", "finish_notification")
+        .put("notification_id", notificationId)
+        .put("worker", worker)
+        .put(
+          "outcome",
+          JSONObject()
+            .put("kind", "delivered")
+            .put("delivery_id", deliveryId),
+        ),
+    ) as Boolean
+
+  fun finishNotificationUncertain(
+    notificationId: String,
+    worker: String,
+    message: String,
+  ): Boolean =
+    invokeValue(
+      JSONObject()
+        .put("operation", "finish_notification")
+        .put("notification_id", notificationId)
+        .put("worker", worker)
+        .put(
+          "outcome",
+          JSONObject()
+            .put("kind", "uncertain")
+            .put("message", message),
+        ),
+    ) as Boolean
+
   fun sendMessage(sessionId: String, content: String, apiKey: String?): RuntimeTurn {
     val request = JSONObject().put("session_id", sessionId).put("content", content)
     val data = responseData(native.sendMessage(handle, request.toString(), apiKey))
@@ -263,6 +381,9 @@ class RuntimeClient internal constructor(
   }
 
   private fun invoke(request: JSONObject): JSONObject = responseData(native.invoke(handle, request.toString()))
+
+  private fun invokeValue(request: JSONObject): Any =
+    responseEnvelope(native.invoke(handle, request.toString())).get("data")
 
   private fun invokeUnit(request: JSONObject) {
     responseEnvelope(native.invoke(handle, request.toString()))
@@ -299,6 +420,7 @@ class RuntimeBridgeException(message: String) : IllegalStateException(message)
 private fun RuntimeInitRequest.toJson(): JSONObject =
   JSONObject()
     .put("app_data_dir", appDataDir)
+    .put("app_package_dir", appPackageDir)
     .put("cache_dir", cacheDir)
     .put("database_path", databasePath)
     .put("builtin_skills_dir", builtinSkillsDir)
@@ -383,6 +505,9 @@ private fun JSONObject.toMessage(): RuntimeMessage =
 
 private fun JSONObject.toDiagnostics(): RuntimeDiagnostics =
   RuntimeDiagnostics(
+    appId = optString("app_id", "dev.generalagent.default"),
+    appVersion = optString("app_version", "0.1.0"),
+    appDisplayName = optString("app_display_name", "GeneralAgent"),
     platform = getString("platform"),
     capabilities = getJSONArray("capabilities").strings(),
     databaseReady = getBoolean("database_ready"),
@@ -548,3 +673,111 @@ private fun JSONObject.toModelConfig(): RuntimeModelConfig =
       getJSONObject("headers").getString(key)
     },
   )
+
+private fun JSONObject.toMemory(): RuntimeMemory {
+  val value = getJSONObject("value")
+  val retention = getJSONObject("retention")
+  val attributes = value.getJSONObject("attributes")
+  return RuntimeMemory(
+    id = getString("id"),
+    kind = getString("kind"),
+    text = value.getString("text"),
+    attributes = attributes.keys().asSequence().associateWith(attributes::getString),
+    evidence = getJSONArray("evidence").objects().map { evidence ->
+      RuntimeMemoryEvidence(
+        source = evidence.getString("source"),
+        sourceId = evidence.nullableString("sourceId"),
+        excerpt = evidence.nullableString("excerpt"),
+        observedAt = evidence.getString("observedAt"),
+      )
+    },
+    confidence = getInt("confidence"),
+    sensitivity = getString("sensitivity"),
+    retention = retention.getString("mode"),
+    state = getString("state"),
+    version = getLong("version"),
+    updatedAt = getString("updatedAt"),
+  )
+}
+
+private fun JSONObject.toMailAddress(): RuntimeMailAddress =
+  RuntimeMailAddress(
+    name = nullableString("name"),
+    address = getString("address"),
+  )
+
+private fun JSONObject.toMailAccount(): RuntimeMailAccount =
+  RuntimeMailAccount(
+    id = getString("id"),
+    displayName = getString("displayName"),
+    primaryAddress = getJSONObject("primaryAddress").toMailAddress(),
+    addresses = getJSONArray("addresses").objects().map { it.toMailAddress() },
+  )
+
+private fun JSONObject.toMailAccountStatus(): RuntimeMailAccountStatus =
+  RuntimeMailAccountStatus(
+    account = getJSONObject("account").toMailAccount(),
+    state = getString("state"),
+    detail = nullableString("detail"),
+  )
+
+private fun JSONObject.toMailPreview(): RuntimeMailPreview =
+  RuntimeMailPreview(
+    id = getString("id"),
+    accountId = getString("accountId"),
+    draftId = getString("draftId"),
+    draftRevision = getLong("draftRevision"),
+    from = getJSONObject("from").toMailAddress(),
+    to = getJSONArray("to").objects().map { it.toMailAddress() },
+    cc = getJSONArray("cc").objects().map { it.toMailAddress() },
+    bcc = getJSONArray("bcc").objects().map { it.toMailAddress() },
+    subject = getString("subject"),
+    previewHash = getString("previewHash"),
+    attachmentCount = getJSONArray("attachments").length(),
+  )
+
+private fun JSONObject.toFoundationApproval(): RuntimeFoundationApproval {
+  val binding = getJSONObject("binding")
+  return RuntimeFoundationApproval(
+    approvalId = getString("approval_id"),
+    status = getString("status"),
+    actionName = binding.getString("action_name"),
+    resourceTarget = binding.getString("resource_target"),
+    riskSummary = binding.getString("risk_summary"),
+    argumentsSha256 = binding.getString("arguments_sha256"),
+  )
+}
+
+private fun JSONObject.toFoundationAction(): RuntimeFoundationAction =
+  RuntimeFoundationAction(
+    actionId = getString("action_id"),
+    status = getString("status"),
+    lastError = nullableString("last_error"),
+    resultJson = opt("result")?.takeUnless { it == JSONObject.NULL }?.toString(),
+  )
+
+private fun JSONObject.toPendingFoundationAction(): RuntimePendingFoundationAction =
+  RuntimePendingFoundationAction(
+    approval = getJSONObject("approval").toFoundationApproval(),
+    action = getJSONObject("action").toFoundationAction(),
+    preview = optJSONObject("preview")?.toMailPreview(),
+  )
+
+private fun JSONObject.toFoundationActionResolution(): RuntimeFoundationActionResolution =
+  RuntimeFoundationActionResolution(
+    approval = getJSONObject("approval").toFoundationApproval(),
+    action = getJSONObject("action").toFoundationAction(),
+  )
+
+private fun JSONObject.toRuntimeNotification(): RuntimeNotification {
+  val request = getJSONObject("request")
+  return RuntimeNotification(
+    notificationId = getString("notification_id"),
+    channel = request.getString("channel"),
+    title = request.getString("title"),
+    body = request.getString("body"),
+    status = getString("status"),
+    attemptCount = getInt("attempt_count"),
+    dataJson = request.get("data").toString(),
+  )
+}

@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { packageAgentApp } from "./package-agent-app.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const target = "aarch64-linux-android";
@@ -141,7 +142,51 @@ function prepareAndroidSkillAssets() {
       { cwd: projectRoot, stdio: "inherit" },
     );
   });
+  const appResult = prepareAndroidAppAssetsAt(projectRoot, {
+    defaultLocale: process.env.GENERAL_AGENT_APP_DEFAULT_LOCALE,
+    input: process.env.GENERAL_AGENT_APP_ROOT,
+    locales: process.env.GENERAL_AGENT_APP_LOCALES,
+  });
   console.log(`Prepared verified Android skill assets at ${result.assetRoot}`);
+  console.log(`Prepared verified Android Agent App at ${appResult.packageRoot}`);
+}
+
+export function androidAppAssetPaths(root) {
+  const generatedRoot = androidSkillAssetPaths(root).generatedRoot;
+  const assetRoot = join(generatedRoot, "agent-app");
+  return {
+    assetRoot,
+    packageRoot: join(assetRoot, "package"),
+    hashFile: join(assetRoot, "app.sha256"),
+  };
+}
+
+export function prepareAndroidAppAssetsAt(root, {
+  input = join(root, "examples", "secretary-agent"),
+  locales,
+  defaultLocale,
+} = {}) {
+  const paths = androidAppAssetPaths(root);
+  makeTreeWritableNoFollow(paths.assetRoot);
+  rmSync(paths.assetRoot, { recursive: true, force: true });
+  mkdirSync(paths.assetRoot, { recursive: true });
+  const releaseRoot = join(paths.assetRoot, ".release-staging");
+  packageAgentApp({
+    input,
+    output: releaseRoot,
+    runtimeVersion: "0.1.0",
+    locales,
+    defaultLocale,
+  });
+  copyRegularTree(join(releaseRoot, "app"), paths.packageRoot);
+  copyFileSync(
+    join(releaseRoot, "agent-app.lock.json"),
+    join(paths.assetRoot, "agent-app.lock.json"),
+  );
+  rmSync(releaseRoot, { recursive: true, force: true });
+  const contentHash = hashRegularTree(paths.packageRoot);
+  writeFileSync(paths.hashFile, `${contentHash}\n`, { encoding: "utf8", mode: 0o600 });
+  return { ...paths, contentHash };
 }
 
 export function prepareAndroidSkillAssetsAt(root, runBundle) {
@@ -302,6 +347,21 @@ function hashSkillBundle(bundleRoot) {
   const digest = createHash("sha256");
   for (const [index, path] of relativePaths.entries()) {
     const bytes = readFileSync(files[index]);
+    digest.update(path, "utf8");
+    digest.update(Buffer.from([0]));
+    digest.update(String(bytes.length), "ascii");
+    digest.update(Buffer.from([0]));
+    digest.update(bytes);
+  }
+  return digest.digest("hex");
+}
+
+function hashRegularTree(root) {
+  const files = collectRegularFiles(root);
+  const digest = createHash("sha256");
+  for (const file of files) {
+    const path = relative(root, file).split(sep).join("/");
+    const bytes = readFileSync(file);
     digest.update(path, "utf8");
     digest.update(Buffer.from([0]));
     digest.update(String(bytes.length), "ascii");

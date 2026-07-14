@@ -1,13 +1,14 @@
 use crate::owner_api::OwnerApiConfig;
 use agent_runtime::{
     events::RuntimeEvent,
-    session::Message,
+    prompt_composer::AppPromptConfig,
+    session::{ConversationScope, Message, Session, messages_to_model_history},
     skill::SkillRegistry,
     skill_catalog::SkillCatalog,
     skill_manager::SkillManager,
     skill_policy::ActorContext,
     storage::Storage,
-    tools::RuntimeConfig,
+    tools::{RuntimeConfig, ToolRegistry},
     turn::{AgentRunner, ModelClient, TurnRunner},
     turn_request::TurnRequest,
 };
@@ -18,7 +19,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use model_gateway::{
     provider::{EndpointType, ProviderProfile},
@@ -38,6 +39,29 @@ pub struct AppState {
     runtime_config: RuntimeConfig,
     dev_skill_mutations: Arc<Mutex<()>>,
     owner_management: Option<OwnerApiConfig>,
+    app_prompt: AppPromptConfig,
+    conversation_scope: ConversationScope,
+    memory_tools: Option<agent_runtime::memory_tools::MemoryToolRuntime>,
+    connector_tools: Option<agent_runtime::connector_tools::ConnectorToolRuntime>,
+    mail_actions: Option<agent_runtime::foundation_actions::MailActionService>,
+    automation: Option<crate::automation_api::AutomationApiState>,
+}
+
+pub struct AppFoundationRuntimes {
+    pub memory_tools: Option<agent_runtime::memory_tools::MemoryToolRuntime>,
+    pub connector_tools: Option<agent_runtime::connector_tools::ConnectorToolRuntime>,
+}
+
+impl AppFoundationRuntimes {
+    pub fn new(
+        memory_tools: Option<agent_runtime::memory_tools::MemoryToolRuntime>,
+        connector_tools: Option<agent_runtime::connector_tools::ConnectorToolRuntime>,
+    ) -> Self {
+        Self {
+            memory_tools,
+            connector_tools,
+        }
+    }
 }
 
 impl AppState {
@@ -50,11 +74,65 @@ impl AppState {
     where
         C: ModelClient + 'static,
     {
-        let runner = TurnRunner::new_with_manager_and_config(
+        Self::new_with_model_app_and_skill_manager(
+            storage,
+            model,
+            skill_manager,
+            runtime_config,
+            AppPromptConfig::default(),
+        )
+    }
+
+    pub fn new_with_model_app_and_skill_manager<C>(
+        storage: Storage,
+        model: C,
+        skill_manager: SkillManager,
+        runtime_config: RuntimeConfig,
+        app_prompt: AppPromptConfig,
+    ) -> Self
+    where
+        C: ModelClient + 'static,
+    {
+        Self::new_with_model_app_foundations_and_skill_manager(
+            storage,
+            model,
+            skill_manager,
+            runtime_config,
+            app_prompt,
+            None,
+            None,
+        )
+    }
+
+    pub fn new_with_model_app_foundations_and_skill_manager<C>(
+        storage: Storage,
+        model: C,
+        skill_manager: SkillManager,
+        runtime_config: RuntimeConfig,
+        app_prompt: AppPromptConfig,
+        memory_tools: Option<agent_runtime::memory_tools::MemoryToolRuntime>,
+        connector_tools: Option<agent_runtime::connector_tools::ConnectorToolRuntime>,
+    ) -> Self
+    where
+        C: ModelClient + 'static,
+    {
+        let mut runner = TurnRunner::new_with_manager_and_config(
             model,
             skill_manager.clone(),
             runtime_config.clone(),
-        );
+        )
+        .with_app_prompt(app_prompt.clone());
+        if let Some(memory) = &memory_tools {
+            runner = runner
+                .with_memory_tools(memory.clone())
+                .with_memory_candidate_extractor(Arc::new(
+                    agent_runtime::memory_lifecycle::ExplicitMemoryCandidateExtractor,
+                ));
+        }
+        if let Some(connectors) = &connector_tools {
+            runner = runner.with_connector_tools(connectors.clone());
+        }
+        let conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
         Self {
             storage,
             agent: Arc::new(runner),
@@ -63,6 +141,12 @@ impl AppState {
             runtime_config,
             dev_skill_mutations: Arc::new(Mutex::new(())),
             owner_management: None,
+            app_prompt,
+            conversation_scope,
+            memory_tools,
+            connector_tools,
+            mail_actions: None,
+            automation: None,
         }
     }
 
@@ -76,12 +160,72 @@ impl AppState {
     where
         C: ModelClient + 'static,
     {
-        let runner = TurnRunner::new_with_manager_and_config(
+        Self::new_with_model_app_skill_manager_and_owner(
+            storage,
+            model,
+            skill_manager,
+            runtime_config,
+            AppPromptConfig::default(),
+            owner_management,
+        )
+    }
+
+    pub fn new_with_model_app_skill_manager_and_owner<C>(
+        storage: Storage,
+        model: C,
+        skill_manager: SkillManager,
+        runtime_config: RuntimeConfig,
+        app_prompt: AppPromptConfig,
+        owner_management: OwnerApiConfig,
+    ) -> Self
+    where
+        C: ModelClient + 'static,
+    {
+        Self::new_with_model_app_foundations_skill_manager_and_owner(
+            storage,
+            model,
+            skill_manager,
+            runtime_config,
+            app_prompt,
+            AppFoundationRuntimes::new(None, None),
+            owner_management,
+        )
+    }
+
+    pub fn new_with_model_app_foundations_skill_manager_and_owner<C>(
+        storage: Storage,
+        model: C,
+        skill_manager: SkillManager,
+        runtime_config: RuntimeConfig,
+        app_prompt: AppPromptConfig,
+        foundations: AppFoundationRuntimes,
+        owner_management: OwnerApiConfig,
+    ) -> Self
+    where
+        C: ModelClient + 'static,
+    {
+        let AppFoundationRuntimes {
+            memory_tools,
+            connector_tools,
+        } = foundations;
+        let mut runner = TurnRunner::new_with_manager_and_config(
             model,
             skill_manager.clone(),
             runtime_config.clone(),
         )
+        .with_app_prompt(app_prompt.clone())
         .with_skill_management(owner_management.management_service());
+        if let Some(memory) = &memory_tools {
+            runner = runner
+                .with_memory_tools(memory.clone())
+                .with_memory_candidate_extractor(Arc::new(
+                    agent_runtime::memory_lifecycle::ExplicitMemoryCandidateExtractor,
+                ));
+        }
+        if let Some(connectors) = &connector_tools {
+            runner = runner.with_connector_tools(connectors.clone());
+        }
+        let conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
         Self {
             storage,
             agent: Arc::new(runner),
@@ -90,6 +234,12 @@ impl AppState {
             runtime_config,
             dev_skill_mutations: Arc::new(Mutex::new(())),
             owner_management: Some(owner_management),
+            app_prompt,
+            conversation_scope,
+            memory_tools,
+            connector_tools,
+            mail_actions: None,
+            automation: None,
         }
     }
 
@@ -134,12 +284,42 @@ impl AppState {
             runtime_config: default_runtime_config(),
             dev_skill_mutations: Arc::new(Mutex::new(())),
             owner_management: None,
+            app_prompt: AppPromptConfig::default(),
+            conversation_scope: ConversationScope::default(),
+            memory_tools: None,
+            connector_tools: None,
+            mail_actions: None,
+            automation: None,
         }
     }
 
     #[cfg(test)]
     pub fn with_runtime_config(mut self, runtime_config: RuntimeConfig) -> Self {
         self.runtime_config = runtime_config;
+        self
+    }
+
+    pub fn with_mail_actions(
+        mut self,
+        mail_actions: agent_runtime::foundation_actions::MailActionService,
+    ) -> Self {
+        self.mail_actions = Some(mail_actions);
+        self
+    }
+
+    pub async fn with_default_automation(mut self, storage: &Storage) -> anyhow::Result<Self> {
+        self.automation =
+            Some(crate::automation_api::AutomationApiState::from_storage(storage).await?);
+        Ok(self)
+    }
+
+    pub fn with_mail_foundation(
+        mut self,
+        connector_tools: agent_runtime::connector_tools::ConnectorToolRuntime,
+        mail_actions: agent_runtime::foundation_actions::MailActionService,
+    ) -> Self {
+        self.connector_tools = Some(connector_tools);
+        self.mail_actions = Some(mail_actions);
         self
     }
 
@@ -202,6 +382,13 @@ pub struct CreateSessionRequest {
 pub struct CreateSessionResponse {
     pub id: String,
     pub title: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppDiagnosticsResponse {
+    pub app_id: String,
+    pub version: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,8 +462,16 @@ pub fn router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/model/test", post(test_model_connection))
-        .route("/sessions", post(create_session))
-        .route("/sessions/{session_id}/messages", post(post_message));
+        .route("/diagnostics/app", get(app_diagnostics))
+        .route("/sessions", get(list_sessions).post(create_session))
+        .route("/sessions/{session_id}", delete(delete_session))
+        .route(
+            "/sessions/{session_id}/messages",
+            get(get_messages).post(post_message),
+        );
+    router = router
+        .merge(crate::foundation_api::router())
+        .merge(crate::automation_api::router());
     if let Some(owner_routes) = crate::owner_api::router(&state) {
         router = router.merge(owner_routes);
     }
@@ -315,6 +510,54 @@ impl AppState {
     pub(crate) fn owner_management(&self) -> Option<&OwnerApiConfig> {
         self.owner_management.as_ref()
     }
+
+    pub(crate) fn app_prompt(&self) -> &AppPromptConfig {
+        &self.app_prompt
+    }
+
+    pub(crate) fn conversation_scope(&self) -> &ConversationScope {
+        &self.conversation_scope
+    }
+
+    pub(crate) fn configured_tool_registry(&self) -> anyhow::Result<ToolRegistry> {
+        let mut registry = ToolRegistry::try_new(self.skills(), &self.runtime_config)?;
+        if let Some(memory) = &self.memory_tools {
+            registry = registry.try_with_memory_tools(memory.clone())?;
+        }
+        if let Some(connectors) = &self.connector_tools {
+            registry = registry.try_with_connector_tools(connectors.clone())?;
+        }
+        Ok(registry)
+    }
+
+    pub(crate) fn memory_tools(&self) -> Option<agent_runtime::memory_tools::MemoryToolRuntime> {
+        self.memory_tools.clone()
+    }
+
+    pub(crate) fn connector_tools(
+        &self,
+    ) -> Option<agent_runtime::connector_tools::ConnectorToolRuntime> {
+        self.connector_tools.clone()
+    }
+
+    pub(crate) fn mail_actions(
+        &self,
+    ) -> Option<agent_runtime::foundation_actions::MailActionService> {
+        self.mail_actions.clone()
+    }
+
+    pub(crate) fn automation(&self) -> Option<&crate::automation_api::AutomationApiState> {
+        self.automation.as_ref()
+    }
+}
+
+async fn app_diagnostics(State(state): State<Arc<AppState>>) -> Json<AppDiagnosticsResponse> {
+    let identity = &state.app_prompt().identity;
+    Json(AppDiagnosticsResponse {
+        app_id: identity.app_id.clone(),
+        version: identity.version.clone(),
+        display_name: identity.display_name.clone(),
+    })
 }
 
 pub(crate) fn desktop_cors_layer() -> CorsLayer {
@@ -351,7 +594,7 @@ async fn create_session(
     let title = request.title.unwrap_or_else(|| "New Session".to_string());
     let session = state
         .storage
-        .create_session(&title)
+        .create_scoped_session(state.conversation_scope(), &title)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -359,6 +602,53 @@ async fn create_session(
         id: session.id,
         title: session.title,
     }))
+}
+
+async fn list_sessions(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Session>>, ApiError> {
+    state
+        .storage
+        .list_scoped_sessions(state.conversation_scope())
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
+async fn get_messages(
+    Path(session_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Message>>, ApiError> {
+    if !state
+        .storage
+        .session_exists_scoped(state.conversation_scope(), &session_id)
+        .await
+        .map_err(ApiError::Internal)?
+    {
+        return Err(ApiError::NotFound("session not found"));
+    }
+    state
+        .storage
+        .list_scoped_messages(state.conversation_scope(), &session_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
+async fn delete_session(
+    Path(session_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    if let Some(memory) = state.memory_tools() {
+        memory
+            .on_session_end(&session_id, Vec::new())
+            .await
+            .map_err(ApiError::Internal)?;
+    }
+    state
+        .storage
+        .delete_scoped_session(state.conversation_scope(), &session_id)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn post_message(
@@ -377,19 +667,31 @@ pub(crate) async fn post_message_for_actor(
 ) -> Result<Json<UserMessageResponse>, ApiError> {
     let session_exists = state
         .storage
-        .session_exists(&session_id)
+        .session_exists_scoped(state.conversation_scope(), &session_id)
         .await
         .map_err(ApiError::Internal)?;
     if !session_exists {
         return Err(ApiError::NotFound("session not found"));
     }
 
-    let events = run_agent_turn_for_actor(&state, &request, actor).await?;
+    let history = state
+        .storage
+        .list_scoped_messages(state.conversation_scope(), &session_id)
+        .await
+        .map_err(ApiError::Internal)?;
+    let history = messages_to_model_history(&history).map_err(ApiError::Internal)?;
+    let events = run_agent_turn_for_actor(&state, &session_id, &request, actor, history).await?;
     let assistant_text = assistant_text_from_events(&events)
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("agent turn did not finish")))?;
     let (user_message, assistant_message) = state
         .storage
-        .append_turn(&session_id, &request.content, &assistant_text)
+        .append_scoped_turn_with_events(
+            state.conversation_scope(),
+            &session_id,
+            &request.content,
+            &assistant_text,
+            &events,
+        )
         .await
         .map_err(ApiError::Internal)?;
 
@@ -403,8 +705,10 @@ pub(crate) async fn post_message_for_actor(
 
 async fn run_agent_turn_for_actor(
     state: &AppState,
+    session_id: &str,
     request: &UserMessageRequest,
     actor: ActorContext,
+    history: Vec<serde_json::Value>,
 ) -> Result<Vec<RuntimeEvent>, ApiError> {
     if let Some(model_settings) = request.model_settings.clone() {
         let profile = provider_profile_from_request(model_settings)?;
@@ -412,20 +716,41 @@ async fn run_agent_turn_for_actor(
             GatewayHttpClient::new(profile),
             state.skill_manager(),
             state.runtime_config.clone(),
-        );
+        )
+        .with_app_prompt(state.app_prompt.clone());
         if let Some(owner_management) = state.owner_management() {
             runner = runner.with_skill_management(owner_management.management_service());
         }
+        if let Some(memory) = &state.memory_tools {
+            runner = runner
+                .with_memory_tools(memory.clone())
+                .with_memory_candidate_extractor(Arc::new(
+                    agent_runtime::memory_lifecycle::ExplicitMemoryCandidateExtractor,
+                ));
+        }
+        if let Some(connectors) = &state.connector_tools {
+            runner = runner.with_connector_tools(connectors.clone());
+        }
 
         return runner
-            .run_request(TurnRequest::new(&request.content).with_actor_context(actor))
+            .run_request(
+                TurnRequest::new(&request.content)
+                    .with_session_id(session_id)
+                    .with_conversation_history(history)
+                    .with_actor_context(actor),
+            )
             .await
             .map_err(agent_turn_error);
     }
 
     state
         .agent
-        .run_request(TurnRequest::new(&request.content).with_actor_context(actor))
+        .run_request(
+            TurnRequest::new(&request.content)
+                .with_session_id(session_id)
+                .with_conversation_history(history)
+                .with_actor_context(actor),
+        )
         .await
         .map_err(agent_turn_error)
 }
@@ -500,3 +825,15 @@ fn deterministic_assistant_reply(content: &str) -> String {
 #[cfg(test)]
 #[path = "api_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "api_conversation_tests.rs"]
+mod conversation_tests;
+
+#[cfg(test)]
+#[path = "api_automation_tests.rs"]
+mod automation_tests;
+
+#[cfg(test)]
+#[path = "api_foundation_tests.rs"]
+mod foundation_tests;

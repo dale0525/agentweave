@@ -1,6 +1,9 @@
+use crate::prompt_composer::{
+    AppPromptConfig, DEFAULT_FRAMEWORK_SAFETY_INSTRUCTIONS, PromptAuthority, PromptBlock,
+    PromptComposer, PromptComposition,
+};
 use crate::skill_catalog::{SkillInstructionDocument, SkillSummary};
 use anyhow::{Context, bail};
-use serde_json::json;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -10,8 +13,17 @@ pub struct InstructionConfig {
     pub workspace_root: PathBuf,
     pub cwd: PathBuf,
     pub max_instruction_bytes: usize,
+    pub max_prompt_bytes: usize,
+    pub max_prompt_layer_bytes: usize,
+    pub framework_instructions: String,
+    pub app_prompt: AppPromptConfig,
+    /// Backward-compatible alias for the App system instructions.
     pub base_instructions: String,
     pub developer_instructions: Option<String>,
+    pub session_instructions: Option<String>,
+    pub memory_context: Option<String>,
+    pub goal_instructions: Option<String>,
+    pub turn_local_instructions: Option<String>,
     pub skill_summaries: Vec<SkillSummary>,
     pub skill_instructions: Vec<SkillInstructionDocument>,
 }
@@ -37,10 +49,16 @@ impl InstructionConfig {
             workspace_root: workspace_root.into(),
             cwd: cwd.into(),
             max_instruction_bytes: 64 * 1024,
-            base_instructions:
-                "GeneralAgent is a Codex-like runtime. Use tools for concrete workspace actions."
-                    .into(),
+            max_prompt_bytes: 512 * 1024,
+            max_prompt_layer_bytes: 64 * 1024,
+            framework_instructions: DEFAULT_FRAMEWORK_SAFETY_INSTRUCTIONS.into(),
+            app_prompt: AppPromptConfig::default(),
+            base_instructions: crate::prompt_composer::DEFAULT_APP_SYSTEM_INSTRUCTIONS.into(),
             developer_instructions: None,
+            session_instructions: None,
+            memory_context: None,
+            goal_instructions: None,
+            turn_local_instructions: None,
             skill_summaries: Vec::new(),
             skill_instructions: Vec::new(),
         }
@@ -95,32 +113,132 @@ impl InstructionContext {
     }
 
     pub fn model_input(&self, user_text: &str) -> Vec<serde_json::Value> {
-        vec![
-            json!({
-                "role": "system",
-                "content": self.config.base_instructions.clone(),
-            }),
-            json!({
-                "role": "developer",
-                "content": self.developer_context(),
-            }),
-            json!({
-                "role": "user",
-                "content": user_text,
-            }),
-        ]
+        self.try_model_input(user_text, &[])
+            .expect("default prompt budgets should compose")
+            .input
     }
 
-    fn developer_context(&self) -> String {
+    pub fn try_model_input(
+        &self,
+        user_text: &str,
+        history: &[serde_json::Value],
+    ) -> anyhow::Result<PromptComposition> {
+        PromptComposer::new(self.config.max_prompt_bytes).compose(
+            self.prompt_blocks(),
+            history,
+            user_text,
+        )
+    }
+
+    fn prompt_blocks(&self) -> Vec<PromptBlock> {
+        let budget = self.config.max_prompt_layer_bytes;
+        let mut blocks = vec![
+            PromptBlock::new(
+                PromptAuthority::Framework,
+                "framework:safety",
+                self.config.framework_instructions.clone(),
+                budget,
+            ),
+            PromptBlock::new(
+                PromptAuthority::AppSystem,
+                format!("app:{}", self.config.app_prompt.identity.app_id),
+                self.app_system_context(),
+                budget,
+            ),
+        ];
+        if let Some(instructions) = &self.config.app_prompt.developer_instructions {
+            blocks.push(PromptBlock::new(
+                PromptAuthority::AppDeveloper,
+                "app:developer",
+                instructions.clone(),
+                budget,
+            ));
+        }
+        if let Some(instructions) = &self.config.developer_instructions {
+            blocks.push(PromptBlock::new(
+                PromptAuthority::AppDeveloper,
+                "host:developer",
+                format!("<developer_instructions>\n{instructions}\n</developer_instructions>"),
+                budget,
+            ));
+        }
+        blocks.push(PromptBlock::new(
+            PromptAuthority::Workspace,
+            "workspace:instructions",
+            self.workspace_context(),
+            budget,
+        ));
+        if let Some(instructions) = &self.config.session_instructions {
+            blocks.push(PromptBlock::new(
+                PromptAuthority::Session,
+                "session:instructions",
+                instructions.clone(),
+                budget,
+            ));
+        }
+        if let Some(context) = &self.config.memory_context {
+            blocks.push(PromptBlock::new(
+                PromptAuthority::Memory,
+                "memory:recall",
+                context.clone(),
+                budget,
+            ));
+        }
+        let skill_context = self.skill_context();
+        if !skill_context.is_empty() {
+            blocks.push(PromptBlock::new(
+                PromptAuthority::Skill,
+                "skills:snapshot",
+                skill_context,
+                budget,
+            ));
+        }
+        if let Some(instructions) = &self.config.goal_instructions {
+            blocks.push(PromptBlock::new(
+                PromptAuthority::Goal,
+                "goal:active",
+                format!("<active_goal>\n{instructions}\n</active_goal>"),
+                budget,
+            ));
+        }
+        if let Some(instructions) = &self.config.turn_local_instructions {
+            blocks.push(PromptBlock::new(
+                PromptAuthority::TurnLocal,
+                "turn:local",
+                instructions.clone(),
+                budget,
+            ));
+        }
+        blocks
+    }
+
+    fn app_system_context(&self) -> String {
+        let app = &self.config.app_prompt;
+        let system_instructions = if self.config.base_instructions
+            == crate::prompt_composer::DEFAULT_APP_SYSTEM_INSTRUCTIONS
+        {
+            &app.system_instructions
+        } else {
+            &self.config.base_instructions
+        };
+        let mut content = format!(
+            "<agent_app id=\"{}\" version=\"{}\" display_name=\"{}\">\n",
+            app.identity.app_id, app.identity.version, app.identity.display_name
+        );
+        if !app.identity.enabled_capabilities.is_empty() {
+            content.push_str("enabled_capabilities=");
+            content.push_str(&app.identity.enabled_capabilities.join(","));
+            content.push('\n');
+        }
+        content.push_str(system_instructions);
+        content.push_str("\n</agent_app>");
+        content
+    }
+
+    fn workspace_context(&self) -> String {
         let mut context = String::from(
             "Use tools for concrete workspace actions. Respect the project instructions below in directory order.",
         );
-
-        if let Some(instructions) = &self.config.developer_instructions {
-            context.push_str("\n\n<developer_instructions>\n");
-            context.push_str(instructions);
-            context.push_str("\n</developer_instructions>");
-        }
 
         for document in &self.documents {
             context.push_str("\n\n");
@@ -135,8 +253,13 @@ impl InstructionContext {
             context.push_str("\n</project_instructions>");
         }
 
+        context
+    }
+
+    fn skill_context(&self) -> String {
+        let mut context = String::new();
+
         if !self.config.skill_summaries.is_empty() {
-            context.push_str("\n\n");
             context.push_str(&format!(
                 "<available_skills count=\"{}\">\n",
                 self.config.skill_summaries.len()
@@ -153,7 +276,9 @@ impl InstructionContext {
         }
 
         for document in &self.config.skill_instructions {
-            context.push_str("\n\n");
+            if !context.is_empty() {
+                context.push_str("\n\n");
+            }
             context.push_str(&format!(
                 "<skill_instructions name=\"{}\" source=\"{}\" bytes=\"{}\" original_bytes=\"{}\" truncated=\"{}\">\n",
                 document.name,

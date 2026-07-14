@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "generalagent.foundation.notes",
+  "version": "0.1.0",
+  "displayName": "Notes and Knowledge",
+  "kind": "host_tools_only",
+  "package": { "includeInstructions": true, "includeRuntime": false },
+  "compatibility": { "platforms": ["android", "desktop", "server"] },
+  "requires": {
+    "packages": [],
+    "capabilities": ["host-tools"],
+    "runtimeTools": [],
+    "connectors": ["generalagent.connector.notes/v1"]
+  }
+}

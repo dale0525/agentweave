@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mail"
+  short_description: "Read, draft, organize, and safely send email"
+  default_prompt: "Use the Mail workflow to inspect the relevant messages, prepare a draft, and request exact approval before sending."

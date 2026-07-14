@@ -49,7 +49,7 @@ fun DiagnosticsScreen(
   skillRows: List<SkillRow>,
   onRefresh: () -> Unit,
 ) {
-  Column(modifier = Modifier.fillMaxSize().background(Color.White)) {
+  Column(modifier = Modifier.fillMaxSize().background(GaSurface)) {
     DiagnosticsTopBar(onRefresh)
     Column(
       modifier = Modifier
@@ -99,7 +99,7 @@ fun DiagnosticsScreen(
 @Composable
 private fun DiagnosticsTopBar(onRefresh: () -> Unit) {
   Row(
-    modifier = Modifier.fillMaxWidth().height(64.dp).background(Color.White).padding(horizontal = 16.dp),
+    modifier = Modifier.fillMaxWidth().height(64.dp).background(GaSurface).padding(horizontal = 16.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     IconButton(onClick = {}, modifier = Modifier.size(48.dp)) {
@@ -122,7 +122,7 @@ private fun DiagnosticsTopBar(onRefresh: () -> Unit) {
 private fun DiagnosticSectionLabel(label: String, startPadding: Int = 0) {
   Text(
     text = label,
-    color = Color(0xFF737373),
+    color = GaTextSecondary,
     fontSize = 14.sp,
     lineHeight = 22.sp,
     fontWeight = FontWeight.Bold,
@@ -183,7 +183,7 @@ private fun SkillValidationStatus(rows: List<SkillRow>) {
       .fillMaxWidth()
       .heightIn(min = 112.dp)
       .background(GaAmberContainer, GaLargeShape)
-      .border(1.dp, Color(0xFFFDE68A), GaLargeShape)
+      .border(1.dp, GaAmber, GaLargeShape)
       .padding(8.dp),
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
@@ -203,7 +203,7 @@ private fun SkillValidationStatus(rows: List<SkillRow>) {
         modifier = Modifier
           .weight(1f)
           .height(40.dp)
-          .background(Color(0x1AD97706), GaSmallShape)
+          .background(GaAmberContainer, GaSmallShape)
           .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -233,7 +233,7 @@ private fun CapabilityRow(capability: String) {
     modifier = Modifier
       .fillMaxWidth()
       .height(48.dp)
-      .background(Color.White, GaLargeShape)
+      .background(GaSurface, GaLargeShape)
       .border(1.dp, GaBorder, GaLargeShape)
       .padding(horizontal = 16.dp),
     verticalAlignment = Alignment.CenterVertically,
@@ -241,7 +241,7 @@ private fun CapabilityRow(capability: String) {
     Icon(
       capabilityIcon(capability),
       contentDescription = null,
-      tint = Color(0xFFA3A3A3),
+      tint = GaTextSecondary,
       modifier = Modifier.size(20.dp),
     )
     Spacer(modifier = Modifier.size(10.dp))

@@ -10,7 +10,7 @@ export default defineConfig({
     minify: false,
     outDir: "dist-electron",
     rollupOptions: {
-      external: ["electron", "node:path", "node:url"],
+      external: ["electron", "node:fs", "node:path", "node:url"],
       input: {
         "approval-preload": resolve(__dirname, "src/preload/approval.ts"),
         main: resolve(__dirname, "src/main/electronMain.ts"),

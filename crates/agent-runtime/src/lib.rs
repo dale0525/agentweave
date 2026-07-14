@@ -1,12 +1,41 @@
 #![cfg_attr(test, allow(deprecated))]
 
+pub mod app_definition;
+pub mod app_manifest;
+pub mod approval;
+pub mod automation;
+pub mod calendar;
+pub mod connector;
+pub mod connector_ledger;
+pub mod connector_tools;
+pub mod contacts;
 pub mod context;
+mod conversation_migration;
+pub mod credential;
+pub mod credential_file;
+pub mod credential_sqlite;
+pub mod documents;
+pub mod durable_run;
 pub mod events;
+pub mod foundation_actions;
 pub mod instructions;
+pub mod mail;
+pub mod mail_connector_transport;
+pub mod mail_fake;
+#[cfg(not(target_os = "android"))]
+pub mod mail_imap_smtp;
+pub mod memory;
+pub mod memory_lifecycle;
+pub mod memory_sqlite;
+pub mod memory_tools;
+pub mod messaging;
 pub mod mobile_host;
 pub mod model_config;
+pub mod notes;
 pub mod platform;
 pub mod policy;
+pub mod prompt_composer;
+pub mod scheduler;
 pub mod session;
 pub mod skill;
 pub mod skill_authoring;
@@ -23,6 +52,7 @@ pub mod skill_package;
 pub mod skill_policy;
 pub mod skill_recovery;
 pub mod skill_resolver;
+pub mod skill_resource;
 mod skill_runtime_source;
 pub mod skill_security;
 pub mod skill_snapshot;
@@ -69,11 +99,14 @@ mod skill_store_windows;
 mod skill_store_windows_directory_create;
 mod skill_verified;
 pub mod storage;
+pub mod structured_content;
 pub mod subagent;
+pub mod tasks;
 pub mod tools;
 pub mod turn;
 pub mod turn_request;
 pub mod vfs;
+pub mod web_research;
 
 #[cfg(test)]
 mod skill_package_tests;

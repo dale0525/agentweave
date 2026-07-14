@@ -6,23 +6,31 @@ pub enum ApprovalPolicy {
     Never,
     OnWorkspaceWrite,
     OnCommand,
+    OnWrites,
+    OnSensitiveOperations,
 }
 
 impl ApprovalPolicy {
     pub fn requires_approval(self, permission: ToolPermission) -> bool {
-        match (self, permission) {
-            (Self::Never, ToolPermission::ReadWorkspace) => false,
-            (Self::Never, ToolPermission::WriteWorkspace) => false,
-            (Self::Never, ToolPermission::ExecuteCommand) => false,
-            (Self::Never, ToolPermission::ManageSkills) => false,
-            (Self::OnWorkspaceWrite, ToolPermission::ReadWorkspace) => false,
-            (Self::OnWorkspaceWrite, ToolPermission::WriteWorkspace) => true,
-            (Self::OnWorkspaceWrite, ToolPermission::ExecuteCommand) => true,
-            (Self::OnWorkspaceWrite, ToolPermission::ManageSkills) => false,
-            (Self::OnCommand, ToolPermission::ReadWorkspace) => false,
-            (Self::OnCommand, ToolPermission::WriteWorkspace) => false,
-            (Self::OnCommand, ToolPermission::ExecuteCommand) => true,
-            (Self::OnCommand, ToolPermission::ManageSkills) => false,
+        if permission == ToolPermission::ManageSkills {
+            return false;
+        }
+        match self {
+            Self::Never => false,
+            Self::OnWorkspaceWrite => matches!(
+                permission,
+                ToolPermission::WriteWorkspace | ToolPermission::ExecuteCommand
+            ),
+            Self::OnCommand => permission == ToolPermission::ExecuteCommand,
+            Self::OnWrites => matches!(
+                permission,
+                ToolPermission::WriteWorkspace
+                    | ToolPermission::ExecuteCommand
+                    | ToolPermission::PersistData
+                    | ToolPermission::ExternalWrite
+                    | ToolPermission::DestructiveWrite
+            ),
+            Self::OnSensitiveOperations => permission != ToolPermission::ReadWorkspace,
         }
     }
 }
@@ -124,6 +132,8 @@ mod tests {
             ApprovalPolicy::Never,
             ApprovalPolicy::OnWorkspaceWrite,
             ApprovalPolicy::OnCommand,
+            ApprovalPolicy::OnWrites,
+            ApprovalPolicy::OnSensitiveOperations,
         ] {
             assert!(!policy.requires_approval(ToolPermission::ManageSkills));
         }

@@ -62,6 +62,49 @@ enum RuntimeRequest {
         config: MobileModelConfigDto,
     },
     LoadModelConfig,
+    ListMemories {
+        #[serde(default)]
+        query: String,
+        #[serde(default = "default_memory_limit")]
+        limit: usize,
+    },
+    ForgetMemory {
+        memory_id: String,
+        expected_version: u64,
+    },
+    ExportMemories,
+    ListMailAccounts,
+    MailAccountStatus {
+        account_id: String,
+    },
+    ConnectMailAccount {
+        account_id: String,
+    },
+    DisconnectMailAccount {
+        account_id: String,
+    },
+    ListFoundationActions,
+    ResolveFoundationAction {
+        approval_id: String,
+        decision: agent_runtime::approval::ApprovalDecision,
+    },
+    CreateScheduledJob {
+        request: agent_runtime::scheduler::ScheduledJobRequest,
+    },
+    RunSchedulerTick {
+        #[serde(default = "default_automation_limit")]
+        limit: usize,
+    },
+    ClaimNotifications {
+        worker: String,
+        #[serde(default = "default_automation_limit")]
+        limit: usize,
+    },
+    FinishNotification {
+        notification_id: String,
+        worker: String,
+        outcome: agent_runtime::automation::NotificationDeliveryOutcome,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,10 +192,61 @@ pub fn invoke_runtime_json(handle: i64, request_json: &str) -> String {
                 Ok(Value::Null)
             }
             RuntimeRequest::LoadModelConfig => serde_json::to_value(runtime.load_model_config()?),
+            RuntimeRequest::ListMemories { query, limit } => {
+                Ok(runtime.list_memories(&query, limit)?)
+            }
+            RuntimeRequest::ForgetMemory {
+                memory_id,
+                expected_version,
+            } => Ok(runtime.forget_memory(&memory_id, expected_version)?),
+            RuntimeRequest::ExportMemories => Ok(runtime.export_memories()?),
+            RuntimeRequest::ListMailAccounts => Ok(runtime.list_mail_accounts()?),
+            RuntimeRequest::MailAccountStatus { account_id } => {
+                Ok(runtime.mail_account_status(&account_id)?)
+            }
+            RuntimeRequest::ConnectMailAccount { account_id } => {
+                Ok(runtime.connect_mail_account(&account_id)?)
+            }
+            RuntimeRequest::DisconnectMailAccount { account_id } => {
+                Ok(runtime.disconnect_mail_account(&account_id)?)
+            }
+            RuntimeRequest::ListFoundationActions => {
+                serde_json::to_value(runtime.list_foundation_actions()?)
+            }
+            RuntimeRequest::ResolveFoundationAction {
+                approval_id,
+                decision,
+            } => serde_json::to_value(runtime.resolve_foundation_action(&approval_id, decision)?),
+            RuntimeRequest::CreateScheduledJob { request } => {
+                serde_json::to_value(runtime.create_scheduled_job(request)?)
+            }
+            RuntimeRequest::RunSchedulerTick { limit } => {
+                serde_json::to_value(runtime.run_scheduler_tick(limit)?)
+            }
+            RuntimeRequest::ClaimNotifications { worker, limit } => {
+                serde_json::to_value(runtime.claim_notifications(&worker, limit)?)
+            }
+            RuntimeRequest::FinishNotification {
+                notification_id,
+                worker,
+                outcome,
+            } => serde_json::to_value(runtime.finish_notification(
+                &notification_id,
+                &worker,
+                outcome,
+            )?),
         }
         .map_err(Into::into)
     })();
     bridge_result(result)
+}
+
+fn default_memory_limit() -> usize {
+    50
+}
+
+fn default_automation_limit() -> usize {
+    25
 }
 
 fn parse_runtime_request(request_json: &str) -> anyhow::Result<RuntimeRequest> {

@@ -19,13 +19,17 @@ test("mobile MVP requires stable manifest and lock APK assets", () => {
   assert.deepEqual(REQUIRED_APK_SKILL_ASSETS, [
     "assets/skills/skill-bundle.json",
     "assets/skills/skill-bundle.lock",
+    "assets/agent-app/agent-app.lock.json",
   ]);
   assert.doesNotThrow(() => assertRequiredApkAssets([
     "AndroidManifest.xml",
     ...REQUIRED_APK_SKILL_ASSETS,
   ]));
   assert.throws(
-    () => assertRequiredApkAssets(["assets/skills/skill-bundle.json"]),
+    () => assertRequiredApkAssets([
+      "assets/skills/skill-bundle.json",
+      "assets/agent-app/agent-app.lock.json",
+    ]),
     /assets\/skills\/skill-bundle.lock/,
   );
 });

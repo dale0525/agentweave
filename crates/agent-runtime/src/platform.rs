@@ -58,6 +58,17 @@ impl CapabilitySet {
             "filesystem.app_data",
             "secure_storage",
             "model.http_provider",
+            "memory-provider",
+            "provenance",
+            "retention-policy",
+            "reversible-history",
+            "durable-actions",
+            "approval-engine",
+            "credential-vault",
+            "mail-connector",
+            "scheduler",
+            "task-provider",
+            "host-tools",
         ])
     }
 
@@ -67,6 +78,18 @@ impl CapabilitySet {
             "filesystem.workspace",
             "shell.process",
             "model.http_provider",
+            "durable-actions",
+            "approval-engine",
+            "credential-vault",
+            "memory-provider",
+            "provenance",
+            "retention-policy",
+            "reversible-history",
+            "mail-connector",
+            "scheduler",
+            "task-provider",
+            "structured-content",
+            "host-tools",
         ])
     }
 
@@ -76,6 +99,18 @@ impl CapabilitySet {
             "filesystem.workspace",
             "shell.process",
             "model.http_provider",
+            "durable-actions",
+            "approval-engine",
+            "credential-vault",
+            "memory-provider",
+            "provenance",
+            "retention-policy",
+            "reversible-history",
+            "mail-connector",
+            "scheduler",
+            "task-provider",
+            "structured-content",
+            "host-tools",
         ])
     }
 
@@ -100,6 +135,8 @@ mod tests {
         assert!(capabilities.contains_name("filesystem.app_data"));
         assert!(capabilities.contains_name("secure_storage"));
         assert!(capabilities.contains_name("model.http_provider"));
+        assert!(capabilities.contains_name("scheduler"));
+        assert!(capabilities.contains_name("task-provider"));
         assert!(!capabilities.contains_name("shell.process"));
         assert!(!capabilities.contains_name("browser.headless"));
         assert!(!capabilities.contains_name("desktop.automation"));
@@ -129,6 +166,7 @@ mod tests {
         assert!(capabilities.contains_name("filesystem.workspace"));
         assert!(capabilities.contains_name("shell.process"));
         assert!(capabilities.contains_name("model.http_provider"));
+        assert!(capabilities.contains_name("task-provider"));
         assert!(!capabilities.contains_name("secure_storage"));
     }
 
@@ -140,6 +178,7 @@ mod tests {
         assert!(capabilities.contains_name("filesystem.workspace"));
         assert!(capabilities.contains_name("shell.process"));
         assert!(capabilities.contains_name("model.http_provider"));
+        assert!(capabilities.contains_name("task-provider"));
         assert!(!capabilities.contains_name("secure_storage"));
     }
 }

@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { DevSkillPackage } from "../../api";
 import { AppIconButton } from "../AppIconButton";
+import { useI18n } from "../../i18n/I18nProvider";
 
 type DeleteSkillDialogProps = {
   disabled?: boolean;
@@ -18,6 +19,7 @@ export function DeleteSkillDialog({
   onConfirm,
   onOpenChange
 }: DeleteSkillDialogProps): JSX.Element {
+  const { t } = useI18n();
   const [isDeleting, setIsDeleting] = useState(false);
 
   const confirmDelete = async () => {
@@ -37,10 +39,10 @@ export function DeleteSkillDialog({
     <Dialog.Root open={skillPackage !== null} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="developer-dialog-overlay" />
-        <Dialog.Content aria-label="delete skill package" className="developer-dialog-content">
+        <Dialog.Content aria-label={t("developer.deleteDialogLabel")} className="developer-dialog-content">
           <header className="developer-dialog-header">
-            <Dialog.Title>Delete package</Dialog.Title>
-            <AppIconButton label="Close delete dialog" onClick={() => onOpenChange(false)}>
+            <Dialog.Title>{t("developer.deletePackage")}</Dialog.Title>
+            <AppIconButton label={t("developer.closeDelete")} onClick={() => onOpenChange(false)}>
               <X aria-hidden="true" size={16} />
             </AppIconButton>
           </header>
@@ -48,14 +50,14 @@ export function DeleteSkillDialog({
           <div className="developer-dialog-body">
             <p>
               {skillPackage
-                ? `Delete ${skillPackage.name} and remove its local development assets?`
-                : "Delete this package?"}
+                ? t("developer.deleteQuestion", { name: skillPackage.name })
+                : t("developer.deleteFallbackQuestion")}
             </p>
           </div>
 
           <footer className="developer-dialog-footer">
             <button className="developer-secondary-button" onClick={() => onOpenChange(false)} type="button">
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               className="developer-danger-button"
@@ -64,7 +66,7 @@ export function DeleteSkillDialog({
               type="button"
             >
               {isDeleting ? <LoaderCircle aria-hidden="true" className="activity-spin" size={16} /> : <Trash2 aria-hidden="true" size={16} />}
-              <span>{skillPackage ? `Delete ${skillPackage.name}` : "Delete package"}</span>
+              <span>{skillPackage ? t("developer.deleteNamed", { name: skillPackage.name }) : t("developer.deletePackage")}</span>
             </button>
           </footer>
         </Dialog.Content>

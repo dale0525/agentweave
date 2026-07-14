@@ -1,6 +1,7 @@
 pub mod bridge;
 #[cfg(target_os = "android")]
 mod jni_bridge;
+mod mobile_app;
 pub mod runtime;
 mod runtime_inventory;
 pub mod types;

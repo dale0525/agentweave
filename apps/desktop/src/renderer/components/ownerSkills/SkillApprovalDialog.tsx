@@ -211,5 +211,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function preferredAppearance(): "dark" | "light" {
+  const configured = document.documentElement.dataset.appearance;
+  if (configured === "dark" || configured === "light") return configured;
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }

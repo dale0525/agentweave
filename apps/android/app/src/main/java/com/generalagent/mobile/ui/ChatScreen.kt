@@ -42,7 +42,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -193,6 +192,7 @@ fun ChatScreen(
   interactionAllowed: () -> Boolean,
   modifier: Modifier = Modifier,
 ) {
+  val strings = LocalAppStrings.current
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
   var errorMessage by remember { mutableStateOf<String?>(null) }
   var refreshToken by remember { mutableIntStateOf(0) }
@@ -316,7 +316,7 @@ fun ChatScreen(
       modifier = Modifier
         .weight(1f)
         .fillMaxWidth()
-        .background(Color(0xFFFAFAFA)),
+        .background(GaSurfaceSubtle),
       contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
       verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
@@ -343,7 +343,7 @@ fun ChatScreen(
       onSend = sendDraft,
       enabled = snapshot != null && !sending && interactionEnabled,
       sending = sending,
-      onAttach = { errorMessage = "Attachments are unavailable in the Android MVP" },
+      onAttach = { errorMessage = strings.text("android.chat.attachmentsUnavailable") },
     )
   }
 }
@@ -358,27 +358,28 @@ private fun RuntimeClient.loadChatSnapshot(): ChatSnapshot {
 
 @Composable
 private fun ChatTopBar(ready: Boolean, onRefresh: () -> Unit) {
+  val strings = LocalAppStrings.current
   Row(
     modifier = Modifier
       .fillMaxWidth()
       .height(64.dp)
-      .background(Color.White)
+      .background(GaSurface)
       .padding(horizontal = 16.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     IconButton(onClick = {}, modifier = Modifier.size(48.dp)) {
-      Icon(Icons.Outlined.SmartToy, contentDescription = "GeneralAgent", tint = GaPrimary)
+      Icon(Icons.Outlined.SmartToy, contentDescription = strings.text("app.name"), tint = GaPrimary)
     }
     Spacer(modifier = Modifier.size(12.dp))
     Column(modifier = Modifier.weight(1f)) {
       Text(
-        text = "GeneralAgent",
+        text = strings.text("app.name"),
         style = MaterialTheme.typography.titleMedium,
         color = GaText,
       )
       Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-          text = "Android runtime setup",
+          text = strings.text("android.chat.runtimeSetup"),
           color = GaTextSecondary,
           fontSize = 12.sp,
           lineHeight = 16.sp,
@@ -389,13 +390,13 @@ private fun ChatTopBar(ready: Boolean, onRefresh: () -> Unit) {
             .widthIn(min = 81.dp)
             .height(20.dp)
             .background(
-              if (ready) Color(0xFFDCFCE7) else MaterialTheme.colorScheme.errorContainer,
+              if (ready) GaReadyContainer else MaterialTheme.colorScheme.errorContainer,
               GaSmallShape,
             ),
           contentAlignment = Alignment.Center,
         ) {
           Text(
-            text = if (ready) "Runtime ready" else "Unavailable",
+            text = if (ready) strings.text("android.chat.runtimeReady") else strings.text("android.chat.unavailable"),
             color = if (ready) GaReady else MaterialTheme.colorScheme.error,
             fontSize = 10.sp,
             lineHeight = 14.sp,
@@ -405,7 +406,7 @@ private fun ChatTopBar(ready: Boolean, onRefresh: () -> Unit) {
       }
     }
     IconButton(onClick = onRefresh, modifier = Modifier.size(48.dp)) {
-      Icon(Icons.Outlined.Sync, contentDescription = "Sync", tint = GaPrimary)
+      Icon(Icons.Outlined.Sync, contentDescription = strings.text("android.chat.sync"), tint = GaPrimary)
     }
   }
   HorizontalDivider(color = GaBorder)
@@ -413,6 +414,7 @@ private fun ChatTopBar(ready: Boolean, onRefresh: () -> Unit) {
 
 @Composable
 private fun ChatMessageBubble(message: RuntimeMessage) {
+  val strings = LocalAppStrings.current
   val user = message.role == "user"
   Column(
     modifier = Modifier.fillMaxWidth(),
@@ -420,7 +422,7 @@ private fun ChatMessageBubble(message: RuntimeMessage) {
   ) {
     if (!user) {
       Text(
-        text = "GeneralAgent runtime",
+        text = strings.text("android.chat.runtime"),
         color = GaTextSecondary,
         fontFamily = FontFamily.Monospace,
         fontSize = 13.sp,
@@ -432,7 +434,7 @@ private fun ChatMessageBubble(message: RuntimeMessage) {
       modifier = Modifier
         .fillMaxWidth(if (user) 0.85f else 0.9f)
         .clip(GaLargeShape)
-        .background(if (user) Color(0xFFE5E5E5) else Color.White)
+        .background(if (user) GaSurfaceMuted else GaSurface)
         .then(if (user) Modifier else Modifier.border(1.dp, GaBorder, GaLargeShape))
         .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
@@ -448,12 +450,13 @@ private fun ChatMessageBubble(message: RuntimeMessage) {
 
 @Composable
 private fun RunningTurnRow() {
+  val strings = LocalAppStrings.current
   Row(
     modifier = Modifier
       .fillMaxWidth(0.9f)
       .height(46.dp)
-      .background(Color(0xFFFFFBEB), GaLargeShape)
-      .border(1.dp, Color(0xFFFDE68A), GaLargeShape)
+      .background(GaAmberContainer, GaLargeShape)
+      .border(1.dp, GaAmber, GaLargeShape)
       .padding(horizontal = 12.dp),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -464,7 +467,7 @@ private fun RunningTurnRow() {
       strokeWidth = 2.dp,
     )
     Text(
-      text = "Running model turn...",
+      text = strings.text("android.chat.running"),
       color = GaAmberText,
       fontWeight = FontWeight.Medium,
       fontSize = 14.sp,
@@ -495,12 +498,13 @@ private fun ChatComposer(
   sending: Boolean,
   onAttach: () -> Unit,
 ) {
+  val strings = LocalAppStrings.current
   val sendHighlighted = sending || (enabled && draft.isNotBlank())
   Column(
     modifier = Modifier
       .fillMaxWidth()
       .height(80.dp)
-      .background(Color.White),
+      .background(GaSurface),
   ) {
     HorizontalDivider(color = GaBorder)
     Row(
@@ -511,7 +515,7 @@ private fun ChatComposer(
       horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
       IconButton(onClick = onAttach, modifier = Modifier.size(48.dp)) {
-        Icon(Icons.Outlined.AttachFile, contentDescription = "Attach", tint = GaTextSecondary)
+        Icon(Icons.Outlined.AttachFile, contentDescription = strings.text("android.chat.attach"), tint = GaTextSecondary)
       }
       BasicTextField(
         value = draft,
@@ -527,13 +531,13 @@ private fun ChatComposer(
         modifier = Modifier
           .weight(1f)
           .heightIn(min = 48.dp, max = 64.dp)
-          .background(Color.White, GaLargeShape)
+          .background(GaSurfaceMuted, GaLargeShape)
           .border(1.dp, GaBorder, GaLargeShape)
           .padding(horizontal = 12.dp, vertical = 14.dp),
         decorationBox = { inner ->
           Box {
             if (draft.isEmpty()) {
-              Text("Type a command...", color = GaTextSecondary, fontSize = 14.sp)
+              Text(strings.text("android.chat.placeholder"), color = GaTextSecondary, fontSize = 14.sp)
             }
             inner()
           }
@@ -551,8 +555,8 @@ private fun ChatComposer(
       ) {
         Icon(
           Icons.AutoMirrored.Filled.Send,
-          contentDescription = "Send",
-          tint = if (sendHighlighted) Color.White else GaTextSecondary,
+          contentDescription = strings.text("android.chat.send"),
+          tint = if (sendHighlighted) MaterialTheme.colorScheme.onPrimary else GaTextSecondary,
         )
       }
     }

@@ -8,6 +8,7 @@ import {
   buildModifySkillPrompt
 } from "../../devSkillPrompts";
 import { AppIconButton } from "../AppIconButton";
+import { useI18n } from "../../i18n/I18nProvider";
 
 type SkillCreatorPromptDialogProps = {
   inventory: DevSkillInventory | null;
@@ -20,7 +21,9 @@ export function SkillCreatorPromptDialog({
   promptPackage,
   onOpenChange
 }: SkillCreatorPromptDialogProps): JSX.Element {
-  const [copyLabel, setCopyLabel] = useState("Copy prompt");
+  const { t } = useI18n();
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const copyLabel = t(copyState === "copied" ? "common.copied" : copyState === "failed" ? "common.copyFailed" : "common.copyPrompt");
   const open = promptPackage !== null && inventory !== null;
   const prompt =
     promptPackage === null || inventory === null
@@ -33,12 +36,12 @@ export function SkillCreatorPromptDialog({
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(prompt);
-        setCopyLabel("Copied");
-        window.setTimeout(() => setCopyLabel("Copy prompt"), 1200);
+        setCopyState("copied");
+        window.setTimeout(() => setCopyState("idle"), 1200);
       }
     } catch {
-      setCopyLabel("Copy failed");
-      window.setTimeout(() => setCopyLabel("Copy prompt"), 1200);
+      setCopyState("failed");
+      window.setTimeout(() => setCopyState("idle"), 1200);
     }
   };
 
@@ -46,18 +49,17 @@ export function SkillCreatorPromptDialog({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="developer-dialog-overlay" />
-        <Dialog.Content aria-label="skill-creator prompt" className="developer-dialog-content">
+        <Dialog.Content aria-label={t("developer.promptTitle")} className="developer-dialog-content">
           <header className="developer-dialog-header">
-            <Dialog.Title>skill-creator prompt</Dialog.Title>
-            <AppIconButton label="Close prompt dialog" onClick={() => onOpenChange(false)}>
+            <Dialog.Title>{t("developer.promptTitle")}</Dialog.Title>
+            <AppIconButton label={t("developer.closePrompt")} onClick={() => onOpenChange(false)}>
               <X aria-hidden="true" size={16} />
             </AppIconButton>
           </header>
 
           <div className="developer-dialog-body">
             <p>
-              Use this prompt with the existing `skill-creator` skill to author or
-              modify the local package.
+              {t("developer.promptDescription")}
             </p>
             <pre className="developer-dialog-prompt">{prompt}</pre>
           </div>

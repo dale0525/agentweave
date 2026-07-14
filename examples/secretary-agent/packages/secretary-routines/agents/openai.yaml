@@ -1,0 +1,4 @@
+interface:
+  display_name: "Secretary Routines"
+  short_description: "Create daily briefs and follow-up action lists"
+  default_prompt: "Use $secretary-routines to prepare a concise, source-backed secretary brief."

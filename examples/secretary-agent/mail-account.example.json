@@ -1,0 +1,32 @@
+{
+  "account": {
+    "id": "primary",
+    "displayName": "Primary Mail",
+    "primaryAddress": {
+      "name": "Local User",
+      "address": "user@example.com"
+    },
+    "addresses": [],
+    "providerReference": null
+  },
+  "credentialScope": {
+    "appId": "com.example.secretary-agent",
+    "tenantId": "local",
+    "userId": "local-user"
+  },
+  "credentialSecretId": "mail.primary.password",
+  "imapHost": "imap.example.com",
+  "imapPort": 993,
+  "imapTls": "implicit",
+  "smtpHost": "smtp.example.com",
+  "smtpPort": 465,
+  "smtpTls": "implicit",
+  "username": "user@example.com",
+  "archiveMailbox": "Archive",
+  "sentMailbox": "Sent",
+  "draftsMailbox": "Drafts",
+  "trashMailbox": "Trash",
+  "allowInsecureLocalhost": false,
+  "connectTimeoutSeconds": 15,
+  "operationTimeoutSeconds": 30
+}

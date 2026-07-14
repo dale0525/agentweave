@@ -105,6 +105,7 @@ fn init_config(root: &std::path::Path) -> MobileInitConfig {
         .unwrap();
     MobileInitConfig {
         app_data_dir: app_data_dir.display().to_string(),
+        app_package_dir: None,
         cache_dir: cache_dir.display().to_string(),
         database_path: app_data_dir.join("general-agent.db").display().to_string(),
         builtin_skills_dir: builtin_skills_dir.display().to_string(),

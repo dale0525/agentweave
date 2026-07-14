@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundation Calendar"
+  short_description: "Plan and change calendar events safely"
+  default_prompt: "Use $foundation-calendar to check availability and propose a safe calendar change."

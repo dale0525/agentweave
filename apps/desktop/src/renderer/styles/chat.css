@@ -1,24 +1,4 @@
 .chat-shell {
-  color-scheme: light;
-  --color-primary: #0d9488;
-  --color-primary-text: #0f766e;
-  --color-primary-fill: #0f766e;
-  --color-primary-fill-hover: #115e59;
-  --color-primary-fill-text: #ffffff;
-  --color-primary-hover: #0f766e;
-  --color-primary-soft: #ccfbf1;
-  --color-background: #ffffff;
-  --color-surface: #ffffff;
-  --color-surface-muted: #f9fafb;
-  --color-surface-raised: #f3f4f6;
-  --color-border: #e5e7eb;
-  --color-border-strong: #d1d5db;
-  --color-text: #111827;
-  --color-text-muted: #4b5563;
-  --color-text-subtle: #6b7280;
-  --color-danger: #b91c1c;
-  --color-danger-surface: #fef2f2;
-  --shadow-focus: 0 0 0 3px rgba(13, 148, 136, 0.16);
   display: flex;
   height: 100%;
   min-height: 0;
@@ -64,8 +44,8 @@
 
 .message-bubble-user {
   align-self: flex-end;
-  border: 1px solid var(--color-surface-raised);
-  background: var(--color-surface-raised);
+  border: 1px solid color-mix(in srgb, var(--color-user-message) 82%, var(--color-border));
+  background: var(--color-user-message);
 }
 
 .activity-row {

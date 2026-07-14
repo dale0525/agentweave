@@ -200,6 +200,86 @@ fn request_has_tool(request: &model_gateway::responses::GatewayRequest, name: &s
         .any(|tool| tool.advertised_name() == name)
 }
 
+struct PreferenceExtractor;
+
+#[async_trait]
+impl crate::memory_lifecycle::MemoryCandidateExtractor for PreferenceExtractor {
+    async fn extract_candidates(
+        &self,
+        transcript: &crate::memory_lifecycle::MemoryTurnTranscript,
+    ) -> anyhow::Result<Vec<crate::memory::MemoryDraft>> {
+        assert_eq!(transcript.session_id, "session-memory");
+        assert_eq!(transcript.user_text, "以后默认把会议安排在下午");
+        assert_eq!(transcript.assistant_text, "我会先把它作为待确认偏好。");
+        Ok(vec![crate::memory::MemoryDraft {
+            kind: crate::memory::MemoryKind::parse(crate::memory::MemoryKind::PREFERENCE)?,
+            value: crate::memory::MemoryValue::new("会议默认安排在下午")?,
+            evidence: vec![crate::memory::MemoryEvidence {
+                source: crate::memory::MemoryEvidenceSource::UserStatement,
+                source_id: Some(transcript.session_id.clone()),
+                excerpt: Some(transcript.user_text.clone()),
+                observed_at: chrono::Utc::now(),
+            }],
+            confidence: crate::memory::MemoryConfidence::from_basis_points(9_000)?,
+            sensitivity: crate::memory::MemorySensitivity::Personal,
+            retention: crate::memory::MemoryRetention::Persistent,
+            conflict_key: Some("meeting-time-preference".into()),
+            supersedes: None,
+        }])
+    }
+}
+
+#[tokio::test]
+async fn post_turn_memory_candidates_are_proposed_through_the_provider_lifecycle() {
+    use crate::memory::{MemoryExportRequest, MemoryProvider, MemoryScope, MemoryState};
+
+    let storage = crate::storage::Storage::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let provider = Arc::new(storage.local_memory_provider());
+    provider.initialize().await.unwrap();
+    let scope = MemoryScope::new("app", "tenant", "user").unwrap();
+    let memory =
+        crate::memory_tools::MemoryToolRuntime::new(provider.clone(), scope.clone()).unwrap();
+    let workspace = test_workspace("memory-lifecycle");
+    let runner = TurnRunner::new_with_config(
+        ScriptedModel {
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+            responses: vec![vec![
+                GatewayEvent::TextDelta {
+                    text: "我会先把它作为待确认偏好。".into(),
+                },
+                GatewayEvent::Completed,
+            ]],
+        },
+        SkillRegistry::empty(),
+        RuntimeConfig::workspace_write(workspace.clone(), workspace.clone()),
+    )
+    .with_memory_tools(memory)
+    .with_memory_candidate_extractor(Arc::new(PreferenceExtractor));
+
+    let events = runner
+        .run_request(TurnRequest::new("以后默认把会议安排在下午").with_session_id("session-memory"))
+        .await
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::MemoryCandidatesProposed { memory_ids } if memory_ids.len() == 1
+    )));
+    let exported = provider
+        .export(MemoryExportRequest {
+            scope,
+            include_proposals: true,
+            include_tombstones: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(exported.records.len(), 1);
+    assert_eq!(exported.records[0].state, MemoryState::Proposed);
+    remove_workspace(&workspace);
+}
+
 #[tokio::test]
 async fn builtin_create_directory_creates_workspace_directory_through_turn_loop() {
     let workspace = test_workspace("create-directory");
@@ -839,73 +919,6 @@ async fn turn_keeps_the_snapshot_captured_at_start() {
     remove_workspace(&workspace);
 }
 
-#[tokio::test]
-async fn next_turn_uses_the_newly_published_snapshot() {
-    let root = tempdir().unwrap();
-    let package_root = root.path().join("runtime");
-    write_turn_runtime_package(&package_root, "first_tool").await;
-    let manager = turn_skill_manager(root.path()).await;
-    let workspace = test_workspace("snapshot-next-turn");
-    let runner = TurnRunner::new_with_manager_and_config(
-        SnapshotSwapModel {
-            calls: AtomicUsize::new(0),
-            manager: manager.clone(),
-            package_root,
-            fail_reload: false,
-        },
-        manager,
-        RuntimeConfig::workspace_write(workspace.clone(), workspace.clone()),
-    );
-
-    runner.run("first turn").await.unwrap();
-    let events = runner.run("second turn").await.unwrap();
-
-    assert!(events.iter().any(|event| matches!(
-        event,
-        RuntimeEvent::ToolCallStarted { name, .. } if name == "second_tool"
-    )));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        RuntimeEvent::ToolCallFinished { result, .. }
-            if result["ok"] == true && result["tool"] == "second_tool"
-    )));
-    remove_workspace(&workspace);
-}
-
-#[tokio::test]
-async fn failed_reload_does_not_change_the_running_turn_snapshot() {
-    let root = tempdir().unwrap();
-    let package_root = root.path().join("runtime");
-    write_turn_runtime_package(&package_root, "first_tool").await;
-    let manager = turn_skill_manager(root.path()).await;
-    let initial = manager.current_snapshot();
-    let workspace = test_workspace("snapshot-failed-reload");
-    let runner = TurnRunner::new_with_manager_and_config(
-        SnapshotSwapModel {
-            calls: AtomicUsize::new(0),
-            manager: manager.clone(),
-            package_root,
-            fail_reload: true,
-        },
-        manager.clone(),
-        RuntimeConfig::workspace_write(workspace.clone(), workspace.clone()),
-    );
-
-    let events = runner.run("use the tool").await.unwrap();
-
-    assert!(events.iter().any(|event| matches!(
-        event,
-        RuntimeEvent::ToolCallStarted { name, .. } if name == "first_tool"
-    )));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        RuntimeEvent::ToolCallFinished { result, .. }
-            if result["ok"] == true && result["tool"] == "first_tool"
-    )));
-    assert!(Arc::ptr_eq(&initial, &manager.current_snapshot()));
-    remove_workspace(&workspace);
-}
-
 async fn turn_skill_manager(root: &Path) -> SkillManager {
     SkillManager::new(SkillManagerConfig {
         sources: vec![Arc::new(DirectorySkillSource::new(
@@ -969,3 +982,6 @@ async fn write_turn_runtime_package(package_root: &Path, tool_name: &str) {
     .await
     .unwrap();
 }
+
+#[path = "turn_snapshot_followup_tests.rs"]
+mod snapshot_followup_tests;

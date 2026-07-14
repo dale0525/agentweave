@@ -1,8 +1,11 @@
 use anyhow::Context;
+use icu_casemap::CaseMapper;
 use serde::Deserialize;
-use std::collections::HashSet;
+use serde::Serialize;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Component;
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillSummary {
@@ -10,6 +13,19 @@ pub struct SkillSummary {
     pub description: String,
     pub aliases: Vec<String>,
     pub source: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSelectionReason {
+    ExplicitInvocation,
+    UniqueNameOrAlias,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillSelection {
+    pub name: String,
+    pub reason: SkillSelectionReason,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +212,13 @@ impl SkillCatalog {
     }
 
     pub fn triggered_skill_names(&self, user_text: &str) -> Vec<String> {
+        self.triggered_skills(user_text)
+            .into_iter()
+            .map(|selection| selection.name)
+            .collect()
+    }
+
+    pub fn triggered_skills(&self, user_text: &str) -> Vec<SkillSelection> {
         let tokens = trigger_tokens(user_text);
         let dollar_tokens: HashSet<_> = tokens
             .iter()
@@ -206,11 +229,18 @@ impl SkillCatalog {
             .filter(|token| !token.starts_with('$'))
             .map(String::as_str)
             .collect();
-        let mut triggered = HashSet::new();
+        let normalized_text = normalized_casefold(user_text);
+        let mut triggered = BTreeMap::new();
 
         for summary in &self.summaries {
-            if dollar_tokens.contains(summary.name.to_ascii_lowercase().as_str()) {
-                triggered.insert(summary.name.clone());
+            let normalized_name = normalized_casefold(&summary.name);
+            let explicit = dollar_tokens.contains(normalized_name.as_str())
+                || normalized_text.contains(&format!("${normalized_name}"));
+            if explicit {
+                triggered.insert(
+                    summary.name.clone(),
+                    SkillSelectionReason::ExplicitInvocation,
+                );
             }
         }
 
@@ -222,13 +252,28 @@ impl SkillCatalog {
                 .map(|summary| summary.name.clone())
                 .collect();
             if matches.len() == 1 {
-                triggered.insert(matches[0].clone());
+                triggered
+                    .entry(matches[0].clone())
+                    .or_insert(SkillSelectionReason::UniqueNameOrAlias);
             }
         }
 
-        let mut names: Vec<_> = triggered.into_iter().collect();
-        names.sort();
-        names
+        let unicode_mentions = self
+            .summaries
+            .iter()
+            .filter(|summary| summary.matches_unicode_substring(&normalized_text))
+            .map(|summary| summary.name.clone())
+            .collect::<Vec<_>>();
+        if unicode_mentions.len() == 1 {
+            triggered
+                .entry(unicode_mentions[0].clone())
+                .or_insert(SkillSelectionReason::UniqueNameOrAlias);
+        }
+
+        triggered
+            .into_iter()
+            .map(|(name, reason)| SkillSelection { name, reason })
+            .collect()
     }
 
     pub async fn load_instruction_documents(
@@ -260,11 +305,19 @@ impl SkillCatalog {
 
 impl SkillSummary {
     fn matches_plain_token(&self, token: &str) -> bool {
-        self.name.eq_ignore_ascii_case(token)
+        let token = normalized_casefold(token);
+        normalized_casefold(&self.name) == token
             || self
                 .aliases
                 .iter()
-                .any(|alias| alias.eq_ignore_ascii_case(token))
+                .any(|alias| normalized_casefold(alias) == token)
+    }
+
+    fn matches_unicode_substring(&self, normalized_text: &str) -> bool {
+        std::iter::once(&self.name)
+            .chain(self.aliases.iter())
+            .filter(|candidate| !candidate.is_ascii())
+            .any(|candidate| normalized_text.contains(&normalized_casefold(candidate)))
     }
 }
 
@@ -472,7 +525,7 @@ fn validate_catalog_entry(entry: &SkillCatalogEntry) -> anyhow::Result<()> {
 fn validate_unique_skill_names(summaries: &[SkillSummary]) -> anyhow::Result<()> {
     let mut names = HashSet::new();
     for summary in summaries {
-        if !names.insert(summary.name.as_str()) {
+        if !names.insert(normalized_casefold(&summary.name)) {
             anyhow::bail!("duplicate instruction skill name: {}", summary.name);
         }
     }
@@ -514,21 +567,32 @@ fn trigger_tokens(text: &str) -> Vec<String> {
     let mut current = String::new();
 
     for ch in text.chars() {
-        if ch == '$' && current.is_empty() {
+        if (ch == '$' && current.is_empty()) || ch.is_alphanumeric() || ch == '_' || ch == '-' {
             current.push(ch);
-        } else if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-            current.push(ch.to_ascii_lowercase());
         } else if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
+            tokens.push(normalized_casefold(&std::mem::take(&mut current)));
         }
     }
 
     if !current.is_empty() {
-        tokens.push(current);
+        tokens.push(normalized_casefold(&current));
     }
 
     tokens
 }
+
+fn normalized_casefold(value: &str) -> String {
+    let normalized = value.nfkc().collect::<String>();
+    CaseMapper::new()
+        .fold_string(&normalized)
+        .as_ref()
+        .nfkc()
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "skill_catalog_unicode_tests.rs"]
+mod unicode_tests;
 
 #[cfg(test)]
 mod tests {

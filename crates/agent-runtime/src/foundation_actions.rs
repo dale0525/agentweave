@@ -1,0 +1,547 @@
+use crate::approval::{
+    ApprovalBinding, ApprovalDecision, ApprovalRecord, ApprovalRisk, ApprovalStatus,
+};
+use crate::connector::{ConnectorExecutionResult, connector_action_hash};
+use crate::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
+use crate::credential::CredentialScope;
+use crate::durable_run::{
+    ActionOutcome, ActionStatus, DurableAction, DurableRunStore, OutboxStatus, QueueActionRequest,
+    RunScope, RunStatus,
+};
+use crate::mail::{ApprovedSendRequest, DeliveryState, SendPreview};
+use crate::mail_connector_transport::MAIL_CONNECTOR_ID;
+use crate::storage::Storage;
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::sync::Arc;
+
+const MAIL_SEND_ACTION: &str = "mail_send";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingFoundationAction {
+    pub approval: ApprovalRecord,
+    pub action: DurableAction,
+    pub preview: Option<SendPreview>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundationActionResolution {
+    pub approval: ApprovalRecord,
+    pub action: DurableAction,
+    pub connector_result: Option<ConnectorExecutionResult>,
+}
+
+#[derive(Clone)]
+pub struct MailActionService {
+    store: DurableRunStore,
+    tools: ConnectorToolRuntime,
+    context: Arc<EphemeralConnectorContextProvider>,
+    scope: CredentialScope,
+    policy_version: String,
+}
+
+impl MailActionService {
+    pub async fn new(
+        storage: &Storage,
+        tools: ConnectorToolRuntime,
+        context: Arc<EphemeralConnectorContextProvider>,
+        scope: CredentialScope,
+        policy_version: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        scope.validate()?;
+        let policy_version = policy_version.into();
+        anyhow::ensure!(
+            !policy_version.trim().is_empty(),
+            "foundation action policy version is required"
+        );
+        Ok(Self {
+            store: DurableRunStore::from_storage(storage).await?,
+            tools,
+            context,
+            scope,
+            policy_version,
+        })
+    }
+
+    pub async fn request_send(
+        &self,
+        preview: SendPreview,
+        session_id: Option<String>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<PendingFoundationAction> {
+        validate_preview(&preview)?;
+        let run_scope = self.run_scope(session_id);
+        let arguments = json!({"preview": preview});
+        if let Some(existing) = self
+            .store
+            .find_scoped_action_by_idempotency(
+                &run_scope,
+                MAIL_SEND_ACTION,
+                preview_idempotency_key(&arguments)?,
+            )
+            .await?
+        {
+            anyhow::ensure!(
+                existing.arguments_sha256 == crate::approval::immutable_arguments_hash(&arguments)?,
+                "mail send idempotency key conflicts with another preview"
+            );
+            return self.pending_from_action(existing).await;
+        }
+
+        let run = self
+            .store
+            .create_run(run_scope, "Send an approved Mail draft", now)
+            .await?;
+        anyhow::ensure!(
+            self.store
+                .transition_run(&run.run_id, run.version, RunStatus::Running, json!({}), now)
+                .await?,
+            "mail action run could not start"
+        );
+        let step = self
+            .store
+            .add_step(&run.run_id, 0, MAIL_SEND_ACTION, json!({}), now)
+            .await?;
+        let preview = preview_from_arguments(&arguments)?;
+        let action = self
+            .store
+            .queue_action(
+                QueueActionRequest {
+                    run_id: &run.run_id,
+                    step_id: &step.step_id,
+                    action_name: MAIL_SEND_ACTION,
+                    arguments,
+                    resource_target: &format!("mail-account:{}", preview.account_id),
+                    idempotency_key: &preview.idempotency_key,
+                    approval_required: true,
+                },
+                now,
+            )
+            .await?;
+        let binding = ApprovalBinding {
+            actor_id: self.scope.user_id.clone(),
+            app_id: self.scope.app_id.clone(),
+            run_id: run.run_id.clone(),
+            action_id: action.action_id.clone(),
+            action_name: action.action_name.clone(),
+            arguments_sha256: action.arguments_sha256.clone(),
+            resource_target: action.resource_target.clone(),
+            policy_version: self.policy_version.clone(),
+            risk: ApprovalRisk::ExternalWrite,
+            risk_summary: mail_risk_summary(&preview),
+            session_id: run.scope.session_id.clone(),
+            expires_at: now + Duration::minutes(15),
+        };
+        let approval = self.store.request_approval(binding, now).await?;
+        anyhow::ensure!(
+            self.store
+                .bind_action_approval(&action.action_id, &approval.approval_id, now)
+                .await?,
+            "mail action approval could not be bound"
+        );
+        anyhow::ensure!(
+            self.store
+                .transition_run(
+                    &run.run_id,
+                    run.version + 1,
+                    RunStatus::WaitingApproval,
+                    json!({"actionId": action.action_id, "approvalId": approval.approval_id}),
+                    now,
+                )
+                .await?,
+            "mail action run could not wait for approval"
+        );
+        let action = self
+            .store
+            .get_action(&action.action_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("mail action disappeared"))?;
+        Ok(PendingFoundationAction {
+            approval,
+            action,
+            preview: Some(preview),
+        })
+    }
+
+    pub async fn list_actions(&self) -> anyhow::Result<Vec<PendingFoundationAction>> {
+        let approvals = self
+            .store
+            .list_approvals_for_scope(
+                &self.scope.app_id,
+                &self.scope.tenant_id,
+                &self.scope.user_id,
+            )
+            .await?;
+        let mut actions = Vec::with_capacity(approvals.len());
+        for approval in approvals {
+            let action = self
+                .store
+                .get_action(&approval.binding.action_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("approved action is missing"))?;
+            let preview = (action.action_name == MAIL_SEND_ACTION)
+                .then(|| preview_from_arguments(&action.arguments))
+                .transpose()?;
+            actions.push(PendingFoundationAction {
+                approval,
+                action,
+                preview,
+            });
+        }
+        Ok(actions)
+    }
+
+    pub async fn resolve(
+        &self,
+        approval_id: &str,
+        decision: ApprovalDecision,
+        resolver: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<FoundationActionResolution> {
+        anyhow::ensure!(resolver == self.scope.user_id, "approval actor mismatch");
+        let current = self
+            .store
+            .get_approval(approval_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("approval not found"))?;
+        anyhow::ensure!(
+            current.binding.app_id == self.scope.app_id,
+            "approval App mismatch"
+        );
+        anyhow::ensure!(
+            current.binding.actor_id == resolver,
+            "approval actor mismatch"
+        );
+        let resolved = self
+            .store
+            .resolve_approval(approval_id, decision, resolver, now)
+            .await?;
+        let action = self
+            .store
+            .get_action(&resolved.binding.action_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("approved action is missing"))?;
+
+        if matches!(
+            resolved.status,
+            ApprovalStatus::Rejected | ApprovalStatus::Cancelled | ApprovalStatus::Expired
+        ) {
+            self.finish_cancelled(&action, &resolved, now).await?;
+            return self.resolution(resolved, None).await;
+        }
+        if action.status.is_terminal() {
+            return Ok(FoundationActionResolution {
+                approval: resolved,
+                action,
+                connector_result: None,
+            });
+        }
+        anyhow::ensure!(
+            matches!(
+                resolved.status,
+                ApprovalStatus::Approved | ApprovalStatus::Consumed
+            ),
+            "approval is not executable"
+        );
+        if action.status == ActionStatus::Executing {
+            anyhow::bail!("mail action execution outcome is uncertain and requires reconciliation");
+        }
+        self.execute_approved(resolved, action, now).await
+    }
+
+    async fn execute_approved(
+        &self,
+        approval: ApprovalRecord,
+        action: DurableAction,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<FoundationActionResolution> {
+        if action.status == ActionStatus::WaitingApproval {
+            self.store
+                .consume_approval(&approval.approval_id, &approval.binding, now)
+                .await?;
+        }
+        let action = self
+            .store
+            .get_action(&action.action_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("approved action is missing"))?;
+        anyhow::ensure!(
+            action.status == ActionStatus::Ready,
+            "approved action is not ready"
+        );
+        let run = self
+            .store
+            .get_run(&action.run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("foundation action run is missing"))?;
+        if run.status == RunStatus::WaitingApproval {
+            anyhow::ensure!(
+                self.store
+                    .transition_run(
+                        &run.run_id,
+                        run.version,
+                        RunStatus::Running,
+                        run.checkpoint,
+                        now,
+                    )
+                    .await?,
+                "approved action run was resumed elsewhere"
+            );
+        }
+        anyhow::ensure!(
+            self.store
+                .begin_action(&action.action_id, action.version, now)
+                .await?,
+            "approved action was claimed elsewhere"
+        );
+        let preview = preview_from_arguments(&action.arguments)?;
+        let request = ApprovedSendRequest {
+            preview_id: preview.id.clone(),
+            approval: preview.approval_grant(approval.approval_id.clone()),
+        };
+        let connector_arguments = serde_json::to_value(request)?;
+        let action_hash =
+            connector_action_hash(MAIL_CONNECTOR_ID, MAIL_SEND_ACTION, &connector_arguments)?;
+        self.context
+            .grant_once(&action_hash, preview.idempotency_key.clone())?;
+        let outbox = self
+            .store
+            .enqueue_outbox(
+                &action.action_id,
+                &preview.idempotency_key,
+                connector_arguments.clone(),
+                now,
+            )
+            .await?;
+        anyhow::ensure!(
+            self.store.claim_outbox(&outbox.outbox_id, now).await?,
+            "mail outbox was claimed elsewhere"
+        );
+        let result = self
+            .tools
+            .execute(
+                MAIL_SEND_ACTION,
+                &format!("resume:{}", action.action_id),
+                connector_arguments,
+            )
+            .await;
+        let connector_result = match result {
+            Ok(value) => serde_json::from_value::<ConnectorExecutionResult>(value)?,
+            Err(error) => {
+                self.store
+                    .finish_outbox(
+                        &outbox.outbox_id,
+                        OutboxStatus::Uncertain,
+                        None,
+                        Some("connector execution failed after outbox claim"),
+                        Utc::now(),
+                    )
+                    .await?;
+                self.store
+                    .complete_action(
+                        &action.action_id,
+                        ActionOutcome::Uncertain,
+                        Value::Null,
+                        Some("connector execution outcome requires reconciliation"),
+                        Utc::now(),
+                    )
+                    .await?;
+                self.finish_run(&action.run_id, RunStatus::Uncertain, Utc::now())
+                    .await?;
+                return Err(error.context("mail send outcome requires reconciliation"));
+            }
+        };
+        let delivery = serde_json::from_value::<crate::mail::DeliveryReceipt>(
+            connector_result.output.clone(),
+        )?;
+        let (outbox_status, action_outcome, run_status) = match delivery.state {
+            DeliveryState::Delivered => (
+                OutboxStatus::Delivered,
+                ActionOutcome::Succeeded,
+                RunStatus::Succeeded,
+            ),
+            DeliveryState::Uncertain => (
+                OutboxStatus::Uncertain,
+                ActionOutcome::Uncertain,
+                RunStatus::Uncertain,
+            ),
+            DeliveryState::Rejected | DeliveryState::Deferred => (
+                OutboxStatus::Failed,
+                ActionOutcome::Failed,
+                RunStatus::Failed,
+            ),
+        };
+        self.store
+            .finish_outbox(
+                &outbox.outbox_id,
+                outbox_status,
+                Some(&delivery.message_id),
+                delivery.detail.as_deref(),
+                Utc::now(),
+            )
+            .await?;
+        self.store
+            .complete_action(
+                &action.action_id,
+                action_outcome,
+                connector_result.output.clone(),
+                delivery.detail.as_deref(),
+                Utc::now(),
+            )
+            .await?;
+        self.finish_run(&action.run_id, run_status, Utc::now())
+            .await?;
+        self.resolution(approval, Some(connector_result)).await
+    }
+
+    async fn finish_cancelled(
+        &self,
+        action: &DurableAction,
+        approval: &ApprovalRecord,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.store
+            .cancel_waiting_action(&action.action_id, "approval was not granted", now)
+            .await?;
+        let run_status = if approval.status == ApprovalStatus::Expired {
+            RunStatus::Expired
+        } else {
+            RunStatus::Cancelled
+        };
+        self.finish_run(&action.run_id, run_status, now).await
+    }
+
+    async fn finish_run(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let run = self
+            .store
+            .get_run(run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("foundation action run is missing"))?;
+        if !run.status.is_terminal() {
+            anyhow::ensure!(
+                self.store
+                    .transition_run(run_id, run.version, status, run.checkpoint, now)
+                    .await?,
+                "foundation action run transition lost a race"
+            );
+        }
+        Ok(())
+    }
+
+    async fn pending_from_action(
+        &self,
+        action: DurableAction,
+    ) -> anyhow::Result<PendingFoundationAction> {
+        let approval_id = action
+            .approval_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("mail action approval is missing"))?;
+        let approval = self
+            .store
+            .get_approval(approval_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("mail action approval disappeared"))?;
+        let preview = preview_from_arguments(&action.arguments)?;
+        Ok(PendingFoundationAction {
+            approval,
+            action,
+            preview: Some(preview),
+        })
+    }
+
+    async fn resolution(
+        &self,
+        approval: ApprovalRecord,
+        connector_result: Option<ConnectorExecutionResult>,
+    ) -> anyhow::Result<FoundationActionResolution> {
+        let approval = self
+            .store
+            .get_approval(&approval.approval_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("resolved approval is missing"))?;
+        let action = self
+            .store
+            .get_action(&approval.binding.action_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("resolved action is missing"))?;
+        Ok(FoundationActionResolution {
+            approval,
+            action,
+            connector_result,
+        })
+    }
+
+    fn run_scope(&self, session_id: Option<String>) -> RunScope {
+        RunScope {
+            app_id: self.scope.app_id.clone(),
+            agent_id: "foundation-host".into(),
+            tenant_id: self.scope.tenant_id.clone(),
+            user_id: self.scope.user_id.clone(),
+            session_id,
+        }
+    }
+}
+
+impl ActionStatus {
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Uncertain
+        )
+    }
+}
+
+fn validate_preview(preview: &SendPreview) -> anyhow::Result<()> {
+    anyhow::ensure!(!preview.id.trim().is_empty(), "mail preview id is required");
+    anyhow::ensure!(
+        !preview.idempotency_key.trim().is_empty(),
+        "mail preview idempotency key is required"
+    );
+    anyhow::ensure!(
+        !preview.preview_hash.trim().is_empty(),
+        "mail preview hash is required"
+    );
+    Ok(())
+}
+
+fn preview_from_arguments(arguments: &Value) -> anyhow::Result<SendPreview> {
+    let preview = arguments
+        .get("preview")
+        .ok_or_else(|| anyhow::anyhow!("mail action preview is missing"))?;
+    serde_json::from_value(preview.clone()).map_err(Into::into)
+}
+
+fn preview_idempotency_key(arguments: &Value) -> anyhow::Result<&str> {
+    arguments
+        .get("preview")
+        .and_then(|preview| preview.get("idempotencyKey"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("mail preview idempotency key is missing"))
+}
+
+fn mail_risk_summary(preview: &SendPreview) -> String {
+    let recipients = preview
+        .to
+        .iter()
+        .chain(&preview.cc)
+        .chain(&preview.bcc)
+        .map(|address| address.address.as_str())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Send mail from account {} to {} with subject {:?}",
+        preview.account_id, recipients, preview.subject
+    )
+    .chars()
+    .take(1024)
+    .collect()
+}

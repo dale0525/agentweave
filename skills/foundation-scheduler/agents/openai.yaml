@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundation Scheduler"
+  short_description: "Create durable timezone-aware schedules"
+  default_prompt: "Use $foundation-scheduler to propose a durable schedule for this work."

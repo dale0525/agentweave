@@ -38,6 +38,106 @@ export type ModelConnectionTestResponse = {
   message: string;
 };
 
+export type MemoryEvidence = {
+  source: string;
+  sourceId?: string | null;
+  excerpt?: string | null;
+  observedAt: string;
+};
+
+export type MemoryRecord = {
+  schemaVersion: number;
+  id: string;
+  kind: string;
+  value: { text: string; attributes: Record<string, string> };
+  evidence: MemoryEvidence[];
+  confidence: number;
+  sensitivity: string;
+  retention: { mode: string; expiresAt?: string; sessionId?: string };
+  state: "proposed" | "committed" | "tombstoned";
+  version: number;
+  conflictKey?: string | null;
+  supersedes?: string | null;
+  supersededBy?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MemoryExport = {
+  schemaVersion: number;
+  exportedAt: string;
+  records: MemoryRecord[];
+};
+
+export type MailAddress = {
+  name?: string | null;
+  address: string;
+};
+
+export type MailAccount = {
+  id: string;
+  displayName: string;
+  primaryAddress: MailAddress;
+  addresses: MailAddress[];
+};
+
+export type MailAccountStatus = {
+  account: MailAccount;
+  state: "connected" | "authentication_required" | "unavailable";
+  detail?: string | null;
+};
+
+export type FoundationApproval = {
+  approval_id: string;
+  binding: {
+    action_name: string;
+    arguments_sha256: string;
+    expires_at: string;
+    resource_target: string;
+    risk: string;
+    risk_summary: string;
+  };
+  status: "pending" | "approved" | "rejected" | "cancelled" | "expired" | "consumed";
+};
+
+export type FoundationAction = {
+  action_id: string;
+  action_name: string;
+  arguments_sha256: string;
+  idempotency_key: string;
+  last_error?: string | null;
+  resource_target: string;
+  result?: unknown;
+  status: "pending" | "waiting_approval" | "ready" | "executing" | "succeeded" | "failed" | "cancelled" | "uncertain";
+};
+
+export type MailSendPreview = {
+  id: string;
+  accountId: string;
+  draftId: string;
+  draftRevision: number;
+  from: MailAddress;
+  to: MailAddress[];
+  cc: MailAddress[];
+  bcc: MailAddress[];
+  subject: string;
+  bodySha256: string;
+  attachments: Array<{ fileName: string; mimeType: string; sizeBytes: number }>;
+  previewHash: string;
+};
+
+export type PendingFoundationAction = {
+  approval: FoundationApproval;
+  action: FoundationAction;
+  preview?: MailSendPreview | null;
+};
+
+export type FoundationActionResolution = {
+  approval: FoundationApproval;
+  action: FoundationAction;
+  connectorResult?: unknown;
+};
+
 export type OwnerSkillValidation = {
   ok: boolean;
   errors: string[];
@@ -210,6 +310,10 @@ export async function postSessionMessage(
   content: string,
   modelSettings?: ModelSettings | null
 ): Promise<PostMessageResponse> {
+  const secureBridge = window.generalAgent?.modelSettings;
+  if (secureBridge) {
+    return secureBridge.postSessionMessage(sessionId, content) as Promise<PostMessageResponse>;
+  }
   return requestJson<PostMessageResponse>(`/sessions/${sessionId}/messages`, {
     body: JSON.stringify({
       content,
@@ -222,10 +326,78 @@ export async function postSessionMessage(
 export async function testModelConnection(
   settings: ModelSettings
 ): Promise<ModelConnectionTestResponse> {
+  const secureBridge = window.generalAgent?.modelSettings;
+  if (secureBridge) {
+    return secureBridge.testConnection() as Promise<ModelConnectionTestResponse>;
+  }
   return requestJson<ModelConnectionTestResponse>("/model/test", {
     body: JSON.stringify(settings),
     method: "POST"
   });
+}
+
+export async function listMemories(query = "", limit = 50): Promise<MemoryRecord[]> {
+  const params = new URLSearchParams({ query, limit: String(limit) });
+  return requestJson<MemoryRecord[]>(`/foundation/memory?${params}`, { method: "GET" });
+}
+
+export async function getMemory(id: string): Promise<MemoryRecord> {
+  return requestJson<MemoryRecord>(`/foundation/memory/${encodeURIComponent(id)}`, {
+    method: "GET"
+  });
+}
+
+export async function forgetMemory(id: string, expectedVersion: number): Promise<unknown> {
+  return requestJson(`/foundation/memory/${encodeURIComponent(id)}`, {
+    body: JSON.stringify({ expectedVersion }),
+    method: "DELETE"
+  });
+}
+
+export async function exportMemories(): Promise<MemoryExport> {
+  return requestJson<MemoryExport>("/foundation/memory/export", { method: "GET" });
+}
+
+export async function listMailAccounts(): Promise<MailAccount[]> {
+  return requestJson<MailAccount[]>("/foundation/mail/accounts", { method: "GET" });
+}
+
+export async function getMailAccountStatus(id: string): Promise<MailAccountStatus> {
+  return requestJson<MailAccountStatus>(
+    `/foundation/mail/accounts/${encodeURIComponent(id)}`,
+    { method: "GET" }
+  );
+}
+
+export async function connectMailAccount(id: string): Promise<MailAccountStatus> {
+  return requestJson<MailAccountStatus>(
+    `/foundation/mail/accounts/${encodeURIComponent(id)}`,
+    { method: "POST" }
+  );
+}
+
+export async function disconnectMailAccount(id: string): Promise<MailAccountStatus> {
+  return requestJson<MailAccountStatus>(
+    `/foundation/mail/accounts/${encodeURIComponent(id)}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function listFoundationActions(): Promise<PendingFoundationAction[]> {
+  return requestJson<PendingFoundationAction[]>("/foundation/actions", { method: "GET" });
+}
+
+export async function resolveFoundationAction(
+  approvalId: string,
+  decision: "approve_once" | "reject"
+): Promise<FoundationActionResolution> {
+  return requestJson<FoundationActionResolution>(
+    `/foundation/actions/${encodeURIComponent(approvalId)}`,
+    {
+      body: JSON.stringify({ decision }),
+      method: "POST"
+    }
+  );
 }
 
 export async function listDevSkills(): Promise<DevSkillInventory> {

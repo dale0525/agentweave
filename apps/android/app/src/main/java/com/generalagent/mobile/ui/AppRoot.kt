@@ -16,10 +16,12 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.outlined.Analytics
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -37,7 +39,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
@@ -45,20 +46,24 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.generalagent.mobile.runtime.RuntimeClient
+import com.generalagent.mobile.runtime.AgentAppAppearance
+import com.generalagent.mobile.runtime.AgentAppLocalization
 import com.generalagent.mobile.runtime.RuntimeDiagnostics
 import com.generalagent.mobile.runtime.RuntimeSkill
 import com.generalagent.mobile.runtime.RuntimeSkillPackageSummary
+import com.generalagent.mobile.runtime.androidMvpCapabilities
 import com.generalagent.mobile.secrets.ModelSecretStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class AppTab(val label: String) {
-  Chat("Chat"),
-  Settings("Settings"),
-  Skills("Skills"),
-  Diagnostics("Diagnostics"),
+enum class AppTab(val label: String, val translationKey: String) {
+  Chat("Chat", "android.nav.chat"),
+  Settings("Settings", "android.nav.settings"),
+  Foundation("Data", "android.nav.data"),
+  Skills("Skills", "android.nav.skills"),
+  Diagnostics("Diagnostics", "android.nav.diagnostics"),
 }
 
 enum class SkillScreenMode { Hidden, DiagnosticsOnly, OwnerManage }
@@ -128,6 +133,7 @@ fun AppTab.activeNavigationSize(): NavigationSize =
   when (this) {
     AppTab.Chat -> NavigationSize(64, 48)
     AppTab.Settings -> NavigationSize(72, 60)
+    AppTab.Foundation -> NavigationSize(64, 48)
     AppTab.Skills -> NavigationSize(64, 48)
     AppTab.Diagnostics -> NavigationSize(72, 64)
   }
@@ -180,13 +186,7 @@ fun ownerSkillInventory(
   return inventory.values.sortedBy(RuntimeSkill::packageId)
 }
 
-fun androidDiagnosticCapabilityIds(): List<String> =
-  listOf(
-    "network.http",
-    "filesystem.app_data",
-    "secure_storage",
-    "model.http_provider",
-  )
+fun androidDiagnosticCapabilityIds(): List<String> = androidMvpCapabilities()
 
 @Composable
 fun AppRoot(
@@ -195,6 +195,12 @@ fun AppRoot(
   settingsGate: RuntimeSettingsGate,
   initialDiagnostics: RuntimeDiagnostics,
   secretStore: ModelSecretStore,
+  appearance: AgentAppAppearance,
+  selectedThemeId: String,
+  localization: AgentAppLocalization,
+  selectedLocaleId: String,
+  onThemeSelected: (String) -> Unit,
+  onLocaleSelected: (String) -> Unit,
   modifier: Modifier = Modifier,
 ) {
   var selectedTab by remember { mutableStateOf(AppTab.Chat) }
@@ -280,10 +286,20 @@ fun AppRoot(
               secretStore = secretStore,
               settingsGate = settingsGate,
               runtimeBusy = chatSending,
+              appearance = appearance,
+              selectedThemeId = selectedThemeId,
+              localization = localization,
+              selectedLocaleId = selectedLocaleId,
+              onThemeSelected = onThemeSelected,
+              onLocaleSelected = onLocaleSelected,
               onBack = {
                 selectedTab = admittedAppTab(selectedTab, AppTab.Chat, settingsSaving)
               },
               onSaved = refreshSkillsAndDiagnostics,
+            )
+            AppTab.Foundation -> FoundationScreen(
+              runtimeClient = runtimeClient,
+              appDisplayName = diagnostics.appDisplayName,
             )
             AppTab.Skills -> SkillsScreen(
               mode = skillAccess.mode,
@@ -335,9 +351,10 @@ private fun AppBottomNavigation(
   selected: AppTab,
   onSelect: (AppTab) -> Unit,
 ) {
+  val strings = LocalAppStrings.current
   NavigationBar(
     modifier = Modifier.fillMaxWidth().height(80.dp),
-    containerColor = Color.White,
+    containerColor = MaterialTheme.colorScheme.surface,
     tonalElevation = 0.dp,
   ) {
     tabs.forEach { tab ->
@@ -354,7 +371,7 @@ private fun AppBottomNavigation(
         },
         label = {
           Text(
-            text = tab.label,
+            text = strings.text(tab.translationKey),
             style = MaterialTheme.typography.labelSmall.copy(
               fontSize = 11.sp,
               lineHeight = 16.sp,
@@ -371,6 +388,7 @@ private fun AppTab.icon(active: Boolean): ImageVector =
   when (this) {
     AppTab.Chat -> if (active) Icons.AutoMirrored.Filled.Chat else Icons.Outlined.ChatBubbleOutline
     AppTab.Settings -> if (active) Icons.Filled.Settings else Icons.Outlined.Settings
+    AppTab.Foundation -> if (active) Icons.Filled.Storage else Icons.Outlined.Storage
     AppTab.Skills -> if (active) Icons.Filled.Extension else Icons.Outlined.Extension
     AppTab.Diagnostics -> if (active) Icons.Filled.Analytics else Icons.Outlined.Analytics
   }

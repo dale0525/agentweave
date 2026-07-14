@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundation Notes"
+  short_description: "Manage explicit user-owned knowledge"
+  default_prompt: "Use $foundation-notes to organize this material as an explicit user-owned note."

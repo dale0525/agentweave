@@ -2,6 +2,7 @@ import { FormEvent } from "react";
 import { Send } from "lucide-react";
 
 import { AppIconButton } from "./AppIconButton";
+import { useI18n } from "../i18n/I18nProvider";
 
 type ComposerProps = {
   draft: string;
@@ -18,8 +19,9 @@ export function Composer({
   onChange,
   onSubmit
 }: ComposerProps): JSX.Element {
+  const { t } = useI18n();
   return (
-    <form aria-label="Message composer" className="composer" onSubmit={onSubmit}>
+    <form aria-label={t("composer.ariaLabel")} className="composer" onSubmit={onSubmit}>
       {error ? (
         <p className="composer-error" role="alert">
           {error}
@@ -27,15 +29,15 @@ export function Composer({
       ) : null}
       <div className="composer-input-row">
         <label className="sr-only" htmlFor="generalagent-message">
-          Message GeneralAgent
+          {t("composer.message")}
         </label>
         <input
           id="generalagent-message"
-          aria-label="Message GeneralAgent"
+          aria-label={t("composer.message")}
           value={draft}
           onChange={(event) => onChange(event.target.value)}
         />
-        <AppIconButton disabled={isSending} label="Send message" type="submit">
+        <AppIconButton disabled={isSending} label={t("composer.send")} type="submit">
           <Send size={18} aria-hidden="true" />
         </AppIconButton>
       </div>

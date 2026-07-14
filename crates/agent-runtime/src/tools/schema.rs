@@ -21,12 +21,13 @@ pub fn validate_tool_definition(definition: &ToolDefinition) -> ToolSchemaDiagno
     let mut errors = Vec::new();
 
     if !is_valid_tool_identifier(&definition.name) {
-        errors.push("tool name must be 1-64 ASCII alphanumeric, '_' or '-' chars".to_string());
+        errors.push("tool name must be a model-safe local or canonical identity".to_string());
     }
     if let Some(namespace) = &definition.namespace
-        && !is_valid_tool_identifier(namespace)
+        && !is_valid_namespace(namespace)
     {
-        errors.push("tool namespace must be 1-64 ASCII alphanumeric, '_' or '-' chars".to_string());
+        errors
+            .push("tool namespace must be a model-safe package or connector identity".to_string());
     }
     if definition
         .input_schema
@@ -49,9 +50,26 @@ pub fn validate_tool_definition(definition: &ToolDefinition) -> ToolSchemaDiagno
 }
 
 fn is_valid_tool_identifier(value: &str) -> bool {
+    if let Some((package, local)) = value.split_once('/') {
+        return !local.contains('/')
+            && crate::skill_package::SkillPackageId::parse(package).is_ok()
+            && is_valid_local_name(local);
+    }
+    is_valid_local_name(value)
+}
+
+fn is_valid_local_name(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 64
+        && value.len() <= 128
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn is_valid_namespace(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }

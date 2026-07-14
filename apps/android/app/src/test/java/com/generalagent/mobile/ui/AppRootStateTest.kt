@@ -10,18 +10,26 @@ import com.generalagent.mobile.secrets.ModelSecretStoreException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
 class AppRootStateTest {
   @Test
+  fun disconnectingAConnectedAccountRequiresTrustedConfirmation() {
+    assertTrue(accountActionNeedsConfirmation("connected"))
+    assertFalse(accountActionNeedsConfirmation("authentication_required"))
+    assertFalse(accountActionNeedsConfirmation("unavailable"))
+  }
+
+  @Test
   fun tabsExposeMvpScreensInStableOrder() {
     assertEquals(
-      listOf(AppTab.Chat, AppTab.Settings, AppTab.Skills, AppTab.Diagnostics),
+      listOf(AppTab.Chat, AppTab.Settings, AppTab.Foundation, AppTab.Skills, AppTab.Diagnostics),
       AppTab.entries,
     )
     assertEquals(
-      listOf("Chat", "Settings", "Skills", "Diagnostics"),
+      listOf("Chat", "Settings", "Data", "Skills", "Diagnostics"),
       AppTab.entries.map { it.label },
     )
   }
@@ -29,7 +37,7 @@ class AppRootStateTest {
   @Test
   fun diagnosticsPolicyKeepsSkillsInStableNavigationOrder() {
     assertEquals(
-      listOf(AppTab.Chat, AppTab.Settings, AppTab.Skills, AppTab.Diagnostics),
+      listOf(AppTab.Chat, AppTab.Settings, AppTab.Foundation, AppTab.Skills, AppTab.Diagnostics),
       visibleTabs(skillManagementMode = "diagnostics_only"),
     )
   }
@@ -54,12 +62,7 @@ class AppRootStateTest {
   @Test
   fun diagnosticsPreserveExactCapabilityIds() {
     assertEquals(
-      listOf(
-        "network.http",
-        "filesystem.app_data",
-        "secure_storage",
-        "model.http_provider",
-      ),
+      com.generalagent.mobile.runtime.androidMvpCapabilities(),
       androidDiagnosticCapabilityIds(),
     )
   }

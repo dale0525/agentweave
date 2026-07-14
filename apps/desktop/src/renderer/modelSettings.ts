@@ -9,64 +9,147 @@ export const initialModelSettings: ModelSettings = {
 
 export const modelSettingsStorageKey = "generalagent.modelSettings.v1";
 
+export type ModelSettingsSnapshot = {
+  apiKeyConfigured: boolean;
+  saved: boolean;
+  settings: ModelSettings;
+};
+
 const endpointTypes: EndpointType[] = ["responses", "chat_completions", "completion"];
+let browserSettings: ModelSettings | null = null;
 
-export function loadModelSettings(): ModelSettings {
-  return loadSavedModelSettings() ?? initialModelSettings;
+export async function loadModelSettings(): Promise<ModelSettingsSnapshot> {
+  const bridge = window.generalAgent?.modelSettings;
+  if (bridge) {
+    await migrateLegacySettings(bridge);
+    return snapshotFromUnknown(await bridge.load());
+  }
+  return loadBrowserSnapshot();
 }
 
-export function loadSavedModelSettings(): ModelSettings | null {
-  if (typeof window === "undefined") {
-    return null;
+export async function loadSavedModelSettings(): Promise<ModelSettings | null> {
+  if (window.generalAgent?.modelSettings) return null;
+  const snapshot = loadBrowserSnapshot();
+  return snapshot.saved ? browserSettings : null;
+}
+
+export async function saveModelSettings(settings: ModelSettings): Promise<ModelSettingsSnapshot> {
+  const bridge = window.generalAgent?.modelSettings;
+  if (bridge) {
+    const payload = {
+      baseUrl: settings.baseUrl,
+      endpointType: settings.endpointType,
+      modelName: settings.modelName,
+      ...(settings.apiKey ? { apiKey: settings.apiKey } : {})
+    };
+    return snapshotFromUnknown(await bridge.save(payload));
   }
 
+  browserSettings = {
+    ...settings,
+    apiKey: settings.apiKey || browserSettings?.apiKey || ""
+  };
+  persistBrowserMetadata(browserSettings);
+  return {
+    apiKeyConfigured: Boolean(browserSettings.apiKey),
+    saved: true,
+    settings: { ...settings, apiKey: "" }
+  };
+}
+
+export async function clearSavedModelApiKey(settings: ModelSettings): Promise<ModelSettingsSnapshot> {
+  const bridge = window.generalAgent?.modelSettings;
+  if (bridge) return snapshotFromUnknown(await bridge.clearApiKey());
+  browserSettings = { ...settings, apiKey: "" };
+  persistBrowserMetadata(browserSettings);
+  return { apiKeyConfigured: false, saved: true, settings: browserSettings };
+}
+
+function loadBrowserSnapshot(): ModelSettingsSnapshot {
+  const raw = readLocalStorage();
+  if (!raw) {
+    browserSettings = null;
+    return { apiKeyConfigured: false, saved: false, settings: initialModelSettings };
+  }
+  const parsed = modelSettingsFromUnknown(raw);
+  if (!browserSettings) browserSettings = parsed;
+  if (parsed.apiKey) {
+    browserSettings = parsed;
+    persistBrowserMetadata(parsed);
+  }
+  return {
+    apiKeyConfigured: Boolean(browserSettings.apiKey),
+    saved: true,
+    settings: { ...browserSettings, apiKey: "" }
+  };
+}
+
+async function migrateLegacySettings(
+  bridge: NonNullable<NonNullable<Window["generalAgent"]>["modelSettings"]>
+): Promise<void> {
+  const legacy = readLocalStorage();
+  if (!legacy) return;
   try {
-    const rawSettings = window.localStorage.getItem(modelSettingsStorageKey);
-    if (!rawSettings) {
-      return null;
+    await bridge.save(modelSettingsFromUnknown(legacy));
+    window.localStorage.removeItem(modelSettingsStorageKey);
+  } catch {
+    // Preserve legacy data until the operating-system credential store is available.
+  }
+}
+
+function readLocalStorage(): unknown | null {
+  try {
+    const raw = window.localStorage.getItem(modelSettingsStorageKey);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistBrowserMetadata(settings: ModelSettings): void {
+  try {
+    window.localStorage.setItem(
+      modelSettingsStorageKey,
+      JSON.stringify({
+        baseUrl: settings.baseUrl,
+        endpointType: settings.endpointType,
+        modelName: settings.modelName
+      })
+    );
+  } catch {
+    // Browser development mode keeps the settings in memory when storage is unavailable.
+  }
+}
+
+function snapshotFromUnknown(value: unknown): ModelSettingsSnapshot {
+  if (!value || typeof value !== "object") {
+    return { apiKeyConfigured: false, saved: false, settings: initialModelSettings };
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    apiKeyConfigured: record.apiKeyConfigured === true,
+    saved: record.saved === true,
+    settings: {
+      apiKey: "",
+      baseUrl: typeof record.baseUrl === "string" ? record.baseUrl : initialModelSettings.baseUrl,
+      endpointType: isEndpointType(record.endpointType)
+        ? record.endpointType
+        : initialModelSettings.endpointType,
+      modelName: typeof record.modelName === "string" ? record.modelName : initialModelSettings.modelName
     }
-
-    return modelSettingsFromUnknown(JSON.parse(rawSettings));
-  } catch {
-    return null;
-  }
-}
-
-export function saveModelSettings(settings: ModelSettings): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(modelSettingsStorageKey, JSON.stringify(settings));
-  } catch {
-    // Settings should remain editable even when localStorage is unavailable.
-  }
+  };
 }
 
 function modelSettingsFromUnknown(value: unknown): ModelSettings {
-  if (typeof value !== "object" || value === null) {
-    return initialModelSettings;
-  }
-
+  if (typeof value !== "object" || value === null) return initialModelSettings;
   const settings = value as Partial<Record<keyof ModelSettings, unknown>>;
-
   return {
-    apiKey:
-      typeof settings.apiKey === "string"
-        ? settings.apiKey
-        : initialModelSettings.apiKey,
-    baseUrl:
-      typeof settings.baseUrl === "string"
-        ? settings.baseUrl
-        : initialModelSettings.baseUrl,
+    apiKey: typeof settings.apiKey === "string" ? settings.apiKey : "",
+    baseUrl: typeof settings.baseUrl === "string" ? settings.baseUrl : initialModelSettings.baseUrl,
     endpointType: isEndpointType(settings.endpointType)
       ? settings.endpointType
       : initialModelSettings.endpointType,
-    modelName:
-      typeof settings.modelName === "string"
-        ? settings.modelName
-        : initialModelSettings.modelName
+    modelName: typeof settings.modelName === "string" ? settings.modelName : initialModelSettings.modelName
   };
 }
 

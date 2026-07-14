@@ -1,6 +1,7 @@
 use crate::context::{compact_model_input_with_stats, exceeds_budget};
 use crate::events::RuntimeEvent;
 use crate::instructions::{InstructionConfig, InstructionContext};
+use crate::prompt_composer::AppPromptConfig;
 use crate::skill::SkillRegistry;
 use crate::skill_catalog::SkillCatalog;
 use crate::skill_management::OwnerSkillManagementService;
@@ -43,6 +44,10 @@ pub struct TurnRunner<C> {
     max_steps: usize,
     management: Option<OwnerSkillManagementService>,
     execution_observer: Option<Arc<dyn crate::tools::ToolExecutionObserver>>,
+    app_prompt: AppPromptConfig,
+    memory: Option<crate::memory_tools::MemoryToolRuntime>,
+    memory_candidate_extractor: Option<Arc<dyn crate::memory_lifecycle::MemoryCandidateExtractor>>,
+    connector_tools: Option<crate::connector_tools::ConnectorToolRuntime>,
 }
 
 impl<C> TurnRunner<C>
@@ -87,11 +92,41 @@ where
             max_steps,
             management: None,
             execution_observer: None,
+            app_prompt: AppPromptConfig::default(),
+            memory: None,
+            memory_candidate_extractor: None,
+            connector_tools: None,
         }
     }
 
     pub fn with_skill_management(mut self, service: OwnerSkillManagementService) -> Self {
         self.management = Some(service);
+        self
+    }
+
+    pub fn with_app_prompt(mut self, app_prompt: AppPromptConfig) -> Self {
+        self.app_prompt = app_prompt;
+        self
+    }
+
+    pub fn with_memory_tools(mut self, memory: crate::memory_tools::MemoryToolRuntime) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    pub fn with_memory_candidate_extractor(
+        mut self,
+        extractor: Arc<dyn crate::memory_lifecycle::MemoryCandidateExtractor>,
+    ) -> Self {
+        self.memory_candidate_extractor = Some(extractor);
+        self
+    }
+
+    pub fn with_connector_tools(
+        mut self,
+        connector_tools: crate::connector_tools::ConnectorToolRuntime,
+    ) -> Self {
+        self.connector_tools = Some(connector_tools);
         self
     }
 
@@ -134,13 +169,20 @@ where
         let lease_cancellation = execution_lease
             .as_ref()
             .map(|lease| lease.cancellation_token());
-        let tools = ToolRegistry::try_new_with_management(
+        let mut tools = ToolRegistry::try_new_with_management(
             snapshot.registry().clone(),
             &self.config,
             management,
-        )?
-        .with_turn_execution_lease(execution_lease.clone())
-        .with_execution_observer(observer);
+        )?;
+        if let Some(memory) = &self.memory {
+            tools = tools.try_with_memory_tools(memory.clone())?;
+        }
+        if let Some(connectors) = &self.connector_tools {
+            tools = tools.try_with_connector_tools(connectors.clone())?;
+        }
+        let tools = tools
+            .with_turn_execution_lease(execution_lease.clone())
+            .with_execution_observer(observer);
         let skill_catalog = snapshot.catalog();
         let turn_id = Uuid::new_v4().to_string();
         let mut events = vec![RuntimeEvent::TurnStarted {
@@ -149,8 +191,43 @@ where
         let mut budget = BudgetPolicy::new(request.token_budget);
         let mut instruction_config =
             InstructionConfig::new(self.config.workspace_root.clone(), self.config.cwd.clone());
+        instruction_config.app_prompt = self.app_prompt.clone();
+        instruction_config.goal_instructions =
+            request.goal.as_ref().map(|goal| goal.objective.clone());
+        if let Some(memory) = &self.memory {
+            match memory.recall_for_turn(&request.user_text, 8).await {
+                Ok(records) => {
+                    if !records.is_empty() {
+                        instruction_config.memory_context = Some(
+                            crate::memory_tools::MemoryToolRuntime::render_recall_context(
+                                &records,
+                            )?,
+                        );
+                        events.push(RuntimeEvent::MemoryRecalled {
+                            memory_ids: records
+                                .iter()
+                                .map(|record| record.id.as_str().to_string())
+                                .collect(),
+                        });
+                    }
+                }
+                Err(error) => events.push(RuntimeEvent::MemoryRecallFailed {
+                    message: error.to_string(),
+                }),
+            }
+        }
         instruction_config.skill_summaries = skill_catalog.summaries().to_vec();
-        let triggered_skill_names = skill_catalog.triggered_skill_names(&request.user_text);
+        let triggered_skills = skill_catalog.triggered_skills(&request.user_text);
+        for selection in &triggered_skills {
+            events.push(RuntimeEvent::SkillSelected {
+                skill_name: selection.name.clone(),
+                reason: selection.reason,
+            });
+        }
+        let triggered_skill_names = triggered_skills
+            .iter()
+            .map(|selection| selection.name.clone())
+            .collect::<Vec<_>>();
         if !triggered_skill_names.is_empty() {
             match skill_catalog
                 .load_instruction_documents(&triggered_skill_names, self.config.output_limit_bytes)
@@ -169,17 +246,9 @@ where
             }
         }
         let instruction_context = InstructionContext::load(instruction_config)?;
-        let mut input = instruction_context.model_input(&request.user_text);
-        if let Some(goal) = &request.goal {
-            let insert_at = input.len().saturating_sub(1);
-            input.insert(
-                insert_at,
-                serde_json::json!({
-                    "role": "developer",
-                    "content": format!("<active_goal>\n{}\n</active_goal>", goal.objective)
-                }),
-            );
-        }
+        let mut input = instruction_context
+            .try_model_input(&request.user_text, &request.conversation_history)?
+            .input;
         if let Some(context_budget_bytes) = request.context_budget_bytes
             && exceeds_budget(&input, context_budget_bytes)?
         {
@@ -190,10 +259,25 @@ where
                 budget_bytes: context_budget_bytes,
             });
             input = compacted.input;
+            if let (Some(memory), Some(session_id)) = (&self.memory, request.session_id.as_deref())
+            {
+                match memory.on_compaction(session_id, Vec::new()).await {
+                    Ok(records) => events.push(RuntimeEvent::MemoryCompactionSynced {
+                        memory_ids: records
+                            .iter()
+                            .map(|record| record.id.as_str().to_string())
+                            .collect(),
+                    }),
+                    Err(error) => events.push(RuntimeEvent::MemoryCandidateExtractionFailed {
+                        message: error.to_string(),
+                    }),
+                }
+            }
         }
         let gateway_tools = gateway_tools(tools.definitions());
         let mut final_text = String::new();
         let mut tool_calls = 0usize;
+        let mut memory_tool_results = Vec::new();
 
         for _step in 0..self.max_steps {
             if turn_lease_is_invalid(execution_lease.as_ref()).await {
@@ -347,6 +431,7 @@ where
                             return Ok(events);
                         }
                         let result = result.into_value();
+                        memory_tool_results.push(result.clone());
                         events.extend(tools.take_observer_diagnostics().into_iter().map(
                             |diagnostic| RuntimeEvent::ToolObserverDiagnostic {
                                 operation: diagnostic.operation.into(),
@@ -403,7 +488,16 @@ where
                 return Ok(events);
             }
             if !saw_tool {
-                events.push(RuntimeEvent::AssistantMessageFinished { text: final_text });
+                events.push(RuntimeEvent::AssistantMessageFinished {
+                    text: final_text.clone(),
+                });
+                self.extract_memory_candidates(
+                    &request,
+                    &final_text,
+                    memory_tool_results,
+                    &mut events,
+                )
+                .await;
                 events.push(RuntimeEvent::TurnFinished { turn_id });
                 return Ok(events);
             }
@@ -414,6 +508,47 @@ where
             message: "max agent steps exceeded".into(),
         });
         Ok(events)
+    }
+
+    async fn extract_memory_candidates(
+        &self,
+        request: &TurnRequest,
+        assistant_text: &str,
+        tool_results: Vec<serde_json::Value>,
+        events: &mut Vec<RuntimeEvent>,
+    ) {
+        let (Some(memory), Some(extractor), Some(session_id)) = (
+            &self.memory,
+            &self.memory_candidate_extractor,
+            request.session_id.as_deref(),
+        ) else {
+            return;
+        };
+        let transcript = crate::memory_lifecycle::MemoryTurnTranscript {
+            session_id: session_id.to_string(),
+            user_text: request.user_text.clone(),
+            assistant_text: assistant_text.to_string(),
+            tool_results,
+        };
+        let result = async {
+            let candidates = extractor.extract_candidates(&transcript).await?;
+            memory.post_turn_candidates(session_id, candidates).await
+        }
+        .await;
+        match result {
+            Ok(records) if !records.is_empty() => {
+                events.push(RuntimeEvent::MemoryCandidatesProposed {
+                    memory_ids: records
+                        .iter()
+                        .map(|record| record.id.as_str().to_string())
+                        .collect(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) => events.push(RuntimeEvent::MemoryCandidateExtractionFailed {
+                message: error.to_string(),
+            }),
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use agent_runtime::{
     instructions::{InstructionConfig, InstructionContext},
+    prompt_composer::PromptCompositionDiagnostics,
     tools::{
-        ToolRegistry,
         discovery::{ConnectorMetadata, ToolDiscoveryItem},
         schema::ToolDiagnostic,
     },
@@ -41,6 +41,7 @@ struct InstructionsPreviewResponse {
     developer: String,
     user: String,
     triggered_skills: Vec<String>,
+    diagnostics: PromptCompositionDiagnostics,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,8 +70,9 @@ pub fn router(state: Arc<AppState>) -> Router {
 async fn list_tools(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DevToolsResponse>, StatusCode> {
-    let skills = state.skills();
-    let registry = ToolRegistry::new(skills, &state.runtime_config());
+    let registry = state
+        .configured_tool_registry()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(DevToolsResponse {
         tools: registry.diagnostics(),
@@ -80,8 +82,9 @@ async fn list_tools(
 async fn discover_tools(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DevToolDiscoveryResponse>, StatusCode> {
-    let skills = state.skills();
-    let registry = ToolRegistry::new(skills, &state.runtime_config());
+    let registry = state
+        .configured_tool_registry()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let discovery = registry.discovery();
 
     Ok(Json(DevToolDiscoveryResponse {
@@ -99,7 +102,17 @@ async fn preview_instructions(
     let triggered_skills = skill_catalog.triggered_skill_names(&request.content);
     let mut instruction_config =
         InstructionConfig::new(runtime_config.workspace_root, runtime_config.cwd);
+    instruction_config.app_prompt = state.app_prompt().clone();
     instruction_config.skill_summaries = skill_catalog.summaries().to_vec();
+    if let Some(memory) = state.memory_tools()
+        && let Ok(records) = memory.recall_for_turn(&request.content, 8).await
+        && !records.is_empty()
+    {
+        instruction_config.memory_context = Some(
+            agent_runtime::memory_tools::MemoryToolRuntime::render_recall_context(&records)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        );
+    }
     if !triggered_skills.is_empty() {
         instruction_config.skill_instructions = skill_catalog
             .load_instruction_documents(&triggered_skills, runtime_config.output_limit_bytes)
@@ -109,13 +122,17 @@ async fn preview_instructions(
 
     let context =
         InstructionContext::load(instruction_config).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let input = context.model_input(&request.content);
+    let composition = context
+        .try_model_input(&request.content, &[])
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let input = composition.input;
 
     Ok(Json(InstructionsPreviewResponse {
         system: input_content(&input, 0),
         developer: input_content(&input, 1),
         user: input_content(&input, 2),
         triggered_skills,
+        diagnostics: composition.diagnostics,
     }))
 }
 

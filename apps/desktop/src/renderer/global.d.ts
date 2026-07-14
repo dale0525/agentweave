@@ -5,6 +5,9 @@ import type { ApprovalObservationResult } from "../shared/approvalObservation";
 export {};
 
 declare global {
+  const __GENERAL_AGENT_APPEARANCE__: import("./appearance/types").DesktopAppearanceBundle;
+  const __GENERAL_AGENT_LOCALIZATION__: import("./i18n/types").DesktopLocalizationBundle;
+
   interface Window {
     generalAgent?: {
       owner: {
@@ -21,6 +24,13 @@ declare global {
       };
       approval: {
         open(approvalId: string): Promise<ApprovalObservationResult>;
+      };
+      modelSettings?: {
+        clearApiKey(): Promise<unknown>;
+        load(): Promise<unknown>;
+        postSessionMessage(sessionId: string, content: string): Promise<unknown>;
+        save(settings: unknown): Promise<unknown>;
+        testConnection(): Promise<unknown>;
       };
     };
     generalAgentApproval?: {

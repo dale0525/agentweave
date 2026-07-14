@@ -6,12 +6,16 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+aes-gcm.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
+cron.workspace = true
 futures.workspace = true
 fs2.workspace = true
 hex.workspace = true
 icu_casemap.workspace = true
+mail-parser.workspace = true
 model-gateway = { path = "../model-gateway" }
 semver.workspace = true
 serde.workspace = true
@@ -32,3 +36,9 @@ rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+async-imap.workspace = true
+lettre.workspace = true
+native-tls.workspace = true
+tokio-native-tls.workspace = true

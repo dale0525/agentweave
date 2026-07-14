@@ -3,9 +3,18 @@ import type { ProxyOptions } from "vite";
 import { defineConfig } from "vitest/config";
 
 import { normalizeOwnerRequest } from "./src/preload/ownerTransport";
+import { buildDesktopAppearance } from "../../scripts/build-desktop-appearance.mjs";
+import { buildDesktopLocalization } from "../../scripts/build-desktop-localization.mjs";
+
+const desktopAppearance = buildDesktopAppearance();
+const desktopLocalization = buildDesktopLocalization();
 
 export default defineConfig({
   base: "./",
+  define: {
+    __GENERAL_AGENT_APPEARANCE__: JSON.stringify(desktopAppearance),
+    __GENERAL_AGENT_LOCALIZATION__: JSON.stringify(desktopLocalization)
+  },
   build: {
     rollupOptions: {
       input: {

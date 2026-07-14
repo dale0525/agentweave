@@ -28,26 +28,42 @@ export function packageHasBlockingDiagnostics(skillPackage: DevSkillPackage): bo
   return diagnostics.some((item) => !isMissingSkillMdDiagnostic(item));
 }
 
-export function packageStateLabel(skillPackage: DevSkillPackage): string {
+export function packageStateLabel(
+  skillPackage: DevSkillPackage,
+  translate: (key: string) => string = defaultTranslation
+): string {
   if (packageHasBlockingDiagnostics(skillPackage)) {
-    return "Validation issues";
+    return translate("developer.stateIssues");
   }
 
   if (!skillPackage.hasSkillMd && skillPackage.packageKind === "runtime") {
-    return "Runtime only";
+    return translate("developer.stateRuntimeOnly");
   }
 
-  return "Ready";
+  return translate("developer.stateReady");
 }
 
-export function packageValidationHeading(skillPackage: DevSkillPackage): string {
+export function packageValidationHeading(
+  skillPackage: DevSkillPackage,
+  translate: (key: string) => string = defaultTranslation
+): string {
   if (packageHasBlockingDiagnostics(skillPackage)) {
-    return "Needs attention";
+    return translate("developer.needsAttention");
   }
 
   if (!skillPackage.hasSkillMd && skillPackage.packageKind === "runtime") {
-    return "Runtime only";
+    return translate("developer.stateRuntimeOnly");
   }
 
-  return "PASS";
+  return translate("developer.pass");
+}
+
+function defaultTranslation(key: string): string {
+  return {
+    "developer.stateIssues": "Validation issues",
+    "developer.stateRuntimeOnly": "Runtime only",
+    "developer.stateReady": "Ready",
+    "developer.needsAttention": "Needs attention",
+    "developer.pass": "PASS"
+  }[key] ?? key;
 }

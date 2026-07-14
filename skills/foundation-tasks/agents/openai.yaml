@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundation Tasks"
+  short_description: "Capture and manage durable tasks safely"
+  default_prompt: "Use $foundation-tasks to capture and organize this work as durable tasks."

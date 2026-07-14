@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundation Contacts"
+  short_description: "Resolve identities before external actions"
+  default_prompt: "Use $foundation-contacts to resolve the intended person before continuing."

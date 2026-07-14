@@ -7,6 +7,7 @@ import {
   packageHasBlockingDiagnostics,
   packageValidationHeading
 } from "./skillPackageDiagnostics";
+import { useI18n } from "../../i18n/I18nProvider";
 
 type SkillPackageDetailProps = {
   isBusy: boolean;
@@ -17,12 +18,12 @@ type SkillPackageDetailProps = {
   onReload: () => void;
 };
 
-const kindLabel: Record<DevSkillPackageKind, string> = {
-  combined: "Combined",
-  empty: "Empty",
-  instruction: "Instruction",
-  invalid: "Invalid",
-  runtime: "Runtime"
+const kindKey: Record<DevSkillPackageKind, string> = {
+  combined: "developer.kindCombined",
+  empty: "developer.kindEmpty",
+  instruction: "developer.kindInstruction",
+  invalid: "developer.kindInvalid",
+  runtime: "developer.kindRuntime"
 };
 
 export function SkillPackageDetail({
@@ -33,14 +34,16 @@ export function SkillPackageDetail({
   onModify,
   onReload
 }: SkillPackageDetailProps): JSX.Element {
-  const [copyLabel, setCopyLabel] = useState("Copy prompt");
+  const { t } = useI18n();
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const copyLabel = t(copyState === "copied" ? "common.copied" : copyState === "failed" ? "common.copyFailed" : "common.copyPrompt");
 
   if (!inventory || inventory.packages.length === 0 || !skillPackage) {
     return (
       <section className="developer-detail-pane">
         <div className="developer-empty-state developer-detail-empty-state">
-          <h2>Package details</h2>
-          <p>Select a package to inspect prompts, diagnostics, and exported tools.</p>
+          <h2>{t("developer.packageDetails")}</h2>
+          <p>{t("developer.packageDetailsHint")}</p>
         </div>
       </section>
     );
@@ -50,18 +53,18 @@ export function SkillPackageDetail({
   const diagnosticsCount =
     skillPackage.validation.errors.length + skillPackage.validation.warnings.length;
   const hasBlockingDiagnostics = packageHasBlockingDiagnostics(skillPackage);
-  const validationHeading = packageValidationHeading(skillPackage);
+  const validationHeading = packageValidationHeading(skillPackage, t);
 
   const copyPrompt = async () => {
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(prompt);
-        setCopyLabel("Copied");
-        window.setTimeout(() => setCopyLabel("Copy prompt"), 1200);
+        setCopyState("copied");
+        window.setTimeout(() => setCopyState("idle"), 1200);
       }
     } catch {
-      setCopyLabel("Copy failed");
-      window.setTimeout(() => setCopyLabel("Copy prompt"), 1200);
+      setCopyState("failed");
+      window.setTimeout(() => setCopyState("idle"), 1200);
     }
   };
 
@@ -74,26 +77,26 @@ export function SkillPackageDetail({
             <h2>{skillPackage.name}</h2>
             <p>{skillPackage.description}</p>
           </div>
-          <span className="developer-kind-badge">{kindLabel[skillPackage.packageKind]}</span>
+          <span className="developer-kind-badge">{t(kindKey[skillPackage.packageKind])}</span>
         </div>
       </div>
 
       <div className="developer-detail-grid">
         <section className="developer-detail-section">
           <header className="developer-section-heading">
-            <h3>Package files</h3>
+            <h3>{t("developer.packageFiles")}</h3>
           </header>
           <div className="developer-file-list" role="list">
             <div className="developer-file-row" role="listitem">
               <span className="developer-file-name">skill.json</span>
               <span className="developer-file-state">
-                {skillPackage.hasRuntimeManifest ? "Present" : "Missing"}
+                {skillPackage.hasRuntimeManifest ? t("common.present") : t("common.missing")}
               </span>
             </div>
             <div className="developer-file-row" role="listitem">
               <span className="developer-file-name">SKILL.md</span>
               <span className="developer-file-state">
-                {skillPackage.hasSkillMd ? "Present" : "SKILL.md missing"}
+                {skillPackage.hasSkillMd ? t("common.present") : t("developer.skillMdMissing")}
               </span>
             </div>
           </div>
@@ -101,7 +104,7 @@ export function SkillPackageDetail({
 
         <section className="developer-detail-section">
           <header className="developer-section-heading">
-            <h3>Validation</h3>
+            <h3>{t("developer.validation")}</h3>
           </header>
           <div
             className={`developer-validation-panel${
@@ -111,8 +114,8 @@ export function SkillPackageDetail({
             <strong>{validationHeading}</strong>
             <p>
               {!hasBlockingDiagnostics
-                ? `Bundle readiness: ${skillPackage.bundleReady ? "ready" : "not ready"}`
-                : `${diagnosticsCount} diagnostic item(s) reported`}
+                ? t("developer.bundleReadiness", { state: t(skillPackage.bundleReady ? "developer.ready" : "developer.notReady") })
+                : t("developer.diagnosticCount", { count: diagnosticsCount })}
             </p>
             {skillPackage.validation.errors.length > 0 ? (
               <ul className="developer-validation-list">
@@ -133,7 +136,7 @@ export function SkillPackageDetail({
 
         <section className="developer-detail-section developer-detail-section-wide">
           <header className="developer-section-heading">
-            <h3>Exported tools</h3>
+            <h3>{t("developer.exportedTools")}</h3>
           </header>
           {skillPackage.runtimeTools.length > 0 ? (
             <div className="developer-tool-list" role="list">
@@ -144,15 +147,15 @@ export function SkillPackageDetail({
                   </span>
                   <span className="developer-tool-copy">
                     <strong>{toolName}</strong>
-                    <small>Runtime export</small>
+                    <small>{t("developer.runtimeExport")}</small>
                   </span>
                 </div>
               ))}
             </div>
           ) : (
             <div className="developer-inline-empty-state">
-              <h3>No runtime tools exported</h3>
-              <p>This package currently provides instruction assets only.</p>
+              <h3>{t("developer.noRuntimeTools")}</h3>
+              <p>{t("developer.noRuntimeToolsHint")}</p>
             </div>
           )}
         </section>
@@ -165,7 +168,7 @@ export function SkillPackageDetail({
           type="button"
         >
           <ShieldAlert aria-hidden="true" size={16} />
-          <span>Modify with skill-creator</span>
+          <span>{t("developer.modify")}</span>
         </button>
         <button className="developer-secondary-button" onClick={() => void copyPrompt()} type="button">
           <Copy aria-hidden="true" size={16} />
@@ -178,14 +181,14 @@ export function SkillPackageDetail({
           type="button"
         >
           <RefreshCw aria-hidden="true" size={16} />
-          <span>Reload diagnostics</span>
+          <span>{t("developer.reload")}</span>
         </button>
       </div>
 
       <section className="developer-danger-zone">
         <div>
-          <h3>Danger zone</h3>
-          <p>Deleting this package removes local developer assets for {skillPackage.name}.</p>
+          <h3>{t("developer.dangerZone")}</h3>
+          <p>{t("developer.deleteWarning", { name: skillPackage.name })}</p>
         </div>
         <button
           className="developer-danger-button"
@@ -194,13 +197,13 @@ export function SkillPackageDetail({
           type="button"
         >
           <Trash2 aria-hidden="true" size={16} />
-          <span>Delete package</span>
+          <span>{t("developer.deletePackage")}</span>
         </button>
       </section>
 
-      <aside className="developer-prompt-preview" aria-label="Prompt preview">
+      <aside className="developer-prompt-preview" aria-label={t("developer.promptPreview")}>
         <div className="developer-prompt-preview-header">
-          <span>Prompt preview</span>
+          <span>{t("developer.promptPreview")}</span>
         </div>
         <pre>{prompt}</pre>
       </aside>

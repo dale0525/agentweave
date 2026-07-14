@@ -5,6 +5,7 @@ androidx-compose-bom = "2026.06.01"
 androidx-core = "1.19.0"
 androidx-lifecycle = "2.11.0"
 androidx-test = "1.7.0"
+androidx-work = "2.11.0"
 junit = "4.13.2"
 kotlin = "2.3.10"
 robolectric = "4.16.1"
@@ -21,6 +22,7 @@ androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidx
 androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "androidx-lifecycle" }
 androidx-test-core = { module = "androidx.test:core", version.ref = "androidx-test" }
 androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidx-test" }
+androidx-work-runtime = { module = "androidx.work:work-runtime", version.ref = "androidx-work" }
 junit = { module = "junit:junit", version.ref = "junit" }
 robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
 

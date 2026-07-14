@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 export const REQUIRED_APK_SKILL_ASSETS = [
   "assets/skills/skill-bundle.json",
   "assets/skills/skill-bundle.lock",
+  "assets/agent-app/agent-app.lock.json",
 ];
 
 export function mobileMvpTaskNames() {

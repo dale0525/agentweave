@@ -20,7 +20,8 @@ const DEFAULT_DATABASE_URL: &str = "sqlite://general-agent.db?mode=rwc";
 const DEFAULT_SKILLS_ROOT: &str = "skills";
 const DEFAULT_MODEL_BASE_URL: &str = "http://127.0.0.1:11434/v1";
 const DEFAULT_MODEL_NAME: &str = "local-agent-model";
-
+mod server_app;
+mod server_automation;
 #[path = "server_skill_startup.rs"]
 mod server_skill_startup;
 #[cfg(test)]
@@ -35,7 +36,6 @@ use server_skill_startup::{
 #[cfg(test)]
 use server_skill_startup::{ManagedSkillsConfig, load_skill_manager};
 use server_tenant_startup::{build_managed_tenant_registry, build_tenant_app_state};
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|connector| connector.id.clone())
         .collect::<Vec<_>>();
     let model = GatewayHttpClient::new(model_profile_from_env());
-    let state = if let Some(managed_skills) = managed_skills {
+    let (state, automation_storage) = if let Some(managed_skills) = managed_skills {
         let policy = owner_host
             .as_ref()
             .map(|host| host.policy.clone())
@@ -72,9 +72,15 @@ async fn main() -> anyhow::Result<()> {
             runtime.database_path.clone(),
         ];
         let runtime_config = base_runtime_config.excluding_workspace_roots(control_roots);
+        let app_prompt = server_app::resolve_app_prompt(&runtime.manager, &runtime_config).await?;
         let owner_management =
             build_tenant_owner_api_config(owner_host, &runtime, connector_catalog).await?;
-        build_tenant_app_state(runtime, model, runtime_config, owner_management)
+        let storage = runtime.storage.clone();
+        (
+            build_tenant_app_state(runtime, model, runtime_config, app_prompt, owner_management)
+                .await?,
+            storage,
+        )
     } else {
         let database_url = std::env::var("GENERAL_AGENT_DATABASE_URL")
             .unwrap_or_else(|_| DEFAULT_DATABASE_URL.into());
@@ -89,25 +95,43 @@ async fn main() -> anyhow::Result<()> {
             control_roots.push(database_path);
         }
         let runtime_config = base_runtime_config.excluding_workspace_roots(control_roots);
+        let app_prompt = server_app::resolve_app_prompt(&loaded.manager, &runtime_config).await?;
         let owner_management =
             build_owner_api_config(owner_host, &loaded, storage.clone(), connector_catalog).await?;
-        if let Some(owner_management) = owner_management {
-            api::AppState::new_with_model_skill_manager_and_owner(
-                storage,
+        let memory_tools = server_app::resolve_memory_tools(&storage, &app_prompt).await?;
+        let connector_foundation =
+            server_app::resolve_connector_tools(&storage, &app_prompt).await?;
+        let connector_tools = connector_foundation
+            .as_ref()
+            .map(|foundation| foundation.tools.clone());
+        let state = if let Some(owner_management) = owner_management {
+            api::AppState::new_with_model_app_foundations_skill_manager_and_owner(
+                storage.clone(),
                 model,
                 loaded.manager,
                 runtime_config,
+                app_prompt,
+                api::AppFoundationRuntimes::new(memory_tools, connector_tools),
                 owner_management,
             )
         } else {
-            api::AppState::new_with_model_and_skill_manager(
-                storage,
+            api::AppState::new_with_model_app_foundations_and_skill_manager(
+                storage.clone(),
                 model,
                 loaded.manager,
                 runtime_config,
+                app_prompt,
+                memory_tools,
+                connector_tools,
             )
-        }
+        };
+        let state = match connector_foundation {
+            Some(foundation) => state.with_mail_actions(foundation.actions),
+            None => state,
+        };
+        (state, storage)
     };
+    let state = state.with_default_automation(&automation_storage).await?;
     let state = Arc::new(state.with_skills_root(skills_root.clone()));
     let app = if std::env::var("GENERAL_AGENT_DEV_API").as_deref() == Ok("1") {
         api::router_with_dev_routes(state)
@@ -117,8 +141,26 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 49321));
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
+    let scheduler_cancellation = tokio_util::sync::CancellationToken::new();
+    let scheduler_task = if std::env::var("GENERAL_AGENT_SCHEDULER_WORKER").as_deref() == Ok("1") {
+        Some(
+            server_automation::start_scheduler_worker(
+                &automation_storage,
+                scheduler_cancellation.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     tracing::info!("agent server listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app).await;
+    scheduler_cancellation.cancel();
+    if let Some(task) = scheduler_task {
+        task.await??;
+    }
+    serve_result?;
     Ok(())
 }
 
@@ -150,6 +192,9 @@ fn runtime_config_from_env() -> RuntimeConfig {
         .without_builtin_tools();
     if std::env::var("GENERAL_AGENT_COMMAND_MODE").as_deref() == Ok("allowed") {
         config = config.with_command_mode(CommandMode::Allowed);
+    }
+    if let Ok(app_root) = std::env::var("GENERAL_AGENT_APP_ROOT") {
+        config = config.excluding_workspace_roots([PathBuf::from(app_root)]);
     }
     config
 }

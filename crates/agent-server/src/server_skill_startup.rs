@@ -108,6 +108,9 @@ pub(super) async fn load_skill_manager_with_mode(
     let deferred_managed_startup = managed_config.is_some();
     let builtin = load_builtin_skill_source(root, builtin_mode).await?;
     let mut sources = vec![builtin];
+    if let Some(app_packages) = load_app_package_source_from_env().await? {
+        sources.push(app_packages);
+    }
     let mut managed_store = None;
     #[cfg(test)]
     let mut managed_source = None;
@@ -141,6 +144,26 @@ pub(super) async fn load_skill_manager_with_mode(
         #[cfg(test)]
         managed_source,
     })
+}
+
+pub(super) async fn load_app_package_source_from_env()
+-> anyhow::Result<Option<Arc<dyn SkillSource>>> {
+    let Ok(app_root) = std::env::var("GENERAL_AGENT_APP_ROOT") else {
+        return Ok(None);
+    };
+    let packages = PathBuf::from(app_root).join("packages");
+    match tokio::fs::symlink_metadata(&packages).await {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "Agent App packages root must be a real directory"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    Ok(Some(Arc::new(DirectorySkillSource::new(
+        SkillLayer::Session,
+        packages,
+    ))))
 }
 
 pub(super) async fn load_builtin_skill_source(

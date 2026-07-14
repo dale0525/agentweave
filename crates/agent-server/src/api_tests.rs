@@ -398,7 +398,7 @@ async fn custom_model_settings_preserve_management_service_and_request_actor() {
         }),
     };
 
-    run_agent_turn_for_actor(&state, &request, owner)
+    run_agent_turn_for_actor(&state, "session-1", &request, owner, Vec::new())
         .await
         .unwrap();
 

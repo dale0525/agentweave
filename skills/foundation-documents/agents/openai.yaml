@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foundation Documents"
+  short_description: "Create and verify traceable documents"
+  default_prompt: "Use $foundation-documents to create this document and verify the rendered result."

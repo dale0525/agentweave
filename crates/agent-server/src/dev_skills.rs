@@ -1,6 +1,7 @@
 use agent_runtime::{
     skill::{SkillManifest, SkillRegistry},
     skill_catalog::SkillCatalog,
+    skill_package::SkillPackageKind,
 };
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,8 @@ pub struct DevSkillPackage {
     pub validation: DevSkillValidation,
     #[serde(skip)]
     instruction_skill_name: Option<String>,
+    #[serde(skip)]
+    declared_kind: Option<SkillPackageKind>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -64,6 +67,8 @@ pub struct DevSkillValidation {
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DevSkillPackageMetadata {
+    #[serde(default)]
+    pub kind: Option<SkillPackageKind>,
     #[serde(default)]
     pub package: DevSkillPackageTargets,
     #[serde(default)]
@@ -313,6 +318,7 @@ async fn scan_one_package(root: &Path, package_path: PathBuf) -> DevSkillPackage
         has_package_metadata: metadata.has_package_metadata,
         validation: metadata.validation,
         instruction_skill_name: metadata.instruction_skill_name,
+        declared_kind: metadata.package_metadata.kind,
     }
 }
 
@@ -394,22 +400,26 @@ fn apply_readiness(packages: &mut [DevSkillPackage]) {
 
         let mut instruction_ready =
             package.validation.ok && package.has_skill_md && package.has_package_metadata;
+        let host_tools_only = package.declared_kind == Some(SkillPackageKind::HostToolsOnly);
         if package.has_skill_md {
             if !package.has_package_metadata {
                 readiness_issues.push(format!(
                     "missing {PACKAGE_METADATA_FILE} metadata for instruction skill"
                 ));
             }
-            for required_tool in &package.required_runtime_tools {
-                if !available_runtime_tools.contains(required_tool) {
+            if !host_tools_only {
+                for required_tool in &package.required_runtime_tools {
+                    if !available_runtime_tools.contains(required_tool) {
+                        instruction_ready = false;
+                        readiness_issues
+                            .push(format!("missing required runtime tool: {required_tool}"));
+                    }
+                }
+                for required_connector in &package.required_connectors {
                     instruction_ready = false;
                     readiness_issues
-                        .push(format!("missing required runtime tool: {required_tool}"));
+                        .push(format!("missing required connector: {required_connector}"));
                 }
-            }
-            for required_connector in &package.required_connectors {
-                instruction_ready = false;
-                readiness_issues.push(format!("missing required connector: {required_connector}"));
             }
         }
 

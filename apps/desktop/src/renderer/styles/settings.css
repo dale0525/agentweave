@@ -73,8 +73,9 @@
 }
 
 .endpoint-option,
-.settings-primary-action {
-  min-height: 38px;
+.settings-primary-action,
+.settings-secondary-action {
+  min-height: 44px;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-control);
   background: var(--color-surface);
@@ -127,6 +128,28 @@
 
 .settings-primary-action {
   padding: 0 14px;
+}
+
+.settings-secondary-action {
+  padding: 0 14px;
+  color: var(--color-text);
+}
+
+.settings-secondary-action:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary-text);
+}
+
+.settings-secret-status {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.settings-actions button:disabled,
+.endpoint-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .settings-primary-action:hover {

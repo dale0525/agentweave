@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "defaultTheme": "vscode.dark-2026",
+  "upstream": {
+    "repository": "microsoft/vscode",
+    "commit": "fc3def6774c76082adf699d366f31a557ce5573f",
+    "license": "MIT"
+  },
+  "themes": [
+    {
+      "id": "vscode.dark-2026",
+      "label": "Dark 2026",
+      "type": "dark",
+      "source": "theme-defaults/themes/2026-dark.json",
+      "colors": {
+        "foreground": "#bfbfbf",
+        "descriptionForeground": "#8C8C8C",
+        "disabledForeground": "#555555",
+        "errorForeground": "#f48771",
+        "focusBorder": "#3994BCB3",
+        "textLink.foreground": "#48A0C7",
+        "button.background": "#297AA0",
+        "button.foreground": "#FFFFFF",
+        "button.hoverBackground": "#2B7DA3",
+        "input.background": "#191A1B",
+        "input.border": "#333536FF",
+        "input.foreground": "#bfbfbf",
+        "sideBar.background": "#191A1B",
+        "sideBar.border": "#2A2B2CFF",
+        "editor.background": "#121314",
+        "editor.foreground": "#BBBEBF",
+        "editorWidget.background": "#202122",
+        "editorWidget.border": "#2A2B2CFF",
+        "panel.background": "#191A1B",
+        "panel.border": "#2A2B2CFF",
+        "chat.requestBubbleBackground": "#ffffff13",
+        "list.hoverBackground": "#FFFFFF14",
+        "list.inactiveSelectionBackground": "#2C2D2E",
+        "inputValidation.errorBackground": "#3A1D1D",
+        "inputValidation.errorBorder": "#BE1100"
+      }
+    },
+    {
+      "id": "vscode.light-2026",
+      "label": "Light 2026",
+      "type": "light",
+      "source": "theme-defaults/themes/2026-light.json",
+      "colors": {
+        "foreground": "#202020",
+        "descriptionForeground": "#606060",
+        "disabledForeground": "#BBBBBB",
+        "errorForeground": "#ad0707",
+        "focusBorder": "#0069CCFF",
+        "textLink.foreground": "#0069CC",
+        "button.background": "#0069CC",
+        "button.foreground": "#FFFFFF",
+        "button.hoverBackground": "#0063C1",
+        "input.background": "#FFFFFF",
+        "input.border": "#D8D8D866",
+        "input.foreground": "#202020",
+        "sideBar.background": "#FAFAFD",
+        "sideBar.border": "#F0F1F2FF",
+        "editor.background": "#FFFFFF",
+        "editor.foreground": "#202020",
+        "editorWidget.background": "#FAFAFD",
+        "editorWidget.border": "#E4E5E6FF",
+        "panel.background": "#FAFAFD",
+        "panel.border": "#F0F1F2FF",
+        "chat.requestBubbleBackground": "#EEF4FB",
+        "list.hoverBackground": "#00000014",
+        "list.inactiveSelectionBackground": "#DADADA99",
+        "inputValidation.errorBackground": "#FDEDED",
+        "inputValidation.errorBorder": "#ad0707"
+      }
+    },
+    {
+      "id": "vscode.dark-plus",
+      "label": "Dark+",
+      "type": "dark",
+      "source": "theme-defaults/themes/dark_plus.json",
+      "colors": { "editor.background": "#1E1E1E", "editor.foreground": "#D4D4D4" }
+    },
+    {
+      "id": "vscode.dark-modern",
+      "label": "Dark Modern",
+      "type": "dark",
+      "source": "theme-defaults/themes/dark_modern.json",
+      "colors": {
+        "foreground": "#CCCCCC",
+        "descriptionForeground": "#9D9D9D",
+        "errorForeground": "#F85149",
+        "focusBorder": "#0078D4",
+        "textLink.foreground": "#4daafc",
+        "button.background": "#0078D4",
+        "button.foreground": "#FFFFFF",
+        "button.hoverBackground": "#026EC1",
+        "input.background": "#313131",
+        "input.border": "#3C3C3C",
+        "input.foreground": "#CCCCCC",
+        "sideBar.background": "#181818",
+        "sideBar.border": "#2B2B2B",
+        "editor.background": "#1F1F1F",
+        "editor.foreground": "#CCCCCC",
+        "editorWidget.background": "#202020",
+        "panel.background": "#181818",
+        "panel.border": "#2B2B2B"
+      }
+    },
+    {
+      "id": "vscode.light-plus",
+      "label": "Light+",
+      "type": "light",
+      "source": "theme-defaults/themes/light_plus.json",
+      "colors": { "editor.background": "#FFFFFF", "editor.foreground": "#000000", "list.hoverBackground": "#E8E8E8" }
+    },
+    {
+      "id": "vscode.light-modern",
+      "label": "Light Modern",
+      "type": "light",
+      "source": "theme-defaults/themes/light_modern.json",
+      "colors": {
+        "foreground": "#3B3B3B",
+        "descriptionForeground": "#3B3B3B",
+        "errorForeground": "#F85149",
+        "focusBorder": "#005FB8",
+        "textLink.foreground": "#005FB8",
+        "button.background": "#005FB8",
+        "button.foreground": "#FFFFFF",
+        "button.hoverBackground": "#0258A8",
+        "input.background": "#FFFFFF",
+        "input.border": "#CECECE",
+        "input.foreground": "#3B3B3B",
+        "sideBar.background": "#F8F8F8",
+        "sideBar.border": "#E5E5E5",
+        "editor.background": "#FFFFFF",
+        "editor.foreground": "#3B3B3B",
+        "editorWidget.background": "#F8F8F8",
+        "panel.background": "#F8F8F8",
+        "panel.border": "#E5E5E5",
+        "list.hoverBackground": "#F2F2F2"
+      }
+    },
+    {
+      "id": "vscode.visual-studio-dark",
+      "label": "Dark (Visual Studio)",
+      "type": "dark",
+      "source": "theme-defaults/themes/dark_vs.json",
+      "colors": { "editor.background": "#1E1E1E", "editor.foreground": "#D4D4D4" }
+    },
+    {
+      "id": "vscode.visual-studio-light",
+      "label": "Light (Visual Studio)",
+      "type": "light",
+      "source": "theme-defaults/themes/light_vs.json",
+      "colors": { "editor.background": "#FFFFFF", "editor.foreground": "#000000", "list.hoverBackground": "#E8E8E8" }
+    },
+    {
+      "id": "vscode.high-contrast-dark",
+      "label": "Dark High Contrast",
+      "type": "hcDark",
+      "source": "theme-defaults/themes/hc_black.json",
+      "colors": { "focusBorder": "#F38518", "editor.background": "#000000", "editor.foreground": "#FFFFFF", "sideBar.background": "#000000", "sideBar.border": "#FFFFFF" }
+    },
+    {
+      "id": "vscode.high-contrast-light",
+      "label": "Light High Contrast",
+      "type": "hcLight",
+      "source": "theme-defaults/themes/hc_light.json",
+      "colors": { "focusBorder": "#0F4A85", "editor.background": "#FFFFFF", "editor.foreground": "#292929", "sideBar.background": "#FFFFFF", "sideBar.border": "#292929" }
+    },
+    {
+      "id": "vscode.abyss",
+      "label": "Abyss",
+      "type": "dark",
+      "source": "theme-abyss/themes/abyss-color-theme.json",
+      "colors": { "focusBorder": "#596F99", "button.background": "#2B3C5D", "input.background": "#181f2f", "sideBar.background": "#060621", "editor.background": "#000c18", "editor.foreground": "#6688cc", "editorWidget.background": "#262641", "panel.border": "#2b2b4a", "list.hoverBackground": "#061940", "list.inactiveSelectionBackground": "#152037", "inputValidation.errorBackground": "#A22D44", "inputValidation.errorBorder": "#AB395B" }
+    },
+    {
+      "id": "vscode.kimbie-dark",
+      "label": "Kimbie Dark",
+      "type": "dark",
+      "source": "theme-kimbie-dark/themes/kimbie-dark-color-theme.json",
+      "colors": { "focusBorder": "#a57a4c", "button.background": "#6e583b", "input.background": "#51412c", "sideBar.background": "#362712", "editor.background": "#221a0f", "editor.foreground": "#d3af86", "editorWidget.background": "#131510", "list.hoverBackground": "#7c502166", "list.inactiveSelectionBackground": "#645342", "inputValidation.errorBackground": "#5f0d0d", "inputValidation.errorBorder": "#9d2f23" }
+    },
+    {
+      "id": "vscode.monokai",
+      "label": "Monokai",
+      "type": "dark",
+      "source": "theme-monokai/themes/monokai-color-theme.json",
+      "colors": { "focusBorder": "#99947c", "button.background": "#75715E", "input.background": "#414339", "sideBar.background": "#1e1f1c", "editor.background": "#272822", "editor.foreground": "#f8f8f2", "editorWidget.background": "#1e1f1c", "panel.border": "#414339", "list.hoverBackground": "#3e3d32", "list.inactiveSelectionBackground": "#414339", "inputValidation.errorBackground": "#90274A", "inputValidation.errorBorder": "#f92672" }
+    },
+    {
+      "id": "vscode.monokai-dimmed",
+      "label": "Monokai Dimmed",
+      "type": "dark",
+      "source": "theme-monokai-dimmed/themes/dimmed-monokai-color-theme.json",
+      "colors": { "focusBorder": "#3655b5", "button.background": "#565656", "sideBar.background": "#272727", "editor.background": "#1e1e1e", "editor.foreground": "#c5c8c6", "list.hoverBackground": "#444444", "list.inactiveSelectionBackground": "#4e4e4e" }
+    },
+    {
+      "id": "vscode.quiet-light",
+      "label": "Quiet Light",
+      "type": "light",
+      "source": "theme-quietlight/themes/quietlight-color-theme.json",
+      "colors": { "errorForeground": "#f1897f", "focusBorder": "#9769dc", "button.background": "#705697", "sideBar.background": "#F2F2F2", "editor.background": "#F5F5F5", "panel.background": "#F5F5F5", "list.hoverBackground": "#e0e0e0", "list.inactiveSelectionBackground": "#d3dbcd", "inputValidation.errorBackground": "#ffeaea", "inputValidation.errorBorder": "#f1897f" }
+    },
+    {
+      "id": "vscode.red",
+      "label": "Red",
+      "type": "dark",
+      "source": "theme-red/themes/Red-color-theme.json",
+      "colors": { "errorForeground": "#ffeaea", "focusBorder": "#ff6666aa", "button.background": "#833", "input.background": "#580000", "sideBar.background": "#330000", "editor.background": "#390000", "editor.foreground": "#F8F8F8", "editorWidget.background": "#300000", "list.hoverBackground": "#800000", "list.inactiveSelectionBackground": "#770000" }
+    },
+    {
+      "id": "vscode.solarized-dark",
+      "label": "Solarized Dark",
+      "type": "dark",
+      "source": "theme-solarized-dark/themes/solarized-dark-color-theme.json",
+      "colors": { "errorForeground": "#ffeaea", "focusBorder": "#2AA19899", "button.background": "#2AA19899", "input.background": "#003847", "input.foreground": "#93A1A1", "sideBar.background": "#00212B", "editor.background": "#002B36", "editor.foreground": "#839496", "editorWidget.background": "#00212B", "panel.border": "#2b2b4a", "list.hoverBackground": "#004454AA", "list.inactiveSelectionBackground": "#00445488", "inputValidation.errorBackground": "#571b26", "inputValidation.errorBorder": "#a92049" }
+    },
+    {
+      "id": "vscode.solarized-light",
+      "label": "Solarized Light",
+      "type": "light",
+      "source": "theme-solarized-light/themes/solarized-light-color-theme.json",
+      "colors": { "focusBorder": "#b49471", "button.background": "#AC9D57", "input.background": "#DDD6C1", "input.foreground": "#586E75", "sideBar.background": "#EEE8D5", "editor.background": "#FDF6E3", "editor.foreground": "#657B83", "editorWidget.background": "#EEE8D5", "panel.border": "#DDD6C1", "list.hoverBackground": "#DFCA8844", "list.inactiveSelectionBackground": "#D1CBB8" }
+    },
+    {
+      "id": "vscode.tomorrow-night-blue",
+      "label": "Tomorrow Night Blue",
+      "type": "dark",
+      "source": "theme-tomorrow-night-blue/themes/tomorrow-night-blue-color-theme.json",
+      "colors": { "errorForeground": "#a92049", "focusBorder": "#bbdaff", "input.background": "#001733", "sideBar.background": "#001c40", "editor.background": "#002451", "editor.foreground": "#ffffff", "editorWidget.background": "#001c40", "list.hoverBackground": "#ffffff30", "list.inactiveSelectionBackground": "#ffffff40" }
+    }
+  ]
+}

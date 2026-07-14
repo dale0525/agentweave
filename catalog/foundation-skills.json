@@ -1,0 +1,924 @@
+{
+  "schemaVersion": 1,
+  "catalogId": "generalagent.foundation-skills",
+  "catalogVersion": "0.1.0",
+  "replacementPolicy": {
+    "selection": "app_manifest",
+    "identity": "replacement_contract",
+    "versioning": "semantic_major",
+    "fallback": "disabled",
+    "mustNotBypass": [
+      "permissions",
+      "approvals",
+      "credential_vault",
+      "audit",
+      "idempotency"
+    ]
+  },
+  "waves": {
+    "available": "Implemented and locally package-validated.",
+    "wave1": "First provider-backed foundation packages after the required runtime contracts land.",
+    "wave2": "Follow-up packages that depend on Wave 1 infrastructure or richer artifact support."
+  },
+  "skills": [
+    {
+      "id": "generalagent.core.filesystem",
+      "version": "0.1.0",
+      "displayName": "Filesystem",
+      "description": "Workspace-scoped file inspection and mutation primitives.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": true,
+      "stability": "stable",
+      "wave": "available",
+      "platforms": [
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [],
+        "runtimeFeatures": [
+          "workspace-boundary"
+        ],
+        "runtimeCapabilities": [
+          "shell.process"
+        ],
+        "connectors": [],
+        "hostTools": []
+      },
+      "permissions": {
+        "required": [
+          "read_workspace"
+        ],
+        "conditional": [
+          "write_workspace"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "workspace_private",
+        "categories": [
+          "workspace_content",
+          "file_metadata"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.filesystem",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Preserve workspace confinement.",
+          "Preserve read and write permission separation.",
+          "Return deterministic structured errors for denied paths."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/filesystem",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.core.skill-creator",
+      "version": "0.1.0",
+      "displayName": "Skill Creator",
+      "description": "Developer workflow for authoring and validating GeneralAgent skills.",
+      "audience": [
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "stable",
+      "wave": "available",
+      "platforms": [
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [
+          "generalagent.core.filesystem"
+        ],
+        "runtimeFeatures": [
+          "skill-package-lifecycle"
+        ],
+        "runtimeCapabilities": [],
+        "connectors": [],
+        "hostTools": []
+      },
+      "permissions": {
+        "required": [],
+        "conditional": [
+          "write_workspace",
+          "manage_skills"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "workspace_private",
+        "categories": [
+          "skill_source",
+          "package_metadata"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.skill-authoring",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Remain developer-only by default.",
+          "Use the runtime package lifecycle for validation and publication.",
+          "Never activate generated packages without host approval."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/skill-creator",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.memory",
+      "version": "0.1.0",
+      "displayName": "Memory",
+      "description": "Provider-neutral workflows for querying, proposing, correcting, exporting, and forgetting memory.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "stable",
+      "wave": "available",
+      "platforms": [
+        "android",
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [],
+        "runtimeFeatures": [
+          "memory-provider",
+          "provenance",
+          "retention-policy",
+          "reversible-history"
+        ],
+        "runtimeCapabilities": [
+          "memory-provider",
+          "provenance",
+          "retention-policy",
+          "reversible-history",
+          "host-tools"
+        ],
+        "connectors": [],
+        "hostTools": [
+          "memory_search",
+          "memory_get",
+          "memory_propose",
+          "memory_confirm",
+          "memory_update",
+          "memory_forget",
+          "memory_export"
+        ]
+      },
+      "permissions": {
+        "required": [
+          "memory.read"
+        ],
+        "conditional": [
+          "memory.propose",
+          "memory.update",
+          "memory.delete",
+          "memory.export"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "highly_sensitive",
+        "categories": [
+          "personal_facts",
+          "preferences",
+          "relationship_context",
+          "conversation_provenance"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.memory",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Expose provenance, confidence, sensitivity, and retention metadata.",
+          "Separate proposals from committed memory mutations.",
+          "Support export, deletion, and auditable conflict resolution."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-memory",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.mail",
+      "version": "0.1.0",
+      "displayName": "Mail",
+      "description": "Provider-neutral inbox, thread, draft, reply, forwarding, and follow-up workflows.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "preview",
+      "wave": "available",
+      "platforms": [
+        "android",
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [],
+        "runtimeFeatures": [
+          "connector-runtime",
+          "credential-vault",
+          "durable-approval",
+          "idempotency"
+        ],
+        "runtimeCapabilities": [
+          "durable-actions",
+          "approval-engine",
+          "credential-vault",
+          "mail-connector",
+          "host-tools"
+        ],
+        "connectors": [
+          "generalagent-mail"
+        ],
+        "hostTools": [
+          "mail_accounts_list",
+          "mail_account_status",
+          "mail_account_connect",
+          "mail_account_disconnect",
+          "mailboxes_list",
+          "mail_threads_list",
+          "mail_search",
+          "mail_thread_get",
+          "mail_message_get",
+          "mail_body_read",
+          "mail_attachment_read",
+          "mail_mark_read",
+          "mail_archive",
+          "mail_move",
+          "mail_draft_create",
+          "mail_draft_get",
+          "mail_draft_update",
+          "mail_draft_delete",
+          "mail_reply_draft",
+          "mail_forward_draft",
+          "mail_send_preview",
+          "mail_send",
+          "mail_delivery_status"
+        ]
+      },
+      "permissions": {
+        "required": [
+          "mail.account.read",
+          "mail.message.read"
+        ],
+        "conditional": [
+          "mail.draft.write",
+          "mail.message.send",
+          "mail.message.move",
+          "mail.message.delete"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "highly_sensitive",
+        "categories": [
+          "message_content",
+          "attachments",
+          "contact_identifiers",
+          "account_metadata"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.mail",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Keep provider authentication outside the skill package.",
+          "Separate draft mutation from external delivery.",
+          "Require durable approval and idempotency for external side effects."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-mail",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.calendar",
+      "version": "0.1.0",
+      "displayName": "Calendar",
+      "description": "Calendar lookup, free-busy, proposal, creation, update, and cancellation workflows.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "preview",
+      "wave": "available",
+      "platforms": [
+        "android",
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [],
+        "runtimeFeatures": [
+          "connector-runtime",
+          "credential-vault",
+          "durable-approval",
+          "idempotency",
+          "timezone-service"
+        ],
+        "runtimeCapabilities": [
+          "approval-engine",
+          "credential-vault",
+          "durable-actions",
+          "host-tools"
+        ],
+        "connectors": [
+          "generalagent.connector.calendar/v1"
+        ],
+        "hostTools": []
+      },
+      "permissions": {
+        "required": [
+          "calendar.event.read",
+          "calendar.freebusy.read"
+        ],
+        "conditional": [
+          "calendar.event.create",
+          "calendar.event.update",
+          "calendar.event.cancel"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "sensitive",
+        "categories": [
+          "event_content",
+          "attendees",
+          "location",
+          "availability"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.calendar",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Preserve timezone and recurrence semantics.",
+          "Expose conflicts before mutation.",
+          "Require approval for attendee-visible changes."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-calendar",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.tasks",
+      "version": "0.1.0",
+      "displayName": "Tasks and Reminders",
+      "description": "Task capture, status, due dates, recurrence, completion, and reminder association.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "preview",
+      "wave": "available",
+      "platforms": [
+        "android",
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [],
+        "runtimeFeatures": [
+          "task-provider",
+          "idempotency"
+        ],
+        "runtimeCapabilities": [
+          "host-tools",
+          "task-provider"
+        ],
+        "connectors": [],
+        "hostTools": [
+          "generalagent.host.tasks/v1"
+        ]
+      },
+      "permissions": {
+        "required": [
+          "task.read"
+        ],
+        "conditional": [
+          "task.create",
+          "task.update",
+          "task.complete",
+          "task.delete"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "sensitive",
+        "categories": [
+          "task_content",
+          "deadlines",
+          "project_context"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.tasks",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Keep task state separate from scheduler triggers.",
+          "Preserve recurrence and completion semantics.",
+          "Expose stable task identifiers for idempotent updates."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-tasks",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.web-research",
+      "version": "0.1.0",
+      "displayName": "Web Research",
+      "description": "Search, page reading, source tracking, citation, and multi-source synthesis workflows.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "preview",
+      "wave": "available",
+      "platforms": [
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [],
+        "runtimeFeatures": [
+          "connector-runtime",
+          "content-safety",
+          "artifact-store",
+          "source-provenance"
+        ],
+        "runtimeCapabilities": [
+          "host-tools",
+          "network.http"
+        ],
+        "connectors": [
+          "generalagent.connector.web/v1"
+        ],
+        "hostTools": []
+      },
+      "permissions": {
+        "required": [
+          "web.search",
+          "web.page.read"
+        ],
+        "conditional": [
+          "artifact.write"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "public_or_user_directed",
+        "categories": [
+          "search_queries",
+          "visited_sources",
+          "research_artifacts"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.web-research",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Retain source URLs and retrieval timestamps.",
+          "Keep fetched content untrusted until processed.",
+          "Make citation provenance inspectable."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-web-research",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.documents",
+      "version": "0.1.0",
+      "displayName": "Documents",
+      "description": "Document reading, extraction, rendering, conversion, creation, and visual quality checks.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "preview",
+      "wave": "available",
+      "platforms": [
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [
+          "generalagent.core.filesystem"
+        ],
+        "runtimeFeatures": [
+          "artifact-store",
+          "content-safety",
+          "render-verification"
+        ],
+        "runtimeCapabilities": [
+          "host-tools"
+        ],
+        "connectors": [],
+        "hostTools": [
+          "generalagent.host.documents/v1"
+        ]
+      },
+      "permissions": {
+        "required": [
+          "read_workspace"
+        ],
+        "conditional": [
+          "write_workspace",
+          "artifact.write"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "workspace_private",
+        "categories": [
+          "document_content",
+          "document_metadata",
+          "rendered_artifacts"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.documents",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Preserve source files unless replacement is explicit.",
+          "Keep generated artifacts traceable to their inputs.",
+          "Verify layout-sensitive outputs before delivery."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-documents",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.contacts",
+      "version": "0.1.0",
+      "displayName": "Contacts",
+      "description": "Contact resolution, reading, relationship context, and controlled updates.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "preview",
+      "wave": "available",
+      "platforms": [
+        "android",
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [],
+        "runtimeFeatures": [
+          "connector-runtime",
+          "credential-vault",
+          "durable-approval"
+        ],
+        "runtimeCapabilities": [
+          "approval-engine",
+          "credential-vault",
+          "host-tools"
+        ],
+        "connectors": [
+          "generalagent.connector.contacts/v1"
+        ],
+        "hostTools": []
+      },
+      "permissions": {
+        "required": [
+          "contact.read"
+        ],
+        "conditional": [
+          "contact.update",
+          "contact.create",
+          "contact.delete"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "highly_sensitive",
+        "categories": [
+          "contact_identifiers",
+          "relationship_context",
+          "addresses"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.contacts",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Resolve ambiguous contacts before external actions.",
+          "Keep relationship context access auditable.",
+          "Require approval for externally visible updates."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-contacts",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.scheduler",
+      "version": "0.1.0",
+      "displayName": "Scheduler",
+      "description": "Persistent one-shot, interval, cron, and RRULE trigger workflows with recovery and misfire policy.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "preview",
+      "wave": "available",
+      "platforms": [
+        "android",
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [],
+        "runtimeFeatures": [
+          "scheduler",
+          "timezone-service",
+          "durable-runs"
+        ],
+        "runtimeCapabilities": [
+          "host-tools",
+          "scheduler"
+        ],
+        "connectors": [],
+        "hostTools": [
+          "generalagent.host.scheduler/v1"
+        ]
+      },
+      "permissions": {
+        "required": [],
+        "conditional": [
+          "scheduler.create",
+          "scheduler.update",
+          "scheduler.cancel"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "sensitive",
+        "categories": [
+          "schedule_payload",
+          "execution_history",
+          "timezone"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.scheduler",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Keep trigger state separate from task and notification state.",
+          "Recover expired claims with the same run identity.",
+          "Preserve timezone, DST, and misfire semantics."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-scheduler",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.notifications",
+      "version": "0.1.0",
+      "displayName": "Notifications",
+      "description": "Notification delivery, cancellation, quiet hours, and delivery-status workflows.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "preview",
+      "wave": "available",
+      "platforms": [
+        "android",
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [],
+        "runtimeFeatures": [
+          "scheduler",
+          "quiet-hours",
+          "delivery-status"
+        ],
+        "runtimeCapabilities": [
+          "host-tools",
+          "scheduler"
+        ],
+        "connectors": [],
+        "hostTools": [
+          "generalagent.host.notifications/v1"
+        ]
+      },
+      "permissions": {
+        "required": [],
+        "conditional": [
+          "notification.deliver",
+          "notification.cancel"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "sensitive",
+        "categories": [
+          "notification_content",
+          "delivery_channels",
+          "delivery_status"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.notifications",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Keep notification delivery separate from trigger execution.",
+          "Honor quiet hours and channel policy deterministically.",
+          "Expose cancellation and delivery state."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-notifications",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.notes",
+      "version": "0.1.0",
+      "displayName": "Notes and Knowledge",
+      "description": "User-owned notes, knowledge pages, and explicit knowledge-base workflows.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "preview",
+      "wave": "available",
+      "platforms": [
+        "android",
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [],
+        "runtimeFeatures": [
+          "connector-runtime",
+          "artifact-store",
+          "source-provenance"
+        ],
+        "runtimeCapabilities": [
+          "host-tools"
+        ],
+        "connectors": [
+          "generalagent.connector.notes/v1"
+        ],
+        "hostTools": []
+      },
+      "permissions": {
+        "required": [
+          "note.read"
+        ],
+        "conditional": [
+          "note.create",
+          "note.update",
+          "note.delete"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "highly_sensitive",
+        "categories": [
+          "user_owned_content",
+          "knowledge_metadata",
+          "sharing_state"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.notes",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Keep explicit user-owned notes distinct from agent memory.",
+          "Preserve ownership and sharing metadata.",
+          "Support reversible, auditable mutations."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-notes",
+        "manifest": "general-agent.json"
+      }
+    },
+    {
+      "id": "generalagent.foundation.messaging",
+      "version": "0.1.0",
+      "displayName": "Messaging",
+      "description": "Provider-neutral channel reading, drafting, and approved sending workflows.",
+      "audience": [
+        "consumer",
+        "developer"
+      ],
+      "consumerDefault": false,
+      "stability": "preview",
+      "wave": "available",
+      "platforms": [
+        "android",
+        "desktop",
+        "server"
+      ],
+      "dependencies": {
+        "packages": [
+          "generalagent.foundation.contacts"
+        ],
+        "runtimeFeatures": [
+          "connector-runtime",
+          "credential-vault",
+          "durable-approval",
+          "idempotency"
+        ],
+        "runtimeCapabilities": [
+          "approval-engine",
+          "credential-vault",
+          "durable-actions",
+          "host-tools"
+        ],
+        "connectors": [
+          "generalagent.connector.messaging/v1"
+        ],
+        "hostTools": []
+      },
+      "permissions": {
+        "required": [
+          "message.thread.read"
+        ],
+        "conditional": [
+          "message.draft.write",
+          "message.send",
+          "message.delete"
+        ]
+      },
+      "dataSensitivity": {
+        "level": "highly_sensitive",
+        "categories": [
+          "message_content",
+          "channel_identity",
+          "contact_identifiers",
+          "attachments"
+        ]
+      },
+      "replacementContract": {
+        "id": "generalagent.foundation.messaging",
+        "majorVersion": 1,
+        "replaceable": true,
+        "canDisable": true,
+        "requirements": [
+          "Keep provider credentials outside the skill package.",
+          "Resolve recipients before delivery.",
+          "Require durable approval and idempotency for sends."
+        ]
+      },
+      "localPackage": {
+        "path": "skills/foundation-messaging",
+        "manifest": "general-agent.json"
+      }
+    }
+  ]
+}

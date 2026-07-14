@@ -36,6 +36,7 @@ fn mobile_config(root: &std::path::Path) -> MobileInitConfig {
     let builtin_skills_dir = app_data_dir.join("builtin-skills");
     MobileInitConfig {
         app_data_dir: app_data_dir.display().to_string(),
+        app_package_dir: None,
         cache_dir: cache_dir.display().to_string(),
         database_path: app_data_dir.join("general-agent.db").display().to_string(),
         builtin_skills_dir: builtin_skills_dir.display().to_string(),

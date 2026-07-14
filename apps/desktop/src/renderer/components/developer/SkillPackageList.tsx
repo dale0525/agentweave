@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 
 import { DevSkillInventory, DevSkillPackage, DevSkillPackageKind } from "../../api";
 import { packageStateLabel } from "./skillPackageDiagnostics";
+import { useI18n } from "../../i18n/I18nProvider";
 
 type SkillPackageListProps = {
   inventory: DevSkillInventory | null;
@@ -11,12 +12,12 @@ type SkillPackageListProps = {
   onSelect: (id: string) => void;
 };
 
-const kindLabel: Record<DevSkillPackageKind, string> = {
-  combined: "Combined",
-  empty: "Empty",
-  instruction: "Instruction",
-  invalid: "Invalid",
-  runtime: "Runtime"
+const kindKey: Record<DevSkillPackageKind, string> = {
+  combined: "developer.kindCombined",
+  empty: "developer.kindEmpty",
+  instruction: "developer.kindInstruction",
+  invalid: "developer.kindInvalid",
+  runtime: "developer.kindRuntime"
 };
 
 export function SkillPackageList({
@@ -25,6 +26,7 @@ export function SkillPackageList({
   onCreate,
   onSelect
 }: SkillPackageListProps): JSX.Element {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
 
   const filteredPackages = useMemo(() => {
@@ -45,21 +47,21 @@ export function SkillPackageList({
     <aside className="developer-list-pane">
       <div className="developer-pane-header">
         <div className="developer-pane-heading">
-          <h2>Skill packages</h2>
-          <p>{inventory ? `${inventory.packages.length} package(s)` : "Loading inventory"}</p>
+          <h2>{t("developer.packages")}</h2>
+          <p>{inventory ? t("developer.packageCount", { count: inventory.packages.length }) : t("developer.loadingInventory")}</p>
         </div>
         <button className="developer-primary-button" onClick={onCreate} type="button">
           <Plus aria-hidden="true" size={16} />
-          <span>New skill</span>
+          <span>{t("developer.newSkill")}</span>
         </button>
       </div>
 
       <label className="search-box developer-search-box">
         <Search aria-hidden="true" size={16} />
-        <span className="sr-only">Search skill packages</span>
+        <span className="sr-only">{t("developer.search")}</span>
         <input
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search packages"
+          placeholder={t("developer.searchPlaceholder")}
           type="search"
           value={query}
         />
@@ -67,11 +69,11 @@ export function SkillPackageList({
 
       {inventory && filteredPackages.length === 0 ? (
         <div className="developer-inline-empty-state">
-          <h3>No skill packages found</h3>
-          <p>Adjust the search or create a new package.</p>
+          <h3>{t("developer.noPackages")}</h3>
+          <p>{t("developer.noPackagesHint")}</p>
         </div>
       ) : (
-        <div aria-label="Skill packages" className="developer-package-list" role="list">
+        <div aria-label={t("developer.packages")} className="developer-package-list" role="list">
           {(filteredPackages.length > 0 ? filteredPackages : inventory?.packages ?? []).map(
             (skillPackage) => (
               <SkillPackageRow
@@ -79,6 +81,7 @@ export function SkillPackageList({
                 key={skillPackage.id}
                 onSelect={onSelect}
                 skillPackage={skillPackage}
+                t={t}
               />
             )
           )}
@@ -92,9 +95,10 @@ function SkillPackageRow(props: {
   isSelected: boolean;
   onSelect: (id: string) => void;
   skillPackage: DevSkillPackage;
+  t: ReturnType<typeof useI18n>["t"];
 }): JSX.Element {
-  const { isSelected, onSelect, skillPackage } = props;
-  const stateText = packageStateLabel(skillPackage);
+  const { isSelected, onSelect, skillPackage, t } = props;
+  const stateText = packageStateLabel(skillPackage, t);
 
   return (
     <button
@@ -106,7 +110,7 @@ function SkillPackageRow(props: {
         <strong>{skillPackage.name}</strong>
         <small>{stateText}</small>
       </span>
-      <span className="developer-kind-badge">{kindLabel[skillPackage.packageKind]}</span>
+      <span className="developer-kind-badge">{t(kindKey[skillPackage.packageKind])}</span>
     </button>
   );
 }

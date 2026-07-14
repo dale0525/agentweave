@@ -71,8 +71,11 @@ async fn tenant_router(
             tool_names: Arc::new(Mutex::new(Vec::new())),
         },
         RuntimeConfig::read_only(".", ".").without_builtin_tools(),
+        agent_runtime::prompt_composer::AppPromptConfig::default(),
         Some(owner),
-    );
+    )
+    .await
+    .unwrap();
     api::router(Arc::new(state))
 }
 

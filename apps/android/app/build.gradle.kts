@@ -4,6 +4,8 @@ plugins {
 }
 
 val generatedSkillAssets = layout.buildDirectory.dir("generated/skillAssets/main")
+val packagedAgentAppRoot = providers.environmentVariable("GENERAL_AGENT_APP_ROOT")
+  .orElse(rootProject.projectDir.resolve("../../examples/secretary-agent").absolutePath)
 
 android {
   namespace = "com.generalagent.mobile"
@@ -37,6 +39,8 @@ android {
 
   sourceSets.named("main") {
     assets.directories.add("build/generated/skillAssets/main")
+    assets.directories.add(rootProject.projectDir.resolve("../../catalog").absolutePath)
+    assets.directories.add(rootProject.projectDir.resolve("../../resources").absolutePath)
   }
 
   sourceSets.named("release") {
@@ -50,6 +54,7 @@ dependencies {
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.core.ktx)
   implementation(libs.androidx.lifecycle.runtime.ktx)
+  implementation(libs.androidx.work.runtime)
   implementation(libs.androidx.compose.material3)
   implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.ui)
@@ -67,6 +72,15 @@ val prepareAndroidSkillAssets by tasks.registering(Exec::class) {
   workingDir(rootProject.projectDir.resolve("../.."))
   commandLine("node", "scripts/build-android-rust.mjs", "--skills-only")
   inputs.dir(rootProject.projectDir.resolve("../../skills"))
+  inputs.dir(packagedAgentAppRoot)
+  inputs.property(
+    "agentAppLocales",
+    providers.environmentVariable("GENERAL_AGENT_APP_LOCALES").orElse(""),
+  )
+  inputs.property(
+    "agentAppDefaultLocale",
+    providers.environmentVariable("GENERAL_AGENT_APP_DEFAULT_LOCALE").orElse(""),
+  )
   inputs.file(rootProject.projectDir.resolve("../../scripts/build-android-rust.mjs"))
   outputs.dir(generatedSkillAssets)
   outputs.upToDateWhen { false }
