@@ -1,33 +1,35 @@
 # Secretary Agent Reference App
 
-这是一个用于证明 AgentWeave Framework 可组合性的参考应用，不是核心 Runtime 的特殊模式。应用身份、中文 system prompt、Memory、Mail 和 `secretary-routines` 自定义 Skill 都通过 App package 配置提供。
+English | [简体中文](./README.zh-CN.md)
 
-默认 Mail 实现是本地 Fake Connector，不需要账号或凭据；所有写操作仍然经过 Runtime 的审批和幂等边界。Memory 使用与会话数据库同 scope 的本地 SQLite provider。
+This reference application demonstrates that the AgentWeave Framework is composable; it is not a special mode built into the core Runtime. Its application identity, Chinese system prompt, Memory, Mail, and custom `secretary-routines` Skill are all supplied through App package configuration.
 
-需要连接真实邮箱时，按仓库根目录的 [IMAP/SMTP 配置指南](../../MAIL_CONNECTOR_SETUP.md) 创建账号配置并把密码写入 Credential Vault。示例配置见 `mail-account.example.json`；该文件只包含 opaque secret ID，不包含密码。
+The default Mail implementation is a local Fake Connector that requires no account or credentials. All write operations still pass through the Runtime's approval and idempotency boundaries. Memory uses a local SQLite provider with the same scope as the conversation database.
 
-从仓库根目录验证：
+To connect a real mailbox, follow the repository's [IMAP/SMTP setup guide](../../MAIL_CONNECTOR_SETUP.md) to create an account configuration and store the password in the Credential Vault. See `mail-account.example.json` for an example; it contains only an opaque secret ID, never a password.
+
+Validate from the repository root:
 
 ```bash
 pixi run scaffold-agent-app -- --validate examples/secretary-agent
 pixi run check-skills
 ```
 
-同时启动本地 Server 与 Desktop 开发页面：
+Start the local Server and Desktop development page together:
 
 ```bash
 AGENTWEAVE_APP_ROOT=examples/secretary-agent pixi run dev
 ```
 
-只启动 Server：
+Start only the Server:
 
 ```bash
 AGENTWEAVE_APP_ROOT=examples/secretary-agent pixi run server
 ```
 
-开发页面位于 <http://127.0.0.1:5173>，Server 健康检查位于 <http://127.0.0.1:49321/health>。Fake Mail 和本地 Memory 不需要账号，但实际对话仍需要配置可用的模型端点。
+The development page is available at <http://127.0.0.1:5173>, and the Server health check is available at <http://127.0.0.1:49321/health>. Fake Mail and local Memory require no account, but an actual conversation still requires a reachable model endpoint.
 
-生成可发布的冻结产物：
+Generate a frozen release artifact:
 
 ```bash
 pixi run package-agent-app -- \
@@ -36,4 +38,4 @@ pixi run package-agent-app -- \
   --runtime-version 0.1.0
 ```
 
-要开发另一个秘书类或垂直 Agent App，可以复制本目录，替换 `appId`、品牌和 prompts，并增删 Foundation 或应用本地 packages；不需要修改 `crates/agent-runtime` 的 turn loop。
+To develop another secretary-style or vertical Agent App, copy this directory, replace its `appId`, brand, and prompts, and add or remove Foundation or app-local packages. You do not need to modify the turn loop in `crates/agent-runtime`.

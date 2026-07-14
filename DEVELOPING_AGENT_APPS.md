@@ -1,18 +1,20 @@
-# 开发 Agent App
+# Developing Agent Apps
 
-AgentWeave 的开发模型是“框架 + App 定义 + 可选扩展包”。一个下游产品应主要通过 `agent-app.json`、Prompt、Skills、Connectors 和品牌界面形成差异，而不是修改 `crates/agent-runtime` 的 turn loop。
+English | [简体中文](./DEVELOPING_AGENT_APPS.zh-CN.md)
 
-本文面向使用 AgentWeave 构建下游应用的开发者。如果你还没有运行过仓库，请先完成 [README 的快速开始](./README.md#5-分钟快速开始)；如果你要修改框架、宿主或 Foundation package，请同时阅读 [贡献指南](./CONTRIBUTING.md)。以下命令均从 AgentWeave 仓库根目录执行。
+AgentWeave follows a “framework + App definition + optional extension packages” development model. A downstream product should derive its differences primarily from `agent-app.json`, prompts, Skills, Connectors, and a branded interface—not from changes to the turn loop in `crates/agent-runtime`.
 
-开始前先选择一个起点：
+This guide is for developers building downstream applications with AgentWeave. If you have not run the repository yet, complete the [README quick start](./README.md#5-minute-quick-start) first. If you plan to change the framework, hosts, or Foundation packages, also read the [Contributing Guide](./CONTRIBUTING.md). Run every command below from the AgentWeave repository root.
 
-- `templates/agent-app`：脚手架使用的最小、默认拒绝权限模板。
-- `examples/minimal-agent`：只启用 Filesystem 的最小消费者应用。
-- `examples/secretary-agent`：组合 Mail、Memory 和应用私有 Skill 的跨平台参考应用。
+Choose a starting point before you begin:
 
-## 1. 创建应用
+- `templates/agent-app`: the minimal scaffold template, with permissions denied by default.
+- `examples/minimal-agent`: the smallest consumer application, enabling only Filesystem.
+- `examples/secretary-agent`: a cross-platform reference app combining Mail, Memory, and an app-private Skill.
 
-在仓库根目录执行：
+## 1. Create an application
+
+Run from the repository root:
 
 ```bash
 pixi run scaffold-agent-app -- \
@@ -21,7 +23,7 @@ pixi run scaffold-agent-app -- \
   --output output/my-agent
 ```
 
-脚手架会创建：
+The scaffold creates:
 
 ```text
 output/my-agent/
@@ -35,34 +37,34 @@ output/my-agent/
   packages/
 ```
 
-模板默认拒绝网络和后台执行，不生成凭据文件，也不会启用 Owner Skill 管理。先保持最小权限，再按实际包依赖增加 capability、runtime tool 和 connector 声明。
+The template denies network access and background execution by default. It does not generate credential files or enable Owner Skill management. Start with the minimum permissions, then add capability, runtime tool, and Connector declarations only as required by actual package dependencies.
 
-## 2. 定义 App 行为
+## 2. Define App behavior
 
-`agent-app.json` 是跨 Desktop、Android 和 Server 的版本化应用契约。它定义：
+`agent-app.json` is the versioned application contract shared across Desktop, Android, and Server. It defines:
 
-- App 与 package 身份、版本和支持平台；
-- Runtime 兼容范围；
-- 启用的 Skill packages；
-- 所需 capabilities、runtime tools 和 connectors；
-- 外部副作用、网络、后台执行、Memory 和 Skill 管理策略；
-- 品牌信息、可打包语言、主题、字体目录及 system/developer instruction 资源。
+- App and package identities, versions, and supported platforms;
+- Runtime compatibility ranges;
+- Enabled Skill packages;
+- Required capabilities, runtime tools, and Connectors;
+- Policies for external side effects, networking, background execution, Memory, and Skill management;
+- Brand information, packageable languages, theme and font directories, and system/developer instruction resources.
 
-System prompt 可以定义产品人格和领域行为，但不能授予权限。发送邮件、修改日历、持久化敏感 Memory 等操作仍由 Runtime、Host 和 Connector 的确定性策略约束。
+A system prompt can define the product persona and domain behavior, but it cannot grant permissions. Operations such as sending mail, changing a calendar, or persisting sensitive Memory remain subject to deterministic Runtime, Host, and Connector policies.
 
-修改后执行：
+After making changes, run:
 
 ```bash
 pixi run scaffold-agent-app -- --validate output/my-agent
 ```
 
-校验会拒绝未来 schema、未知字段、路径逃逸、符号链接、缺失 package、平台不兼容、未声明依赖和嵌入 Manifest 的 secret。
+Validation rejects future schemas, unknown fields, path escapes, symbolic links, missing packages, platform incompatibilities, undeclared dependencies, and secrets embedded in the Manifest.
 
-### 2.1 选择主题与字体
+### 2.1 Choose themes and fonts
 
-Desktop Host 读取 `agent-app.json` 的可选 `appearance` 配置。`themes.builtins` 决定最终 App 中可见的内置主题，`defaultTheme` 决定首次启动时使用的主题。新脚手架预置与当前 VS Code 1.128 相同的 19 个颜色主题，并默认使用 `vscode.dark-2026`。
+The Desktop Host reads the optional `appearance` configuration from `agent-app.json`. `themes.builtins` determines which built-in themes are visible in the final App, while `defaultTheme` determines the theme used on first launch. New scaffolds include the same 19 color themes as the current VS Code 1.128 release and use `vscode.dark-2026` by default.
 
-只保留深色与浅色默认主题时，可以写成：
+To keep only the default dark and light themes, use:
 
 ```json
 {
@@ -79,7 +81,7 @@ Desktop Host 读取 `agent-app.json` 的可选 `appearance` 配置。`themes.bui
 }
 ```
 
-自定义主题放在 App 根目录的 `themes/`。文件使用 VS Code color theme 的 JSON 或 JSONC 格式，可以通过 `include` 继承同目录中的另一个主题。随后在 `themes.custom` 中声明稳定 ID、可选显示名和相对路径：
+Place custom themes in the App root's `themes/` directory. Theme files use the VS Code color theme JSON or JSONC format and may inherit another theme in the same directory through `include`. Then declare a stable ID, optional display label, and relative path in `themes.custom`:
 
 ```json
 {
@@ -89,22 +91,22 @@ Desktop Host 读取 `agent-app.json` 的可选 `appearance` 配置。`themes.bui
 }
 ```
 
-Desktop 构建会把 VS Code workbench colors 映射为聊天、设置、表单、边框和状态颜色。语法 token colors 可以继续保留在主题文件中，但不会改变聊天正文的语法高亮。
+Desktop builds map VS Code workbench colors to chat, settings, form, border, and status colors. Syntax token colors may remain in the theme file, but they do not change syntax highlighting in the chat body.
 
-字体放在 App 根目录的 `fonts/`，不需要写入 Manifest。文件名决定用途：`ui.woff2` 用于界面正文，`display.woff2` 用于标题，`mono.woff2` 用于代码。也可以添加字重和斜体后缀，例如 `ui-600.woff2` 或 `ui-400-italic.woff2`。Desktop 支持 WOFF2、WOFF、TTF 和 OTF，并优先使用 WOFF2；Android 通过平台 `Typeface` 加载 TTF/OTF，遇到 WOFF/WOFF2 时会安全回退到系统字体。
+Place fonts in the App root's `fonts/` directory; they do not need Manifest entries. Filenames determine their role: `ui.woff2` is used for interface text, `display.woff2` for headings, and `mono.woff2` for code. You can add weight and italic suffixes, such as `ui-600.woff2` or `ui-400-italic.woff2`. Desktop supports WOFF2, WOFF, TTF, and OTF, preferring WOFF2. Android loads TTF and OTF through the platform `Typeface` and safely falls back to the system font for WOFF or WOFF2.
 
-本地开发和正式构建都应提供相同的 App 根目录：
+Use the same App root for local development and production builds:
 
 ```bash
 AGENTWEAVE_APP_ROOT=output/my-agent pixi run dev
 AGENTWEAVE_APP_ROOT=output/my-agent pixi run npm --prefix apps/desktop run build
 ```
 
-主题与字体会进入 App 内容哈希。修改任何相关文件后，都应重新生成并验证发布产物。
+Themes and fonts contribute to the App content hash. Regenerate and validate release artifacts after changing any related file.
 
-### 2.2 管理界面语言
+### 2.2 Manage interface languages
 
-`localization` 声明 App 可提供的界面语言、默认语言和对应的 UTF-8 JSON 词典。词典使用稳定的扁平 key，便于审阅、合并和交给翻译工具处理：
+`localization` declares the interface languages an App can provide, the default language, and the corresponding UTF-8 JSON dictionaries. Dictionaries use stable flat keys so they are easy to review, merge, and process with translation tools:
 
 ```json
 {
@@ -126,13 +128,13 @@ AGENTWEAVE_APP_ROOT=output/my-agent pixi run npm --prefix apps/desktop run build
 }
 ```
 
-每个词典必须包含相同的 key，并保留相同的 `{placeholder}`。Host 自带英文和简体中文基础文案，App 词典可以覆盖 `app.name`、`app.tagline` 等 key；未覆盖的 Host 文案会回退到对应语言，再回退到英文。运行时只向用户显示最终发布包声明的语言，并持久化用户选择。
+Every dictionary must contain the same keys and preserve the same `{placeholder}` values. The Host includes base English and Simplified Chinese copy. App dictionaries may override keys such as `app.name` and `app.tagline`; Host copy that is not overridden falls back first to the matching language and then to English. At runtime, users only see languages declared by the final release package, and their selection is persisted.
 
-`pixi run scaffold-agent-app -- --validate <app>` 会同时检查 locale ID、资源路径、JSON 编码、key 对齐和 placeholder 对齐。新增语言时，先复制默认词典，逐项翻译，再执行校验；不要在组件中新增硬编码的用户可见文案。
+`pixi run scaffold-agent-app -- --validate <app>` also checks locale IDs, resource paths, JSON encoding, key alignment, and placeholder alignment. To add a language, copy the default dictionary, translate each entry, and run validation. Do not add hard-coded user-facing copy to components.
 
-## 3. 添加自定义 Skill
+## 3. Add a custom Skill
 
-App 私有 Skill 放在 `packages/<skill-name>/`。每个 package 至少包含：
+Place app-private Skills in `packages/<skill-name>/`. Every package must contain at least:
 
 ```text
 packages/my-workflow/
@@ -141,52 +143,52 @@ packages/my-workflow/
   agents/openai.yaml
 ```
 
-Instruction Skill 可以按需增加 `references/`、`scripts/` 和 `assets/`。资源读取绑定当前 turn 捕获的 package revision；路径逃逸、符号链接和越界大小会被拒绝。脚本执行必须走受控 helper/sandbox，不得通过 Skill 指令绕过 Host 权限。
+An instruction Skill may add `references/`, `scripts/`, and `assets/` as needed. Resource reads are bound to the package revision captured for the current turn; path escapes, symbolic links, and out-of-bounds sizes are rejected. Scripts must run through a controlled helper or sandbox and must not use Skill instructions to bypass Host permissions.
 
-创建或更新 Skill 时遵循 `skill-creator` 的渐进披露原则：触发条件写在 frontmatter `description`，`SKILL.md` 保持精炼，详细材料放入按需读取的 references。使用 runtime 的 package 校验器检查 App 私有 Skills：
+When creating or updating a Skill, follow Skill Creator's progressive-disclosure principles: put trigger conditions in the frontmatter `description`, keep `SKILL.md` concise, and move detailed material to references that are read only when needed. Validate app-private Skills with the runtime package validator:
 
 ```bash
 pixi run cargo run -p agent-server --bin check-skills -- \
   --root output/my-agent/packages
 ```
 
-随后在 `agent-app.json` 的 `requires.packages` 中启用该 package，并完整声明它要求的 capabilities、runtime tools 和 connectors。
+Then enable the package in `agent-app.json` under `requires.packages` and fully declare its required capabilities, runtime tools, and Connectors.
 
-## 4. 选择 Foundation Skills
+## 4. Choose Foundation Skills
 
-机器可读目录位于 `catalog/foundation-skills.json`。所有 Foundation Skills 都是可选、可禁用、可替换的 package。
+The machine-readable catalog is located at `catalog/foundation-skills.json`. Every Foundation Skill is an optional package that can be disabled or replaced.
 
-- Stable foundation：Memory，以及既有 Filesystem 基础能力。
-- Preview foundation：Mail、Calendar、Tasks、Web Research、Documents、Contacts、Notifications、Notes、Messaging、Scheduler。
-- Developer-only：Skill Creator 等作者工具，不会自动进入消费者 App。
+- Stable foundation: Memory and the existing Filesystem foundation capability.
+- Preview foundation: Mail, Calendar, Tasks, Web Research, Documents, Contacts, Notifications, Notes, Messaging, and Scheduler.
+- Developer-only: authoring tools such as Skill Creator, which are not automatically included in consumer Apps.
 
-Mail 负责通用邮件工作流，具体账号访问由 Fake、IMAP/SMTP 或后续 vendor adapter 提供。Memory 负责 Agent 可审计上下文；Notes 是用户明确拥有的内容，两者不能混用。Task 保存工作状态，Scheduler 负责触发，Notification 负责投递结果。
+Mail defines general mail workflows, while account access is provided by Fake, IMAP/SMTP, or future vendor adapters. Memory provides auditable Agent context; Notes contains content explicitly owned by the user, and the two must not be conflated. Tasks store work state, Scheduler triggers work, and Notifications deliver results.
 
-## 5. 本地运行
+## 5. Run locally
 
-Server：
+Server:
 
 ```bash
 AGENTWEAVE_APP_ROOT=output/my-agent pixi run server
 ```
 
-Desktop 开发模式：
+Desktop development mode:
 
 ```bash
 AGENTWEAVE_APP_ROOT=output/my-agent pixi run dev
 ```
 
-Android 默认打包 `examples/secretary-agent`，同时写入冻结的 App lock 和 Skill bundle lock。要更换 Android 参考 App，应修改构建时 App 输入，而不是在 Runtime 中增加领域分支。
+Android packages `examples/secretary-agent` by default and writes a frozen App lock and Skill bundle lock. To use a different Android reference App, change the build-time App input instead of adding domain branches to the Runtime.
 
-## 6. 使用 fake 实现做测试
+## 6. Test with fake implementations
 
-默认测试不得依赖外部账号。Mail、Memory、Calendar、Tasks、Web Research、Documents、Contacts、Notes 和 Messaging 均提供 deterministic fake 或 local backing，用于覆盖分页、冲突、审批、幂等、隔离和错误分支。
+Default tests must not depend on external accounts. Mail, Memory, Calendar, Tasks, Web Research, Documents, Contacts, Notes, and Messaging all provide deterministic fake or local backing for coverage of pagination, conflicts, approvals, idempotency, isolation, and error paths.
 
-Secretary 参考应用位于 `examples/secretary-agent`。它用本地 Fake Mail 和 SQLite Memory 验证“记住偏好、读取邮件、创建草稿、审批并只发送一次”的组合路径。
+The Secretary reference app lives in `examples/secretary-agent`. It uses local Fake Mail and SQLite Memory to validate the combined path of remembering preferences, reading mail, creating a draft, obtaining approval, and sending exactly once.
 
-## 7. 生成冻结发布产物
+## 7. Generate frozen release artifacts
 
-开发模式可以读取可变源码目录；发布模式应使用冻结产物：
+Development mode may read mutable source directories. Release mode should use frozen artifacts:
 
 ```bash
 pixi run package-agent-app -- \
@@ -197,9 +199,9 @@ pixi run package-agent-app -- \
   --default-locale en
 ```
 
-`--locales` 从 Manifest 已声明的词典中选择本次发布实际携带的语言。未选择的词典不会复制到 release；若原默认语言被排除，打包器会使用列表中的第一种语言，也可以用 `--default-locale` 明确指定。源码目录不会被改写。
+`--locales` selects the languages from the Manifest dictionaries that will actually ship in this release. Unselected dictionaries are not copied into the release. If the original default language is excluded, the packager uses the first language in the list, or you can choose one explicitly with `--default-locale`. The source directory is not rewritten.
 
-Android 打包沿用相同选择规则。构建下游 App 时设置 `AGENTWEAVE_APP_ROOT`，并可用 `AGENTWEAVE_APP_LOCALES` 与 `AGENTWEAVE_APP_DEFAULT_LOCALE` 指定 APK 中的语言清单：
+Android packaging follows the same selection rules. When building a downstream App, set `AGENTWEAVE_APP_ROOT` and optionally use `AGENTWEAVE_APP_LOCALES` and `AGENTWEAVE_APP_DEFAULT_LOCALE` to specify the APK's language set:
 
 ```bash
 AGENTWEAVE_APP_ROOT=output/my-agent \
@@ -208,7 +210,7 @@ AGENTWEAVE_APP_DEFAULT_LOCALE=en \
 pixi run android-assemble
 ```
 
-Release artifact 包含：
+The release artifact contains:
 
 ```text
 output/my-agent-release/
@@ -217,17 +219,17 @@ output/my-agent-release/
   packages/
 ```
 
-Lock 固定 App 身份、Runtime 版本、平台、语言清单、每个 package 的版本与 SHA-256、capabilities、runtime tools，以及 host-provided connector/provider 要求。产物不会记录本机源码绝对路径，并拒绝 `.env`、私钥和 credential/secret JSON 文件。
+The lock pins the App identity, Runtime version, platform, language set, package versions and SHA-256 hashes, capabilities, runtime tools, and host-provided Connector or provider requirements. Artifacts do not record absolute local source paths and reject `.env` files, private keys, and credential or secret JSON files.
 
-发布或启动前再次验证：
+Validate again before publishing or launching:
 
 ```bash
 pixi run package-agent-app -- --verify output/my-agent-release
 ```
 
-任何 Prompt、Skill 或 lock 篡改都会导致验证失败。
+Any tampering with a prompt, Skill, or lock causes verification to fail.
 
-## 8. 最低质量门禁
+## 8. Minimum quality gate
 
 ```bash
 pixi run cargo fmt --all --check
@@ -241,30 +243,30 @@ pixi run mobile-mvp-check
 pixi run source-lines
 ```
 
-外部服务的 live tests 必须保持 opt-in。默认门禁只使用本地 fake server 和无凭据测试。
+Live tests against external services must remain opt-in. The default gates use only local fake servers and credential-free tests.
 
-## 9. 常见问题
+## 9. Troubleshooting
 
-### Desktop 页面提示依赖缺失
+### The Desktop page reports missing dependencies
 
-首次拉取或 `package-lock.json` 更新后，重新安装 Desktop 依赖：
+Install the Desktop dependencies again after the first checkout or whenever `package-lock.json` changes:
 
 ```bash
 pixi run npm --prefix apps/desktop ci
 ```
 
-### Server 无法绑定端口
+### The Server cannot bind to its port
 
-本地 Server 固定监听 `127.0.0.1:49321`，Desktop 开发页面使用 `127.0.0.1:5173`。先停止占用端口的旧开发进程，再重新运行 `pixi run dev`。
+The local Server listens on `127.0.0.1:49321`, and the Desktop development page uses `127.0.0.1:5173`. Stop the old development process occupying the port, then run `pixi run dev` again.
 
-### 页面能打开但无法发送消息
+### The page opens, but messages cannot be sent
 
-启动链路不要求模型，但对话需要可访问的模型端点。在设置页核对 Base URL、端点类型和模型名，并先运行连接测试。Responses、Chat Completions 和 Completion 是不同协议，端点类型必须与服务实际支持的协议一致。
+The startup path does not require a model, but conversations need a reachable model endpoint. Check the Base URL, endpoint type, and model name on the Settings page, then run the connection test. Responses, Chat Completions, and Completion are different protocols; the endpoint type must match the protocol actually supported by the service.
 
-### Manifest 校验失败
+### Manifest validation fails
 
-从第一条错误开始修复。校验器会拒绝未知字段、未来 schema、路径逃逸、符号链接、缺失 package、平台不兼容、未声明依赖和 secret。不要通过放宽校验来绕过应用契约；应修正 Manifest 或 package 声明。
+Start with the first error. The validator rejects unknown fields, future schemas, path escapes, symbolic links, missing packages, platform incompatibilities, undeclared dependencies, and secrets. Do not weaken validation to bypass the application contract; correct the Manifest or package declarations instead.
 
-### Android 构建找不到 SDK 或 NDK
+### The Android build cannot find the SDK or NDK
 
-Android 任务默认使用 `.tool/android-sdk`，Rust native 构建默认查找 `.tool/android-sdk/ndk/28.2.13676358`。完整环境要求和分阶段检查命令见 [贡献指南的 Android 环境](./CONTRIBUTING.md#android-环境)。
+Android tasks use `.tool/android-sdk` by default, and Rust native builds look for `.tool/android-sdk/ndk/28.2.13676358`. See the [Android environment section of the Contributing Guide](./CONTRIBUTING.md#android-environment) for complete requirements and staged diagnostic commands.

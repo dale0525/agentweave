@@ -1,28 +1,30 @@
 # AgentWeave
 
-AgentWeave 是一个面向开发者的 **Agent App Framework**。它提供可复用的 Agent runtime、模型适配、扩展系统、安全边界和跨平台宿主，让一个新 Agent App 的差异主要来自 Prompt、Skills、Connectors、策略和产品界面，而不是对核心 turn loop 的复制与重写。
+English | [简体中文](./README.zh-CN.md)
 
-你可以用它构建个人秘书、研究助手、内容工作流、企业内部 Agent 或其他垂直应用；仓库中的秘书应用只是参考实现，不是框架的固定产品形态。
+AgentWeave is an **Agent App Framework** for developers. It provides a reusable Agent runtime, model adapters, an extension system, security boundaries, and cross-platform hosts so that a new Agent App is defined primarily by its prompts, Skills, Connectors, policies, and product interface—not by a copied and rewritten core turn loop.
+
+You can use it to build personal assistants, research assistants, content workflows, internal enterprise Agents, and other vertical applications. The secretary app in this repository is only a reference implementation, not the framework's fixed product form.
 
 > [!IMPORTANT]
-> 项目仍处于 `0.1.x` 阶段，Manifest、Host API 和 Foundation Skill 契约可能在形成稳定版本前调整。当前更适合原型验证、框架开发和受控环境集成，不建议在未经安全评审的情况下直接处理生产凭据或高风险外部操作。
+> The project is still in the `0.1.x` stage. Manifests, Host APIs, and Foundation Skill contracts may change before they stabilize. It is currently best suited to prototyping, framework development, and controlled integrations. Do not use it with production credentials or high-risk external operations without a security review.
 
-## 先选一条路径
+## Choose a path
 
-| 目标 | 从这里开始 |
+| Goal | Start here |
 | --- | --- |
-| 先把项目跑起来 | 继续阅读下方“5 分钟快速开始” |
-| 基于框架开发自己的 Agent App | [开发 Agent App](./DEVELOPING_AGENT_APPS.md) |
-| 为 runtime、宿主或 Foundation Skill 贡献代码 | [贡献指南](./CONTRIBUTING.md) |
-| 接入真实 IMAP/SMTP 邮箱 | [Mail Connector 配置](./MAIL_CONNECTOR_SETUP.md) |
+| Run the project first | Continue to the “5-minute quick start” below |
+| Build your own Agent App on the framework | [Developing Agent Apps](./DEVELOPING_AGENT_APPS.md) |
+| Contribute to the runtime, hosts, or Foundation Skills | [Contributing Guide](./CONTRIBUTING.md) |
+| Connect a real IMAP/SMTP mailbox | [Mail Connector Setup](./MAIL_CONNECTOR_SETUP.md) |
 
-## 5 分钟快速开始
+## 5-minute quick start
 
-### 1. 准备环境
+### 1. Prepare the environment
 
-你只需要预先安装 Git 和 [pixi](https://pixi.prefix.dev/latest/)。Rust、Node.js、Python、OpenJDK 和其他命令行依赖由项目的 Pixi 环境管理，不需要系统级安装。
+You only need Git and [pixi](https://pixi.prefix.dev/latest/) installed beforehand. The project's Pixi environment manages Rust, Node.js, Python, OpenJDK, and the other command-line dependencies, so you do not need to install them system-wide.
 
-当前 `pixi.toml` 已声明 macOS Apple Silicon、macOS Intel 和 Linux x86_64。Android 构建还需要项目本地的 Android SDK/NDK，首次体验 Desktop/Server 时可以暂时跳过。
+The current `pixi.toml` declares macOS Apple Silicon, macOS Intel, and Linux x86_64 as supported platforms. Android builds additionally require a project-local Android SDK/NDK, but you can skip that when first trying the Desktop or Server hosts.
 
 ```bash
 git clone https://github.com/dale0525/agentweave.git
@@ -32,31 +34,31 @@ pixi install
 pixi run npm --prefix apps/desktop ci
 ```
 
-第二条安装命令只写入 `apps/desktop/node_modules`。项目生成物、缓存和本地工具应保留在已忽略的目录中，不要把依赖安装到系统环境。
+The second install command only writes to `apps/desktop/node_modules`. Keep generated files, caches, and local tools in ignored project directories; do not install project dependencies into the system environment.
 
-### 2. 验证仓库资产
+### 2. Validate repository assets
 
 ```bash
 pixi run validate-agent-assets
 pixi run test-dev-script
 ```
 
-这两组快速检查会验证 App Manifest、示例 App、脚手架/打包脚本和本地开发入口，不需要模型 API Key 或外部账号。
+These quick checks validate the App Manifest, example Apps, scaffolding and packaging scripts, and local development entry points. They do not require a model API key or an external account.
 
-### 3. 启动最小示例
+### 3. Start the minimal example
 
 ```bash
 AGENTWEAVE_APP_ROOT=examples/minimal-agent pixi run dev
 ```
 
-命令会同时启动本地 Agent Server 和 Desktop 的开发页面：
+This command starts both the local Agent Server and the Desktop development page:
 
-- 开发页面：<http://127.0.0.1:5173>
-- Server 健康检查：<http://127.0.0.1:49321/health>
+- Development page: <http://127.0.0.1:5173>
+- Server health check: <http://127.0.0.1:49321/health>
 
-看到健康检查返回 `ok`，并且开发页面能够加载，就说明本地链路已经跑通。模型不是启动必需项；需要实际对话时，在设置页填写兼容 Responses、Chat Completions 或 Completion 协议的模型地址、端点类型和模型名。按 `Ctrl+C` 会同时停止两个进程。
+If the health check returns `ok` and the development page loads, the local path is working. A model is not required to start the app. To have an actual conversation, enter a model URL, endpoint type, and model name compatible with the Responses, Chat Completions, or Completion protocol on the Settings page. Press `Ctrl+C` to stop both processes.
 
-### 4. 创建自己的 Agent App
+### 4. Create your own Agent App
 
 ```bash
 pixi run scaffold-agent-app -- \
@@ -68,9 +70,9 @@ pixi run scaffold-agent-app -- --validate output/research-agent
 AGENTWEAVE_APP_ROOT=output/research-agent pixi run dev
 ```
 
-生成目录中的 `agent-app.json` 定义应用身份、兼容性、可用语言、能力和安全策略，`locales/` 管理界面词典，`prompts/` 定义 Agent 行为，`packages/` 放应用私有 Skills。完整的 Manifest、i18n、主题、字体、Skill 和发布说明见 [开发 Agent App](./DEVELOPING_AGENT_APPS.md)。
+In the generated directory, `agent-app.json` defines the application identity, compatibility, available languages, capabilities, and security policies. The `locales/` directory contains UI dictionaries, `prompts/` defines Agent behavior, and `packages/` contains app-private Skills. See [Developing Agent Apps](./DEVELOPING_AGENT_APPS.md) for complete guidance on the Manifest, i18n, themes, fonts, Skills, and release artifacts.
 
-## 框架如何组合
+## How the framework fits together
 
 ```text
 Custom Agent App
@@ -85,101 +87,101 @@ Desktop / Android / Server Hosts
   credentials + connectors + approvals + platform capabilities
 ```
 
-核心设计原则是：
+The core design principles are:
 
-- **应用行为可替换**：人格、领域流程和默认能力由 App Manifest、Prompt 与可选 package 决定。
-- **扩展契约稳定优先**：通用能力进入 runtime、SDK、Host Tool 或 Connector 协议，特定产品逻辑留在下游 App。
-- **Prompt 不是安全边界**：凭据访问、持久写入、网络和外部副作用必须由 runtime/host 的确定性权限与审批机制约束。
-- **Foundation Skills 可选**：第一方基础能力独立打包，下游应用可以启用、替换、禁用或不随产品分发。
-- **默认测试不依赖外部服务**：Mail、Memory 等能力提供 fake/local backing，用于可重复地覆盖审批、幂等和错误分支。
+- **Replaceable application behavior**: Personas, domain workflows, and default capabilities are defined by the App Manifest, prompts, and optional packages.
+- **Stable extension contracts first**: General-purpose capabilities belong in runtime, SDK, Host Tool, or Connector contracts. Product-specific logic stays in downstream Apps.
+- **Prompts are not security boundaries**: Credential access, persistent writes, networking, and external side effects must be governed by deterministic runtime and host permissions and approvals.
+- **Optional Foundation Skills**: First-party foundation capabilities are packaged independently, so downstream Apps can enable, replace, disable, or omit them.
+- **Default tests do not depend on external services**: Capabilities such as Mail and Memory provide fake or local backing for repeatable coverage of approvals, idempotency, and error paths.
 
-## 仓库结构
+## Repository structure
 
 ```text
 apps/
-  desktop/                 Electron + React 宿主
-  android/                 Kotlin Compose + Rust FFI 宿主
+  desktop/                 Electron + React host
+  android/                 Kotlin Compose + Rust FFI host
 crates/
-  agent-runtime/           turn、会话、工具、策略、存储和扩展生命周期
-  model-gateway/           模型端点与流式协议适配
-  agent-server/            本地 HTTP API、开发诊断和后台运行入口
-  mobile-ffi/              Android 与 Rust runtime 的桥接层
-skills/                    内置、Foundation 和开发者 Skills
-catalog/                   Foundation Skills 与主题的机器可读目录
-examples/                  可运行的 Agent App 参考实现
-templates/agent-app/       App 脚手架模板
-scripts/                   开发、校验、打包和移动端构建脚本
+  agent-runtime/           turns, sessions, tools, policy, storage, and extension lifecycle
+  model-gateway/           model endpoints and streaming protocol adapters
+  agent-server/            local HTTP API, development diagnostics, and background execution
+  mobile-ffi/              bridge between Android and the Rust runtime
+skills/                    built-in, Foundation, and developer Skills
+catalog/                   machine-readable Foundation Skill and theme catalogs
+examples/                  runnable Agent App reference implementations
+templates/agent-app/       App scaffolding template
+scripts/                   development, validation, packaging, and mobile build scripts
 ```
 
-如果一个改动只服务于某个领域或产品，优先把它放进 `skills/`、独立 Connector 或 `examples/`；只有可被多类 Agent App 复用的协议、状态模型和安全机制才应进入核心 crates。
+If a change only serves one domain or product, put it in `skills/`, a standalone Connector, or `examples/` first. Only protocols, state models, and security mechanisms reusable across many Agent Apps should enter the core crates.
 
-## 扩展点
+## Extension points
 
-### Agent App 与 Prompt
+### Agent Apps and prompts
 
-`agent-app.json` 是 Desktop、Android 和 Server 共用的版本化应用契约。System prompt 和 developer instructions 可以定义人格与行为，但不能授予权限，也不能绕过 Host 审批。
+`agent-app.json` is the versioned application contract shared by Desktop, Android, and Server. System prompts and developer instructions can define a persona and behavior, but they cannot grant permissions or bypass Host approvals.
 
 ### Skills
 
-Skill 描述“如何完成一类任务”，可以包含 `SKILL.md`、`references/`、`scripts/`、`assets/` 和 runtime tool manifest。Skill 不应自行承担通用 OAuth、凭据保存或高风险业务审批。
+A Skill describes how to perform a class of tasks. It may include `SKILL.md`, `references/`, `scripts/`, `assets/`, and a runtime tool manifest. A Skill should not take responsibility for general OAuth, credential storage, or high-risk operation approval.
 
-### Connectors 与 Host Tools
+### Connectors and Host Tools
 
-Connector 和 Host Tool 确定性地访问邮箱、日历、浏览器或设备能力，并通过框架的认证、权限、超时、取消、审计和幂等机制运行。厂商适配器可以独立发布，核心 runtime 只维护协议和安全执行边界。
+Connectors and Host Tools access mailboxes, calendars, browsers, or device capabilities deterministically and run within the framework's authentication, permission, timeout, cancellation, audit, and idempotency mechanisms. Vendor adapters can be published independently; the core runtime maintains only the contract and the secure execution boundary.
 
-### 跨平台宿主
+### Cross-platform hosts
 
-Desktop、Android 和 Server 共享同一 App/Skill 契约，但由各自宿主实现凭据存储、平台能力与 UI。新增能力时应先明确哪一部分属于 runtime，哪一部分必须由 host 提供。
+Desktop, Android, and Server share the same App and Skill contracts, while each host implements its own credential storage, platform capabilities, and UI. When adding a capability, first establish which parts belong in the runtime and which must be provided by a host.
 
-## 当前能力与成熟度
+## Current capabilities and maturity
 
-当前仓库已包含版本化 Agent App Manifest、可替换 Prompt、多轮会话、Skill 资源与发布生命周期、持久 Memory、Durable Run、审批、Credential Vault、Connector Runtime、Scheduler，以及 Desktop、Android、Server 三类宿主。
+The repository currently includes a versioned Agent App Manifest, replaceable prompts, multi-turn sessions, Skill resource and release lifecycles, persistent Memory, Durable Runs, approvals, a Credential Vault, a Connector Runtime, a Scheduler, and Desktop, Android, and Server hosts.
 
-Foundation Catalog 是能力状态的唯一机器可读来源，位于 [`catalog/foundation-skills.json`](./catalog/foundation-skills.json)。当前概况如下：
+The Foundation Catalog at [`catalog/foundation-skills.json`](./catalog/foundation-skills.json) is the single machine-readable source of capability status. The current overview is:
 
-- Stable：Filesystem、Memory；Skill Creator 面向开发者使用。
-- Preview：Mail、Calendar、Tasks、Web Research、Documents、Contacts、Notifications、Notes、Messaging、Scheduler。
-- Reference only：`echo` 等用于验证扩展机制的示例，不代表框架的产品方向。
+- Stable: Filesystem and Memory. Skill Creator is available for developers.
+- Preview: Mail, Calendar, Tasks, Web Research, Documents, Contacts, Notifications, Notes, Messaging, and Scheduler.
+- Reference only: `echo` and similar examples validate extension mechanisms but do not define the framework's product direction.
 
-Preview package 已实现并通过本地 package 校验，但 API、Provider/Connector 覆盖和跨平台行为仍可能变化。应用是否启用某项能力，始终由自己的 Manifest 决定。
+Preview packages are implemented and pass local package validation, but their APIs, provider and Connector coverage, and cross-platform behavior may still change. Each App's Manifest always determines which capabilities are enabled.
 
-## 常用开发命令
+## Common development commands
 
-| 命令 | 用途 |
+| Command | Purpose |
 | --- | --- |
-| `pixi run dev` | 同时启动 Server 与 Desktop 开发页面 |
-| `pixi run server` | 只启动本地 Server |
-| `pixi run test` | 运行 Rust workspace 测试 |
-| `pixi run check-skills` | 校验仓库内 Skill packages |
-| `pixi run test-dev-script` | 测试脚手架、打包和其他 Node 脚本 |
-| `pixi run source-lines` | 检查代码类文件不超过 1000 行 |
-| `pixi run skill-lifecycle-check` | 运行包含 Android 构建在内的完整质量门禁 |
+| `pixi run dev` | Start the Server and Desktop development page together |
+| `pixi run server` | Start only the local Server |
+| `pixi run test` | Run Rust workspace tests |
+| `pixi run check-skills` | Validate Skill packages in the repository |
+| `pixi run test-dev-script` | Test scaffolding, packaging, and other Node scripts |
+| `pixi run source-lines` | Check that code-like files stay under 1,000 lines |
+| `pixi run skill-lifecycle-check` | Run the complete quality gate, including the Android build |
 
-完整门禁需要本地 Android SDK/NDK。按改动范围选择测试、准备 Android 环境和提交 Pull Request 的规则见 [贡献指南](./CONTRIBUTING.md)。
+The complete gate requires a local Android SDK/NDK. See the [Contributing Guide](./CONTRIBUTING.md) for test selection by change scope, Android setup, and Pull Request requirements.
 
-## 安全模型摘要
+## Security model summary
 
-- App 与 Skill 声明能力需求，Host 决定实际授予范围。
-- 外部副作用必须经过可恢复审批，并使用幂等标识避免重复执行。
-- 凭据由 Host Credential Vault 保存，不进入 Prompt、Skill 包、Manifest 或 Git。
-- Workspace 工具必须限制在批准目录内，不能把应用、Skill、缓存或数据库控制目录当成普通工作区。
-- 外部服务测试必须显式启用；默认测试只使用 fake server 或本地存储。
+- Apps and Skills declare requested capabilities; the Host decides what is actually granted.
+- External side effects require recoverable approval and idempotency identifiers that prevent duplicate execution.
+- Credentials are stored in the Host Credential Vault and never placed in prompts, Skill packages, Manifests, or Git.
+- Workspace tools must stay within approved directories and must not treat application, Skill, cache, or database control directories as ordinary workspace content.
+- Tests against external services must be explicitly enabled. Default tests use only fake servers or local storage.
 
-发现潜在安全问题时，不要在示例配置、测试日志或公开 Issue 中附上真实凭据、邮件内容或个人数据。
+When reporting a potential security issue, do not include real credentials, mailbox content, or personal data in example configurations, test logs, or public issues.
 
-## 文档导航
+## Documentation
 
-- [贡献指南](./CONTRIBUTING.md)：环境初始化、改动边界、测试矩阵和 PR 清单。
-- [开发 Agent App](./DEVELOPING_AGENT_APPS.md)：Manifest、Prompt、Skill、主题、字体和发布产物。
-- [Minimal Agent](./examples/minimal-agent/README.md)：最小消费者应用。
-- [Secretary Agent](./examples/secretary-agent/README.md)：组合 Mail、Memory 与应用私有 Skill 的参考应用。
-- [Mail Connector 配置](./MAIL_CONNECTOR_SETUP.md)：IMAP/SMTP 与 Credential Vault 的本地配置。
-- [项目协作约定](./AGENTS.md)：架构边界、工具、编码与仓库级约束。
+- [Contributing Guide](./CONTRIBUTING.md): environment setup, change boundaries, the test matrix, and the PR checklist.
+- [Developing Agent Apps](./DEVELOPING_AGENT_APPS.md): Manifests, prompts, Skills, themes, fonts, and release artifacts.
+- [Minimal Agent](./examples/minimal-agent/README.md): the smallest consumer application.
+- [Secretary Agent](./examples/secretary-agent/README.md): a reference app combining Mail, Memory, and an app-private Skill.
+- [Mail Connector Setup](./MAIL_CONNECTOR_SETUP.md): local IMAP/SMTP and Credential Vault configuration.
+- [Repository collaboration rules](./AGENTS.md): architecture boundaries, tooling, coding, and repository-level constraints.
 
-## 参与贡献
+## Contributing
 
-欢迎贡献可复用的 runtime 能力、Host/Connector 契约、Foundation Skills、测试夹具、示例和文档。开始编码前，请先阅读 [贡献指南](./CONTRIBUTING.md)，确认改动应该进入核心、可选 package 还是示例应用，并为涉及权限、凭据、持久化或外部副作用的路径补充失败与恢复测试。
+Contributions to reusable runtime capabilities, Host and Connector contracts, Foundation Skills, test fixtures, examples, and documentation are welcome. Before writing code, read the [Contributing Guide](./CONTRIBUTING.md) to decide whether your change belongs in the core, an optional package, or an example, and add failure and recovery coverage for any path involving permissions, credentials, persistence, or external side effects.
 
 ## License
 
-Rust workspace 当前声明为 `Apache-2.0 OR MIT`。仓库尚未提供独立许可证文本时，不应仅凭该声明假设所有第三方资产都可以按相同条款再分发；引入 Skill、脚本、主题、协议或 Connector 时，仍需逐项保留并遵守其许可证与版权声明。
+The Rust workspace currently declares `Apache-2.0 OR MIT`. Until the repository provides standalone license texts, do not assume from that declaration alone that all third-party assets may be redistributed under the same terms. Preserve and follow the license and copyright notice for every Skill, script, theme, protocol, or Connector you introduce.
