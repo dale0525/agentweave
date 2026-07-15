@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import {
   existsSync,
   mkdirSync,
@@ -14,8 +15,17 @@ import { fileURLToPath } from "node:url";
 
 const HANDSHAKE_LIMIT = 4_096;
 const LOG_LIMIT = 32_768;
+const MODEL_REQUEST_LIMIT = 1024 * 1024;
 const START_TIMEOUT_MS = 20_000;
 const STOP_TIMEOUT_MS = 5_000;
+const TURN_TIMEOUT_MS = 25_000;
+
+const FOUNDATION_TOOLS = [
+  "mail_draft_create",
+  "mail_send_preview",
+  "memory_confirm",
+  "memory_propose",
+];
 
 function fail(message) {
   throw new Error(message);
@@ -47,6 +57,17 @@ function requireStringArray(value, label) {
     fail(`${label} is invalid`);
   }
   return value;
+}
+
+export function foundationScenarioSupported(expected) {
+  const capabilities = new Set(expected.capabilities);
+  const tools = new Set(expected.runtimeTools);
+  return capabilities.has("approval-engine")
+    && capabilities.has("durable-actions")
+    && capabilities.has("mail-connector")
+    && capabilities.has("memory-provider")
+    && expected.connectors.length > 0
+    && FOUNDATION_TOOLS.every((tool) => tools.has(tool));
 }
 
 export function packagedSidecarPlan(appPath) {
@@ -123,33 +144,59 @@ export async function checkPackagedSidecar(appPath) {
   const plan = packagedSidecarPlan(appPath);
   const temporaryRoot = mkdtempSync(join(tmpdir(), "agentweave-packaged-sidecar-"));
   let child;
+  let model;
   try {
     for (const directory of ["cache", "data", "workspace"]) {
       mkdirSync(join(temporaryRoot, directory), { recursive: true });
     }
-    const launch = launchSidecar(plan, temporaryRoot);
+    const foundationScenario = foundationScenarioSupported(plan.expected);
+    model = foundationScenario ? await startScriptedModelServer() : undefined;
+    const launch = launchSidecar(plan, temporaryRoot, model?.baseUrl);
     child = launch.child;
     const handshake = await launch.handshake;
     await expectResponse(handshake.origin, null, "/health", 401);
     await expectResponse(handshake.origin, handshake.token, "/health", 200, "ok");
     const discovery = await expectJson(handshake.origin, handshake.token, "/host/bootstrap");
     assertPackagedDiscovery(discovery, plan.expected);
+    if (foundationScenario) {
+      try {
+        await createPackagedFoundationState(handshake.origin, handshake.token);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const modelError = model.diagnostics.lastError ? `; model error: ${model.diagnostics.lastError}` : "";
+        const sidecarError = launch.stderr() ? `; sidecar: ${launch.stderr()}` : "";
+        fail(
+          `${reason}; scripted model requests: ${model.diagnostics.requests}`
+          + `; last reply: ${model.diagnostics.lastReply}${modelError}${sidecarError}`,
+        );
+      }
+      await assertPackagedFoundationState(handshake.origin, handshake.token);
+    }
     await stopChild(child);
     child = undefined;
+    if (foundationScenario) {
+      const restarted = launchSidecar(plan, temporaryRoot, model.baseUrl);
+      child = restarted.child;
+      const restartedHandshake = await restarted.handshake;
+      await assertPackagedFoundationState(restartedHandshake.origin, restartedHandshake.token);
+      await stopChild(child);
+      child = undefined;
+    }
     return plan;
   } finally {
     if (child) await stopChild(child);
+    if (model) await model.close();
     rmSync(temporaryRoot, { force: true, recursive: true });
   }
 }
 
-function launchSidecar(plan, temporaryRoot) {
+function launchSidecar(plan, temporaryRoot, modelBaseUrl) {
   const launchId = randomUUID();
   const token = randomBytes(32).toString("base64url");
   let stderr = "";
   const child = spawn(plan.sidecarPath, [], {
     cwd: dirname(plan.bundleRoot),
-    env: childEnvironment(plan, temporaryRoot),
+    env: childEnvironment(plan, temporaryRoot, modelBaseUrl),
     stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -164,10 +211,11 @@ function launchSidecar(plan, temporaryRoot) {
   return {
     child,
     handshake: readHandshake(child, launchId, token, () => stderr.trim()),
+    stderr: () => stderr.trim(),
   };
 }
 
-function childEnvironment(plan, temporaryRoot) {
+function childEnvironment(plan, temporaryRoot, modelBaseUrl) {
   const env = {};
   for (const key of [
     "DYLD_FALLBACK_LIBRARY_PATH",
@@ -198,9 +246,309 @@ function childEnvironment(plan, temporaryRoot) {
     AGENTWEAVE_LAUNCH_CONFIG_FD: "3",
     AGENTWEAVE_LAUNCH_RESULT_FD: "4",
     AGENTWEAVE_MANAGED_SKILLS: "1",
+    ...(modelBaseUrl ? {
+      AGENTWEAVE_MODEL_BASE_URL: modelBaseUrl,
+      AGENTWEAVE_MODEL_ENDPOINT_TYPE: "chat_completions",
+      AGENTWEAVE_MODEL_NAME: "packaged-foundation-check",
+    } : {}),
     AGENTWEAVE_SKILLS_ROOT: plan.skillsRoot,
     AGENTWEAVE_WORKSPACE_ROOT: join(temporaryRoot, "workspace"),
   };
+}
+
+async function startScriptedModelServer() {
+  const diagnostics = { lastError: null, lastReply: "none", requests: 0 };
+  const server = createServer((request, response) => {
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404).end();
+      return;
+    }
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > MODEL_REQUEST_LIMIT) request.destroy();
+    });
+    request.on("end", () => {
+      try {
+        diagnostics.requests += 1;
+        const reply = scriptedModelReply(JSON.parse(body));
+        diagnostics.lastReply = reply.choices?.[0]?.message?.tool_calls?.[0]?.id ?? "text";
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(reply));
+      } catch (error) {
+        diagnostics.lastError = error instanceof Error ? error.message : String(error);
+        response.writeHead(500, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "scripted model request is invalid" }));
+      }
+    });
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", rejectListen);
+      resolveListen();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") fail("scripted model address is invalid");
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    diagnostics,
+    close: () => new Promise((resolveClose, rejectClose) => {
+      server.close((error) => error ? rejectClose(error) : resolveClose());
+    }),
+  };
+}
+
+export function scriptedModelReply(body) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.messages)) {
+    fail("scripted model request body is invalid");
+  }
+  const completed = new Set(body.messages
+    .filter((message) => message?.role === "tool" && typeof message.tool_call_id === "string")
+    .map((message) => message.tool_call_id));
+  if (!completed.has("foundation-memory-propose")) {
+    return modelToolCall(body, "memory_propose", "foundation-memory-propose", {
+      draft: {
+        kind: "user.preference",
+        value: { text: "Packaged Foundation state survives restart", attributes: {} },
+        evidence: [{
+          source: "explicit_user_action",
+          sourceId: "packaged-foundation-check",
+          excerpt: "Persist this deterministic package-check preference.",
+          observedAt: "2026-01-01T00:00:00Z",
+        }],
+        confidence: 10_000,
+        sensitivity: "internal",
+        retention: { mode: "persistent" },
+        conflictKey: "packaged-foundation-check",
+        supersedes: null,
+      },
+    });
+  }
+  if (!completed.has("foundation-memory-confirm")) {
+    const proposal = successfulToolOutput(body, "foundation-memory-propose");
+    return modelToolCall(body, "memory_confirm", "foundation-memory-confirm", {
+      id: requireString(proposal.record?.id, "proposed memory identifier"),
+      expectedVersion: requirePositiveInteger(
+        proposal.record?.version,
+        "proposed memory version",
+      ),
+    });
+  }
+  if (!completed.has("foundation-mail-draft")) {
+    successfulToolOutput(body, "foundation-memory-confirm");
+    return modelToolCall(body, "mail_draft_create", "foundation-mail-draft", {
+      accountId: "primary",
+      content: {
+        to: [{ name: "Package Check", address: "recipient@example.test" }],
+        cc: [],
+        bcc: [],
+        subject: "Packaged Foundation persistence check",
+        body: { plainText: "This draft remains behind an approval boundary.", html: null },
+        attachments: [],
+        replyContext: null,
+        forwardContext: null,
+      },
+    });
+  }
+  if (!completed.has("foundation-mail-preview")) {
+    const draft = successfulToolOutput(body, "foundation-mail-draft");
+    return modelToolCall(body, "mail_send_preview", "foundation-mail-preview", {
+      accountId: "primary",
+      draftId: requireString(draft.id, "Mail draft identifier"),
+      expectedRevision: requirePositiveInteger(draft.revision, "Mail draft revision"),
+      idempotencyKey: "packaged-foundation-send-v1",
+    });
+  }
+  successfulToolOutput(body, "foundation-mail-preview");
+  return { choices: [{ message: { content: "Packaged Foundation scenario completed." } }] };
+}
+
+function modelToolCall(body, canonicalName, callId, argumentsValue) {
+  const suffix = `_${canonicalName}`;
+  const tool = Array.isArray(body.tools)
+    ? body.tools.find((candidate) => candidate?.function?.name?.endsWith(suffix))
+    : undefined;
+  if (!tool) fail(`scripted model is missing '${canonicalName}'`);
+  return {
+    choices: [{
+      message: {
+        content: null,
+        tool_calls: [{
+          id: callId,
+          type: "function",
+          function: {
+            name: tool.function.name,
+            arguments: JSON.stringify(argumentsValue),
+          },
+        }],
+      },
+    }],
+  };
+}
+
+function successfulToolOutput(body, callId) {
+  const message = body.messages.find((candidate) => (
+    candidate?.role === "tool" && candidate.tool_call_id === callId
+  ));
+  if (!message) fail(`scripted model is missing tool result '${callId}'`);
+  let result;
+  try {
+    result = typeof message.content === "string" ? JSON.parse(message.content) : message.content;
+  } catch {
+    fail(`scripted model tool result '${callId}' is invalid`);
+  }
+  return successfulToolResultData(result, `scripted model tool result '${callId}'`);
+}
+
+function successfulToolResultData(result, label) {
+  if (!result || result.ok !== true || !result.data || typeof result.data !== "object") {
+    const code = typeof result?.error?.code === "string" ? result.error.code : "unknown";
+    const message = typeof result?.error?.message === "string" ? result.error.message : "unknown";
+    fail(`${label} failed (${code}: ${message})`);
+  }
+  if (result.data.ok === false) {
+    const code = typeof result.data?.error?.code === "string" ? result.data.error.code : "unknown";
+    fail(`${label} failed (${code})`);
+  }
+  if (typeof result.data.connector_id === "string"
+    && result.data.output
+    && typeof result.data.output === "object") {
+    return result.data.output;
+  }
+  return result.data.ok === true && result.data.output && typeof result.data.output === "object"
+    ? result.data.output
+    : result.data;
+}
+
+function requirePositiveInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 1) fail(`${label} is invalid`);
+  return value;
+}
+
+async function createPackagedFoundationState(origin, token) {
+  const session = await requestJson(origin, token, "/sessions", {
+    body: { title: "Packaged Foundation check" },
+    method: "POST",
+    status: 200,
+  });
+  const sessionId = requireString(session.id, "Foundation check session identifier");
+  const started = await requestJson(origin, token, `/sessions/${encodeURIComponent(sessionId)}/turns`, {
+    body: {
+      requestId: randomUUID(),
+      content: "Persist the deterministic check state and prepare the approval-bound Mail action.",
+    },
+    method: "POST",
+    status: 202,
+  });
+  const turnId = requireString(started.turn?.id, "Foundation check turn identifier");
+  const turn = await waitForTurn(origin, token, sessionId, turnId);
+  if (turn.turn?.status !== "completed") fail("packaged Foundation turn did not complete");
+  const previewEvent = turn.events.find((event) => (
+    event?.payload?.type === "tool_call_finished"
+    && event.payload.call_id === "foundation-mail-preview"
+  ));
+  if (!previewEvent) fail("packaged Mail preview is missing");
+  const preview = successfulToolResultData(
+    previewEvent.payload.result,
+    "packaged Mail preview",
+  );
+  await requestJson(origin, token, "/foundation/mail/send-approvals", {
+    body: {
+      accountId: requireString(
+        preview.accountId ?? preview.account_id,
+        "Mail preview account identifier",
+      ),
+      draftId: requireString(
+        preview.draftId ?? preview.draft_id,
+        "Mail preview draft identifier",
+      ),
+      expectedRevision: requirePositiveInteger(
+        preview.draftRevision ?? preview.draft_revision,
+        "Mail preview revision",
+      ),
+      idempotencyKey: requireString(
+        preview.idempotencyKey ?? preview.idempotency_key,
+        "Mail preview idempotency key",
+      ),
+      sessionId,
+    },
+    method: "POST",
+    status: 200,
+  });
+}
+
+async function waitForTurn(origin, token, sessionId, turnId) {
+  const deadline = Date.now() + TURN_TIMEOUT_MS;
+  const path = `/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`;
+  const events = [];
+  let cursor = -1;
+  let lastStatus = "unknown";
+  while (Date.now() < deadline) {
+    const page = await requestJson(
+      origin,
+      token,
+      `${path}/events?after=${cursor}&limit=100&waitMs=2500`,
+      { method: "GET", status: 200 },
+    );
+    if (!Array.isArray(page.events) || !Number.isSafeInteger(page.nextCursor)) {
+      fail("packaged Foundation turn event page is invalid");
+    }
+    events.push(...page.events);
+    cursor = page.nextCursor;
+    lastStatus = page.turn?.status ?? "missing";
+    if (page.turn?.status !== "running") return { ...page, events };
+  }
+  const eventTypes = events.map((event) => event?.payload?.type ?? "invalid").join(",");
+  fail(`packaged Foundation turn timed out (${lastStatus}; events: ${eventTypes})`);
+}
+
+async function assertPackagedFoundationState(origin, token) {
+  const memories = await requestJson(
+    origin,
+    token,
+    "/foundation/memory?query=Packaged%20Foundation&limit=20",
+    { method: "GET", status: 200 },
+  );
+  if (!Array.isArray(memories) || !memories.some((memory) => (
+    memory?.state === "committed"
+    && memory?.value?.text === "Packaged Foundation state survives restart"
+  ))) {
+    fail("packaged committed Memory state is missing");
+  }
+  const actions = await requestJson(origin, token, "/foundation/actions", {
+    method: "GET",
+    status: 200,
+  });
+  if (!Array.isArray(actions) || !actions.some((item) => (
+    item?.action?.status === "waiting_approval"
+    && item?.approval?.status === "pending"
+    && item?.preview?.idempotencyKey === "packaged-foundation-send-v1"
+  ))) {
+    fail("packaged approval-bound Action state is missing");
+  }
+}
+
+async function requestJson(origin, token, path, { body, method, status }) {
+  const response = await fetch(new URL(path, origin), {
+    method,
+    headers: {
+      "X-AgentWeave-Transport": token,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (response.status !== status) {
+    fail(`expected ${method} ${path} HTTP ${status}, received ${response.status}`);
+  }
+  try {
+    return await response.json();
+  } catch {
+    fail(`${method} ${path} response body is invalid JSON`);
+  }
 }
 
 function readHandshake(child, launchId, token, readStderr) {

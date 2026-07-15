@@ -11,7 +11,9 @@ import test from "node:test";
 
 import {
   assertPackagedDiscovery,
+  foundationScenarioSupported,
   packagedSidecarPlan,
+  scriptedModelReply,
 } from "./check-packaged-sidecar.mjs";
 import { PROJECT_ROOT } from "./scaffold-agent-app.mjs";
 
@@ -108,3 +110,119 @@ test("packaged sidecar plan rejects an incomplete App bundle", () => {
     rmSync(root, { force: true, recursive: true });
   }
 });
+
+test("packaged Foundation scenario requires the complete reusable contract", () => {
+  const expected = {
+    capabilities: [
+      "approval-engine",
+      "durable-actions",
+      "mail-connector",
+      "memory-provider",
+    ],
+    connectors: ["agentweave-mail"],
+    runtimeTools: [
+      "mail_draft_create",
+      "mail_send_preview",
+      "memory_confirm",
+      "memory_propose",
+    ],
+  };
+
+  assert.equal(foundationScenarioSupported(expected), true);
+  assert.equal(foundationScenarioSupported({
+    ...expected,
+    runtimeTools: expected.runtimeTools.filter((tool) => tool !== "memory_confirm"),
+  }), false);
+  assert.equal(foundationScenarioSupported({ ...expected, connectors: [] }), false);
+});
+
+test("scripted model advances only through successful Foundation tool results", () => {
+  const body = scriptedBody();
+  const proposed = scriptedModelReply(body);
+  assert.equal(toolCall(proposed).id, "foundation-memory-propose");
+  assert.equal(toolArguments(proposed).draft.retention.mode, "persistent");
+
+  body.messages.push(toolMessage("foundation-memory-propose", {
+    action: "proposed",
+    record: {
+      id: "00000000-0000-4000-8000-000000000001",
+      version: 1,
+    },
+  }));
+  const confirmed = scriptedModelReply(body);
+  assert.equal(toolCall(confirmed).id, "foundation-memory-confirm");
+  assert.equal(toolArguments(confirmed).expectedVersion, 1);
+
+  body.messages.push(toolMessage("foundation-memory-confirm", {
+    id: "00000000-0000-4000-8000-000000000001",
+    version: 2,
+  }));
+  const drafted = scriptedModelReply(body);
+  assert.equal(toolCall(drafted).id, "foundation-mail-draft");
+  assert.deepEqual(toolArguments(drafted).content.attachments, []);
+
+  body.messages.push(toolMessage("foundation-mail-draft", {
+    id: "draft-1",
+    revision: 1,
+  }));
+  const previewed = scriptedModelReply(body);
+  assert.equal(toolCall(previewed).id, "foundation-mail-preview");
+  assert.equal(toolArguments(previewed).draftId, "draft-1");
+
+  body.messages.push(toolMessage("foundation-mail-preview", {
+    id: "preview-1",
+    idempotencyKey: "packaged-foundation-send-v1",
+  }));
+  const completed = scriptedModelReply(body);
+  assert.equal(completed.choices[0].message.content, "Packaged Foundation scenario completed.");
+
+  const failed = scriptedBody();
+  failed.messages.push({
+    role: "tool",
+    tool_call_id: "foundation-memory-propose",
+    content: JSON.stringify({
+      ok: false,
+      data: null,
+      error: { code: "failed", message: "failed" },
+    }),
+  });
+  assert.throws(() => scriptedModelReply(failed), /tool result .* failed/);
+});
+
+function scriptedBody() {
+  return {
+    messages: [],
+    tools: [
+      "mail_draft_create",
+      "mail_send_preview",
+      "memory_confirm",
+      "memory_propose",
+    ].map((name) => ({
+      type: "function",
+      function: { name: `ga_fixture_${name}`, parameters: { type: "object" } },
+    })),
+  };
+}
+
+function toolMessage(callId, output) {
+  const data = callId.startsWith("foundation-mail-") ? {
+    connector_id: "agentweave-mail",
+    tool_name: "fixture",
+    action_hash: "a".repeat(64),
+    replayed: false,
+    output,
+  } : output;
+  return {
+    role: "tool",
+    tool_call_id: callId,
+    content: JSON.stringify({ ok: true, data, error: null }),
+  };
+}
+
+function toolCall(reply) {
+  return reply.choices[0].message.tool_calls[0];
+}
+
+function toolArguments(reply) {
+  return JSON.parse(toolCall(reply).function.arguments);
+}
