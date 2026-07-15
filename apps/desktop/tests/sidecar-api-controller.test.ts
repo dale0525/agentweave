@@ -167,6 +167,86 @@ describe("trusted sidecar API controller", () => {
     );
   });
 
+  it("maps bounded Mail configuration only to the trusted Host API", async () => {
+    const harness = ipcHarness();
+    const sidecarRequest = vi.fn(async () => new Response(JSON.stringify({ configured: true })));
+    registerSidecarApiController({
+      ipcMain: harness.ipcMain,
+      requesterWebContents: { id: 42 },
+      sidecarRequest,
+    });
+    const password = "transient-app-password";
+    await harness.invoke(
+      { sender: { id: 42 } },
+      {
+        operation: "mail.configuration.put",
+        input: {
+          id: "primary",
+          displayName: "Primary Mail",
+          primaryAddress: "user@example.test",
+          username: "user@example.test",
+          password,
+          imapHost: "imap.example.test",
+          imapPort: 993,
+          imapTls: "implicit",
+          smtpHost: "smtp.example.test",
+          smtpPort: 587,
+          smtpTls: "start_tls",
+        },
+      },
+    );
+    expect(sidecarRequest).toHaveBeenLastCalledWith(
+      "/foundation/mail/account-configurations/primary",
+      expect.objectContaining({
+        method: "PUT",
+        body: expect.stringContaining(password),
+      }),
+    );
+    await harness.invoke(
+      { sender: { id: 42 } },
+      { operation: "mail.configuration.delete", input: { id: "primary" } },
+    );
+    expect(sidecarRequest).toHaveBeenLastCalledWith(
+      "/foundation/mail/account-configurations/primary",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it.each([
+    ["invalid TLS", { imapTls: "disabled" }, /imapTls is invalid/],
+    ["blank password", { password: "  " }, /password is invalid/],
+    ["unknown Mail field", { credentialPath: "/tmp/secret" }, /unknown fields/],
+  ])("rejects %s before Mail sidecar access", async (_name, override, error) => {
+    const harness = ipcHarness();
+    const sidecarRequest = vi.fn();
+    registerSidecarApiController({
+      ipcMain: harness.ipcMain,
+      requesterWebContents: { id: 42 },
+      sidecarRequest,
+    });
+    await expect(harness.invoke(
+      { sender: { id: 42 } },
+      {
+        operation: "mail.configuration.put",
+        input: {
+          id: "primary",
+          displayName: "Primary Mail",
+          primaryAddress: "user@example.test",
+          username: "user@example.test",
+          password: "secret",
+          imapHost: "imap.example.test",
+          imapPort: 993,
+          imapTls: "implicit",
+          smtpHost: "smtp.example.test",
+          smtpPort: 587,
+          smtpTls: "start_tls",
+          ...override,
+        },
+      },
+    )).rejects.toThrow(error as RegExp);
+    expect(sidecarRequest).not.toHaveBeenCalled();
+  });
+
   it("maps attachment metadata operations without exposing attachment bytes", async () => {
     const harness = ipcHarness();
     const sidecarRequest = vi.fn(async () => new Response(JSON.stringify([])));

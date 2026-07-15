@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let mut transport = agent_server::local_transport::prepare_from_environment().await?;
     let data_protection_key = transport.take_data_protection_key();
+    let credential_vault_key = transport.take_credential_vault_key().map(Arc::new);
 
     let skills_root = skills_root_from_env();
     let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
@@ -69,9 +70,14 @@ async fn main() -> anyhow::Result<()> {
                 mode: SkillManagementMode::DiagnosticsOnly,
                 ..SkillManagementPolicy::default()
             });
-        let registry =
-            build_managed_tenant_registry(&skills_root, managed_skills, builtin_mode, policy)
-                .await?;
+        let registry = build_managed_tenant_registry(
+            &skills_root,
+            managed_skills,
+            builtin_mode,
+            policy,
+            credential_vault_key.clone(),
+        )
+        .await?;
         let runtime = registry.for_tenant(SINGLE_USER_TENANT_ID).await?;
         let database_path = runtime.database_path.clone();
         let control_roots = vec![
@@ -122,8 +128,14 @@ async fn main() -> anyhow::Result<()> {
             server_app::resolve_automation_tools(&storage, &resolved_app.prompt).await?;
         let attachment_tools =
             server_app::resolve_attachment_tools(&storage, &resolved_app.prompt).await?;
-        let connector_foundation =
-            server_app::resolve_connector_tools(&storage, &resolved_app.prompt).await?;
+        let credential_root = server_app::credential_root_for_database(database_path.as_deref());
+        let connector_foundation = server_app::resolve_connector_tools(
+            &storage,
+            &resolved_app.prompt,
+            credential_vault_key.clone(),
+            credential_root.as_deref(),
+        )
+        .await?;
         let connector_tools = connector_foundation
             .as_ref()
             .map(|foundation| foundation.tools.clone());
@@ -152,10 +164,7 @@ async fn main() -> anyhow::Result<()> {
             )
         }
         .with_host_discovery(resolved_app.host_discovery)?;
-        let state = match connector_foundation {
-            Some(foundation) => state.with_mail_actions(foundation.actions),
-            None => state,
-        };
+        let state = server_app::apply_connector_foundation(state, connector_foundation);
         (state, storage, database_path)
     };
     let state = state.with_default_automation(&automation_storage).await?;

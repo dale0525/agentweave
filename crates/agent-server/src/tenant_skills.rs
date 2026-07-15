@@ -1,6 +1,7 @@
 use crate::tenant_initialization::{
     TenantInitializationPaths, acquire_tenant_initialization_lock, prepare_real_directory,
 };
+use agent_runtime::credential::SecretMaterial;
 use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::skill_management::OwnerSkillManagementService;
 use agent_runtime::skill_manager::{SkillManager, SkillManagerConfig};
@@ -30,6 +31,7 @@ pub struct TenantSkillRuntime {
     pub data_root: PathBuf,
     pub cache_root: PathBuf,
     pub database_path: PathBuf,
+    pub credential_vault_key: Option<Arc<SecretMaterial>>,
 }
 
 impl std::fmt::Debug for TenantSkillRuntime {
@@ -199,6 +201,7 @@ pub struct TenantSkillManagerConfig {
     pub allowed_overrides: Vec<SkillPackageId>,
     pub runtime_version: Version,
     pub management_policy: SkillManagementPolicy,
+    pub credential_vault_key: Option<Arc<SecretMaterial>>,
 }
 
 #[derive(Clone)]
@@ -367,6 +370,7 @@ impl FilesystemTenantSkillManagerFactory {
                 data_root,
                 cache_root,
                 database_path,
+                credential_vault_key: self.config.credential_vault_key.clone(),
             })
         }
         .await;

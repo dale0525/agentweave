@@ -1,4 +1,5 @@
 use crate::api;
+use agent_runtime::credential::SecretMaterial;
 use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::prompt_composer::AppPromptConfig;
 use agent_runtime::skill_policy::SkillManagementPolicy;
@@ -52,6 +53,7 @@ pub(super) async fn build_managed_tenant_registry(
     managed: ManagedSkillsConfig,
     builtin_mode: BuiltinSkillsMode,
     management_policy: SkillManagementPolicy,
+    credential_vault_key: Option<Arc<SecretMaterial>>,
 ) -> anyhow::Result<TenantSkillManagerRegistry> {
     let builtin = load_builtin_skill_source(skills_root, builtin_mode).await?;
     let mut sources = vec![builtin];
@@ -68,6 +70,7 @@ pub(super) async fn build_managed_tenant_registry(
         allowed_overrides: Vec::new(),
         runtime_version: env!("CARGO_PKG_VERSION").parse()?,
         management_policy,
+        credential_vault_key,
     })
     .await?;
     Ok(TenantSkillManagerRegistry::new(factory))
@@ -90,8 +93,14 @@ where
         super::server_app::resolve_automation_tools(&runtime.storage, &app_prompt).await?;
     let attachment_tools =
         super::server_app::resolve_attachment_tools(&runtime.storage, &app_prompt).await?;
-    let connector_foundation =
-        super::server_app::resolve_connector_tools(&runtime.storage, &app_prompt).await?;
+    let credential_root = runtime.data_root.join("credentials");
+    let connector_foundation = super::server_app::resolve_connector_tools(
+        &runtime.storage,
+        &app_prompt,
+        runtime.credential_vault_key.clone(),
+        Some(&credential_root),
+    )
+    .await?;
     let connector_tools = connector_foundation
         .as_ref()
         .map(|foundation| foundation.tools.clone());
@@ -119,8 +128,8 @@ where
                 .with_attachment_tools(attachment_tools),
         )
     };
-    Ok(match connector_foundation {
-        Some(foundation) => state.with_mail_actions(foundation.actions),
-        None => state,
-    })
+    Ok(super::server_app::apply_connector_foundation(
+        state,
+        connector_foundation,
+    ))
 }

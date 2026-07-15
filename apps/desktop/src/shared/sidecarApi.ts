@@ -11,6 +11,10 @@ export type SidecarApiOperation =
   | "devSkills.reload"
   | "devSkills.validate"
   | "mail.connect"
+  | "mail.configuration.delete"
+  | "mail.configuration.get"
+  | "mail.configuration.list"
+  | "mail.configuration.put"
   | "mail.disconnect"
   | "mail.list"
   | "mail.status"
@@ -41,6 +45,28 @@ export type SidecarApiOperation =
   | "turns.events";
 
 export type FoundationTaskStatus = "open" | "completed" | "cancelled";
+
+export type FoundationMailTlsMode = "implicit" | "start_tls" | "none";
+
+export type FoundationMailConfigurationInput = Readonly<{
+  id: string;
+  displayName: string;
+  primaryName?: string;
+  primaryAddress: string;
+  username: string;
+  password: string;
+  imapHost: string;
+  imapPort: number;
+  imapTls: FoundationMailTlsMode;
+  smtpHost: string;
+  smtpPort: number;
+  smtpTls: FoundationMailTlsMode;
+  archiveMailbox?: string;
+  sentMailbox?: string;
+  draftsMailbox?: string;
+  trashMailbox?: string;
+  allowInsecureLocalhost?: boolean;
+}>;
 
 export type FoundationTaskPriority = "low" | "normal" | "high" | "urgent";
 

@@ -257,6 +257,147 @@ impl CredentialVault {
         Ok(())
     }
 
+    /// Atomically exposes connector metadata only after its secret is durable.
+    ///
+    /// Existing credentials are restored when metadata persistence fails. Secret
+    /// material is consumed by this method and is never returned or serialized.
+    pub async fn configure_connector_account(
+        &self,
+        account: ConnectorAccount,
+        secret: SecretMaterial,
+    ) -> anyhow::Result<()> {
+        validate_connector_account(&account)?;
+        let previous = self
+            .connector_account(&account.scope, &account.account_id)
+            .await?;
+        let previous_secret = self.store.load(&account.scope, &account.secret_id).await?;
+        if previous_secret.is_some() {
+            self.store
+                .rotate(&account.scope, &account.secret_id, secret)
+                .await?;
+        } else {
+            self.store
+                .save(&account.scope, &account.secret_id, secret)
+                .await?;
+        }
+
+        if let Some(metadata) = &self.metadata
+            && let Err(error) = metadata.upsert_account(&account).await
+        {
+            let compensation = match previous_secret {
+                Some(value) => {
+                    self.store
+                        .rotate(&account.scope, &account.secret_id, value)
+                        .await
+                }
+                None => self
+                    .store
+                    .delete(&account.scope, &account.secret_id)
+                    .await
+                    .map(|_| ()),
+            };
+            return match compensation {
+                Ok(()) => Err(error),
+                Err(compensation) => Err(error.context(format!(
+                    "credential secret compensation failed: {compensation:#}"
+                ))),
+            };
+        }
+
+        self.accounts
+            .lock()
+            .expect("credential account lock poisoned")
+            .insert(
+                (account.scope.clone(), account.account_id.clone()),
+                account.clone(),
+            );
+        if let Some(previous) = previous
+            && previous.secret_id != account.secret_id
+        {
+            let _ = self
+                .store
+                .delete(&previous.scope, &previous.secret_id)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Removes connector metadata and secret material without ever returning the
+    /// secret. Metadata is restored if secret deletion fails, making retry safe.
+    pub async fn delete_connector_account(
+        &self,
+        scope: &CredentialScope,
+        account_id: &str,
+    ) -> anyhow::Result<bool> {
+        let Some(account) = self.connector_account(scope, account_id).await? else {
+            return Ok(false);
+        };
+        if let Some(metadata) = &self.metadata {
+            metadata.delete_account(scope, account_id).await?;
+        }
+        if let Err(error) = self.store.delete(scope, &account.secret_id).await {
+            let compensation = match &self.metadata {
+                Some(metadata) => metadata.upsert_account(&account).await,
+                None => Ok(()),
+            };
+            if compensation.is_ok() {
+                self.accounts
+                    .lock()
+                    .expect("credential account lock poisoned")
+                    .insert((scope.clone(), account_id.to_string()), account);
+            }
+            return match compensation {
+                Ok(()) => Err(error),
+                Err(compensation) => Err(error.context(format!(
+                    "credential metadata compensation failed: {compensation:#}"
+                ))),
+            };
+        }
+        self.accounts
+            .lock()
+            .expect("credential account lock poisoned")
+            .remove(&(scope.clone(), account_id.to_string()));
+        Ok(true)
+    }
+
+    /// Returns non-secret connector metadata for lifecycle coordination.
+    pub async fn connector_account(
+        &self,
+        scope: &CredentialScope,
+        account_id: &str,
+    ) -> anyhow::Result<Option<ConnectorAccount>> {
+        scope.validate()?;
+        if let Some(account) = self
+            .accounts
+            .lock()
+            .expect("credential account lock poisoned")
+            .get(&(scope.clone(), account_id.to_string()))
+            .cloned()
+        {
+            return Ok(Some(account));
+        }
+        match &self.metadata {
+            Some(metadata) => metadata.get_account(scope, account_id).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Checks metadata and backing secret presence without exposing secret bytes.
+    pub async fn connector_credential_configured(
+        &self,
+        scope: &CredentialScope,
+        connector_id: &str,
+        account_id: &str,
+    ) -> anyhow::Result<bool> {
+        let Some(account) = self.connector_account(scope, account_id).await? else {
+            return Ok(false);
+        };
+        if account.connector_id != connector_id {
+            return Ok(false);
+        }
+        Ok(self.store.load(scope, &account.secret_id).await?.is_some())
+    }
+
     pub async fn begin_oauth_authorization(
         &self,
         scope: &CredentialScope,
@@ -408,9 +549,72 @@ impl CredentialVault {
     }
 }
 
+fn validate_connector_account(account: &ConnectorAccount) -> anyhow::Result<()> {
+    account.scope.validate()?;
+    for value in [
+        &account.account_id,
+        &account.connector_id,
+        &account.provider_id,
+    ] {
+        anyhow::ensure!(
+            !value.trim().is_empty(),
+            "credential account field is required"
+        );
+        anyhow::ensure!(value.len() <= 255, "credential account field is too long");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Default)]
+    struct FailOnceDeleteSecretStore {
+        inner: InMemorySecretStore,
+        fail_next_delete: AtomicBool,
+    }
+
+    #[async_trait]
+    impl SecretStore for FailOnceDeleteSecretStore {
+        async fn save(
+            &self,
+            scope: &CredentialScope,
+            secret_id: &SecretId,
+            value: SecretMaterial,
+        ) -> anyhow::Result<()> {
+            self.inner.save(scope, secret_id, value).await
+        }
+
+        async fn load(
+            &self,
+            scope: &CredentialScope,
+            secret_id: &SecretId,
+        ) -> anyhow::Result<Option<SecretMaterial>> {
+            self.inner.load(scope, secret_id).await
+        }
+
+        async fn delete(
+            &self,
+            scope: &CredentialScope,
+            secret_id: &SecretId,
+        ) -> anyhow::Result<bool> {
+            if self.fail_next_delete.swap(false, Ordering::SeqCst) {
+                anyhow::bail!("injected secret delete failure");
+            }
+            self.inner.delete(scope, secret_id).await
+        }
+
+        async fn rotate(
+            &self,
+            scope: &CredentialScope,
+            secret_id: &SecretId,
+            value: SecretMaterial,
+        ) -> anyhow::Result<()> {
+            self.inner.rotate(scope, secret_id, value).await
+        }
+    }
 
     fn scope(app_id: &str) -> CredentialScope {
         CredentialScope {
@@ -515,5 +719,68 @@ mod tests {
         let json = serde_json::to_string(&account).unwrap();
         assert!(json.contains("mail.account.primary"));
         assert!(!json.contains("credential-value"));
+    }
+
+    #[tokio::test]
+    async fn failed_secret_delete_restores_persistent_account_metadata() {
+        let storage = crate::storage::Storage::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let metadata =
+            crate::credential_sqlite::SqliteCredentialMetadataStore::from_storage(&storage)
+                .await
+                .unwrap();
+        let store = Arc::new(FailOnceDeleteSecretStore::default());
+        let vault = CredentialVault::new_persistent(store.clone(), metadata.clone());
+        let account_scope = scope("com.example.mail");
+        let account = ConnectorAccount {
+            account_id: "primary".into(),
+            connector_id: "mail".into(),
+            provider_id: "imap-smtp".into(),
+            secret_id: SecretId::parse("mail.primary").unwrap(),
+            scope: account_scope.clone(),
+            granted_scopes: BTreeSet::new(),
+            expires_at: None,
+        };
+        vault
+            .configure_connector_account(account.clone(), SecretMaterial::new("password").unwrap())
+            .await
+            .unwrap();
+
+        store.fail_next_delete.store(true, Ordering::SeqCst);
+        assert!(
+            vault
+                .delete_connector_account(&account_scope, "primary")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("injected")
+        );
+        assert_eq!(
+            metadata
+                .get_account(&account_scope, "primary")
+                .await
+                .unwrap(),
+            Some(account)
+        );
+        assert!(
+            vault
+                .connector_credential_configured(&account_scope, "mail", "primary")
+                .await
+                .unwrap()
+        );
+        assert!(
+            vault
+                .delete_connector_account(&account_scope, "primary")
+                .await
+                .unwrap()
+        );
+        assert!(
+            metadata
+                .get_account(&account_scope, "primary")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

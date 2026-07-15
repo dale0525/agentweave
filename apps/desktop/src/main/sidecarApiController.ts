@@ -19,6 +19,7 @@ const NOTIFICATION_STATUSES = new Set([
   "uncertain",
   "cancelled",
 ]);
+const MAIL_TLS_MODES = new Set(["implicit", "start_tls", "none"]);
 
 type IpcEvent = { sender: { id: number } };
 
@@ -29,7 +30,7 @@ type IpcMainLike = {
 
 type RequestDescription = {
   body?: unknown;
-  method: "DELETE" | "GET" | "PATCH" | "POST";
+  method: "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
   pathname: string;
 };
 
@@ -250,6 +251,58 @@ function describeRequest(request: SidecarApiRequest): RequestDescription {
       );
     case "mail.list":
       return get("/foundation/mail/accounts");
+    case "mail.configuration.list":
+      return get("/foundation/mail/account-configurations");
+    case "mail.configuration.get":
+      return get(`/foundation/mail/account-configurations/${identifier(request.input, "id")}`);
+    case "mail.configuration.put": {
+      const input = exactRecord(request.input, [
+        "allowInsecureLocalhost",
+        "archiveMailbox",
+        "displayName",
+        "draftsMailbox",
+        "id",
+        "imapHost",
+        "imapPort",
+        "imapTls",
+        "password",
+        "primaryAddress",
+        "primaryName",
+        "sentMailbox",
+        "smtpHost",
+        "smtpPort",
+        "smtpTls",
+        "trashMailbox",
+        "username",
+      ]);
+      return json(
+        "PUT",
+        `/foundation/mail/account-configurations/${identifier(input, "id")}`,
+        {
+          displayName: nonBlankString(input, "displayName", 512),
+          primaryName: optionalString(input, "primaryName", 512),
+          primaryAddress: nonBlankString(input, "primaryAddress", 512),
+          username: nonBlankString(input, "username", 512),
+          password: nonBlankString(input, "password", 64 * 1_024),
+          imapHost: nonBlankString(input, "imapHost", 512),
+          imapPort: fieldInteger(input, "imapPort", 1, 65_535),
+          imapTls: fieldEnum(input, "imapTls", MAIL_TLS_MODES),
+          smtpHost: nonBlankString(input, "smtpHost", 512),
+          smtpPort: fieldInteger(input, "smtpPort", 1, 65_535),
+          smtpTls: fieldEnum(input, "smtpTls", MAIL_TLS_MODES),
+          archiveMailbox: optionalString(input, "archiveMailbox", 512),
+          sentMailbox: optionalString(input, "sentMailbox", 512),
+          draftsMailbox: optionalString(input, "draftsMailbox", 512),
+          trashMailbox: optionalString(input, "trashMailbox", 512),
+          allowInsecureLocalhost: optionalBoolean(input, "allowInsecureLocalhost") ?? false,
+        },
+      );
+    }
+    case "mail.configuration.delete":
+      return {
+        method: "DELETE",
+        pathname: `/foundation/mail/account-configurations/${identifier(request.input, "id")}`,
+      };
     case "mail.status":
       return get(`/foundation/mail/accounts/${identifier(request.input, "id")}`);
     case "mail.connect":
@@ -313,11 +366,17 @@ function get(pathname: string): RequestDescription {
 }
 
 function json(
-  method: "DELETE" | "PATCH" | "POST",
+  method: "DELETE" | "PATCH" | "POST" | "PUT",
   pathname: string,
   body: unknown,
 ): RequestDescription {
   return { body, method, pathname };
+}
+
+function optionalBoolean(value: unknown, name: string): boolean | undefined {
+  if (!isRecord(value) || value[name] === undefined) return undefined;
+  if (typeof value[name] !== "boolean") throw new Error(`${name} is invalid`);
+  return value[name];
 }
 
 function identifier(value: unknown, name: string): string {
@@ -581,6 +640,10 @@ const OPERATIONS = new Set<SidecarApiOperation>([
   "devSkills.reload",
   "devSkills.validate",
   "mail.connect",
+  "mail.configuration.delete",
+  "mail.configuration.get",
+  "mail.configuration.list",
+  "mail.configuration.put",
   "mail.disconnect",
   "mail.list",
   "mail.status",

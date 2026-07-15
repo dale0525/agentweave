@@ -61,6 +61,8 @@ pub struct AppState {
     data_protection: Option<crate::data_protection::DataProtectionService>,
     connector_tools: Option<agent_runtime::connector_tools::ConnectorToolRuntime>,
     mail_actions: Option<agent_runtime::foundation_actions::MailActionService>,
+    mail_account_manager:
+        Option<Arc<agent_runtime::mail_imap_smtp_accounts::ImapSmtpMailAccountManager>>,
     automation: Option<crate::automation_api::AutomationApiState>,
 }
 
@@ -167,6 +169,7 @@ impl AppState {
             data_protection: None,
             connector_tools,
             mail_actions: None,
+            mail_account_manager: None,
             automation: None,
         }
     }
@@ -279,6 +282,7 @@ impl AppState {
             data_protection: None,
             connector_tools,
             mail_actions: None,
+            mail_account_manager: None,
             automation: None,
         }
     }
@@ -336,6 +340,7 @@ impl AppState {
             data_protection: None,
             connector_tools: None,
             mail_actions: None,
+            mail_account_manager: None,
             automation: None,
         }
     }
@@ -351,6 +356,14 @@ impl AppState {
         mail_actions: agent_runtime::foundation_actions::MailActionService,
     ) -> Self {
         self.mail_actions = Some(mail_actions);
+        self
+    }
+
+    pub fn with_mail_account_manager(
+        mut self,
+        manager: Arc<agent_runtime::mail_imap_smtp_accounts::ImapSmtpMailAccountManager>,
+    ) -> Self {
+        self.mail_account_manager = Some(manager);
         self
     }
 
@@ -656,6 +669,12 @@ impl AppState {
         &self,
     ) -> Option<agent_runtime::foundation_actions::MailActionService> {
         self.mail_actions.clone()
+    }
+
+    pub(crate) fn mail_account_manager(
+        &self,
+    ) -> Option<Arc<agent_runtime::mail_imap_smtp_accounts::ImapSmtpMailAccountManager>> {
+        self.mail_account_manager.clone()
     }
 
     pub(crate) fn automation(&self) -> Option<&crate::automation_api::AutomationApiState> {
