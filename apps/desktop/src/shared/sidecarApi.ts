@@ -71,6 +71,12 @@ export type FoundationMailConfigurationInput = Readonly<{
   allowInsecureLocalhost?: boolean;
 }>;
 
+export type FoundationMailConfiguration = Readonly<
+  Omit<FoundationMailConfigurationInput, "password"> & {
+    credentialConfigured: boolean;
+  }
+>;
+
 export type FoundationTaskPriority = "low" | "normal" | "high" | "urgent";
 
 export type FoundationTaskContent = Readonly<{
