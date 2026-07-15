@@ -20,7 +20,6 @@ use std::path::PathBuf;
 use std::{collections::BTreeMap, sync::Arc};
 
 const DEFAULT_DATABASE_URL: &str = "sqlite://agentweave.db?mode=rwc";
-const DEFAULT_SKILLS_ROOT: &str = "skills";
 const DEFAULT_MODEL_BASE_URL: &str = "http://127.0.0.1:11434/v1";
 const DEFAULT_MODEL_NAME: &str = "local-agent-model";
 mod server_app;
@@ -39,8 +38,9 @@ use server_skill_startup::{
 #[cfg(test)]
 use server_skill_startup::{ManagedSkillsConfig, load_skill_manager};
 use server_tenant_startup::{
-    apply_storage_protection, build_managed_tenant_registry, build_tenant_app_state, open_storage,
-    runtime_config_from_env, skills_root_from_env, sqlite_database_path,
+    apply_connector_foundation, apply_storage_protection, build_managed_tenant_registry,
+    build_tenant_app_state, open_storage, runtime_config_from_env, skills_root_from_env,
+    sqlite_database_path,
 };
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -135,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
             .map(|foundation| foundation.tools.clone());
         let mail_actions = connector_foundation
             .as_ref()
-            .map(|foundation| foundation.actions.clone());
+            .and_then(|foundation| foundation.mail_actions.clone());
         let state = if let Some(owner_management) = owner_management {
             api::AppState::new_with_model_app_foundations_skill_manager_and_owner(
                 storage.clone(),
@@ -163,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
             )
         }
         .with_host_discovery(resolved_app.host_discovery)?;
+        let state = apply_connector_foundation(state, connector_foundation);
         (state, storage, database_path)
     };
     let host_scheduler_requested =
