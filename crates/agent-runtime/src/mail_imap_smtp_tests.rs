@@ -1,6 +1,7 @@
 use super::*;
 use crate::credential::{
-    ConnectorAccount, InMemorySecretStore, SecretId, SecretMaterial, SecretStore,
+    ConnectorAccount, InMemorySecretStore, ProviderCredential, SecretId, SecretMaterial,
+    SecretStore,
 };
 use std::collections::BTreeSet;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -69,18 +70,35 @@ async fn connector_with_config(config: ImapSmtpMailConfig) -> ImapSmtpMailConnec
         .unwrap();
     let vault = Arc::new(CredentialVault::new(store));
     vault
+        .register_provider_credential(
+            &scope(),
+            ProviderCredential {
+                access_secret_id: secret_id,
+                credential_id: "mail-primary".into(),
+                expires_at: None,
+                granted_scopes: BTreeSet::from([
+                    "mail.message.read".into(),
+                    "mail.message.organize".into(),
+                    "mail.message.send".into(),
+                ]),
+                provider_id: "imap-smtp".into(),
+                provider_subject: "user@example.test".into(),
+                refresh_secret_id: None,
+                revoked_at: None,
+            },
+        )
+        .unwrap();
+    vault
         .register_account(ConnectorAccount {
             account_id: "primary".into(),
-            connector_id: CONNECTOR_ID.into(),
-            provider_id: "imap-smtp".into(),
-            secret_id,
-            scope: scope(),
-            granted_scopes: BTreeSet::from([
+            allowed_scopes: BTreeSet::from([
                 "mail.message.read".into(),
                 "mail.message.organize".into(),
                 "mail.message.send".into(),
             ]),
-            expires_at: None,
+            connector_id: CONNECTOR_ID.into(),
+            credential_id: "mail-primary".into(),
+            scope: scope(),
         })
         .unwrap();
     ImapSmtpMailConnector::new(config, vault).unwrap()
