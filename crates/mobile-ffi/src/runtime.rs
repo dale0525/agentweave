@@ -14,7 +14,9 @@ use agent_runtime::automation::{
 use agent_runtime::connector::ConnectorRuntime;
 use agent_runtime::connector_ledger::SqliteConnectorActionLedger;
 use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
-use agent_runtime::credential::{CredentialScope, CredentialVault, InMemorySecretStore};
+use agent_runtime::credential::{
+    CredentialScope, CredentialVault, InMemorySecretStore, SecretMaterial,
+};
 use agent_runtime::foundation_actions::MailActionService;
 use agent_runtime::mail::{MailAccount, MailAddress};
 use agent_runtime::mail_connector_transport::MailConnectorTransport;
@@ -44,6 +46,7 @@ use agent_runtime::skill_source::{
 use agent_runtime::skill_state::{SkillApprovalRecord, SkillSnapshotStatus, SkillStateStore};
 use agent_runtime::skill_store::{SkillRevisionStore, SkillStorePaths};
 use agent_runtime::storage::Storage;
+use agent_runtime::storage_protection::StorageOpenOptions;
 use agent_runtime::tools::RuntimeConfig;
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -87,7 +90,9 @@ pub struct MobileRuntime {
 }
 
 impl MobileRuntime {
-    pub fn initialize(config: MobileInitConfig) -> Result<Self> {
+    pub fn initialize(mut config: MobileInitConfig) -> Result<Self> {
+        let storage_protection_key =
+            decode_storage_protection_key(config.storage_protection_key_hex.take())?;
         let tokio = Runtime::new()?;
         let platform = parse_platform(&config.platform)?;
         let capabilities = CapabilitySet::from_names(config.capabilities.clone());
@@ -150,7 +155,13 @@ impl MobileRuntime {
             std::fs::create_dir_all(parent)?;
         }
         let database_url = format!("sqlite://{}?mode=rwc", database_path.display());
-        let storage = tokio.block_on(Storage::connect(&database_url))?;
+        let storage_options = storage_protection_key
+            .map(|key| StorageOpenOptions::default().with_key(key))
+            .unwrap_or_default();
+        let storage = tokio.block_on(Storage::connect_with_options(
+            &database_url,
+            storage_options,
+        ))?;
         let init = MobileRuntimeInit {
             platform,
             capabilities,
@@ -259,8 +270,8 @@ impl MobileRuntime {
             skill_manager,
             skill_management,
             skill_state: state,
-            skill_policy: config.skill_policy,
-            actor_context: config.actor_context,
+            skill_policy: config.skill_policy.clone(),
+            actor_context: config.actor_context.clone(),
             runtime_config,
             database_ready: true,
             skills_ready: true,
@@ -333,6 +344,7 @@ impl MobileRuntime {
             platform: platform_name(self.init.platform).to_string(),
             capabilities: self.init.capabilities.names().to_vec(),
             database_ready: self.database_ready,
+            storage_protection_state: self.storage.protection_status().state().as_str().into(),
             skills_ready: self.skills_ready,
             model_configured: self.model_configured.load(Ordering::Acquire),
             skill_management_mode: management_mode_name(self.skill_policy.mode).into(),

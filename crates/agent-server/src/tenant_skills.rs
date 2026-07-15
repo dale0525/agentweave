@@ -1,6 +1,7 @@
 use crate::tenant_initialization::{
     TenantInitializationPaths, acquire_tenant_initialization_lock, prepare_real_directory,
 };
+use agent_runtime::credential::SecretMaterial;
 use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::skill_management::OwnerSkillManagementService;
 use agent_runtime::skill_manager::{SkillManager, SkillManagerConfig};
@@ -10,6 +11,7 @@ use agent_runtime::skill_source::{ManagedSkillSource, SkillSource};
 use agent_runtime::skill_state::SkillStateStore;
 use agent_runtime::skill_store::{SkillRevisionStore, SkillStorePaths};
 use agent_runtime::storage::Storage;
+use agent_runtime::storage_protection::StorageOpenOptions;
 use anyhow::Context;
 use semver::Version;
 use std::collections::HashMap;
@@ -199,6 +201,7 @@ pub struct TenantSkillManagerConfig {
     pub allowed_overrides: Vec<SkillPackageId>,
     pub runtime_version: Version,
     pub management_policy: SkillManagementPolicy,
+    pub storage_protection_key: Option<Arc<SecretMaterial>>,
 }
 
 #[derive(Clone)]
@@ -302,10 +305,14 @@ impl FilesystemTenantSkillManagerFactory {
             .await
             .context("tenant database ownership preparation failed")?;
         reject_symlink_or_non_file_if_present(&database_path).await?;
-        let storage = match Storage::connect_without_migrations(&format!(
-            "sqlite://{}?mode=rwc",
-            database_path.display()
-        ))
+        let mut storage_options = StorageOpenOptions::default();
+        if let Some(key) = &self.config.storage_protection_key {
+            storage_options = storage_options.with_key(key.clone());
+        }
+        let storage = match Storage::connect_without_migrations_with_options(
+            &format!("sqlite://{}?mode=rwc", database_path.display()),
+            storage_options,
+        )
         .await
         {
             Ok(storage) => storage,

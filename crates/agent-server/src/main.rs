@@ -7,6 +7,7 @@ use agent_runtime::{
     skill_policy::{ActorContext, SkillGrant, SkillManagementMode, SkillManagementPolicy},
     skill_state::SkillStateStore,
     storage::Storage,
+    storage_protection::StorageOpenOptions,
 };
 use agent_server::api;
 use agent_server::owner_api::{OwnerApiConfig, OwnerAuth};
@@ -48,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let mut transport = agent_server::local_transport::prepare_from_environment().await?;
-    let data_protection_key = transport.take_data_protection_key();
+    let data_protection_key = transport.take_data_protection_key().map(Arc::new);
 
     let skills_root = skills_root_from_env();
     let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
@@ -69,9 +70,14 @@ async fn main() -> anyhow::Result<()> {
                 mode: SkillManagementMode::DiagnosticsOnly,
                 ..SkillManagementPolicy::default()
             });
-        let registry =
-            build_managed_tenant_registry(&skills_root, managed_skills, builtin_mode, policy)
-                .await?;
+        let registry = build_managed_tenant_registry(
+            &skills_root,
+            managed_skills,
+            builtin_mode,
+            policy,
+            data_protection_key.clone(),
+        )
+        .await?;
         let runtime = registry.for_tenant(SINGLE_USER_TENANT_ID).await?;
         let database_path = runtime.database_path.clone();
         let control_roots = vec![
@@ -102,7 +108,11 @@ async fn main() -> anyhow::Result<()> {
         if let Some(path) = &database_path {
             agent_server::data_protection::apply_pending_restore(path).await?;
         }
-        let storage = Storage::connect(&database_url).await?;
+        let mut storage_options = StorageOpenOptions::default();
+        if let Some(key) = &data_protection_key {
+            storage_options = storage_options.with_key(key.clone());
+        }
+        let storage = Storage::connect_with_options(&database_url, storage_options).await?;
         let loaded =
             load_skill_manager_with_mode(&skills_root, storage.clone(), None, builtin_mode).await?;
         if owner_host.is_none() {
@@ -159,8 +169,8 @@ async fn main() -> anyhow::Result<()> {
         (state, storage, database_path)
     };
     let state = state.with_default_automation(&automation_storage).await?;
-    let state = match (data_protection_key, database_path) {
-        (Some(key), Some(path)) => state.with_data_protection(path, key)?,
+    let state = match (data_protection_key.as_deref(), database_path) {
+        (Some(key), Some(path)) => state.with_borrowed_data_protection(path, key)?,
         _ => state,
     };
     let scheduler_worker_enabled = state.has_automation_tools()

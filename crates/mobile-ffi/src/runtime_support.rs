@@ -1,4 +1,22 @@
 use super::*;
+use zeroize::{Zeroize, Zeroizing};
+
+pub(super) fn decode_storage_protection_key(
+    encoded_key: Option<String>,
+) -> Result<Option<Arc<SecretMaterial>>> {
+    let Some(mut encoded_key) = encoded_key else {
+        return Ok(None);
+    };
+    let mut key = Zeroizing::new([0_u8; 32]);
+    let decoded = hex::decode_to_slice(encoded_key.as_bytes(), key.as_mut());
+    encoded_key.zeroize();
+    if decoded.is_err() {
+        anyhow::bail!("storage protection key must be exactly 64 hexadecimal characters");
+    }
+    let secret = SecretMaterial::new(key.to_vec())?;
+    drop(key);
+    Ok(Some(Arc::new(secret)))
+}
 
 pub(super) struct MonotonicReloadStatus {
     generation: AtomicU64,

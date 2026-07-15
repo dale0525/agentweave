@@ -1599,6 +1599,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "hex",
  "jni",
  "model-gateway",
  "serde",
@@ -1608,6 +1609,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

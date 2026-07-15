@@ -1,4 +1,5 @@
 use crate::api;
+use agent_runtime::credential::SecretMaterial;
 use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::prompt_composer::AppPromptConfig;
 use agent_runtime::skill_policy::SkillManagementPolicy;
@@ -52,6 +53,7 @@ pub(super) async fn build_managed_tenant_registry(
     managed: ManagedSkillsConfig,
     builtin_mode: BuiltinSkillsMode,
     management_policy: SkillManagementPolicy,
+    storage_protection_key: Option<Arc<SecretMaterial>>,
 ) -> anyhow::Result<TenantSkillManagerRegistry> {
     let builtin = load_builtin_skill_source(skills_root, builtin_mode).await?;
     let mut sources = vec![builtin];
@@ -68,6 +70,7 @@ pub(super) async fn build_managed_tenant_registry(
         allowed_overrides: Vec::new(),
         runtime_version: env!("CARGO_PKG_VERSION").parse()?,
         management_policy,
+        storage_protection_key,
     })
     .await?;
     Ok(TenantSkillManagerRegistry::new(factory))

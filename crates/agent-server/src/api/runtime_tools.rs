@@ -19,6 +19,29 @@ impl AppState {
             self.storage.clone(),
             database_path,
             &self.app_prompt.identity.app_id,
+            &key,
+        )?);
+        Ok(self)
+    }
+
+    pub fn with_borrowed_data_protection(
+        mut self,
+        database_path: impl Into<std::path::PathBuf>,
+        key: &agent_runtime::credential::SecretMaterial,
+    ) -> anyhow::Result<Self> {
+        if !self
+            .app_prompt
+            .identity
+            .enabled_capabilities
+            .iter()
+            .any(|capability| capability == "data-protection")
+        {
+            return Ok(self);
+        }
+        self.data_protection = Some(crate::data_protection::DataProtectionService::new(
+            self.storage.clone(),
+            database_path,
+            &self.app_prompt.identity.app_id,
             key,
         )?);
         Ok(self)
@@ -34,7 +57,7 @@ impl AppState {
             self.storage.clone(),
             database_path,
             &self.app_prompt.identity.app_id,
-            key,
+            &key,
         )?);
         Ok(self)
     }
