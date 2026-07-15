@@ -1,9 +1,15 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use uuid::Uuid;
+
+const SECRET_STAGING_LEASE_MINUTES: i64 = 10;
+
+#[path = "credential_persistence.rs"]
+mod persistence;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
@@ -573,31 +579,52 @@ impl CredentialVault {
         if let Some(secret_id) = &credential.refresh_secret_id {
             staged.push(secret_id.clone());
         }
-        metadata.stage_secret_cleanup(scope, &staged).await?;
+        let operation_id = format!("credential-save-{}", Uuid::new_v4());
+        metadata
+            .stage_secret_cleanup(
+                scope,
+                &staged,
+                &operation_id,
+                Utc::now() + Duration::minutes(SECRET_STAGING_LEASE_MINUTES),
+            )
+            .await?;
         if let Err(error) = self
-            .store
-            .save(scope, &credential.access_secret_id, access_secret)
+            .save_provider_secret(scope, &credential.access_secret_id, access_secret)
             .await
         {
-            let _ = self.cleanup_pending_secret_material(scope).await;
+            self.abandon_provider_secret_staging(scope, metadata, &staged, &operation_id)
+                .await;
             return Err(error);
         }
         if let (Some(secret_id), Some(secret)) = (&credential.refresh_secret_id, refresh_secret)
-            && let Err(error) = self.store.save(scope, secret_id, secret).await
+            && let Err(error) = self.save_provider_secret(scope, secret_id, secret).await
         {
-            let _ = self.cleanup_pending_secret_material(scope).await;
+            self.abandon_provider_secret_staging(scope, metadata, &staged, &operation_id)
+                .await;
             return Err(error);
         }
         let activation = match fence {
             Some((authorization_id, owner_id, now)) => {
                 metadata
-                    .activate_credential_fenced(scope, &credential, authorization_id, owner_id, now)
+                    .activate_credential_fenced(
+                        scope,
+                        &credential,
+                        &operation_id,
+                        authorization_id,
+                        owner_id,
+                        std::cmp::max(Utc::now(), now),
+                    )
                     .await
             }
-            None => metadata.activate_credential(scope, &credential).await,
+            None => {
+                metadata
+                    .activate_credential(scope, &credential, &operation_id, Utc::now())
+                    .await
+            }
         };
         if let Err(error) = activation {
-            let _ = self.cleanup_pending_secret_material(scope).await;
+            self.abandon_provider_secret_staging(scope, metadata, &staged, &operation_id)
+                .await;
             return Err(error);
         }
         self.state
@@ -681,26 +708,36 @@ impl CredentialVault {
         if let Some(secret_id) = &credential.refresh_secret_id {
             staged.push(secret_id.clone());
         }
-        metadata.stage_secret_cleanup(scope, &staged).await?;
+        let operation_id = format!("credential-rotate-{}", Uuid::new_v4());
+        metadata
+            .stage_secret_cleanup(
+                scope,
+                &staged,
+                &operation_id,
+                Utc::now() + Duration::minutes(SECRET_STAGING_LEASE_MINUTES),
+            )
+            .await?;
         if let Err(error) = self
-            .store
-            .save(scope, &credential.access_secret_id, access_secret)
+            .save_provider_secret(scope, &credential.access_secret_id, access_secret)
             .await
         {
-            let _ = self.cleanup_pending_secret_material(scope).await;
+            self.abandon_provider_secret_staging(scope, metadata, &staged, &operation_id)
+                .await;
             return Err(error);
         }
         if let (Some(secret_id), Some(secret)) = (&credential.refresh_secret_id, refresh_secret)
-            && let Err(error) = self.store.save(scope, secret_id, secret).await
+            && let Err(error) = self.save_provider_secret(scope, secret_id, secret).await
         {
-            let _ = self.cleanup_pending_secret_material(scope).await;
+            self.abandon_provider_secret_staging(scope, metadata, &staged, &operation_id)
+                .await;
             return Err(error);
         }
         if let Err(error) = metadata
-            .replace_credential_transactional(scope, &credential)
+            .replace_credential_transactional(scope, &credential, &operation_id, Utc::now())
             .await
         {
-            let _ = self.cleanup_pending_secret_material(scope).await;
+            self.abandon_provider_secret_staging(scope, metadata, &staged, &operation_id)
+                .await;
             return Err(error);
         }
         self.state

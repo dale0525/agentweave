@@ -2,9 +2,12 @@ use crate::credential::{
     ConnectorAccount, CredentialScope, OAuthAuthorizationState, ProviderCredential, SecretId,
 };
 use crate::storage::Storage;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 use std::collections::BTreeSet;
+
+#[path = "credential_cleanup_sqlite.rs"]
+mod cleanup;
 
 const CREATE_CREDENTIAL_RECORDS: &str = r#"CREATE TABLE IF NOT EXISTS credential_records (
     app_id TEXT NOT NULL,
@@ -59,10 +62,18 @@ const CREATE_SECRET_CLEANUP: &str = r#"CREATE TABLE IF NOT EXISTS credential_sec
     secret_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     not_before TEXT NOT NULL,
-    PRIMARY KEY(app_id, tenant_id, user_id, secret_id)
+    phase TEXT NOT NULL DEFAULT 'cleanup',
+    operation_id TEXT,
+    lease_expires_at TEXT,
+    cleaned_at TEXT,
+    PRIMARY KEY(app_id, tenant_id, user_id, secret_id),
+    CHECK (
+        (phase = 'staging' AND operation_id IS NOT NULL
+            AND lease_expires_at IS NOT NULL AND cleaned_at IS NULL)
+        OR
+        (phase = 'cleanup' AND operation_id IS NULL AND lease_expires_at IS NULL)
+    )
 )"#;
-
-const SECRET_STAGING_GRACE_MINUTES: i64 = 10;
 
 #[derive(Clone)]
 pub struct SqliteCredentialMetadataStore {
@@ -86,16 +97,26 @@ impl SqliteCredentialMetadataStore {
         sqlx::query(CREATE_OAUTH_STATES).execute(&mut *tx).await?;
         sqlx::query(CREATE_SECRET_CLEANUP).execute(&mut *tx).await?;
         let cleanup_columns = table_columns(&mut tx, "credential_secret_cleanup").await?;
-        if !cleanup_columns.contains("not_before") {
-            sqlx::query("ALTER TABLE credential_secret_cleanup ADD COLUMN not_before TEXT")
+        for (column, definition) in [
+            ("not_before", "TEXT NOT NULL DEFAULT ''"),
+            ("phase", "TEXT NOT NULL DEFAULT 'cleanup'"),
+            ("operation_id", "TEXT"),
+            ("lease_expires_at", "TEXT"),
+            ("cleaned_at", "TEXT"),
+        ] {
+            if !cleanup_columns.contains(column) {
+                sqlx::query(&format!(
+                    "ALTER TABLE credential_secret_cleanup ADD COLUMN {column} {definition}"
+                ))
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query(
-                "UPDATE credential_secret_cleanup SET not_before = created_at WHERE not_before IS NULL",
-            )
-            .execute(&mut *tx)
-            .await?;
+            }
         }
+        sqlx::query(
+            "UPDATE credential_secret_cleanup SET not_before = created_at WHERE not_before = ''",
+        )
+        .execute(&mut *tx)
+        .await?;
 
         let connector_columns = table_columns(&mut tx, "connector_accounts").await?;
         if !connector_columns.is_empty() && !connector_columns.contains("credential_id") {
@@ -209,164 +230,6 @@ impl SqliteCredentialMetadataStore {
         Ok(())
     }
 
-    pub async fn stage_secret_cleanup(
-        &self,
-        scope: &CredentialScope,
-        secret_ids: &[SecretId],
-    ) -> anyhow::Result<()> {
-        scope.validate()?;
-        let mut tx = self.pool.begin().await?;
-        let not_before = Utc::now() + Duration::minutes(SECRET_STAGING_GRACE_MINUTES);
-        for secret_id in secret_ids {
-            enqueue_secret_cleanup(&mut tx, scope, secret_id, not_before).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn activate_credential(
-        &self,
-        scope: &CredentialScope,
-        credential: &ProviderCredential,
-    ) -> anyhow::Result<()> {
-        validate_credential(scope, credential)?;
-        let mut tx = self.pool.begin().await?;
-        upsert_credential_in_transaction(&mut tx, scope, credential).await?;
-        remove_secret_cleanup(&mut tx, scope, &credential.access_secret_id).await?;
-        if let Some(secret_id) = &credential.refresh_secret_id {
-            remove_secret_cleanup(&mut tx, scope, secret_id).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn activate_credential_fenced(
-        &self,
-        scope: &CredentialScope,
-        credential: &ProviderCredential,
-        authorization_id: &str,
-        owner_id: &str,
-        now: DateTime<Utc>,
-    ) -> anyhow::Result<()> {
-        validate_credential(scope, credential)?;
-        let mut tx = self.pool.begin().await?;
-        validate_oauth_fence(&mut tx, scope, authorization_id, owner_id, now).await?;
-        upsert_credential_in_transaction(&mut tx, scope, credential).await?;
-        remove_secret_cleanup(&mut tx, scope, &credential.access_secret_id).await?;
-        if let Some(secret_id) = &credential.refresh_secret_id {
-            remove_secret_cleanup(&mut tx, scope, secret_id).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn replace_credential_transactional(
-        &self,
-        scope: &CredentialScope,
-        credential: &ProviderCredential,
-    ) -> anyhow::Result<ProviderCredential> {
-        validate_credential(scope, credential)?;
-        let mut tx = self.pool.begin().await?;
-        let current = sqlx::query(
-            r#"SELECT credential_id, provider_id, provider_subject, access_secret_id,
-                refresh_secret_id, granted_scopes_json, expires_at, revoked_at
-            FROM credential_records
-            WHERE app_id = ? AND tenant_id = ? AND user_id = ? AND credential_id = ?"#,
-        )
-        .bind(&scope.app_id)
-        .bind(&scope.tenant_id)
-        .bind(&scope.user_id)
-        .bind(&credential.credential_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .map(credential_from_row)
-        .transpose()?
-        .ok_or_else(|| anyhow::anyhow!("provider credential is unavailable"))?;
-        anyhow::ensure!(
-            current.revoked_at.is_none(),
-            "provider credential is revoked"
-        );
-        anyhow::ensure!(
-            current.provider_id == credential.provider_id
-                && current.provider_subject == credential.provider_subject,
-            "provider credential identity cannot change during rotation"
-        );
-        let rows = sqlx::query(
-            r#"SELECT allowed_scopes_json FROM connector_accounts
-            WHERE app_id = ? AND tenant_id = ? AND user_id = ? AND credential_id = ?"#,
-        )
-        .bind(&scope.app_id)
-        .bind(&scope.tenant_id)
-        .bind(&scope.user_id)
-        .bind(&credential.credential_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        for row in rows {
-            let allowed: BTreeSet<String> =
-                serde_json::from_str(row.try_get("allowed_scopes_json")?)?;
-            anyhow::ensure!(
-                allowed.is_subset(&credential.granted_scopes),
-                "rotated provider grant no longer covers a Connector binding"
-            );
-        }
-        upsert_credential_in_transaction(&mut tx, scope, credential).await?;
-        remove_secret_cleanup(&mut tx, scope, &credential.access_secret_id).await?;
-        if let Some(secret_id) = &credential.refresh_secret_id {
-            remove_secret_cleanup(&mut tx, scope, secret_id).await?;
-        }
-        if current.access_secret_id != credential.access_secret_id {
-            enqueue_secret_cleanup(&mut tx, scope, &current.access_secret_id, Utc::now()).await?;
-        }
-        if let Some(secret_id) = &current.refresh_secret_id
-            && credential.refresh_secret_id.as_ref() != Some(secret_id)
-        {
-            enqueue_secret_cleanup(&mut tx, scope, secret_id, Utc::now()).await?;
-        }
-        tx.commit().await?;
-        Ok(current)
-    }
-
-    pub async fn pending_secret_cleanup(
-        &self,
-        scope: &CredentialScope,
-    ) -> anyhow::Result<Vec<SecretId>> {
-        scope.validate()?;
-        let rows = sqlx::query(
-            r#"SELECT secret_id FROM credential_secret_cleanup
-            WHERE app_id = ? AND tenant_id = ? AND user_id = ?
-                AND COALESCE(not_before, created_at) <= ?
-            ORDER BY created_at, secret_id"#,
-        )
-        .bind(&scope.app_id)
-        .bind(&scope.tenant_id)
-        .bind(&scope.user_id)
-        .bind(Utc::now().to_rfc3339())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| SecretId::parse(row.try_get("secret_id")?))
-            .collect()
-    }
-
-    pub async fn complete_secret_cleanup(
-        &self,
-        scope: &CredentialScope,
-        secret_id: &SecretId,
-    ) -> anyhow::Result<()> {
-        scope.validate()?;
-        sqlx::query(
-            r#"DELETE FROM credential_secret_cleanup
-            WHERE app_id = ? AND tenant_id = ? AND user_id = ? AND secret_id = ?"#,
-        )
-        .bind(&scope.app_id)
-        .bind(&scope.tenant_id)
-        .bind(&scope.user_id)
-        .bind(secret_id.as_str())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     pub async fn get_credential(
         &self,
         scope: &CredentialScope,
@@ -427,9 +290,9 @@ impl SqliteCredentialMetadataStore {
             bindings == 0,
             "provider credential is still bound to a connector"
         );
-        enqueue_secret_cleanup(&mut tx, scope, &credential.access_secret_id, Utc::now()).await?;
+        cleanup::enqueue_cleanup_tombstone(&mut tx, scope, &credential.access_secret_id).await?;
         if let Some(secret_id) = &credential.refresh_secret_id {
-            enqueue_secret_cleanup(&mut tx, scope, secret_id, Utc::now()).await?;
+            cleanup::enqueue_cleanup_tombstone(&mut tx, scope, secret_id).await?;
         }
         if credential.revoked_at.is_some() {
             tx.commit().await?;
@@ -762,89 +625,6 @@ async fn validate_oauth_fence(
     Ok(())
 }
 
-async fn upsert_credential_in_transaction(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    scope: &CredentialScope,
-    credential: &ProviderCredential,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"INSERT INTO credential_records(
-            app_id, tenant_id, user_id, credential_id, provider_id, provider_subject,
-            access_secret_id, refresh_secret_id, granted_scopes_json, expires_at,
-            revoked_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(app_id, tenant_id, user_id, credential_id) DO UPDATE SET
-            provider_id = excluded.provider_id,
-            provider_subject = excluded.provider_subject,
-            access_secret_id = excluded.access_secret_id,
-            refresh_secret_id = excluded.refresh_secret_id,
-            granted_scopes_json = excluded.granted_scopes_json,
-            expires_at = excluded.expires_at,
-            revoked_at = excluded.revoked_at,
-            updated_at = excluded.updated_at"#,
-    )
-    .bind(&scope.app_id)
-    .bind(&scope.tenant_id)
-    .bind(&scope.user_id)
-    .bind(&credential.credential_id)
-    .bind(&credential.provider_id)
-    .bind(&credential.provider_subject)
-    .bind(credential.access_secret_id.as_str())
-    .bind(credential.refresh_secret_id.as_ref().map(SecretId::as_str))
-    .bind(serde_json::to_string(&credential.granted_scopes)?)
-    .bind(credential.expires_at.map(|value| value.to_rfc3339()))
-    .bind(credential.revoked_at.map(|value| value.to_rfc3339()))
-    .bind(Utc::now().to_rfc3339())
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-async fn enqueue_secret_cleanup(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    scope: &CredentialScope,
-    secret_id: &SecretId,
-    not_before: DateTime<Utc>,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"INSERT INTO credential_secret_cleanup(
-            app_id, tenant_id, user_id, secret_id, created_at, not_before
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(app_id, tenant_id, user_id, secret_id) DO UPDATE SET
-            not_before = CASE
-                WHEN credential_secret_cleanup.not_before IS NULL
-                    OR excluded.not_before < credential_secret_cleanup.not_before
-                THEN excluded.not_before ELSE credential_secret_cleanup.not_before END"#,
-    )
-    .bind(&scope.app_id)
-    .bind(&scope.tenant_id)
-    .bind(&scope.user_id)
-    .bind(secret_id.as_str())
-    .bind(Utc::now().to_rfc3339())
-    .bind(not_before.to_rfc3339())
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-async fn remove_secret_cleanup(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    scope: &CredentialScope,
-    secret_id: &SecretId,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        r#"DELETE FROM credential_secret_cleanup
-        WHERE app_id = ? AND tenant_id = ? AND user_id = ? AND secret_id = ?"#,
-    )
-    .bind(&scope.app_id)
-    .bind(&scope.tenant_id)
-    .bind(&scope.user_id)
-    .bind(secret_id.as_str())
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
 async fn table_columns(
     connection: &mut SqliteConnection,
     table: &str,
@@ -966,3 +746,7 @@ fn parse_required_time(value: &str) -> anyhow::Result<DateTime<Utc>> {
 #[cfg(test)]
 #[path = "credential_sqlite_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "credential_cleanup_sqlite_tests.rs"]
+mod cleanup_tests;
