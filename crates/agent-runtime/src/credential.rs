@@ -328,22 +328,59 @@ impl CredentialVault {
         validate_connector_account(&account)?;
         if let Some(metadata) = &self.metadata {
             metadata.upsert_account(&account).await?;
-            self.state
-                .lock()
-                .expect("credential vault state lock poisoned")
-                .accounts
-                .insert(
-                    (
-                        account.scope.clone(),
-                        account.connector_id.clone(),
-                        account.account_id.clone(),
-                    ),
-                    account,
-                );
+            self.cache_account(account);
             Ok(())
         } else {
             self.register_account(account)
         }
+    }
+
+    pub async fn register_account_persistent_exclusive(
+        &self,
+        account: ConnectorAccount,
+    ) -> anyhow::Result<()> {
+        validate_connector_account(&account)?;
+        let metadata = self
+            .metadata
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("persistent credential metadata is unavailable"))?;
+        metadata.insert_account(&account).await?;
+        self.cache_account(account);
+        Ok(())
+    }
+
+    pub(crate) async fn register_account_persistent_exclusive_fenced(
+        &self,
+        account: ConnectorAccount,
+        authorization_id: &str,
+        owner_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        validate_connector_account(&account)?;
+        let metadata = self
+            .metadata
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("persistent credential metadata is unavailable"))?;
+        metadata
+            .insert_account_fenced(&account, authorization_id, owner_id, now)
+            .await?;
+        self.cache_account(account);
+        Ok(())
+    }
+
+    fn cache_account(&self, account: ConnectorAccount) {
+        self.state
+            .lock()
+            .expect("credential vault state lock poisoned")
+            .accounts
+            .insert(
+                (
+                    account.scope.clone(),
+                    account.connector_id.clone(),
+                    account.account_id.clone(),
+                ),
+                account,
+            );
     }
 
     pub async fn list_connector_accounts(
@@ -423,7 +460,186 @@ impl CredentialVault {
         Ok((state, verifier))
     }
 
+    pub async fn save_oauth_pkce_verifier(
+        &self,
+        scope: &CredentialScope,
+        secret_id: &SecretId,
+        verifier: SecretMaterial,
+    ) -> anyhow::Result<()> {
+        scope.validate()?;
+        self.store.save(scope, secret_id, verifier).await
+    }
+
+    pub async fn consume_oauth_pkce_verifier(
+        &self,
+        scope: &CredentialScope,
+        secret_id: &SecretId,
+    ) -> anyhow::Result<SecretMaterial> {
+        scope.validate()?;
+        let verifier = self
+            .store
+            .load(scope, secret_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("OAuth PKCE verifier is unavailable"))?;
+        self.store.delete(scope, secret_id).await?;
+        Ok(verifier)
+    }
+
+    pub async fn delete_oauth_pkce_verifier(
+        &self,
+        scope: &CredentialScope,
+        secret_id: &SecretId,
+    ) -> anyhow::Result<bool> {
+        scope.validate()?;
+        self.store.delete(scope, secret_id).await
+    }
+
+    pub(crate) async fn delete_secret_material(
+        &self,
+        scope: &CredentialScope,
+        secret_id: &SecretId,
+    ) -> anyhow::Result<bool> {
+        scope.validate()?;
+        self.store.delete(scope, secret_id).await
+    }
+
+    pub(crate) async fn cleanup_pending_secret_material(
+        &self,
+        scope: &CredentialScope,
+    ) -> anyhow::Result<()> {
+        scope.validate()?;
+        let metadata = self
+            .metadata
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("persistent credential metadata is unavailable"))?;
+        for secret_id in metadata.pending_secret_cleanup(scope).await? {
+            self.store.delete(scope, &secret_id).await?;
+            metadata.complete_secret_cleanup(scope, &secret_id).await?;
+        }
+        Ok(())
+    }
+
     pub async fn save_provider_credential(
+        &self,
+        scope: &CredentialScope,
+        credential: ProviderCredential,
+        access_secret: SecretMaterial,
+        refresh_secret: Option<SecretMaterial>,
+    ) -> anyhow::Result<()> {
+        self.save_provider_credential_inner(scope, credential, access_secret, refresh_secret, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn save_provider_credential_fenced(
+        &self,
+        scope: &CredentialScope,
+        credential: ProviderCredential,
+        access_secret: SecretMaterial,
+        refresh_secret: Option<SecretMaterial>,
+        authorization_id: &str,
+        owner_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.save_provider_credential_inner(
+            scope,
+            credential,
+            access_secret,
+            refresh_secret,
+            Some((authorization_id, owner_id, now)),
+        )
+        .await
+    }
+
+    async fn save_provider_credential_inner(
+        &self,
+        scope: &CredentialScope,
+        credential: ProviderCredential,
+        access_secret: SecretMaterial,
+        refresh_secret: Option<SecretMaterial>,
+        fence: Option<(&str, &str, DateTime<Utc>)>,
+    ) -> anyhow::Result<()> {
+        scope.validate()?;
+        validate_provider_credential(&credential)?;
+        anyhow::ensure!(
+            credential.refresh_secret_id.is_some() == refresh_secret.is_some(),
+            "refresh secret metadata and material must be provided together"
+        );
+        let metadata = self
+            .metadata
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("persistent credential metadata is unavailable"))?;
+        let mut staged = vec![credential.access_secret_id.clone()];
+        if let Some(secret_id) = &credential.refresh_secret_id {
+            staged.push(secret_id.clone());
+        }
+        metadata.stage_secret_cleanup(scope, &staged).await?;
+        if let Err(error) = self
+            .store
+            .save(scope, &credential.access_secret_id, access_secret)
+            .await
+        {
+            let _ = self.cleanup_pending_secret_material(scope).await;
+            return Err(error);
+        }
+        if let (Some(secret_id), Some(secret)) = (&credential.refresh_secret_id, refresh_secret)
+            && let Err(error) = self.store.save(scope, secret_id, secret).await
+        {
+            let _ = self.cleanup_pending_secret_material(scope).await;
+            return Err(error);
+        }
+        let activation = match fence {
+            Some((authorization_id, owner_id, now)) => {
+                metadata
+                    .activate_credential_fenced(scope, &credential, authorization_id, owner_id, now)
+                    .await
+            }
+            None => metadata.activate_credential(scope, &credential).await,
+        };
+        if let Err(error) = activation {
+            let _ = self.cleanup_pending_secret_material(scope).await;
+            return Err(error);
+        }
+        self.state
+            .lock()
+            .expect("credential vault state lock poisoned")
+            .credentials
+            .insert(
+                (scope.clone(), credential.credential_id.clone()),
+                credential,
+            );
+        Ok(())
+    }
+
+    pub async fn lease_provider_refresh_secret(
+        &self,
+        scope: &CredentialScope,
+        provider_id: &str,
+        credential_id: &str,
+    ) -> anyhow::Result<SecretMaterial> {
+        scope.validate()?;
+        let credential = self
+            .get_provider_credential(scope, credential_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("provider credential is unavailable"))?;
+        anyhow::ensure!(
+            credential.provider_id == provider_id,
+            "OAuth provider mismatch"
+        );
+        anyhow::ensure!(
+            credential.revoked_at.is_none(),
+            "provider credential is revoked"
+        );
+        let secret_id = credential
+            .refresh_secret_id
+            .ok_or_else(|| anyhow::anyhow!("provider refresh credential is unavailable"))?;
+        self.store
+            .load(scope, &secret_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("provider refresh credential is unavailable"))
+    }
+
+    pub async fn replace_provider_credential(
         &self,
         scope: &CredentialScope,
         credential: ProviderCredential,
@@ -436,24 +652,55 @@ impl CredentialVault {
             credential.refresh_secret_id.is_some() == refresh_secret.is_some(),
             "refresh secret metadata and material must be provided together"
         );
+        let current = self
+            .get_provider_credential(scope, &credential.credential_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("provider credential is unavailable"))?;
+        anyhow::ensure!(
+            current.revoked_at.is_none(),
+            "provider credential is revoked"
+        );
+        anyhow::ensure!(
+            current.provider_id == credential.provider_id
+                && current.provider_subject == credential.provider_subject,
+            "provider credential identity cannot change during rotation"
+        );
+        for account in self.list_connector_accounts(scope, None).await? {
+            if account.credential_id == credential.credential_id {
+                anyhow::ensure!(
+                    account.allowed_scopes.is_subset(&credential.granted_scopes),
+                    "rotated provider grant no longer covers a Connector binding"
+                );
+            }
+        }
         let metadata = self
             .metadata
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("persistent credential metadata is unavailable"))?;
-        self.store
+        let mut staged = vec![credential.access_secret_id.clone()];
+        if let Some(secret_id) = &credential.refresh_secret_id {
+            staged.push(secret_id.clone());
+        }
+        metadata.stage_secret_cleanup(scope, &staged).await?;
+        if let Err(error) = self
+            .store
             .save(scope, &credential.access_secret_id, access_secret)
-            .await?;
+            .await
+        {
+            let _ = self.cleanup_pending_secret_material(scope).await;
+            return Err(error);
+        }
         if let (Some(secret_id), Some(secret)) = (&credential.refresh_secret_id, refresh_secret)
             && let Err(error) = self.store.save(scope, secret_id, secret).await
         {
-            let _ = self.store.delete(scope, &credential.access_secret_id).await;
+            let _ = self.cleanup_pending_secret_material(scope).await;
             return Err(error);
         }
-        if let Err(error) = metadata.upsert_credential(scope, &credential).await {
-            let _ = self.store.delete(scope, &credential.access_secret_id).await;
-            if let Some(secret_id) = &credential.refresh_secret_id {
-                let _ = self.store.delete(scope, secret_id).await;
-            }
+        if let Err(error) = metadata
+            .replace_credential_transactional(scope, &credential)
+            .await
+        {
+            let _ = self.cleanup_pending_secret_material(scope).await;
             return Err(error);
         }
         self.state
@@ -464,6 +711,9 @@ impl CredentialVault {
                 (scope.clone(), credential.credential_id.clone()),
                 credential,
             );
+        if let Err(error) = self.cleanup_pending_secret_material(scope).await {
+            tracing::warn!(error = %error, "credential secret cleanup remains pending");
+        }
         Ok(())
     }
 
@@ -525,8 +775,8 @@ impl CredentialVault {
         now: DateTime<Utc>,
     ) -> anyhow::Result<bool> {
         scope.validate()?;
-        let credential = if let Some(metadata) = &self.metadata {
-            let Some(credential) = metadata
+        if let Some(metadata) = &self.metadata {
+            let Some(_credential) = metadata
                 .revoke_credential_if_unbound(scope, credential_id, now)
                 .await?
             else {
@@ -537,9 +787,11 @@ impl CredentialVault {
                 .expect("credential vault state lock poisoned")
                 .credentials
                 .remove(&(scope.clone(), credential_id.to_string()));
-            credential
-        } else {
-            let mut state = self
+            self.cleanup_pending_secret_material(scope).await?;
+            return Ok(true);
+        }
+        let credential = {
+            let state = self
                 .state
                 .lock()
                 .expect("credential vault state lock poisoned");
@@ -559,9 +811,6 @@ impl CredentialVault {
             if credential.revoked_at.is_some() {
                 return Ok(false);
             }
-            state
-                .credentials
-                .remove(&(scope.clone(), credential_id.to_string()));
             credential
         };
         self.store
@@ -570,6 +819,11 @@ impl CredentialVault {
         if let Some(secret_id) = &credential.refresh_secret_id {
             self.store.delete(scope, secret_id).await?;
         }
+        self.state
+            .lock()
+            .expect("credential vault state lock poisoned")
+            .credentials
+            .remove(&(scope.clone(), credential_id.to_string()));
         Ok(true)
     }
 
@@ -700,143 +954,5 @@ fn validate_provider_credential(credential: &ProviderCredential) -> anyhow::Resu
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn scope(app_id: &str) -> CredentialScope {
-        CredentialScope {
-            app_id: app_id.into(),
-            tenant_id: "tenant".into(),
-            user_id: "user".into(),
-        }
-    }
-
-    #[tokio::test]
-    async fn secrets_are_scoped_rotatable_and_redacted() {
-        let store = InMemorySecretStore::default();
-        let id = SecretId::parse("mail.account.primary").unwrap();
-        store
-            .save(
-                &scope("com.example.a"),
-                &id,
-                SecretMaterial::new("old").unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            store
-                .load(&scope("com.example.b"), &id)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        store
-            .rotate(
-                &scope("com.example.a"),
-                &id,
-                SecretMaterial::new("new").unwrap(),
-            )
-            .await
-            .unwrap();
-        let loaded = store
-            .load(&scope("com.example.a"), &id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(loaded.expose_bytes(), b"new");
-        assert_eq!(format!("{loaded:?}"), "SecretMaterial([REDACTED])");
-    }
-
-    #[tokio::test]
-    async fn vault_only_leases_exact_connector_account_and_scopes() {
-        let store = Arc::new(InMemorySecretStore::default());
-        let id = SecretId::parse("mail.account.primary").unwrap();
-        let account_scope = scope("com.example.mail");
-        store
-            .save(
-                &account_scope,
-                &id,
-                SecretMaterial::new("credential").unwrap(),
-            )
-            .await
-            .unwrap();
-        let vault = CredentialVault::new(store);
-        vault
-            .register_provider_credential(
-                &account_scope,
-                ProviderCredential {
-                    access_secret_id: id,
-                    credential_id: "fake-principal".into(),
-                    expires_at: None,
-                    granted_scopes: BTreeSet::from(["contacts.read".into(), "mail.read".into()]),
-                    provider_id: "fake".into(),
-                    provider_subject: "provider-user".into(),
-                    refresh_secret_id: None,
-                    revoked_at: None,
-                },
-            )
-            .unwrap();
-        vault
-            .register_account(ConnectorAccount {
-                account_id: "primary".into(),
-                allowed_scopes: BTreeSet::from(["mail.read".into()]),
-                connector_id: "mail.fake".into(),
-                credential_id: "fake-principal".into(),
-                scope: account_scope.clone(),
-            })
-            .unwrap();
-        vault
-            .register_account(ConnectorAccount {
-                account_id: "primary".into(),
-                allowed_scopes: BTreeSet::from(["contacts.read".into()]),
-                connector_id: "contacts.fake".into(),
-                credential_id: "fake-principal".into(),
-                scope: account_scope.clone(),
-            })
-            .unwrap();
-
-        assert!(
-            vault
-                .lease_for_connector(
-                    &account_scope,
-                    "mail.fake",
-                    "primary",
-                    &BTreeSet::from(["mail.read".into()])
-                )
-                .await
-                .is_ok()
-        );
-        assert!(
-            vault
-                .lease_for_connector(
-                    &account_scope,
-                    "contacts.fake",
-                    "primary",
-                    &BTreeSet::from(["contacts.read".into()])
-                )
-                .await
-                .is_ok()
-        );
-        assert!(
-            vault
-                .lease_for_connector(&account_scope, "calendar.fake", "primary", &BTreeSet::new())
-                .await
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn serialized_metadata_never_contains_secret_material() {
-        let account = ConnectorAccount {
-            account_id: "primary".into(),
-            allowed_scopes: BTreeSet::new(),
-            connector_id: "mail.fake".into(),
-            credential_id: "fake-principal".into(),
-            scope: scope("com.example.mail"),
-        };
-        let json = serde_json::to_string(&account).unwrap();
-        assert!(json.contains("fake-principal"));
-        assert!(!json.contains("mail.account.primary"));
-        assert!(!json.contains("credential-value"));
-    }
-}
+#[path = "credential_tests.rs"]
+mod tests;

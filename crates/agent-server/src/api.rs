@@ -62,6 +62,7 @@ pub struct AppState {
     connector_tools: Option<agent_runtime::connector_tools::ConnectorToolRuntime>,
     mail_actions: Option<agent_runtime::foundation_actions::MailActionService>,
     automation: Option<crate::automation_api::AutomationApiState>,
+    oauth_broker: Option<agent_runtime::oauth::OAuthBroker>,
 }
 
 impl AppState {
@@ -168,6 +169,7 @@ impl AppState {
             connector_tools,
             mail_actions: None,
             automation: None,
+            oauth_broker: None,
         }
     }
 
@@ -280,6 +282,7 @@ impl AppState {
             connector_tools,
             mail_actions: None,
             automation: None,
+            oauth_broker: None,
         }
     }
 
@@ -337,6 +340,7 @@ impl AppState {
             connector_tools: None,
             mail_actions: None,
             automation: None,
+            oauth_broker: None,
         }
     }
 
@@ -358,6 +362,11 @@ impl AppState {
         self.automation =
             Some(crate::automation_api::AutomationApiState::from_storage(storage).await?);
         Ok(self)
+    }
+
+    pub fn with_oauth_broker(mut self, oauth_broker: agent_runtime::oauth::OAuthBroker) -> Self {
+        self.oauth_broker = Some(oauth_broker);
+        self
     }
 
     pub fn with_mail_foundation(
@@ -575,21 +584,25 @@ pub fn router_for_transport(
         .merge(crate::task_api::router())
         .merge(crate::attachment_api::router())
         .merge(crate::data_protection_api::router())
-        .merge(crate::automation_api::router());
+        .merge(crate::automation_api::router())
+        .merge(crate::oauth_api::protected_router());
     if let Some(owner_routes) = crate::owner_api::router(&state) {
         router = router.merge(owner_routes);
     }
     if include_dev_routes {
         router = router.merge(crate::dev_api::routes());
     }
-    match transport_auth {
-        Some(auth) => router.route_layer(middleware::from_fn_with_state(
-            auth,
-            crate::local_transport::require_transport,
-        )),
-        None => router.layer(desktop_cors_layer()),
-    }
-    .with_state(state)
+    let callback_router = crate::oauth_api::callback_router();
+    let router = match transport_auth {
+        Some(auth) => router
+            .route_layer(middleware::from_fn_with_state(
+                auth,
+                crate::local_transport::require_transport,
+            ))
+            .merge(callback_router),
+        None => router.merge(callback_router).layer(desktop_cors_layer()),
+    };
+    router.with_state(state)
 }
 
 impl AppState {
@@ -660,6 +673,10 @@ impl AppState {
 
     pub(crate) fn automation(&self) -> Option<&crate::automation_api::AutomationApiState> {
         self.automation.as_ref()
+    }
+
+    pub fn oauth_broker(&self) -> Option<&agent_runtime::oauth::OAuthBroker> {
+        self.oauth_broker.as_ref()
     }
 }
 
