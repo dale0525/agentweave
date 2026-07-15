@@ -1,24 +1,27 @@
-use crate::approval::{
-    ApprovalBinding, ApprovalDecision, ApprovalRecord, ApprovalRisk, ApprovalStatus,
-};
+use crate::approval::{ApprovalDecision, ApprovalRecord, ApprovalStatus};
 use crate::connector::{ConnectorExecutionResult, connector_action_hash};
 use crate::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
 use crate::credential::CredentialScope;
 use crate::durable_run::{
-    ActionOutcome, ActionStatus, DurableAction, DurableRunStore, OutboxStatus, QueueActionRequest,
-    RunScope, RunStatus,
+    ActionOutcome, ActionStatus, DurableAction, DurableRunStore, OutboxStatus, RunScope, RunStatus,
+};
+use crate::foundation_action_envelope::{
+    DurableFoundationActionStore, FoundationActionEnvelope, FoundationActionRequest,
 };
 use crate::mail::{
     ApprovedSendRequest, DeliveryState, PreviewSendRequest, SendPreview, sha256_hex,
+};
+use crate::mail_action_envelope::{
+    CanonicalMailSendEnvelope, MAIL_SEND_ACTION_KIND, MAIL_SEND_OPERATION,
 };
 use crate::mail_connector_transport::MAIL_CONNECTOR_ID;
 use crate::storage::Storage;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 
-const MAIL_SEND_ACTION: &str = "mail_send";
+const LEGACY_MAIL_SEND_ACTION: &str = "mail_send";
 const MAIL_SEND_PREVIEW_ACTION: &str = "mail_send_preview";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -60,7 +63,6 @@ impl FoundationActionTurnContext {
         &self.turn_id
     }
 }
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingFoundationAction {
@@ -80,6 +82,7 @@ pub struct FoundationActionResolution {
 #[derive(Clone)]
 pub struct MailActionService {
     store: DurableRunStore,
+    envelopes: DurableFoundationActionStore,
     tools: ConnectorToolRuntime,
     context: Arc<EphemeralConnectorContextProvider>,
     scope: CredentialScope,
@@ -100,8 +103,11 @@ impl MailActionService {
             !policy_version.trim().is_empty(),
             "foundation action policy version is required"
         );
+        let store = DurableRunStore::from_storage(storage).await?;
+        let envelopes = DurableFoundationActionStore::from_storage(storage).await?;
         Ok(Self {
-            store: DurableRunStore::from_storage(storage).await?,
+            store,
+            envelopes,
             tools,
             context,
             scope,
@@ -176,94 +182,40 @@ impl MailActionService {
     ) -> anyhow::Result<PendingFoundationAction> {
         validate_preview(&preview)?;
         let run_scope = self.run_scope(session_id);
-        let arguments = json!({"preview": preview});
+        let legacy_arguments = serde_json::json!({"preview": preview});
         if let Some(existing) = self
             .store
             .find_scoped_action_by_idempotency(
                 &run_scope,
-                MAIL_SEND_ACTION,
-                preview_idempotency_key(&arguments)?,
+                LEGACY_MAIL_SEND_ACTION,
+                preview_idempotency_key(&legacy_arguments)?,
             )
             .await?
         {
             anyhow::ensure!(
-                existing.arguments_sha256 == crate::approval::immutable_arguments_hash(&arguments)?,
+                existing.arguments_sha256
+                    == crate::approval::immutable_arguments_hash(&legacy_arguments)?,
                 "mail send idempotency key conflicts with another preview"
             );
             return self.pending_from_action(existing).await;
         }
-
-        let run = self
-            .store
-            .create_run(run_scope, "Send an approved Mail draft", now)
-            .await?;
-        anyhow::ensure!(
-            self.store
-                .transition_run(&run.run_id, run.version, RunStatus::Running, json!({}), now)
-                .await?,
-            "mail action run could not start"
-        );
-        let step = self
-            .store
-            .add_step(&run.run_id, 0, MAIL_SEND_ACTION, json!({}), now)
-            .await?;
-        let preview = preview_from_arguments(&arguments)?;
-        let action = self
-            .store
-            .queue_action(
-                QueueActionRequest {
-                    run_id: &run.run_id,
-                    step_id: &step.step_id,
-                    action_name: MAIL_SEND_ACTION,
-                    arguments,
-                    resource_target: &format!("mail-account:{}", preview.account_id),
-                    idempotency_key: &preview.idempotency_key,
-                    approval_required: true,
+        let envelope =
+            CanonicalMailSendEnvelope::from_preview(preview.clone())?.into_foundation_action()?;
+        let pending = self
+            .envelopes
+            .request(
+                FoundationActionRequest {
+                    scope: run_scope,
+                    envelope,
+                    policy_version: self.policy_version.clone(),
+                    expires_at: now + Duration::minutes(15),
                 },
                 now,
             )
             .await?;
-        let binding = ApprovalBinding {
-            actor_id: self.scope.user_id.clone(),
-            app_id: self.scope.app_id.clone(),
-            run_id: run.run_id.clone(),
-            action_id: action.action_id.clone(),
-            action_name: action.action_name.clone(),
-            arguments_sha256: action.arguments_sha256.clone(),
-            resource_target: action.resource_target.clone(),
-            policy_version: self.policy_version.clone(),
-            risk: ApprovalRisk::ExternalWrite,
-            risk_summary: mail_risk_summary(&preview),
-            session_id: run.scope.session_id.clone(),
-            expires_at: now + Duration::minutes(15),
-        };
-        let approval = self.store.request_approval(binding, now).await?;
-        anyhow::ensure!(
-            self.store
-                .bind_action_approval(&action.action_id, &approval.approval_id, now)
-                .await?,
-            "mail action approval could not be bound"
-        );
-        anyhow::ensure!(
-            self.store
-                .transition_run(
-                    &run.run_id,
-                    run.version + 1,
-                    RunStatus::WaitingApproval,
-                    json!({"actionId": action.action_id, "approvalId": approval.approval_id}),
-                    now,
-                )
-                .await?,
-            "mail action run could not wait for approval"
-        );
-        let action = self
-            .store
-            .get_action(&action.action_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("mail action disappeared"))?;
         Ok(PendingFoundationAction {
-            approval,
-            action,
+            approval: pending.approval,
+            action: pending.action,
             preview: Some(preview),
         })
     }
@@ -284,9 +236,10 @@ impl MailActionService {
                 .get_action(&approval.binding.action_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("approved action is missing"))?;
-            let preview = (action.action_name == MAIL_SEND_ACTION)
-                .then(|| preview_from_arguments(&action.arguments))
-                .transpose()?;
+            if !is_mail_send_action(&action) {
+                continue;
+            }
+            let preview = Some(preview_from_action(&action)?);
             actions.push(PendingFoundationAction {
                 approval,
                 action,
@@ -316,6 +269,13 @@ impl MailActionService {
         anyhow::ensure!(
             current.binding.actor_id == resolver,
             "approval actor mismatch"
+        );
+        anyhow::ensure!(
+            matches!(
+                current.binding.action_name.as_str(),
+                MAIL_SEND_ACTION_KIND | LEGACY_MAIL_SEND_ACTION
+            ),
+            "approval is not a Mail send action"
         );
         let resolved = self
             .store
@@ -399,14 +359,14 @@ impl MailActionService {
                 .await?,
             "approved action was claimed elsewhere"
         );
-        let preview = preview_from_arguments(&action.arguments)?;
+        let preview = preview_from_action(&action)?;
         let request = ApprovedSendRequest {
             preview_id: preview.id.clone(),
             approval: preview.approval_grant(approval.approval_id.clone()),
         };
         let connector_arguments = serde_json::to_value(request)?;
         let action_hash =
-            connector_action_hash(MAIL_CONNECTOR_ID, MAIL_SEND_ACTION, &connector_arguments)?;
+            connector_action_hash(MAIL_CONNECTOR_ID, MAIL_SEND_OPERATION, &connector_arguments)?;
         self.context
             .grant_once(&action_hash, preview.idempotency_key.clone())?;
         let outbox = self
@@ -425,7 +385,7 @@ impl MailActionService {
         let result = self
             .tools
             .execute(
-                MAIL_SEND_ACTION,
+                MAIL_SEND_OPERATION,
                 &format!("resume:{}", action.action_id),
                 connector_arguments,
             )
@@ -551,7 +511,7 @@ impl MailActionService {
             .get_approval(approval_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("mail action approval disappeared"))?;
-        let preview = preview_from_arguments(&action.arguments)?;
+        let preview = preview_from_action(&action)?;
         Ok(PendingFoundationAction {
             approval,
             action,
@@ -621,31 +581,30 @@ fn preview_from_arguments(arguments: &Value) -> anyhow::Result<SendPreview> {
     serde_json::from_value(preview.clone()).map_err(Into::into)
 }
 
+fn preview_from_action(action: &DurableAction) -> anyhow::Result<SendPreview> {
+    match action.action_name.as_str() {
+        MAIL_SEND_ACTION_KIND => {
+            let envelope = FoundationActionEnvelope::from_action(action)?;
+            Ok(CanonicalMailSendEnvelope::from_foundation_action(&envelope)?.preview)
+        }
+        LEGACY_MAIL_SEND_ACTION => preview_from_arguments(&action.arguments),
+        _ => anyhow::bail!("action is not a Mail send"),
+    }
+}
+
+fn is_mail_send_action(action: &DurableAction) -> bool {
+    matches!(
+        action.action_name.as_str(),
+        MAIL_SEND_ACTION_KIND | LEGACY_MAIL_SEND_ACTION
+    )
+}
+
 fn preview_idempotency_key(arguments: &Value) -> anyhow::Result<&str> {
     arguments
         .get("preview")
         .and_then(|preview| preview.get("idempotencyKey"))
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("mail preview idempotency key is missing"))
-}
-
-fn mail_risk_summary(preview: &SendPreview) -> String {
-    let recipients = preview
-        .to
-        .iter()
-        .chain(&preview.cc)
-        .chain(&preview.bcc)
-        .map(|address| address.address.as_str())
-        .take(8)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "Send mail from account {} to {} with subject {:?}",
-        preview.account_id, recipients, preview.subject
-    )
-    .chars()
-    .take(1024)
-    .collect()
 }
 
 fn agent_preview_idempotency_key(
