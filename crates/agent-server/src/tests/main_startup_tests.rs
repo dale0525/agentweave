@@ -15,6 +15,7 @@ async fn production_registry_selects_local_and_isolates_two_tenant_routers() {
         server_skill_startup::BuiltinSkillsMode::Directory,
         SkillManagementPolicy::owner_only(),
         None,
+        None,
     )
     .await
     .unwrap();

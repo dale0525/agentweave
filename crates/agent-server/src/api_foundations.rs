@@ -49,6 +49,20 @@ impl AppFoundationRuntimes {
 }
 
 impl AppState {
+    pub(crate) fn mail_account_manager(
+        &self,
+    ) -> Option<std::sync::Arc<agent_runtime::mail_imap_smtp_accounts::ImapSmtpMailAccountManager>>
+    {
+        self.mail_account_manager.clone()
+    }
+
+    pub fn with_mail_account_manager(
+        mut self,
+        manager: std::sync::Arc<agent_runtime::mail_imap_smtp_accounts::ImapSmtpMailAccountManager>,
+    ) -> Self {
+        self.mail_account_manager = Some(manager);
+        self
+    }
     pub fn with_mail_foundation(
         mut self,
         connector_tools: agent_runtime::connector_tools::ConnectorToolRuntime,

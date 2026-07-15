@@ -38,6 +38,8 @@ pub mod mail_connector_transport;
 pub mod mail_fake;
 #[cfg(not(target_os = "android"))]
 pub mod mail_imap_smtp;
+#[cfg(not(target_os = "android"))]
+pub mod mail_imap_smtp_accounts;
 pub mod memory;
 pub mod memory_lifecycle;
 pub mod memory_sqlite;

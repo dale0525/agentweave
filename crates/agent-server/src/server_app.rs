@@ -22,7 +22,10 @@ use agent_runtime::contacts::FakeContactsConnector;
 use agent_runtime::contacts_connector_transport::{
     CONTACTS_CONNECTOR_ID, CONTACTS_TOOL_NAMES, ContactsConnectorTransport,
 };
-use agent_runtime::credential::{ConnectorAccount, CredentialScope, ProviderCredential, SecretId};
+use agent_runtime::credential::{
+    ConnectorAccount, CredentialScope, CredentialVault, ProviderCredential, SecretId,
+    SecretMaterial,
+};
 use agent_runtime::mail::{MailAccount, MailAddress, MailConnector};
 use agent_runtime::mail_attachments::{MailAttachmentSource, StoredMailAttachmentSource};
 use agent_runtime::mail_connector_transport::{
@@ -30,6 +33,9 @@ use agent_runtime::mail_connector_transport::{
 };
 use agent_runtime::mail_fake::FakeMailConnector;
 use agent_runtime::mail_imap_smtp::{ImapSmtpMailConfig, ImapSmtpMailConnector};
+use agent_runtime::mail_imap_smtp_accounts::{
+    ImapSmtpMailAccountManager, ManagedImapSmtpMailConnector, SqliteImapSmtpMailAccountStore,
+};
 use agent_runtime::memory::{MemoryProvider, MemoryScope};
 use agent_runtime::memory_tools::MemoryToolRuntime;
 use agent_runtime::platform::PlatformId;
@@ -40,7 +46,7 @@ use agent_runtime::task_tools::TaskToolRuntime;
 use agent_runtime::tasks::{TaskProvider, TaskScope};
 use agent_runtime::tools::RuntimeConfig;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +56,7 @@ pub(super) struct ResolvedConnectorFoundation {
     pub(super) calendar_actions: Option<agent_runtime::calendar_actions::CalendarActionService>,
     pub(super) contacts_actions: Option<agent_runtime::contacts_actions::ContactsActionService>,
     pub(super) oauth_broker: Option<agent_runtime::oauth::OAuthBroker>,
+    pub(super) account_manager: Option<Arc<ImapSmtpMailAccountManager>>,
 }
 
 pub(super) struct ResolvedServerApp {
@@ -65,6 +72,12 @@ impl ResolvedServerApp {
             None => runtime_config,
         }
     }
+}
+
+pub(super) fn credential_root_for_database(database_path: Option<&Path>) -> Option<PathBuf> {
+    database_path
+        .and_then(Path::parent)
+        .map(|parent| parent.join("credentials"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,6 +286,8 @@ pub(super) async fn resolve_connector_tools(
     storage: &Storage,
     app_prompt: &AppPromptConfig,
     runtime_config: &RuntimeConfig,
+    credential_vault_key: Option<Arc<SecretMaterial>>,
+    credential_root: Option<&Path>,
 ) -> anyhow::Result<Option<ResolvedConnectorFoundation>> {
     let mail_declared = app_prompt
         .identity
@@ -307,9 +322,10 @@ pub(super) async fn resolve_connector_tools(
     let ledger = Arc::new(
         agent_runtime::connector_ledger::SqliteConnectorActionLedger::from_storage(storage).await?,
     );
-    let vault = resolve_credential_vault(storage).await?;
+    let vault =
+        resolve_credential_vault(storage, credential_vault_key.as_deref(), credential_root).await?;
     let runtime = Arc::new(ConnectorRuntime::new_with_ledger(
-        vault.clone(),
+        vault.as_deref().cloned(),
         ledger,
         256 * 1024,
     )?);
@@ -349,7 +365,7 @@ pub(super) async fn resolve_connector_tools(
                 scope.clone(),
                 std::env::var("AGENTWEAVE_OAUTH_CALLBACK_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:43121/oauth/callback".into()),
-                Arc::new(configured_vault.clone()),
+                configured_vault.clone(),
                 vec![provider],
             )
             .await?,
@@ -359,7 +375,7 @@ pub(super) async fn resolve_connector_tools(
     };
     let workspace_credentials = if workspace_provider != WorkspaceProviderMode::Fake {
         Some(Arc::new(VaultCredentialSource::new(
-            Arc::new(vault.as_ref().expect("checked above").clone()),
+            vault.as_ref().expect("checked above").clone(),
             oauth_broker.clone(),
             scope.clone(),
         )?)
@@ -369,6 +385,7 @@ pub(super) async fn resolve_connector_tools(
     } else {
         None
     };
+    let mut resolved_account_manager = None;
     if mail_enabled {
         let attachments_enabled = app_prompt
             .identity
@@ -384,120 +401,133 @@ pub(super) async fn resolve_connector_tools(
         } else {
             None
         };
-        let (mail, display_name, deterministic): (Arc<dyn MailConnector>, &str, bool) =
-            match workspace_provider {
-                WorkspaceProviderMode::Google => {
-                    let configured_vault = vault.as_ref().expect("checked above");
-                    let config = google_imap_smtp_config(scope.clone())?;
-                    let mut connector =
-                        ImapSmtpMailConnector::new(config, Arc::new(configured_vault.clone()))?
-                            .with_xoauth2_authentication(
-                                MAIL_CONNECTOR_ID,
-                                BTreeSet::from([
-                                    "https://www.googleapis.com/auth/gmail.modify".into(),
-                                    "https://www.googleapis.com/auth/gmail.compose".into(),
-                                    "https://www.googleapis.com/auth/gmail.send".into(),
-                                ]),
-                            )?;
-                    if let Some(source) = &attachment_source {
-                        connector = connector.with_attachment_source(source.clone());
-                    }
-                    (Arc::new(connector), "Gmail IMAP/SMTP", false)
+        let (mail, display_name, deterministic, account_manager): (
+            Arc<dyn MailConnector>,
+            &str,
+            bool,
+            Option<Arc<ImapSmtpMailAccountManager>>,
+        ) = match workspace_provider {
+            WorkspaceProviderMode::Google => {
+                let configured_vault = vault.as_ref().expect("checked above");
+                let config = google_imap_smtp_config(scope.clone())?;
+                let mut connector = ImapSmtpMailConnector::new(config, configured_vault.clone())?
+                    .with_xoauth2_authentication(
+                    MAIL_CONNECTOR_ID,
+                    BTreeSet::from([
+                        "https://www.googleapis.com/auth/gmail.modify".into(),
+                        "https://www.googleapis.com/auth/gmail.compose".into(),
+                        "https://www.googleapis.com/auth/gmail.send".into(),
+                    ]),
+                )?;
+                if let Some(source) = &attachment_source {
+                    connector = connector.with_attachment_source(source.clone());
                 }
-                WorkspaceProviderMode::Microsoft => {
-                    let configured_vault = vault.as_ref().expect("checked above");
-                    let config = microsoft_imap_smtp_config(scope.clone())?;
-                    let mut connector =
-                        ImapSmtpMailConnector::new(config, Arc::new(configured_vault.clone()))?
-                            .with_xoauth2_authentication(
-                                MAIL_CONNECTOR_ID,
-                                microsoft_mail_scopes(),
-                            )?;
-                    if let Some(source) = &attachment_source {
-                        connector = connector.with_attachment_source(source.clone());
-                    }
-                    (Arc::new(connector), "Outlook IMAP/SMTP", false)
+                (Arc::new(connector), "Gmail IMAP/SMTP", false, None)
+            }
+            WorkspaceProviderMode::Microsoft => {
+                let configured_vault = vault.as_ref().expect("checked above");
+                let config = microsoft_imap_smtp_config(scope.clone())?;
+                let mut connector =
+                    ImapSmtpMailConnector::new(config, configured_vault.clone())?
+                        .with_xoauth2_authentication(MAIL_CONNECTOR_ID, microsoft_mail_scopes())?;
+                if let Some(source) = &attachment_source {
+                    connector = connector.with_attachment_source(source.clone());
                 }
-                WorkspaceProviderMode::Fake => {
-                    match mail_connector_mode_from_lookup(|name| std::env::var_os(name))? {
-                        MailConnectorMode::ImapSmtp => {
-                            let config = load_imap_smtp_config().await?;
-                            anyhow::ensure!(
-                                config.credential_scope.app_id == app_prompt.identity.app_id,
-                                "IMAP/SMTP credential scope App does not match the active Agent App"
-                            );
-                            let configured_vault = vault.as_ref().ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "IMAP/SMTP requires the persistent Credential Vault"
-                                )
-                            })?;
-                            let granted_scopes = BTreeSet::from([
-                                "mail.message.read".into(),
-                                "mail.message.organize".into(),
-                                "mail.message.send".into(),
-                            ]);
-                            let credential_id = config.credential_secret_id.as_str().to_string();
-                            configured_vault
-                                .register_provider_credential_persistent(
-                                    &config.credential_scope,
-                                    ProviderCredential {
-                                        access_secret_id: config.credential_secret_id.clone(),
-                                        credential_id: credential_id.clone(),
-                                        expires_at: None,
-                                        granted_scopes: granted_scopes.clone(),
-                                        provider_id: "imap-smtp".into(),
-                                        provider_subject: config.username.clone(),
-                                        refresh_secret_id: None,
-                                        revoked_at: None,
-                                    },
-                                )
-                                .await?;
-                            configured_vault
-                                .register_account_persistent(ConnectorAccount {
-                                    account_id: config.account.id.clone(),
-                                    allowed_scopes: granted_scopes,
-                                    connector_id: "agentweave.connector.mail.imap-smtp".into(),
-                                    credential_id,
-                                    scope: config.credential_scope.clone(),
-                                })
-                                .await?;
-                            let mut connector = ImapSmtpMailConnector::new(
-                                config,
-                                Arc::new(configured_vault.clone()),
-                            )?;
-                            if let Some(source) = &attachment_source {
-                                connector = connector.with_attachment_source(source.clone());
-                            }
-                            (Arc::new(connector), "IMAP/SMTP Mail", false)
-                        }
-                        MailConnectorMode::Fake => {
-                            let fake = Arc::new(FakeMailConnector::new());
-                            fake.add_account(MailAccount {
-                                id: "primary".into(),
-                                display_name: "Example Mail".into(),
-                                primary_address: MailAddress {
-                                    name: Some("Local User".into()),
-                                    address: "local@example.test".into(),
+                (Arc::new(connector), "Outlook IMAP/SMTP", false, None)
+            }
+            WorkspaceProviderMode::Fake => {
+                match mail_connector_mode_from_lookup(|name| std::env::var_os(name))? {
+                    MailConnectorMode::ImapSmtp => {
+                        let config = load_imap_smtp_config().await?;
+                        anyhow::ensure!(
+                            config.credential_scope.app_id == app_prompt.identity.app_id,
+                            "IMAP/SMTP credential scope App does not match the active Agent App"
+                        );
+                        let configured_vault = vault.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("IMAP/SMTP requires the persistent Credential Vault")
+                        })?;
+                        let granted_scopes = BTreeSet::from([
+                            "mail.message.read".into(),
+                            "mail.message.organize".into(),
+                            "mail.message.send".into(),
+                        ]);
+                        let credential_id = config.credential_secret_id.as_str().to_string();
+                        configured_vault
+                            .register_provider_credential_persistent(
+                                &config.credential_scope,
+                                ProviderCredential {
+                                    access_secret_id: config.credential_secret_id.clone(),
+                                    credential_id: credential_id.clone(),
+                                    expires_at: None,
+                                    granted_scopes: granted_scopes.clone(),
+                                    provider_id: "imap-smtp".into(),
+                                    provider_subject: config.username.clone(),
+                                    refresh_secret_id: None,
+                                    revoked_at: None,
                                 },
-                                addresses: Vec::new(),
-                                provider_reference: None,
-                            })?;
-                            (fake, "Fake Mail", true)
+                            )
+                            .await?;
+                        configured_vault
+                            .register_account_persistent(ConnectorAccount {
+                                account_id: config.account.id.clone(),
+                                allowed_scopes: granted_scopes,
+                                connector_id: "agentweave.connector.mail.imap-smtp".into(),
+                                credential_id,
+                                scope: config.credential_scope.clone(),
+                            })
+                            .await?;
+                        let mut connector =
+                            ImapSmtpMailConnector::new(config, configured_vault.clone())?;
+                        if let Some(source) = &attachment_source {
+                            connector = connector.with_attachment_source(source.clone());
                         }
-                        MailConnectorMode::Unconfigured => (
+                        (Arc::new(connector), "IMAP/SMTP Mail", false, None)
+                    }
+                    MailConnectorMode::Fake => {
+                        let fake = Arc::new(FakeMailConnector::new());
+                        fake.add_account(MailAccount {
+                            id: "primary".into(),
+                            display_name: "Example Mail".into(),
+                            primary_address: MailAddress {
+                                name: Some("Local User".into()),
+                                address: "local@example.test".into(),
+                            },
+                            addresses: Vec::new(),
+                            provider_reference: None,
+                        })?;
+                        (fake, "Fake Mail", true, None)
+                    }
+                    MailConnectorMode::Unconfigured => match &vault {
+                        Some(vault) => {
+                            let mail = Arc::new(ManagedImapSmtpMailConnector::new());
+                            let store =
+                                SqliteImapSmtpMailAccountStore::from_storage(storage).await?;
+                            let mut manager =
+                                ImapSmtpMailAccountManager::new(store, vault.clone(), mail.clone());
+                            if let Some(source) = &attachment_source {
+                                manager = manager.with_attachment_source(source.clone());
+                            }
+                            let manager = Arc::new(manager);
+                            manager.load_accounts(&scope).await?;
+                            (mail, "Managed IMAP/SMTP Mail", false, Some(manager))
+                        }
+                        None => (
                             Arc::new(FakeMailConnector::new()),
                             "Unconfigured Mail",
                             true,
+                            None,
                         ),
-                    }
+                    },
                 }
-            };
+            }
+        };
         runtime
             .register(
                 MailConnectorTransport::descriptor(display_name, deterministic),
                 Arc::new(MailConnectorTransport::new(mail)),
             )
             .await?;
+        resolved_account_manager = account_manager;
     }
     if calendar_enabled {
         let calendar: Arc<dyn agent_runtime::calendar::CalendarConnector> = match workspace_provider
@@ -631,6 +661,7 @@ pub(super) async fn resolve_connector_tools(
         calendar_actions,
         contacts_actions,
         oauth_broker,
+        account_manager: resolved_account_manager,
     }))
 }
 
@@ -835,7 +866,22 @@ async fn load_imap_smtp_config() -> anyhow::Result<ImapSmtpMailConfig> {
 
 async fn resolve_credential_vault(
     storage: &Storage,
-) -> anyhow::Result<Option<agent_runtime::credential::CredentialVault>> {
+    trusted_key: Option<&SecretMaterial>,
+    trusted_root: Option<&Path>,
+) -> anyhow::Result<Option<Arc<CredentialVault>>> {
+    if let Some(key) = trusted_key {
+        let root = trusted_root
+            .ok_or_else(|| anyhow::anyhow!("trusted Credential Vault root is unavailable"))?;
+        let store = Arc::new(
+            agent_runtime::credential_file::EncryptedFileSecretStore::new_borrowed(root, key)?,
+        );
+        let metadata =
+            agent_runtime::credential_sqlite::SqliteCredentialMetadataStore::from_storage(storage)
+                .await?;
+        return Ok(Some(Arc::new(CredentialVault::new_persistent(
+            store, metadata,
+        ))));
+    }
     let configured = match (
         std::env::var("AGENTWEAVE_SECRET_ROOT").ok(),
         std::env::var("AGENTWEAVE_SECRET_MASTER_KEY_HEX").ok(),
@@ -857,139 +903,14 @@ async fn resolve_credential_vault(
     let metadata =
         agent_runtime::credential_sqlite::SqliteCredentialMetadataStore::from_storage(storage)
             .await?;
-    Ok(Some(
-        agent_runtime::credential::CredentialVault::new_persistent(store, metadata),
-    ))
+    Ok(Some(Arc::new(CredentialVault::new_persistent(
+        store, metadata,
+    ))))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use agent_runtime::app_definition::AgentAppRuntimePolicy;
-    use agent_runtime::app_manifest::AgentAppManifest;
-    use std::collections::HashMap;
-    use std::ffi::OsString;
-
-    fn connector_mode(values: &[(&str, &str)]) -> anyhow::Result<MailConnectorMode> {
-        let values = values
-            .iter()
-            .map(|(name, value)| ((*name).to_string(), OsString::from(value)))
-            .collect::<HashMap<_, _>>();
-        mail_connector_mode_from_lookup(|name| values.get(name).cloned())
-    }
-
-    fn runtime_config_with_policy(
-        network: &str,
-        background: &str,
-        connectors: &[&str],
-    ) -> RuntimeConfig {
-        let manifest = serde_json::json!({
-            "schemaVersion": 1,
-            "appId": "com.example.policy-test",
-            "package": {"id": "com.example.policy-test.app", "version": "0.1.0"},
-            "requires": {
-                "packages": [],
-                "capabilities": [],
-                "runtimeTools": [],
-                "connectors": connectors
-            },
-            "features": [],
-            "policy": {
-                "externalSideEffects": "require_approval",
-                "network": network,
-                "backgroundExecution": background,
-                "memoryPersistence": "disabled",
-                "skillManagement": "disabled"
-            },
-            "branding": {"displayName": "Policy Test"},
-            "instructions": {"system": "prompts/system.md"}
-        });
-        let manifest =
-            AgentAppManifest::parse_json(&serde_json::to_vec(&manifest).unwrap()).unwrap();
-        RuntimeConfig::workspace_write(".", ".")
-            .with_agent_app_policy(AgentAppRuntimePolicy::compile(&manifest))
-    }
-
-    #[test]
-    fn mail_connector_defaults_to_an_unconfigured_account_set() {
-        assert_eq!(
-            connector_mode(&[]).unwrap(),
-            MailConnectorMode::Unconfigured
-        );
-    }
-
-    #[test]
-    fn fake_mail_requires_an_explicit_test_flag() {
-        assert_eq!(
-            connector_mode(&[("AGENTWEAVE_FAKE_MAIL", "enabled")]).unwrap(),
-            MailConnectorMode::Fake
-        );
-    }
-
-    #[test]
-    fn imap_smtp_is_selected_explicitly_and_unknown_connectors_fail_closed() {
-        assert_eq!(
-            connector_mode(&[("AGENTWEAVE_MAIL_CONNECTOR", "imap-smtp")]).unwrap(),
-            MailConnectorMode::ImapSmtp
-        );
-        assert!(connector_mode(&[("AGENTWEAVE_MAIL_CONNECTOR", "unknown")]).is_err());
-    }
-
-    #[test]
-    fn manifest_background_policy_cannot_be_bypassed_by_host_flags() {
-        let disabled = runtime_config_with_policy("deny", "disabled", &[]);
-        assert!(!background_execution_allowed(&disabled, true, true));
-
-        let declared = runtime_config_with_policy("deny", "declared_only", &[]);
-        assert!(!background_execution_allowed(&declared, false, true));
-        assert!(background_execution_allowed(&declared, true, false));
-
-        let enabled = runtime_config_with_policy("deny", "enabled", &[]);
-        assert!(background_execution_allowed(&enabled, false, true));
-    }
-
-    #[test]
-    fn manifest_network_policy_cannot_be_bypassed_by_fake_mail_flag() {
-        let denied = runtime_config_with_policy("deny", "disabled", &[MAIL_CONNECTOR_ID]);
-        assert!(!mail_foundation_allowed(&denied, true, true));
-
-        let undeclared = runtime_config_with_policy("declared_only", "disabled", &[]);
-        assert!(!mail_foundation_allowed(&undeclared, true, true));
-
-        let declared =
-            runtime_config_with_policy("declared_only", "disabled", &[MAIL_CONNECTOR_ID]);
-        assert!(mail_foundation_allowed(&declared, true, false));
-        assert!(!mail_foundation_allowed(&declared, false, true));
-    }
-
-    #[test]
-    fn manifest_network_policy_cannot_be_bypassed_by_fake_calendar_flag() {
-        let denied = runtime_config_with_policy("deny", "disabled", &[CALENDAR_CONNECTOR_ID]);
-        assert!(!calendar_foundation_allowed(&denied, true, true));
-
-        let undeclared = runtime_config_with_policy("declared_only", "disabled", &[]);
-        assert!(!calendar_foundation_allowed(&undeclared, true, true));
-
-        let declared =
-            runtime_config_with_policy("declared_only", "disabled", &[CALENDAR_CONNECTOR_ID]);
-        assert!(calendar_foundation_allowed(&declared, true, false));
-        assert!(!calendar_foundation_allowed(&declared, false, true));
-    }
-
-    #[test]
-    fn manifest_network_policy_cannot_be_bypassed_by_fake_contacts_flag() {
-        let denied = runtime_config_with_policy("deny", "disabled", &[CONTACTS_CONNECTOR_ID]);
-        assert!(!contacts_foundation_allowed(&denied, true, true));
-
-        let undeclared = runtime_config_with_policy("declared_only", "disabled", &[]);
-        assert!(!contacts_foundation_allowed(&undeclared, true, true));
-
-        let declared =
-            runtime_config_with_policy("declared_only", "disabled", &[CONTACTS_CONNECTOR_ID]);
-        assert!(contacts_foundation_allowed(&declared, true, false));
-        assert!(!contacts_foundation_allowed(&declared, false, true));
-    }
-}
+#[path = "server_app_tests.rs"]
+mod tests;
 
 #[cfg(test)]
 #[path = "server_app_workspace_tests.rs"]

@@ -136,6 +136,7 @@ fn config(root: &Path, sources: Vec<Arc<dyn SkillSource>>) -> TenantSkillManager
         runtime_version: "0.1.0".parse().unwrap(),
         management_policy: SkillManagementPolicy::owner_only(),
         storage_protection_key: None,
+        credential_vault_key: None,
     }
 }
 

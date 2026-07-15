@@ -32,6 +32,7 @@ pub struct TenantSkillRuntime {
     pub data_root: PathBuf,
     pub cache_root: PathBuf,
     pub database_path: PathBuf,
+    pub credential_vault_key: Option<Arc<SecretMaterial>>,
 }
 
 impl std::fmt::Debug for TenantSkillRuntime {
@@ -202,6 +203,7 @@ pub struct TenantSkillManagerConfig {
     pub runtime_version: Version,
     pub management_policy: SkillManagementPolicy,
     pub storage_protection_key: Option<Arc<SecretMaterial>>,
+    pub credential_vault_key: Option<Arc<SecretMaterial>>,
 }
 
 #[derive(Clone)]
@@ -374,6 +376,7 @@ impl FilesystemTenantSkillManagerFactory {
                 data_root,
                 cache_root,
                 database_path,
+                credential_vault_key: self.config.credential_vault_key.clone(),
             })
         }
         .await;

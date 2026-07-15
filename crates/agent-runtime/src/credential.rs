@@ -10,6 +10,8 @@ const SECRET_STAGING_LEASE_MINUTES: i64 = 10;
 
 #[path = "credential_persistence.rs"]
 mod persistence;
+#[path = "credential_status.rs"]
+mod status;
 #[path = "credential_validation.rs"]
 mod validation;
 use validation::{validate_connector_account, validate_provider_credential};

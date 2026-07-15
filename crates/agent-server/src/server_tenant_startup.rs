@@ -89,8 +89,12 @@ pub(super) fn apply_connector_foundation(
                 foundation.calendar_actions,
                 foundation.contacts_actions,
             );
-            match foundation.oauth_broker {
+            let state = match foundation.oauth_broker {
                 Some(broker) => state.with_oauth_broker(broker),
+                None => state,
+            };
+            match foundation.account_manager {
+                Some(manager) => state.with_mail_account_manager(manager),
                 None => state,
             }
         }
@@ -104,6 +108,7 @@ pub(super) async fn build_managed_tenant_registry(
     builtin_mode: BuiltinSkillsMode,
     management_policy: SkillManagementPolicy,
     storage_protection_key: Option<Arc<SecretMaterial>>,
+    credential_vault_key: Option<Arc<SecretMaterial>>,
 ) -> anyhow::Result<TenantSkillManagerRegistry> {
     let builtin = load_builtin_skill_source(skills_root, builtin_mode).await?;
     let mut sources = vec![builtin];
@@ -121,6 +126,7 @@ pub(super) async fn build_managed_tenant_registry(
         runtime_version: env!("CARGO_PKG_VERSION").parse()?,
         management_policy,
         storage_protection_key,
+        credential_vault_key,
     })
     .await?;
     Ok(TenantSkillManagerRegistry::new(factory))
@@ -144,9 +150,15 @@ where
             .await?;
     let attachment_tools =
         super::server_app::resolve_attachment_tools(&runtime.storage, &app_prompt).await?;
-    let connector_foundation =
-        super::server_app::resolve_connector_tools(&runtime.storage, &app_prompt, &runtime_config)
-            .await?;
+    let credential_root = runtime.data_root.join("credentials");
+    let connector_foundation = super::server_app::resolve_connector_tools(
+        &runtime.storage,
+        &app_prompt,
+        &runtime_config,
+        runtime.credential_vault_key.clone(),
+        Some(&credential_root),
+    )
+    .await?;
     let connector_tools = connector_foundation
         .as_ref()
         .map(|foundation| foundation.tools.clone());
