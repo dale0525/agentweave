@@ -1,3 +1,4 @@
+use crate::event_persistence::project_runtime_event_for_persistence;
 use crate::events::RuntimeEvent;
 use crate::session::{
     ConversationEventRecord, ConversationScope, ConversationTurn, ConversationTurnEventPage,
@@ -423,7 +424,7 @@ async fn insert_turn_event(
     .bind(session_id)
     .fetch_one(&mut **tx)
     .await?;
-    let payload = serde_json::to_value(event)?;
+    let payload = project_runtime_event_for_persistence(event)?;
     let kind = payload
         .get("type")
         .and_then(serde_json::Value::as_str)

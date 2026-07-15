@@ -1,4 +1,5 @@
 use super::*;
+use crate::tools::ToolPersistence;
 
 #[tokio::test]
 async fn durable_turn_is_idempotent_and_replays_cursor_pages() {
@@ -80,6 +81,66 @@ async fn durable_turn_is_idempotent_and_replays_cursor_pages() {
             .unwrap()
             .len(),
         2
+    );
+}
+
+#[tokio::test]
+async fn durable_event_persistence_projects_sensitive_tool_payloads_across_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("metadata-only-turn.db");
+    let url = format!("sqlite://{}?mode=rwc", database.display());
+    let scope = ConversationScope::local("com.example.metadata-only-turn");
+    let storage = Storage::connect(&url).await.unwrap();
+    let session = storage
+        .create_scoped_session(&scope, "Sensitive turn")
+        .await
+        .unwrap();
+    let started = storage
+        .begin_scoped_turn(&scope, &session.id, "request-sensitive", "read")
+        .await
+        .unwrap();
+    for event in [
+        RuntimeEvent::ToolCallStarted {
+            call_id: "call-sensitive".into(),
+            name: "connector__mail__read".into(),
+            arguments: serde_json::json!({"query": "durable-argument-secret"}),
+            persistence: ToolPersistence::MetadataOnly,
+        },
+        RuntimeEvent::ToolCallFinished {
+            call_id: "call-sensitive".into(),
+            result: serde_json::json!({
+                "ok": false,
+                "data": null,
+                "error": {
+                    "code": "permission_denied",
+                    "message": "durable-result-secret",
+                    "retryable": false
+                },
+                "metadata": {"duration_ms": 4, "output_truncated": false}
+            }),
+            persistence: ToolPersistence::MetadataOnly,
+        },
+    ] {
+        storage
+            .append_scoped_turn_event(&scope, &session.id, &started.turn.id, &event)
+            .await
+            .unwrap();
+    }
+    storage.close().await;
+
+    let restarted = Storage::connect(&url).await.unwrap();
+    let page = restarted
+        .list_scoped_turn_events_page(&scope, &session.id, &started.turn.id, -1, 10)
+        .await
+        .unwrap()
+        .unwrap();
+    let encoded = serde_json::to_string(&page.events).unwrap();
+    assert!(!encoded.contains("durable-argument-secret"));
+    assert!(!encoded.contains("durable-result-secret"));
+    assert!(page.events[0].payload.get("arguments").is_none());
+    assert_eq!(
+        page.events[1].payload["result_metadata"]["error_code"],
+        "permission_denied"
     );
 }
 
