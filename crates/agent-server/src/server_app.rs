@@ -9,6 +9,7 @@ use agent_runtime::connector::ConnectorRuntime;
 use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
 use agent_runtime::credential::{ConnectorAccount, CredentialScope, ProviderCredential};
 use agent_runtime::mail::{MailAccount, MailAddress, MailConnector};
+use agent_runtime::mail_attachments::{MailAttachmentSource, StoredMailAttachmentSource};
 use agent_runtime::mail_connector_transport::{
     MAIL_CONNECTOR_ID, MAIL_TOOL_NAMES, MailConnectorTransport,
 };
@@ -254,6 +255,20 @@ pub(super) async fn resolve_connector_tools(
     let ledger = Arc::new(
         agent_runtime::connector_ledger::SqliteConnectorActionLedger::from_storage(storage).await?,
     );
+    let attachments_enabled = app_prompt
+        .identity
+        .enabled_capabilities
+        .iter()
+        .any(|capability| capability == "attachments")
+        || std::env::var("AGENTWEAVE_ATTACHMENTS").as_deref() == Ok("enabled");
+    let attachment_source: Option<Arc<dyn MailAttachmentSource>> = if attachments_enabled {
+        Some(Arc::new(StoredMailAttachmentSource::new(
+            SqliteAttachmentStore::from_storage(storage).await?,
+            AttachmentScope::new(&app_prompt.identity.app_id, "local", "local-user")?,
+        )) as Arc<dyn MailAttachmentSource>)
+    } else {
+        None
+    };
     let vault = resolve_credential_vault(storage).await?;
     let (mail, display_name, deterministic): (Arc<dyn MailConnector>, &str, bool) =
         match mail_connector_mode_from_lookup(|name| std::env::var_os(name))? {
@@ -296,14 +311,12 @@ pub(super) async fn resolve_connector_tools(
                         scope: config.credential_scope.clone(),
                     })
                     .await?;
-                (
-                    Arc::new(ImapSmtpMailConnector::new(
-                        config,
-                        Arc::new(configured_vault.clone()),
-                    )?),
-                    "IMAP/SMTP Mail",
-                    false,
-                )
+                let mut connector =
+                    ImapSmtpMailConnector::new(config, Arc::new(configured_vault.clone()))?;
+                if let Some(source) = &attachment_source {
+                    connector = connector.with_attachment_source(source.clone());
+                }
+                (Arc::new(connector), "IMAP/SMTP Mail", false)
             }
             MailConnectorMode::Fake => {
                 let fake = Arc::new(FakeMailConnector::new());
