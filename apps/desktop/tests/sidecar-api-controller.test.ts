@@ -174,6 +174,7 @@ describe("trusted sidecar API controller", () => {
     const sidecarRequest = vi.fn(async () => new Response(JSON.stringify({ configured: true })));
     registerSidecarApiController({
       ipcMain: harness.ipcMain,
+      openExternal: vi.fn(),
       requesterWebContents: { id: 42 },
       sidecarRequest,
     });
@@ -223,6 +224,7 @@ describe("trusted sidecar API controller", () => {
     const sidecarRequest = vi.fn();
     registerSidecarApiController({
       ipcMain: harness.ipcMain,
+      openExternal: vi.fn(),
       requesterWebContents: { id: 42 },
       sidecarRequest,
     });
