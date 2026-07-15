@@ -4,6 +4,7 @@ use agent_runtime::oauth::{
     OAuthProviderError, OAuthProviderErrorCode, OAuthRefreshRequest, OAuthTokenGrant,
 };
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use reqwest::Url;
 use serde::Deserialize;
@@ -11,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration as StdDuration;
 
 pub const GOOGLE_PROVIDER_ID: &str = "google-workspace";
+pub const MICROSOFT_PROVIDER_ID: &str = "microsoft-graph";
 
 pub struct WorkspaceOAuthProvider {
     provider_id: String,
@@ -136,6 +138,65 @@ impl WorkspaceOAuthProvider {
         )
     }
 
+    pub fn microsoft(
+        client_id: impl Into<String>,
+        client_secret: Option<SecretMaterial>,
+    ) -> anyhow::Result<Self> {
+        let identity = scopes(&["openid", "profile", "email", "offline_access"]);
+        let connector_scopes = BTreeMap::from([
+            (
+                agent_runtime::mail_connector_transport::MAIL_CONNECTOR_ID.into(),
+                microsoft_mail_scopes(),
+            ),
+            (
+                agent_runtime::calendar_connector_transport::CALENDAR_CONNECTOR_ID.into(),
+                identity
+                    .iter()
+                    .cloned()
+                    .chain(["Calendars.ReadWrite".into()])
+                    .collect::<BTreeSet<_>>(),
+            ),
+            (
+                agent_runtime::contacts_connector_transport::CONTACTS_CONNECTOR_ID.into(),
+                identity
+                    .iter()
+                    .cloned()
+                    .chain(["Contacts.ReadWrite".into()])
+                    .collect::<BTreeSet<_>>(),
+            ),
+        ]);
+        let capability_scopes = BTreeMap::from([
+            (
+                "mail".into(),
+                connector_scopes[agent_runtime::mail_connector_transport::MAIL_CONNECTOR_ID]
+                    .clone(),
+            ),
+            (
+                "calendar".into(),
+                connector_scopes
+                    [agent_runtime::calendar_connector_transport::CALENDAR_CONNECTOR_ID]
+                    .clone(),
+            ),
+            (
+                "contacts".into(),
+                connector_scopes
+                    [agent_runtime::contacts_connector_transport::CONTACTS_CONNECTOR_ID]
+                    .clone(),
+            ),
+        ]);
+        Self::new(
+            MICROSOFT_PROVIDER_ID,
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            "https://graph.microsoft.com/oidc/userinfo",
+            client_id,
+            client_secret,
+            connector_scopes,
+            capability_scopes,
+            BTreeMap::from([("prompt".into(), "select_account".into())]),
+        )
+    }
+
     async fn token_request(
         &self,
         mut form: Vec<(String, String)>,
@@ -179,7 +240,17 @@ impl WorkspaceOAuthProvider {
         }
         let access_token = SecretMaterial::new(token.access_token)
             .map_err(|_| OAuthProviderError::new(OAuthProviderErrorCode::ExchangeFailed))?;
-        let subject = self.user_subject(&access_token).await?;
+        let subject = if self.provider_id == MICROSOFT_PROVIDER_ID {
+            microsoft_id_token_subject(
+                token.id_token.as_deref().ok_or_else(|| {
+                    OAuthProviderError::new(OAuthProviderErrorCode::ExchangeFailed)
+                })?,
+                &self.client_id,
+            )
+            .map_err(|_| OAuthProviderError::new(OAuthProviderErrorCode::ExchangeFailed))?
+        } else {
+            self.user_subject(&access_token).await?
+        };
         Ok(OAuthTokenGrant {
             provider_subject: subject,
             access_token,
@@ -213,12 +284,13 @@ impl WorkspaceOAuthProvider {
             .json()
             .await
             .map_err(|_| OAuthProviderError::new(OAuthProviderErrorCode::ExchangeFailed))?;
-        if user.sub.trim().is_empty() || user.sub.len() > 255 {
+        let subject = user.sub.or(user.id).unwrap_or_default();
+        if subject.trim().is_empty() || subject.len() > 255 {
             return Err(OAuthProviderError::new(
                 OAuthProviderErrorCode::ExchangeFailed,
             ));
         }
-        Ok(user.sub)
+        Ok(subject)
     }
 }
 
@@ -237,6 +309,22 @@ impl OAuthProvider for WorkspaceOAuthProvider {
         connector_ids: &BTreeSet<String>,
         capabilities: &BTreeSet<String>,
     ) -> Result<OAuthAuthorizationPlan, OAuthProviderError> {
+        if self.provider_id == MICROSOFT_PROVIDER_ID {
+            let mail_selected = connector_ids
+                .contains(agent_runtime::mail_connector_transport::MAIL_CONNECTOR_ID)
+                || capabilities.contains("mail");
+            let graph_selected = connector_ids.iter().any(|connector_id| {
+                connector_id == agent_runtime::calendar_connector_transport::CALENDAR_CONNECTOR_ID
+                    || connector_id
+                        == agent_runtime::contacts_connector_transport::CONTACTS_CONNECTOR_ID
+            }) || capabilities.contains("calendar")
+                || capabilities.contains("contacts");
+            if mail_selected && graph_selected {
+                return Err(OAuthProviderError::new(
+                    OAuthProviderErrorCode::InvalidRequest,
+                ));
+            }
+        }
         let mut requested_scopes = BTreeSet::new();
         let mut connector_scopes = BTreeMap::new();
         for connector_id in connector_ids {
@@ -326,17 +414,86 @@ impl OAuthProvider for WorkspaceOAuthProvider {
 struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
+    id_token: Option<String>,
     scope: Option<String>,
     expires_in: Option<i64>,
 }
 
 #[derive(Deserialize)]
 struct UserInfo {
-    sub: String,
+    sub: Option<String>,
+    id: Option<String>,
 }
 
 fn scopes(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(|value| (*value).into()).collect()
+}
+
+pub fn microsoft_mail_scopes() -> BTreeSet<String> {
+    scopes(&[
+        "openid",
+        "profile",
+        "email",
+        "offline_access",
+        "https://outlook.office.com/IMAP.AccessAsUser.All",
+        "https://outlook.office.com/SMTP.Send",
+    ])
+}
+
+#[derive(Deserialize)]
+struct MicrosoftIdTokenClaims {
+    sub: String,
+    aud: Audience,
+    iss: String,
+    exp: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Audience {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn microsoft_id_token_subject(token: &str, client_id: &str) -> anyhow::Result<String> {
+    let mut parts = token.split('.');
+    let header = parts.next().unwrap_or_default();
+    let payload = parts.next().unwrap_or_default();
+    let signature = parts.next().unwrap_or_default();
+    anyhow::ensure!(
+        !header.is_empty()
+            && !payload.is_empty()
+            && !signature.is_empty()
+            && parts.next().is_none(),
+        "Microsoft ID token structure is invalid"
+    );
+    let decoded = URL_SAFE_NO_PAD.decode(payload)?;
+    anyhow::ensure!(
+        decoded.len() <= 16 * 1024,
+        "Microsoft ID token is too large"
+    );
+    let claims: MicrosoftIdTokenClaims = serde_json::from_slice(&decoded)?;
+    let audience_matches = match claims.aud {
+        Audience::One(value) => value == client_id,
+        Audience::Many(values) => values.iter().any(|value| value == client_id),
+    };
+    anyhow::ensure!(audience_matches, "Microsoft ID token audience is invalid");
+    let issuer = Url::parse(&claims.iss)?;
+    anyhow::ensure!(
+        issuer.scheme() == "https"
+            && issuer.host_str() == Some("login.microsoftonline.com")
+            && issuer.path().ends_with("/v2.0"),
+        "Microsoft ID token issuer is invalid"
+    );
+    anyhow::ensure!(
+        claims.exp > Utc::now().timestamp() - 60,
+        "Microsoft ID token is expired"
+    );
+    anyhow::ensure!(
+        !claims.sub.trim().is_empty() && claims.sub.len() <= 255,
+        "Microsoft ID token subject is invalid"
+    );
+    Ok(claims.sub)
 }
 
 fn secure_url(value: &str) -> anyhow::Result<Url> {
@@ -375,5 +532,74 @@ mod tests {
             .unwrap();
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("access_type=offline"));
+    }
+
+    #[test]
+    fn microsoft_plan_uses_outlook_mail_scopes_and_common_tenant() {
+        let provider = WorkspaceOAuthProvider::microsoft("client", None).unwrap();
+        let plan = provider
+            .authorization_plan(
+                &BTreeSet::from(
+                    [agent_runtime::mail_connector_transport::MAIL_CONNECTOR_ID.into()],
+                ),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(
+            plan.requested_scopes
+                .contains("https://outlook.office.com/SMTP.Send")
+        );
+        assert!(
+            provider
+                .authorization_origin()
+                .contains("login.microsoftonline.com")
+        );
+    }
+
+    #[test]
+    fn microsoft_plan_rejects_mixed_outlook_and_graph_resources() {
+        let provider = WorkspaceOAuthProvider::microsoft("client", None).unwrap();
+        assert!(
+            provider
+                .authorization_plan(
+                    &BTreeSet::from([
+                        agent_runtime::mail_connector_transport::MAIL_CONNECTOR_ID.into(),
+                        agent_runtime::calendar_connector_transport::CALENDAR_CONNECTOR_ID.into(),
+                    ]),
+                    &BTreeSet::new(),
+                )
+                .is_err()
+        );
+        assert!(
+            provider
+                .authorization_plan(
+                    &BTreeSet::from([
+                        agent_runtime::calendar_connector_transport::CALENDAR_CONNECTOR_ID.into(),
+                        agent_runtime::contacts_connector_transport::CONTACTS_CONNECTOR_ID.into(),
+                    ]),
+                    &BTreeSet::new(),
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn microsoft_subject_requires_bound_unexpired_id_token_claims() {
+        let claims = serde_json::json!({
+            "sub": "subject-1",
+            "aud": "client",
+            "iss": "https://login.microsoftonline.com/tenant/v2.0",
+            "exp": Utc::now().timestamp() + 300
+        });
+        let token = format!(
+            "{}.{}.signature",
+            URL_SAFE_NO_PAD.encode(b"{}"),
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+        );
+        assert_eq!(
+            microsoft_id_token_subject(&token, "client").unwrap(),
+            "subject-1"
+        );
+        assert!(microsoft_id_token_subject(&token, "different-client").is_err());
     }
 }
