@@ -4,6 +4,11 @@ use agent_runtime::calendar_actions::CalendarActionService;
 use agent_runtime::calendar_connector_transport::CalendarConnectorTransport;
 use agent_runtime::connector::ConnectorRuntime;
 use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
+use agent_runtime::contacts::{
+    ContactIdentity, ContactRecord, ContactScope, FakeContactsConnector,
+};
+use agent_runtime::contacts_actions::ContactsActionService;
+use agent_runtime::contacts_connector_transport::ContactsConnectorTransport;
 use agent_runtime::credential::CredentialScope;
 use agent_runtime::foundation_actions::MailActionService;
 use agent_runtime::mail::{DraftContent, MailAccount, MailAddress, OutgoingBody};
@@ -364,6 +369,110 @@ async fn foundation_calendar_approval_api_resumes_exactly_once() {
         .unwrap();
     assert_eq!(listed.status(), StatusCode::OK);
     assert_eq!(read_json(listed).await.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn foundation_contacts_approval_api_resumes_exactly_once() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let scope = CredentialScope {
+        app_id: "agentweave.default".into(),
+        tenant_id: "local".into(),
+        user_id: "local-user".into(),
+    };
+    let contact = ContactRecord {
+        id: "contact-1".into(),
+        display_name: "Alex Chen".into(),
+        identities: vec![ContactIdentity {
+            kind: "email".into(),
+            value: "alex@example.test".into(),
+            label: None,
+        }],
+        organization: None,
+        relationship: None,
+        version: 1,
+        provider_id: Some("provider-1".into()),
+        updated_at: chrono::Utc::now(),
+    };
+    let contacts = Arc::new(FakeContactsConnector::default());
+    contacts
+        .seed(
+            ContactScope {
+                app_id: scope.app_id.clone(),
+                tenant_id: scope.tenant_id.clone(),
+                user_id: scope.user_id.clone(),
+                account_id: "primary".into(),
+            },
+            contact.clone(),
+        )
+        .unwrap();
+    let runtime = Arc::new(ConnectorRuntime::new(None, 256 * 1024).unwrap());
+    runtime
+        .register(
+            ContactsConnectorTransport::descriptor("Fake Contacts", true),
+            Arc::new(ContactsConnectorTransport::new(contacts, scope.clone()).unwrap()),
+        )
+        .await
+        .unwrap();
+    let context = Arc::new(
+        EphemeralConnectorContextProvider::fail_closed(scope.clone(), Duration::from_secs(2))
+            .unwrap(),
+    );
+    let tools = ConnectorToolRuntime::load(runtime, context.clone()).unwrap();
+    let actions =
+        ContactsActionService::new(&storage, tools.clone(), context, scope, "api-test-v1")
+            .await
+            .unwrap();
+    let app = router(Arc::new(
+        AppState::new(storage).with_contacts_foundation(tools, actions),
+    ));
+    let requested = app
+        .clone()
+        .oneshot(json_request(
+            "/foundation/contacts/update-approvals",
+            json!({
+                "accountId": "primary",
+                "contactId": "contact-1",
+                "expectedVersion": 1,
+                "replacement": {
+                    "id": "ignored",
+                    "displayName": "Alex Chen",
+                    "identities": [{
+                        "kind": "email",
+                        "value": "new@example.test",
+                        "label": "work"
+                    }],
+                    "organization": null,
+                    "relationship": null,
+                    "version": 1,
+                    "providerId": null,
+                    "updatedAt": contact.updated_at
+                },
+                "idempotencyKey": "api-contact-update-1",
+                "sessionId": null
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(requested.status(), StatusCode::OK);
+    let requested = read_json(requested).await;
+    let approval_id = requested["approval"]["approval_id"].as_str().unwrap();
+
+    for _ in 0..2 {
+        let resolved = app
+            .clone()
+            .oneshot(json_request(
+                &format!("/foundation/actions/{approval_id}"),
+                json!({"decision": "approve_once"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let resolved = read_json(resolved).await;
+        assert_eq!(resolved["action"]["status"], "succeeded");
+        if let Some(output) = resolved["connectorResult"]["output"].as_object() {
+            assert_eq!(output["providerId"], "provider-1");
+        }
+    }
 }
 
 fn json_request(uri: &str, body: Value) -> Request<Body> {

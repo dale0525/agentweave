@@ -83,9 +83,11 @@ pub(super) fn apply_connector_foundation(
     foundation: Option<super::server_app::ResolvedConnectorFoundation>,
 ) -> api::AppState {
     match foundation {
-        Some(foundation) => {
-            state.with_connector_actions(foundation.mail_actions, foundation.calendar_actions)
-        }
+        Some(foundation) => state.with_connector_actions(
+            foundation.mail_actions,
+            foundation.calendar_actions,
+            foundation.contacts_actions,
+        ),
         None => state,
     }
 }

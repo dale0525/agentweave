@@ -47,6 +47,12 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
             "/foundation/calendar/cancel-approvals",
             post(request_calendar_cancel_approval),
         )
+        .route("/foundation/contacts", get(resolve_contacts))
+        .route("/foundation/contacts/{contact_id}", get(get_contact))
+        .route(
+            "/foundation/contacts/update-approvals",
+            post(request_contact_update_approval),
+        )
         .route("/foundation/actions", get(list_foundation_actions))
         .route(
             "/foundation/actions/{approval_id}",
@@ -119,6 +125,32 @@ struct CalendarCancelApprovalRequest {
     account_id: String,
     event_id: String,
     expected_version: u64,
+    idempotency_key: String,
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContactsResolveQuery {
+    account_id: String,
+    query: String,
+    #[serde(default = "default_contacts_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContactQuery {
+    account_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContactUpdateApprovalRequest {
+    account_id: String,
+    contact_id: String,
+    expected_version: u64,
+    replacement: agent_runtime::contacts::ContactRecord,
     idempotency_key: String,
     session_id: Option<String>,
 }
@@ -413,6 +445,76 @@ async fn request_calendar_approval(
         .map_err(ApiError::Internal)
 }
 
+async fn resolve_contacts(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ContactsResolveQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !(1..=50).contains(&query.limit) {
+        return Err(ApiError::BadRequest(
+            "contact limit must be between 1 and 50",
+        ));
+    }
+    execute_connector_read(
+        &state,
+        "contacts_resolve",
+        serde_json::json!({
+            "accountId": query.account_id,
+            "query": query.query,
+            "limit": query.limit,
+        }),
+        "Contacts Foundation is disabled",
+    )
+    .await
+}
+
+async fn get_contact(
+    State(state): State<Arc<AppState>>,
+    Path(contact_id): Path<String>,
+    Query(query): Query<ContactQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    execute_connector_read(
+        &state,
+        "contact_get",
+        serde_json::json!({
+            "accountId": query.account_id,
+            "contactId": contact_id,
+        }),
+        "Contacts Foundation is disabled",
+    )
+    .await
+}
+
+async fn request_contact_update_approval(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ContactUpdateApprovalRequest>,
+) -> Result<Json<agent_runtime::contacts_actions::PendingContactAction>, ApiError> {
+    let preview = execute_connector_read(
+        &state,
+        "contact_update_preview",
+        serde_json::json!({
+            "accountId": request.account_id,
+            "contactId": request.contact_id,
+            "expectedVersion": request.expected_version,
+            "replacement": request.replacement,
+            "idempotencyKey": request.idempotency_key,
+        }),
+        "Contacts Foundation is disabled",
+    )
+    .await?
+    .0;
+    let preview =
+        serde_json::from_value(preview).map_err(|error| ApiError::Internal(error.into()))?;
+    state
+        .contacts_actions()
+        .ok_or(ApiError::NotFound(
+            "Contacts Foundation action service is disabled",
+        ))?
+        .request(preview, request.session_id, chrono::Utc::now())
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
 async fn list_foundation_actions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
@@ -427,6 +529,14 @@ async fn list_foundation_actions(
         }
     }
     if let Some(service) = state.calendar_actions() {
+        enabled = true;
+        for action in service.list_actions().await.map_err(ApiError::Internal)? {
+            actions.push(
+                serde_json::to_value(action).map_err(|error| ApiError::Internal(error.into()))?,
+            );
+        }
+    }
+    if let Some(service) = state.contacts_actions() {
         enabled = true;
         for action in service.list_actions().await.map_err(ApiError::Internal)? {
             actions.push(
@@ -450,6 +560,23 @@ async fn resolve_foundation_action(
     Path(approval_id): Path<String>,
     Json(request): Json<ResolveFoundationActionRequest>,
 ) -> Result<Json<agent_runtime::foundation_actions::FoundationActionResolution>, ApiError> {
+    if let Some(service) = state.contacts_actions()
+        && service
+            .handles_approval(&approval_id)
+            .await
+            .map_err(ApiError::Internal)?
+    {
+        return service
+            .resolve(
+                &approval_id,
+                request.decision,
+                "local-user",
+                chrono::Utc::now(),
+            )
+            .await
+            .map(Json)
+            .map_err(ApiError::Internal);
+    }
     if let Some(service) = state.calendar_actions()
         && service
             .handles_approval(&approval_id)
@@ -531,4 +658,8 @@ async fn execute_mail_host_action(
 
 fn default_memory_limit() -> usize {
     50
+}
+
+fn default_contacts_limit() -> usize {
+    20
 }

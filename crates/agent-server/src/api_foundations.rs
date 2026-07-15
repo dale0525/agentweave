@@ -47,3 +47,36 @@ impl AppFoundationRuntimes {
         self
     }
 }
+
+impl AppState {
+    pub fn with_mail_foundation(
+        mut self,
+        connector_tools: agent_runtime::connector_tools::ConnectorToolRuntime,
+        mail_actions: agent_runtime::foundation_actions::MailActionService,
+    ) -> Self {
+        self.connector_tools = Some(connector_tools);
+        self.mail_actions = Some(mail_actions);
+        self
+    }
+
+    pub fn with_calendar_foundation(
+        mut self,
+        connector_tools: agent_runtime::connector_tools::ConnectorToolRuntime,
+        calendar_actions: agent_runtime::calendar_actions::CalendarActionService,
+    ) -> Self {
+        self.connector_tools = Some(connector_tools);
+        self.calendar_actions = Some(calendar_actions);
+        self
+    }
+
+    pub fn with_contacts_foundation(
+        mut self,
+        connector_tools: agent_runtime::connector_tools::ConnectorToolRuntime,
+        contacts_actions: agent_runtime::contacts_actions::ContactsActionService,
+    ) -> Self {
+        self.connector_tools = Some(connector_tools);
+        self.contacts_actions = Some(contacts_actions);
+        self
+    }
+}
+use crate::api::AppState;
