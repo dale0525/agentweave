@@ -120,6 +120,7 @@ impl AppState {
             automation_tools,
             attachment_tools,
             connector_tools,
+            mail_actions,
         } = foundations;
         let mut runner = TurnRunner::new_with_manager_and_config(
             model,
@@ -146,6 +147,9 @@ impl AppState {
         if let Some(connectors) = &connector_tools {
             runner = runner.with_connector_tools(connectors.clone());
         }
+        if let Some(actions) = &mail_actions {
+            runner = runner.with_mail_actions(actions.clone());
+        }
         let conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
         Self {
             storage,
@@ -166,7 +170,7 @@ impl AppState {
             attachment_tools,
             data_protection: None,
             connector_tools,
-            mail_actions: None,
+            mail_actions,
             automation: None,
         }
     }
@@ -231,6 +235,7 @@ impl AppState {
             automation_tools,
             attachment_tools,
             connector_tools,
+            mail_actions,
         } = foundations;
         let mut runner = TurnRunner::new_with_manager_and_config(
             model,
@@ -258,6 +263,9 @@ impl AppState {
         if let Some(connectors) = &connector_tools {
             runner = runner.with_connector_tools(connectors.clone());
         }
+        if let Some(actions) = &mail_actions {
+            runner = runner.with_mail_actions(actions.clone());
+        }
         let conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
         Self {
             storage,
@@ -278,7 +286,7 @@ impl AppState {
             attachment_tools,
             data_protection: None,
             connector_tools,
-            mail_actions: None,
+            mail_actions,
             automation: None,
         }
     }
@@ -855,6 +863,9 @@ async fn run_agent_turn_internal(
         }
         if let Some(connectors) = &state.connector_tools {
             runner = runner.with_connector_tools(connectors.clone());
+        }
+        if let Some(actions) = &state.mail_actions {
+            runner = runner.with_mail_actions(actions.clone());
         }
 
         return match observer {
