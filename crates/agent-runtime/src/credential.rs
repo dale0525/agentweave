@@ -10,6 +10,9 @@ const SECRET_STAGING_LEASE_MINUTES: i64 = 10;
 
 #[path = "credential_persistence.rs"]
 mod persistence;
+#[path = "credential_validation.rs"]
+mod validation;
+use validation::{validate_connector_account, validate_provider_credential};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
@@ -66,6 +69,10 @@ impl SecretMaterial {
 
     pub(crate) fn expose_bytes(&self) -> &[u8] {
         &self.0
+    }
+
+    pub fn with_exposed_bytes<T>(&self, operation: impl FnOnce(&[u8]) -> T) -> T {
+        operation(&self.0)
     }
 }
 
@@ -933,6 +940,33 @@ impl CredentialVault {
             .ok_or_else(|| anyhow::anyhow!("connector credential is unavailable"))
     }
 
+    pub async fn get_connector_account(
+        &self,
+        scope: &CredentialScope,
+        connector_id: &str,
+        account_id: &str,
+    ) -> anyhow::Result<Option<ConnectorAccount>> {
+        scope.validate()?;
+        if let Some(account) = self
+            .state
+            .lock()
+            .expect("credential vault state lock poisoned")
+            .accounts
+            .get(&(
+                scope.clone(),
+                connector_id.to_string(),
+                account_id.to_string(),
+            ))
+            .cloned()
+        {
+            return Ok(Some(account));
+        }
+        match &self.metadata {
+            Some(metadata) => metadata.get_account(scope, connector_id, account_id).await,
+            None => Ok(None),
+        }
+    }
+
     pub async fn get_provider_credential(
         &self,
         scope: &CredentialScope,
@@ -953,41 +987,6 @@ impl CredentialVault {
             None => Ok(None),
         }
     }
-}
-
-fn validate_connector_account(account: &ConnectorAccount) -> anyhow::Result<()> {
-    account.scope.validate()?;
-    for value in [
-        &account.account_id,
-        &account.connector_id,
-        &account.credential_id,
-    ] {
-        anyhow::ensure!(
-            !value.trim().is_empty(),
-            "connector account field is required"
-        );
-        anyhow::ensure!(value.len() <= 255, "connector account field is too long");
-    }
-    Ok(())
-}
-
-fn validate_provider_credential(credential: &ProviderCredential) -> anyhow::Result<()> {
-    for value in [
-        &credential.credential_id,
-        &credential.provider_id,
-        &credential.provider_subject,
-    ] {
-        anyhow::ensure!(
-            !value.trim().is_empty(),
-            "provider credential field is required"
-        );
-        anyhow::ensure!(value.len() <= 255, "provider credential field is too long");
-    }
-    anyhow::ensure!(
-        credential.refresh_secret_id.as_ref() != Some(&credential.access_secret_id),
-        "access and refresh secret IDs must differ"
-    );
-    Ok(())
 }
 
 #[cfg(test)]

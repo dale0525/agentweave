@@ -83,11 +83,17 @@ pub(super) fn apply_connector_foundation(
     foundation: Option<super::server_app::ResolvedConnectorFoundation>,
 ) -> api::AppState {
     match foundation {
-        Some(foundation) => state.with_connector_actions(
-            foundation.mail_actions,
-            foundation.calendar_actions,
-            foundation.contacts_actions,
-        ),
+        Some(foundation) => {
+            let state = state.with_connector_actions(
+                foundation.mail_actions,
+                foundation.calendar_actions,
+                foundation.contacts_actions,
+            );
+            match foundation.oauth_broker {
+                Some(broker) => state.with_oauth_broker(broker),
+                None => state,
+            }
+        }
         None => state,
     }
 }
