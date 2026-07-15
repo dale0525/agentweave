@@ -11,6 +11,7 @@ use crate::foundation_actions::MailActionService;
 use crate::mail_attachments::StoredMailAttachmentSource;
 use crate::mail_connector_transport::MailConnectorTransport;
 use crate::storage::Storage;
+use async_imap::Authenticator;
 use std::collections::BTreeSet;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -59,6 +60,36 @@ fn config() -> ImapSmtpMailConfig {
         connect_timeout_seconds: 2,
         operation_timeout_seconds: 3,
     }
+}
+
+#[test]
+fn xoauth2_authentication_is_explicit_scoped_and_redacted_from_config() {
+    let authenticator = XOAuth2Authenticator {
+        username: "user@example.test",
+        token: "access-token",
+    };
+    let mut reference = &authenticator;
+    assert_eq!(
+        reference.process(&[]),
+        "user=user@example.test\u{1}auth=Bearer access-token\u{1}\u{1}"
+    );
+    let connector = ImapSmtpMailConnector::new(
+        config(),
+        Arc::new(CredentialVault::new(Arc::new(
+            InMemorySecretStore::default(),
+        ))),
+    )
+    .unwrap()
+    .with_xoauth2_authentication("agentweave-mail", BTreeSet::from(["provider.mail".into()]))
+    .unwrap();
+    assert_eq!(connector.authentication, MailAuthentication::XOAuth2);
+    assert_eq!(connector.credential_connector_id, "agentweave-mail");
+    assert!(
+        connector
+            .credential_scopes
+            .unwrap()
+            .contains("provider.mail")
+    );
 }
 
 async fn connector() -> ImapSmtpMailConnector {

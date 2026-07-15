@@ -20,7 +20,7 @@ use agent_runtime::contacts::FakeContactsConnector;
 use agent_runtime::contacts_connector_transport::{
     CONTACTS_CONNECTOR_ID, CONTACTS_TOOL_NAMES, ContactsConnectorTransport,
 };
-use agent_runtime::credential::{ConnectorAccount, CredentialScope, ProviderCredential};
+use agent_runtime::credential::{ConnectorAccount, CredentialScope, ProviderCredential, SecretId};
 use agent_runtime::mail::{MailAccount, MailAddress, MailConnector};
 use agent_runtime::mail_attachments::{MailAttachmentSource, StoredMailAttachmentSource};
 use agent_runtime::mail_connector_transport::{
@@ -368,72 +368,91 @@ pub(super) async fn resolve_connector_tools(
             None
         };
         let (mail, display_name, deterministic): (Arc<dyn MailConnector>, &str, bool) =
-            match mail_connector_mode_from_lookup(|name| std::env::var_os(name))? {
-                MailConnectorMode::ImapSmtp => {
-                    let config = load_imap_smtp_config().await?;
-                    anyhow::ensure!(
-                        config.credential_scope.app_id == app_prompt.identity.app_id,
-                        "IMAP/SMTP credential scope App does not match the active Agent App"
-                    );
-                    let configured_vault = vault.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("IMAP/SMTP requires the persistent Credential Vault")
-                    })?;
-                    let granted_scopes = BTreeSet::from([
-                        "mail.message.read".into(),
-                        "mail.message.organize".into(),
-                        "mail.message.send".into(),
-                    ]);
-                    let credential_id = config.credential_secret_id.as_str().to_string();
-                    configured_vault
-                        .register_provider_credential_persistent(
-                            &config.credential_scope,
-                            ProviderCredential {
-                                access_secret_id: config.credential_secret_id.clone(),
-                                credential_id: credential_id.clone(),
-                                expires_at: None,
-                                granted_scopes: granted_scopes.clone(),
-                                provider_id: "imap-smtp".into(),
-                                provider_subject: config.username.clone(),
-                                refresh_secret_id: None,
-                                revoked_at: None,
-                            },
-                        )
-                        .await?;
-                    configured_vault
-                        .register_account_persistent(ConnectorAccount {
-                            account_id: config.account.id.clone(),
-                            allowed_scopes: granted_scopes,
-                            connector_id: "agentweave.connector.mail.imap-smtp".into(),
-                            credential_id,
-                            scope: config.credential_scope.clone(),
-                        })
-                        .await?;
-                    let mut connector =
-                        ImapSmtpMailConnector::new(config, Arc::new(configured_vault.clone()))?;
-                    if let Some(source) = &attachment_source {
-                        connector = connector.with_attachment_source(source.clone());
+            if workspace_provider == WorkspaceProviderMode::Google {
+                let configured_vault = vault.as_ref().expect("checked above");
+                let config = google_imap_smtp_config(scope.clone())?;
+                let mut connector =
+                    ImapSmtpMailConnector::new(config, Arc::new(configured_vault.clone()))?
+                        .with_xoauth2_authentication(
+                            MAIL_CONNECTOR_ID,
+                            BTreeSet::from([
+                                "https://www.googleapis.com/auth/gmail.modify".into(),
+                                "https://www.googleapis.com/auth/gmail.compose".into(),
+                                "https://www.googleapis.com/auth/gmail.send".into(),
+                            ]),
+                        )?;
+                if let Some(source) = &attachment_source {
+                    connector = connector.with_attachment_source(source.clone());
+                }
+                (Arc::new(connector), "Gmail IMAP/SMTP", false)
+            } else {
+                match mail_connector_mode_from_lookup(|name| std::env::var_os(name))? {
+                    MailConnectorMode::ImapSmtp => {
+                        let config = load_imap_smtp_config().await?;
+                        anyhow::ensure!(
+                            config.credential_scope.app_id == app_prompt.identity.app_id,
+                            "IMAP/SMTP credential scope App does not match the active Agent App"
+                        );
+                        let configured_vault = vault.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("IMAP/SMTP requires the persistent Credential Vault")
+                        })?;
+                        let granted_scopes = BTreeSet::from([
+                            "mail.message.read".into(),
+                            "mail.message.organize".into(),
+                            "mail.message.send".into(),
+                        ]);
+                        let credential_id = config.credential_secret_id.as_str().to_string();
+                        configured_vault
+                            .register_provider_credential_persistent(
+                                &config.credential_scope,
+                                ProviderCredential {
+                                    access_secret_id: config.credential_secret_id.clone(),
+                                    credential_id: credential_id.clone(),
+                                    expires_at: None,
+                                    granted_scopes: granted_scopes.clone(),
+                                    provider_id: "imap-smtp".into(),
+                                    provider_subject: config.username.clone(),
+                                    refresh_secret_id: None,
+                                    revoked_at: None,
+                                },
+                            )
+                            .await?;
+                        configured_vault
+                            .register_account_persistent(ConnectorAccount {
+                                account_id: config.account.id.clone(),
+                                allowed_scopes: granted_scopes,
+                                connector_id: "agentweave.connector.mail.imap-smtp".into(),
+                                credential_id,
+                                scope: config.credential_scope.clone(),
+                            })
+                            .await?;
+                        let mut connector =
+                            ImapSmtpMailConnector::new(config, Arc::new(configured_vault.clone()))?;
+                        if let Some(source) = &attachment_source {
+                            connector = connector.with_attachment_source(source.clone());
+                        }
+                        (Arc::new(connector), "IMAP/SMTP Mail", false)
                     }
-                    (Arc::new(connector), "IMAP/SMTP Mail", false)
+                    MailConnectorMode::Fake => {
+                        let fake = Arc::new(FakeMailConnector::new());
+                        fake.add_account(MailAccount {
+                            id: "primary".into(),
+                            display_name: "Example Mail".into(),
+                            primary_address: MailAddress {
+                                name: Some("Local User".into()),
+                                address: "local@example.test".into(),
+                            },
+                            addresses: Vec::new(),
+                            provider_reference: None,
+                        })?;
+                        (fake, "Fake Mail", true)
+                    }
+                    MailConnectorMode::Unconfigured => (
+                        Arc::new(FakeMailConnector::new()),
+                        "Unconfigured Mail",
+                        true,
+                    ),
                 }
-                MailConnectorMode::Fake => {
-                    let fake = Arc::new(FakeMailConnector::new());
-                    fake.add_account(MailAccount {
-                        id: "primary".into(),
-                        display_name: "Example Mail".into(),
-                        primary_address: MailAddress {
-                            name: Some("Local User".into()),
-                            address: "local@example.test".into(),
-                        },
-                        addresses: Vec::new(),
-                        provider_reference: None,
-                    })?;
-                    (fake, "Fake Mail", true)
-                }
-                MailConnectorMode::Unconfigured => (
-                    Arc::new(FakeMailConnector::new()),
-                    "Unconfigured Mail",
-                    true,
-                ),
             };
         runtime
             .register(
@@ -628,6 +647,44 @@ where
         Some(value) => anyhow::bail!("unsupported AGENTWEAVE_WORKSPACE_PROVIDER '{value}'"),
         None => Ok(WorkspaceProviderMode::Fake),
     }
+}
+
+fn google_imap_smtp_config(scope: CredentialScope) -> anyhow::Result<ImapSmtpMailConfig> {
+    let account_id = std::env::var("AGENTWEAVE_GOOGLE_ACCOUNT_ID")
+        .map_err(|_| anyhow::anyhow!("AGENTWEAVE_GOOGLE_ACCOUNT_ID is required for Gmail"))?;
+    let email = std::env::var("AGENTWEAVE_GOOGLE_EMAIL")
+        .map_err(|_| anyhow::anyhow!("AGENTWEAVE_GOOGLE_EMAIL is required for Gmail"))?;
+    Ok(ImapSmtpMailConfig {
+        account: MailAccount {
+            id: account_id,
+            display_name: "Google Workspace".into(),
+            primary_address: MailAddress {
+                name: None,
+                address: email.clone(),
+            },
+            addresses: Vec::new(),
+            provider_reference: Some(agent_runtime::mail::ProviderReference {
+                provider: "google-workspace".into(),
+                id: email.clone(),
+            }),
+        },
+        credential_scope: scope,
+        credential_secret_id: SecretId::parse("oauth.managed.google")?,
+        imap_host: "imap.gmail.com".into(),
+        imap_port: 993,
+        imap_tls: agent_runtime::mail_imap_smtp::MailTlsMode::Implicit,
+        smtp_host: "smtp.gmail.com".into(),
+        smtp_port: 465,
+        smtp_tls: agent_runtime::mail_imap_smtp::MailTlsMode::Implicit,
+        username: email,
+        archive_mailbox: Some("[Gmail]/All Mail".into()),
+        sent_mailbox: Some("[Gmail]/Sent Mail".into()),
+        drafts_mailbox: Some("[Gmail]/Drafts".into()),
+        trash_mailbox: Some("[Gmail]/Trash".into()),
+        allow_insecure_localhost: false,
+        connect_timeout_seconds: 30,
+        operation_timeout_seconds: 60,
+    })
 }
 
 fn mail_connector_mode_from_lookup<F>(lookup: F) -> anyhow::Result<MailConnectorMode>
