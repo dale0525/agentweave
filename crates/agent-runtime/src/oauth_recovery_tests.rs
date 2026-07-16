@@ -159,11 +159,20 @@ async fn stale_owner_cannot_activate_credentials_after_recovery_claim() {
         .cleanup_pending_secret_material(&scope())
         .await
         .unwrap();
-    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credential_secret_cleanup")
-        .fetch_one(storage.pool())
-        .await
-        .unwrap();
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM credential_secret_cleanup WHERE cleaned_at IS NULL",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
     assert_eq!(pending, 0);
+    let tombstones: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM credential_secret_cleanup WHERE phase = 'cleanup' AND cleaned_at IS NOT NULL",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
+    assert_eq!(tombstones, 2);
 }
 #[tokio::test]
 async fn preparing_sessions_recover_before_or_after_pkce_secret_persistence() {
@@ -469,10 +478,12 @@ async fn cleanup_failure_keeps_a_durable_recovery_pointer_until_retry_succeeds()
             .len(),
         2
     );
-    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credential_secret_cleanup")
-        .fetch_one(storage.pool())
-        .await
-        .unwrap();
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM credential_secret_cleanup WHERE cleaned_at IS NULL",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
     assert!(pending > 0);
 
     secrets.fail_provider_delete.store(false, Ordering::SeqCst);
@@ -488,11 +499,20 @@ async fn cleanup_failure_keeps_a_durable_recovery_pointer_until_retry_succeeds()
         .unwrap();
     assert_eq!(recovered.status, OAuthAuthorizationStatus::Failed);
     assert!(recovered.credential_id.is_none());
-    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credential_secret_cleanup")
-        .fetch_one(storage.pool())
-        .await
-        .unwrap();
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM credential_secret_cleanup WHERE cleaned_at IS NULL",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
     assert_eq!(pending, 0);
+    let tombstones: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM credential_secret_cleanup WHERE cleaned_at IS NOT NULL",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
+    assert!(tombstones > 0);
     assert_eq!(
         vault
             .list_connector_accounts(&scope(), None)
