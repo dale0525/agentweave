@@ -862,6 +862,7 @@ impl MobileRuntime {
                 )?
                 .with_app_prompt(self.app_prompt.clone())
                 .with_foundations(self.memory_tools.clone(), self.connector_tools.clone())
+                .with_mail_actions(self.mail_actions.clone())
                 .with_owner_turn_context(self.skill_management.clone(), self.actor_context.clone());
                 host.send_message_after_user_persisted(session_id, content)
                     .await

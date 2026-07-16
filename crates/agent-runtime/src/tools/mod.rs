@@ -1,6 +1,7 @@
 pub mod builtin;
 pub mod command;
 pub mod discovery;
+mod foundation_actions;
 mod host_dispatch;
 pub mod patch;
 pub mod path;
@@ -267,6 +268,8 @@ pub struct ToolRegistry {
     task_tools: Option<crate::task_tools::TaskToolRuntime>,
     automation_tools: Option<crate::automation_tools::AutomationToolRuntime>,
     attachment_tools: Option<crate::attachment_tools::AttachmentToolRuntime>,
+    mail_actions: Option<crate::foundation_actions::MailActionService>,
+    foundation_action_context: Option<crate::foundation_actions::FoundationActionTurnContext>,
     workspace_root: PathBuf,
     cwd: PathBuf,
     mode: RuntimeMode,
@@ -291,6 +294,7 @@ impl std::fmt::Debug for ToolRegistry {
             .field("has_task_tools", &self.task_tools.is_some())
             .field("has_automation_tools", &self.automation_tools.is_some())
             .field("has_attachment_tools", &self.attachment_tools.is_some())
+            .field("has_mail_actions", &self.mail_actions.is_some())
             .field("has_connector_tools", &self.connector_tools.is_some())
             .field("has_management", &self.management.is_some())
             .field("has_execution_observer", &self.execution_observer.is_some())
@@ -336,6 +340,8 @@ impl ToolRegistry {
             task_tools: None,
             automation_tools: None,
             attachment_tools: None,
+            mail_actions: None,
+            foundation_action_context: None,
             workspace_root: config.workspace_root.clone(),
             cwd: config.cwd.clone(),
             mode: config.mode,
@@ -413,7 +419,10 @@ impl ToolRegistry {
             definitions.extend(attachments.definitions());
         }
         if let Some(connectors) = &self.connector_tools {
-            definitions.extend(connectors.definitions());
+            definitions.extend(self.foundation_connector_definitions(connectors));
+        }
+        if self.mail_actions.is_some() {
+            definitions.push(foundation_actions::mail_send_preview_definition());
         }
 
         let mut runtime_tools = self.skills.tools_with_runtime_sources();
@@ -645,6 +654,12 @@ impl ToolRegistry {
         }
         if let Some(outcome) = self
             .dispatch_attachment_tools(name, call_id, &arguments, started)
+            .await
+        {
+            return outcome;
+        }
+        if let Some(outcome) = self
+            .dispatch_foundation_mail_action(name, call_id, &arguments, started)
             .await
         {
             return outcome;
