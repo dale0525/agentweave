@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { registerApprovalWindowController } from "./approvalWindow";
 import { registerAttachmentController } from "./attachmentController";
 import {
+  deriveCredentialVaultKey,
   loadOrCreateDataProtectionKey,
   unwrapDataProtectionKey,
   type DesktopDataProtectionKey,
@@ -42,6 +43,9 @@ app.whenReady().then(async () => {
     console.error("Data protection key is unavailable");
   }
   const wrappedDataProtectionKey = dataProtection?.wrappedKey;
+  const credentialVaultKey = dataProtection
+    ? deriveCredentialVaultKey(dataProtection.key)
+    : null;
   const sidecar = createDesktopSidecarController(resolveDesktopSidecar({
     appPath: app.getAppPath(),
     env: process.env,
@@ -50,6 +54,7 @@ app.whenReady().then(async () => {
     userDataPath: app.getPath("userData"),
   }), {
     ...(dataProtection ? { dataProtectionKey: dataProtection.key } : {}),
+    ...(credentialVaultKey ? { credentialVaultKey } : {}),
     log: (stream, message) => console.log(`[sidecar:${stream}] ${message}`),
   });
   installSidecarShutdownGate({
@@ -59,6 +64,7 @@ app.whenReady().then(async () => {
   });
   await sidecar.start();
   dataProtection?.key.fill(0);
+  credentialVaultKey?.fill(0);
   dataProtection = null;
   const mainUrl = rendererBase
     ? new URL("/", rendererBase).href

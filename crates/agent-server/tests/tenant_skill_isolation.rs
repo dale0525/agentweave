@@ -26,6 +26,7 @@ async fn tenant_roots_rows_revisions_and_snapshots_are_isolated() {
         runtime_version: "0.1.0".parse().unwrap(),
         management_policy: SkillManagementPolicy::owner_only(),
         storage_protection_key: None,
+        credential_vault_key: None,
     })
     .await
     .unwrap();
@@ -74,6 +75,7 @@ async fn registry_creates_one_manager_per_canonical_tenant_under_concurrency() {
         runtime_version: "0.1.0".parse().unwrap(),
         management_policy: SkillManagementPolicy::owner_only(),
         storage_protection_key: None,
+        credential_vault_key: None,
     })
     .await
     .unwrap();
@@ -368,6 +370,7 @@ async fn tenant_factory_rejects_symlinked_tenant_root_without_touching_target() 
         runtime_version: "0.1.0".parse().unwrap(),
         management_policy: SkillManagementPolicy::owner_only(),
         storage_protection_key: None,
+        credential_vault_key: None,
     })
     .await
     .unwrap();
@@ -489,6 +492,7 @@ fn tenant_config(
         runtime_version: "0.1.0".parse().unwrap(),
         management_policy: SkillManagementPolicy::owner_only(),
         storage_protection_key: None,
+        credential_vault_key: None,
     }
 }
 

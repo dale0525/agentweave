@@ -64,6 +64,8 @@ pub struct AppState {
     pub(crate) mail_actions: Option<agent_runtime::foundation_actions::MailActionService>,
     pub(crate) calendar_actions: Option<agent_runtime::calendar_actions::CalendarActionService>,
     pub(crate) contacts_actions: Option<agent_runtime::contacts_actions::ContactsActionService>,
+    pub(crate) mail_account_manager:
+        Option<Arc<agent_runtime::mail_imap_smtp_accounts::ImapSmtpMailAccountManager>>,
     automation: Option<crate::automation_api::AutomationApiState>,
     oauth_broker: Option<agent_runtime::oauth::OAuthBroker>,
 }
@@ -177,6 +179,7 @@ impl AppState {
             mail_actions,
             calendar_actions: None,
             contacts_actions: None,
+            mail_account_manager: None,
             automation: None,
             oauth_broker: None,
         }
@@ -296,6 +299,7 @@ impl AppState {
             mail_actions,
             calendar_actions: None,
             contacts_actions: None,
+            mail_account_manager: None,
             automation: None,
             oauth_broker: None,
         }
@@ -356,6 +360,7 @@ impl AppState {
             mail_actions: None,
             calendar_actions: None,
             contacts_actions: None,
+            mail_account_manager: None,
             automation: None,
             oauth_broker: None,
         }

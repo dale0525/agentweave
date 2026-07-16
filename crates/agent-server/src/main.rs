@@ -11,19 +11,15 @@ use agent_runtime::{
 use agent_server::api;
 use agent_server::owner_api::{OwnerApiConfig, OwnerAuth};
 use agent_server::tenant_skills::{SINGLE_USER_TENANT_ID, TenantSkillRuntime};
-use model_gateway::{
-    provider::{EndpointType, ProviderProfile},
-    responses::GatewayHttpClient,
-};
+use model_gateway::responses::GatewayHttpClient;
 #[cfg(test)]
 use std::path::PathBuf;
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 const DEFAULT_DATABASE_URL: &str = "sqlite://agentweave.db?mode=rwc";
-const DEFAULT_MODEL_BASE_URL: &str = "http://127.0.0.1:11434/v1";
-const DEFAULT_MODEL_NAME: &str = "local-agent-model";
 mod server_app;
 mod server_automation;
+mod server_model_startup;
 #[path = "server_skill_startup.rs"]
 mod server_skill_startup;
 #[cfg(test)]
@@ -31,6 +27,7 @@ mod server_skill_startup;
 mod server_skill_startup_tests;
 #[path = "server_tenant_startup.rs"]
 mod server_tenant_startup;
+use server_model_startup::model_profile_from_env;
 use server_skill_startup::{
     LoadedSkillManager, builtin_skills_mode_from_lookup, load_skill_manager_with_mode,
     managed_skills_config_from_lookup,
@@ -49,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let mut transport = agent_server::local_transport::prepare_from_environment().await?;
     let data_protection_key = transport.take_data_protection_key().map(Arc::new);
+    let credential_vault_key = transport.take_credential_vault_key().map(Arc::new);
 
     let skills_root = skills_root_from_env();
     let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
@@ -75,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
             builtin_mode,
             policy,
             data_protection_key.clone(),
+            credential_vault_key.clone(),
         )
         .await?;
         let runtime = registry.for_tenant(SINGLE_USER_TENANT_ID).await?;
@@ -127,9 +126,15 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         let attachment_tools =
             server_app::resolve_attachment_tools(&storage, &resolved_app.prompt).await?;
-        let connector_foundation =
-            server_app::resolve_connector_tools(&storage, &resolved_app.prompt, &runtime_config)
-                .await?;
+        let credential_root = server_app::credential_root_for_database(database_path.as_deref());
+        let connector_foundation = server_app::resolve_connector_tools(
+            &storage,
+            &resolved_app.prompt,
+            &runtime_config,
+            credential_vault_key.clone(),
+            credential_root.as_deref(),
+        )
+        .await?;
         let connector_tools = connector_foundation
             .as_ref()
             .map(|foundation| foundation.tools.clone());
@@ -399,30 +404,6 @@ async fn reconcile_managed_startup(
         .map_err(|error| anyhow::anyhow!("managed skill startup reconciliation failed: {error}"))?;
     drop(service);
     Ok(())
-}
-
-fn model_profile_from_env() -> ProviderProfile {
-    ProviderProfile {
-        id: "default".into(),
-        name: "Default".into(),
-        endpoint_type: model_endpoint_type_from_env(),
-        base_url: std::env::var("AGENTWEAVE_MODEL_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_MODEL_BASE_URL.into()),
-        model: std::env::var("AGENTWEAVE_MODEL_NAME").unwrap_or_else(|_| DEFAULT_MODEL_NAME.into()),
-        api_key: std::env::var("AGENTWEAVE_MODEL_API_KEY").ok(),
-        headers: BTreeMap::new(),
-    }
-}
-
-fn model_endpoint_type_from_env() -> EndpointType {
-    match std::env::var("AGENTWEAVE_MODEL_ENDPOINT_TYPE")
-        .unwrap_or_else(|_| "chat_completions".into())
-        .as_str()
-    {
-        "responses" => EndpointType::Responses,
-        "completion" => EndpointType::Completion,
-        _ => EndpointType::ChatCompletions,
-    }
 }
 
 #[cfg(test)]

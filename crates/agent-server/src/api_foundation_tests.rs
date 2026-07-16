@@ -9,11 +9,15 @@ use agent_runtime::contacts::{
 };
 use agent_runtime::contacts_actions::ContactsActionService;
 use agent_runtime::contacts_connector_transport::ContactsConnectorTransport;
-use agent_runtime::credential::CredentialScope;
+use agent_runtime::credential::{CredentialScope, CredentialVault, InMemorySecretStore};
+use agent_runtime::credential_sqlite::SqliteCredentialMetadataStore;
 use agent_runtime::foundation_actions::MailActionService;
 use agent_runtime::mail::{DraftContent, MailAccount, MailAddress, OutgoingBody};
 use agent_runtime::mail_connector_transport::MailConnectorTransport;
 use agent_runtime::mail_fake::FakeMailConnector;
+use agent_runtime::mail_imap_smtp_accounts::{
+    ImapSmtpMailAccountManager, ManagedImapSmtpMailConnector, SqliteImapSmtpMailAccountStore,
+};
 use agent_runtime::prompt_composer::AppPromptConfig;
 use agent_runtime::skill::SkillRegistry;
 use agent_runtime::skill_catalog::SkillCatalog;
@@ -21,7 +25,7 @@ use agent_runtime::skill_manager::SkillManager;
 use agent_runtime::tools::RuntimeConfig;
 use agent_runtime::turn::{ModelClient, ModelEventStream};
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode, header};
+use axum::http::{Method, Request, StatusCode, header};
 use futures::stream;
 use model_gateway::responses::{GatewayEvent, GatewayRequest};
 use serde_json::{Value, json};
@@ -475,9 +479,141 @@ async fn foundation_contacts_approval_api_resumes_exactly_once() {
     }
 }
 
+#[tokio::test]
+async fn trusted_mail_configuration_api_cruds_without_returning_secrets() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let manager = mail_account_manager(&storage).await;
+    let app = router(Arc::new(
+        AppState::new(storage).with_mail_account_manager(manager),
+    ));
+    let first_password = "first-credential-marker";
+    let created = app
+        .clone()
+        .oneshot(json_request_with_method(
+            Method::PUT,
+            "/foundation/mail/account-configurations/primary",
+            mail_configuration(first_password, "first@example.test"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = read_text(created).await;
+    assert!(!created.contains(first_password));
+    assert!(!created.contains("password"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&created).unwrap()["credentialConfigured"],
+        true
+    );
+
+    let second_password = "rotated-credential-marker";
+    let updated = app
+        .clone()
+        .oneshot(json_request_with_method(
+            Method::PUT,
+            "/foundation/mail/account-configurations/primary",
+            mail_configuration(second_password, "updated@example.test"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated = read_text(updated).await;
+    assert!(!updated.contains(second_password));
+    assert_eq!(
+        serde_json::from_str::<Value>(&updated).unwrap()["username"],
+        "updated@example.test"
+    );
+
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/foundation/mail/account-configurations/primary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(read_json(deleted).await["deleted"], true);
+    let missing = app
+        .oneshot(
+            Request::builder()
+                .uri("/foundation/mail/account-configurations/primary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn mail_configuration_api_rejects_insecure_remote_hosts_without_echoing_password() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let app = router(Arc::new(
+        AppState::new(storage.clone())
+            .with_mail_account_manager(mail_account_manager(&storage).await),
+    ));
+    let password = "rejected-credential-marker";
+    let mut body = mail_configuration(password, "user@example.test");
+    body["imapTls"] = json!("none");
+    let response = app
+        .oneshot(json_request_with_method(
+            Method::PUT,
+            "/foundation/mail/account-configurations/primary",
+            body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!read_text(response).await.contains(password));
+}
+
+async fn mail_account_manager(storage: &Storage) -> Arc<ImapSmtpMailAccountManager> {
+    let metadata = SqliteCredentialMetadataStore::from_storage(storage)
+        .await
+        .unwrap();
+    Arc::new(ImapSmtpMailAccountManager::new(
+        SqliteImapSmtpMailAccountStore::from_storage(storage)
+            .await
+            .unwrap(),
+        Arc::new(CredentialVault::new_persistent(
+            Arc::new(InMemorySecretStore::default()),
+            metadata,
+        )),
+        Arc::new(ManagedImapSmtpMailConnector::new()),
+    ))
+}
+
+fn mail_configuration(password: &str, username: &str) -> Value {
+    json!({
+        "displayName": "Primary Mail",
+        "primaryName": "Local User",
+        "primaryAddress": "user@example.test",
+        "username": username,
+        "password": password,
+        "imapHost": "imap.example.test",
+        "imapPort": 993,
+        "imapTls": "implicit",
+        "smtpHost": "smtp.example.test",
+        "smtpPort": 587,
+        "smtpTls": "start_tls",
+        "archiveMailbox": "Archive",
+        "sentMailbox": "Sent",
+        "draftsMailbox": "Drafts",
+        "trashMailbox": "Trash",
+        "allowInsecureLocalhost": false
+    })
+}
+
 fn json_request(uri: &str, body: Value) -> Request<Body> {
+    json_request_with_method(Method::POST, uri, body)
+}
+
+fn json_request_with_method(method: Method, uri: &str, body: Value) -> Request<Body> {
     Request::builder()
-        .method("POST")
+        .method(method)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
@@ -485,6 +621,10 @@ fn json_request(uri: &str, body: Value) -> Request<Body> {
 }
 
 async fn read_json(response: axum::response::Response) -> Value {
+    serde_json::from_str(&read_text(response).await).unwrap()
+}
+
+async fn read_text(response: axum::response::Response) -> String {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+    String::from_utf8(bytes.to_vec()).unwrap()
 }
