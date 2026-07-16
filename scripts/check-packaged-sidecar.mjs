@@ -359,21 +359,29 @@ export function scriptedModelReply(body) {
       accountId: "primary",
       draftId: requireString(draft.id, "Mail draft identifier"),
       expectedRevision: requirePositiveInteger(draft.revision, "Mail draft revision"),
-      idempotencyKey: "packaged-foundation-send-v1",
     });
   }
   successfulToolOutput(body, "foundation-mail-preview");
-  return { choices: [{ message: { content: "Packaged Foundation scenario completed." } }] };
+  return {
+    choices: [{
+      finish_reason: "stop",
+      message: { content: "Packaged Foundation scenario completed." },
+    }],
+  };
 }
 
 function modelToolCall(body, canonicalName, callId, argumentsValue) {
   const suffix = `_${canonicalName}`;
   const tool = Array.isArray(body.tools)
-    ? body.tools.find((candidate) => candidate?.function?.name?.endsWith(suffix))
+    ? body.tools.find((candidate) => (
+      candidate?.function?.name === canonicalName
+      || candidate?.function?.name?.endsWith(suffix)
+    ))
     : undefined;
   if (!tool) fail(`scripted model is missing '${canonicalName}'`);
   return {
     choices: [{
+      finish_reason: "tool_calls",
       message: {
         content: null,
         tool_calls: [{
@@ -455,29 +463,13 @@ async function createPackagedFoundationState(origin, token) {
     previewEvent.payload.result,
     "packaged Mail preview",
   );
-  await requestJson(origin, token, "/foundation/mail/send-approvals", {
-    body: {
-      accountId: requireString(
-        preview.accountId ?? preview.account_id,
-        "Mail preview account identifier",
-      ),
-      draftId: requireString(
-        preview.draftId ?? preview.draft_id,
-        "Mail preview draft identifier",
-      ),
-      expectedRevision: requirePositiveInteger(
-        preview.draftRevision ?? preview.draft_revision,
-        "Mail preview revision",
-      ),
-      idempotencyKey: requireString(
-        preview.idempotencyKey ?? preview.idempotency_key,
-        "Mail preview idempotency key",
-      ),
-      sessionId,
-    },
-    method: "POST",
-    status: 200,
-  });
+  if (preview.status !== "waiting_approval" || !preview.preview) {
+    fail("packaged Mail preview did not create a waiting approval");
+  }
+  requireString(preview.preview.accountId, "Mail preview account identifier");
+  requireString(preview.preview.draftId, "Mail preview draft identifier");
+  requirePositiveInteger(preview.preview.draftRevision, "Mail preview revision");
+  requireString(preview.preview.idempotencyKey, "Mail preview idempotency key");
 }
 
 async function waitForTurn(origin, token, sessionId, turnId) {
@@ -525,7 +517,9 @@ async function assertPackagedFoundationState(origin, token) {
   if (!Array.isArray(actions) || !actions.some((item) => (
     item?.action?.status === "waiting_approval"
     && item?.approval?.status === "pending"
-    && item?.preview?.idempotencyKey === "packaged-foundation-send-v1"
+    && item?.preview?.accountId === "primary"
+    && typeof item?.preview?.idempotencyKey === "string"
+    && item.preview.idempotencyKey.length > 0
   ))) {
     fail("packaged approval-bound Action state is missing");
   }

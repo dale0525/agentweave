@@ -22,6 +22,9 @@ export type SidecarApiOperation =
   | "notifications.enqueue"
   | "notifications.get"
   | "notifications.list"
+  | "oauth.cancel"
+  | "oauth.start"
+  | "oauth.status"
   | "schedules.create"
   | "schedules.get"
   | "schedules.list"
@@ -145,4 +148,35 @@ export type FoundationNotificationRecord = Readonly<{
 export type SidecarApiRequest = Readonly<{
   input?: unknown;
   operation: SidecarApiOperation;
+}>;
+
+export type OAuthAuthorizationStatus =
+  | "cancelled"
+  | "completed"
+  | "denied"
+  | "exchanging"
+  | "expired"
+  | "failed"
+  | "preparing"
+  | "pending";
+
+export type OAuthAuthorizationSummary = Readonly<{
+  authorizationId: string;
+  expiresAt: string;
+  providerId: string;
+  status: OAuthAuthorizationStatus;
+}>;
+
+export type OAuthAuthorizationBinding = Readonly<{
+  accountId: string;
+  connectorId: string;
+}>;
+
+export type OAuthAuthorizationView = OAuthAuthorizationSummary & Readonly<{
+  bindings: readonly OAuthAuthorizationBinding[];
+  connectorIds: readonly string[];
+  createdAt: string;
+  errorCode: string | null;
+  requestedCapabilities: readonly string[];
+  updatedAt: string;
 }>;

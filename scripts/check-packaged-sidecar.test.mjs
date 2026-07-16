@@ -139,6 +139,7 @@ test("packaged Foundation scenario requires the complete reusable contract", () 
 test("scripted model advances only through successful Foundation tool results", () => {
   const body = scriptedBody();
   const proposed = scriptedModelReply(body);
+  assert.equal(proposed.choices[0].finish_reason, "tool_calls");
   assert.equal(toolCall(proposed).id, "foundation-memory-propose");
   assert.equal(toolArguments(proposed).draft.retention.mode, "persistent");
 
@@ -167,13 +168,16 @@ test("scripted model advances only through successful Foundation tool results", 
   }));
   const previewed = scriptedModelReply(body);
   assert.equal(toolCall(previewed).id, "foundation-mail-preview");
+  assert.equal(toolCall(previewed).function.name, "mail_send_preview");
   assert.equal(toolArguments(previewed).draftId, "draft-1");
+  assert.equal("idempotencyKey" in toolArguments(previewed), false);
 
   body.messages.push(toolMessage("foundation-mail-preview", {
     id: "preview-1",
     idempotencyKey: "packaged-foundation-send-v1",
   }));
   const completed = scriptedModelReply(body);
+  assert.equal(completed.choices[0].finish_reason, "stop");
   assert.equal(completed.choices[0].message.content, "Packaged Foundation scenario completed.");
 
   const failed = scriptedBody();
@@ -199,7 +203,10 @@ function scriptedBody() {
       "memory_propose",
     ].map((name) => ({
       type: "function",
-      function: { name: `ga_fixture_${name}`, parameters: { type: "object" } },
+      function: {
+        name: name === "mail_send_preview" ? name : `ga_fixture_${name}`,
+        parameters: { type: "object" },
+      },
     })),
   };
 }

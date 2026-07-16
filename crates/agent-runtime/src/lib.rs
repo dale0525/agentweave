@@ -36,6 +36,8 @@ pub mod messaging;
 pub mod mobile_host;
 pub mod model_config;
 pub mod notes;
+pub mod oauth;
+mod oauth_sqlite;
 pub mod platform;
 pub mod policy;
 pub mod prompt_composer;
