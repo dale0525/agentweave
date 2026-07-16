@@ -9,7 +9,10 @@ use futures::TryStreamExt;
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     message::{Mailbox as LettreMailbox, header::MessageId},
-    transport::smtp::{authentication::Credentials, client::Tls},
+    transport::smtp::{
+        authentication::{Credentials, Mechanism},
+        client::Tls,
+    },
 };
 use mail_parser::{MessageParser, MimeHeaders};
 use serde::{Deserialize, Serialize};
@@ -38,6 +41,10 @@ use support::*;
 #[path = "mail_imap_smtp_outgoing.rs"]
 mod outgoing;
 use outgoing::build_outgoing_message;
+#[path = "mail_imap_smtp_auth.rs"]
+mod authentication;
+pub use authentication::MailAuthentication;
+use authentication::XOAuth2Authenticator;
 
 enum ImapStream {
     Plain(TcpStream),
@@ -170,6 +177,9 @@ pub struct ImapSmtpMailConnector {
     connected: Arc<AtomicBool>,
     previews: Arc<Mutex<HashMap<String, SendPreview>>>,
     messages: Arc<Mutex<HashMap<String, CachedMessage>>>,
+    authentication: MailAuthentication,
+    credential_connector_id: String,
+    credential_scopes: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone)]
@@ -200,6 +210,9 @@ impl ImapSmtpMailConnector {
             connected: Arc::new(AtomicBool::new(true)),
             previews: Arc::new(Mutex::new(HashMap::new())),
             messages: Arc::new(Mutex::new(HashMap::new())),
+            authentication: MailAuthentication::Password,
+            credential_connector_id: CONNECTOR_ID.into(),
+            credential_scopes: None,
         })
     }
 
@@ -220,28 +233,11 @@ impl ImapSmtpMailConnector {
         ])
     }
 
-    async fn password(&self, scopes: &[&str]) -> MailResult<String> {
-        let required = scopes.iter().map(|scope| (*scope).to_string()).collect();
-        let material = self
-            .vault
-            .lease_for_connector(
-                &self.config.credential_scope,
-                CONNECTOR_ID,
-                &self.config.account.id,
-                &required,
-            )
-            .await
-            .map_err(redacted_connector_error)?;
-        std::str::from_utf8(material.expose_bytes())
-            .map(str::to_owned)
-            .map_err(|_| MailError::Connector("credential is not valid UTF-8".into()))
-    }
-
     async fn imap_session(&self, scopes: &[&str]) -> MailResult<ImapSession> {
         if !self.connected.load(Ordering::SeqCst) {
             return Err(MailError::Connector("account is disconnected".into()));
         }
-        let password = self.password(scopes).await?;
+        let credential = self.credential(scopes).await?;
         let connect_timeout = Duration::from_secs(self.config.connect_timeout_seconds);
         let address = (self.config.imap_host.as_str(), self.config.imap_port);
         let tcp = timeout(connect_timeout, TcpStream::connect(address))
@@ -275,13 +271,28 @@ impl ImapSmtpMailConnector {
             .map_err(|_| MailError::Connector("IMAP greeting timed out".into()))?
             .map_err(|_| MailError::Connector("IMAP greeting failed".into()))?
             .ok_or_else(|| MailError::Connector("IMAP server closed before greeting".into()))?;
-        timeout(
-            connect_timeout,
-            client.login(&self.config.username, &password),
-        )
-        .await
-        .map_err(|_| MailError::Connector("IMAP login timed out".into()))?
-        .map_err(|_| MailError::Connector("IMAP authentication failed".into()))
+        match self.authentication {
+            MailAuthentication::Password => timeout(
+                connect_timeout,
+                client.login(&self.config.username, &credential),
+            )
+            .await
+            .map_err(|_| MailError::Connector("IMAP login timed out".into()))?
+            .map_err(|_| MailError::Connector("IMAP authentication failed".into())),
+            MailAuthentication::XOAuth2 => {
+                let authenticator = XOAuth2Authenticator {
+                    username: &self.config.username,
+                    token: &credential,
+                };
+                timeout(
+                    connect_timeout,
+                    client.authenticate("XOAUTH2", &authenticator),
+                )
+                .await
+                .map_err(|_| MailError::Connector("IMAP XOAUTH2 timed out".into()))?
+                .map_err(|_| MailError::Connector("IMAP XOAUTH2 failed".into()))
+            }
+        }
     }
 
     async fn fetch_messages(
@@ -432,7 +443,7 @@ impl ImapSmtpMailConnector {
             })?;
             attachments.push(source.resolve(&draft.account_id, attachment).await?);
         }
-        let password = self.password(&["mail.message.send"]).await?;
+        let credential = self.credential(&["mail.message.send"]).await?;
         let mut builder = Message::builder()
             .from(to_lettre_mailbox(&preview.from)?)
             .subject(&preview.subject)
@@ -447,7 +458,7 @@ impl ImapSmtpMailConnector {
             builder = builder.bcc(to_lettre_mailbox(address)?);
         }
         let message = build_outgoing_message(builder, draft, attachments)?;
-        let credentials = Credentials::new(self.config.username.clone(), password);
+        let credentials = Credentials::new(self.config.username.clone(), credential);
         let mut transport = match self.config.smtp_tls {
             MailTlsMode::Implicit => {
                 AsyncSmtpTransport::<Tokio1Executor>::relay(&self.config.smtp_host)
@@ -467,6 +478,9 @@ impl ImapSmtpMailConnector {
         transport = transport
             .port(self.config.smtp_port)
             .credentials(credentials);
+        if self.authentication == MailAuthentication::XOAuth2 {
+            transport = transport.authentication(vec![Mechanism::Xoauth2]);
+        }
         timeout(
             Duration::from_secs(self.config.operation_timeout_seconds),
             transport.build().send(message),
