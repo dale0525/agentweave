@@ -167,7 +167,9 @@ test("scripted model advances only through successful Foundation tool results", 
   }));
   const previewed = scriptedModelReply(body);
   assert.equal(toolCall(previewed).id, "foundation-mail-preview");
+  assert.equal(toolCall(previewed).function.name, "mail_send_preview");
   assert.equal(toolArguments(previewed).draftId, "draft-1");
+  assert.equal("idempotencyKey" in toolArguments(previewed), false);
 
   body.messages.push(toolMessage("foundation-mail-preview", {
     id: "preview-1",
@@ -199,7 +201,10 @@ function scriptedBody() {
       "memory_propose",
     ].map((name) => ({
       type: "function",
-      function: { name: `ga_fixture_${name}`, parameters: { type: "object" } },
+      function: {
+        name: name === "mail_send_preview" ? name : `ga_fixture_${name}`,
+        parameters: { type: "object" },
+      },
     })),
   };
 }
