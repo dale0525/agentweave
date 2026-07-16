@@ -3,7 +3,10 @@ use crate::foundation_action_envelope::{
     FoundationActionEffect, FoundationActionEnvelope, FoundationActionPreview,
     FoundationActionResource,
 };
-use crate::mail::{DraftContent, MAX_RECIPIENTS, MailDraft, SendPreview};
+use crate::mail::{
+    DraftContent, MAX_DRAFT_ATTACHMENTS, MAX_DRAFT_ATTACHMENTS_TOTAL_BYTES, MAX_RECIPIENTS,
+    MailDraft, SendPreview,
+};
 use crate::mail_connector_transport::MAIL_CONNECTOR_ID;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -205,6 +208,21 @@ fn validate_send_preview(preview: &SendPreview) -> anyhow::Result<()> {
     anyhow::ensure!(
         (1..=MAX_RECIPIENTS).contains(&recipients),
         "Mail preview recipient count is invalid"
+    );
+    anyhow::ensure!(
+        preview.attachments.len() <= MAX_DRAFT_ATTACHMENTS,
+        "Mail preview attachment count is invalid"
+    );
+    let mut total_bytes = 0_u64;
+    for attachment in &preview.attachments {
+        attachment
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        total_bytes = total_bytes.saturating_add(attachment.size_bytes);
+    }
+    anyhow::ensure!(
+        total_bytes <= MAX_DRAFT_ATTACHMENTS_TOTAL_BYTES,
+        "Mail preview attachment bytes exceed limit"
     );
     Ok(())
 }

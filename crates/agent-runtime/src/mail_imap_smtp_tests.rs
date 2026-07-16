@@ -1,8 +1,16 @@
 use super::*;
+use crate::approval::ApprovalDecision;
+use crate::attachments::{AttachmentScope, SqliteAttachmentStore};
+use crate::connector::ConnectorRuntime;
+use crate::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
 use crate::credential::{
     ConnectorAccount, InMemorySecretStore, ProviderCredential, SecretId, SecretMaterial,
     SecretStore,
 };
+use crate::foundation_actions::MailActionService;
+use crate::mail_attachments::StoredMailAttachmentSource;
+use crate::mail_connector_transport::MailConnectorTransport;
+use crate::storage::Storage;
 use std::collections::BTreeSet;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -193,7 +201,28 @@ async fn local_imap_and_smtp_servers_cover_read_draft_and_send_lifecycle() {
     let mut live = config();
     live.imap_port = imap_port;
     live.smtp_port = smtp_port;
-    let connector = connector_with_config(live).await;
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let attachment_store = SqliteAttachmentStore::from_storage(&storage).await.unwrap();
+    let attachment_scope = AttachmentScope::new("com.example.agent", "local", "user").unwrap();
+    let attachment = attachment_store
+        .import(
+            &attachment_scope,
+            "brief.txt",
+            "text/plain",
+            b"attachment bytes",
+            "smtp-attachment-1",
+        )
+        .await
+        .unwrap();
+    let connector = Arc::new(
+        connector_with_config(live)
+            .await
+            .with_attachment_source(Arc::new(StoredMailAttachmentSource::new(
+                attachment_store,
+                attachment_scope,
+            ))),
+    );
+    assert!(connector.capability_report()["outgoing_attachments"]);
 
     let mailboxes = connector.list_mailboxes("primary").await.unwrap();
     assert!(
@@ -250,7 +279,15 @@ async fn local_imap_and_smtp_servers_cover_read_draft_and_send_lifecycle() {
                     plain_text: "Exactly once body".into(),
                     html: None,
                 },
-                attachments: vec![],
+                attachments: vec![DraftAttachment {
+                    host_attachment_id: Some(attachment.id),
+                    source_message_id: None,
+                    source_attachment_id: None,
+                    file_name: attachment.file_name,
+                    mime_type: attachment.mime_type,
+                    size_bytes: attachment.size_bytes,
+                    sha256: Some(attachment.sha256),
+                }],
                 reply_context: None,
                 forward_context: None,
             },
@@ -266,19 +303,61 @@ async fn local_imap_and_smtp_servers_cover_read_draft_and_send_lifecycle() {
         })
         .await
         .unwrap();
-    let receipt = connector
-        .send_approved(ApprovedSendRequest {
-            preview_id: preview.id.clone(),
-            approval: preview.approval_grant("approval-1"),
-        })
+    let runtime = Arc::new(ConnectorRuntime::new(None, 256 * 1024).unwrap());
+    runtime
+        .register(
+            MailConnectorTransport::descriptor("IMAP/SMTP Mail", false),
+            Arc::new(MailConnectorTransport::new(connector.clone())),
+        )
         .await
         .unwrap();
-    assert_eq!(receipt.state, DeliveryState::Delivered);
+    let context = Arc::new(
+        EphemeralConnectorContextProvider::fail_closed(scope(), Duration::from_secs(3)).unwrap(),
+    );
+    let tools = ConnectorToolRuntime::load(runtime, context.clone()).unwrap();
+    let actions = MailActionService::new(
+        &storage,
+        tools,
+        context,
+        scope(),
+        "smtp-attachment-policy-v1",
+    )
+    .await
+    .unwrap();
+    let pending = actions
+        .request_send(preview.clone(), Some("smtp-session".into()), Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(
+        pending.preview.as_ref().unwrap().attachments,
+        preview.attachments
+    );
+    let receipt = actions
+        .resolve(
+            &pending.approval.approval_id,
+            ApprovalDecision::ApproveOnce,
+            "user",
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt.action.result.as_ref().unwrap()["state"],
+        "delivered"
+    );
     let delivered = smtp_messages.lock().unwrap();
     assert_eq!(delivered.len(), 1);
     let delivered = String::from_utf8_lossy(&delivered[0]);
     assert!(delivered.contains("SMTP conformance"));
     assert!(delivered.contains(&preview.internet_message_id));
+    assert!(delivered.contains("Content-Type: multipart/mixed"));
+    assert!(delivered.contains("filename=\"brief.txt\""));
+    assert!(delivered.contains("Content-Type: text/plain"));
+    assert!(delivered.contains("attachment bytes"));
+    assert_eq!(
+        receipt.action.action_name,
+        crate::mail_action_envelope::MAIL_SEND_ACTION_KIND
+    );
 
     imap_task.abort();
     smtp_task.abort();

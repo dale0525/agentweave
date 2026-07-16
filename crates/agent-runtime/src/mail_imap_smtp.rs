@@ -1,5 +1,6 @@
 use crate::credential::{CredentialScope, CredentialVault, SecretId};
 use crate::mail::*;
+use crate::mail_attachments::MailAttachmentSource;
 use crate::mail_fake::{FakeMailConnector, SeedAttachment, SeedBodyPart, SeedMessage};
 use async_imap::{Client, Session, types::Flag};
 use async_trait::async_trait;
@@ -7,7 +8,7 @@ use chrono::{TimeZone, Utc};
 use futures::TryStreamExt;
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
-    message::{Mailbox as LettreMailbox, MultiPart, header::MessageId},
+    message::{Mailbox as LettreMailbox, header::MessageId},
     transport::smtp::{authentication::Credentials, client::Tls},
 };
 use mail_parser::{MessageParser, MimeHeaders};
@@ -34,6 +35,9 @@ const CONNECTOR_ID: &str = "agentweave.connector.mail.imap-smtp";
 #[path = "mail_imap_smtp_support.rs"]
 mod support;
 use support::*;
+#[path = "mail_imap_smtp_outgoing.rs"]
+mod outgoing;
+use outgoing::build_outgoing_message;
 
 enum ImapStream {
     Plain(TcpStream),
@@ -162,6 +166,7 @@ pub struct ImapSmtpMailConnector {
     config: Arc<ImapSmtpMailConfig>,
     vault: Arc<CredentialVault>,
     local: FakeMailConnector,
+    attachment_source: Option<Arc<dyn MailAttachmentSource>>,
     connected: Arc<AtomicBool>,
     previews: Arc<Mutex<HashMap<String, SendPreview>>>,
     messages: Arc<Mutex<HashMap<String, CachedMessage>>>,
@@ -191,10 +196,16 @@ impl ImapSmtpMailConnector {
             config: Arc::new(config),
             vault,
             local,
+            attachment_source: None,
             connected: Arc::new(AtomicBool::new(true)),
             previews: Arc::new(Mutex::new(HashMap::new())),
             messages: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    pub fn with_attachment_source(mut self, source: Arc<dyn MailAttachmentSource>) -> Self {
+        self.attachment_source = Some(source);
+        self
     }
 
     pub fn capability_report(&self) -> BTreeMap<&'static str, bool> {
@@ -205,7 +216,7 @@ impl ImapSmtpMailConnector {
             ("smtp.send", true),
             ("server_side_threads", false),
             ("server_side_drafts", false),
-            ("outgoing_attachments", false),
+            ("outgoing_attachments", self.attachment_source.is_some()),
         ])
     }
 
@@ -412,10 +423,14 @@ impl ImapSmtpMailConnector {
     }
 
     async fn smtp_send(&self, preview: &SendPreview, draft: &MailDraft) -> MailResult<()> {
-        if !draft.content.attachments.is_empty() {
-            return Err(MailError::Unsupported(
-                "IMAP/SMTP outgoing attachments require a host attachment byte source".into(),
-            ));
+        let mut attachments = Vec::with_capacity(draft.content.attachments.len());
+        for attachment in &draft.content.attachments {
+            let source = self.attachment_source.as_ref().ok_or_else(|| {
+                MailError::Unsupported(
+                    "IMAP/SMTP outgoing attachments require a Host attachment source".into(),
+                )
+            })?;
+            attachments.push(source.resolve(&draft.account_id, attachment).await?);
         }
         let password = self.password(&["mail.message.send"]).await?;
         let mut builder = Message::builder()
@@ -431,14 +446,7 @@ impl ImapSmtpMailConnector {
         for address in &preview.bcc {
             builder = builder.bcc(to_lettre_mailbox(address)?);
         }
-        let message = match &draft.content.body.html {
-            Some(html) => builder.multipart(MultiPart::alternative_plain_html(
-                draft.content.body.plain_text.clone(),
-                html.clone(),
-            )),
-            None => builder.body(draft.content.body.plain_text.clone()),
-        }
-        .map_err(|_| MailError::InvalidRequest("outgoing message could not be encoded".into()))?;
+        let message = build_outgoing_message(builder, draft, attachments)?;
         let credentials = Credentials::new(self.config.username.clone(), password);
         let mut transport = match self.config.smtp_tls {
             MailTlsMode::Implicit => {

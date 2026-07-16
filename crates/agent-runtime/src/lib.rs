@@ -27,6 +27,7 @@ pub mod foundation_actions;
 pub mod instructions;
 pub mod mail;
 pub mod mail_action_envelope;
+pub mod mail_attachments;
 pub mod mail_connector_transport;
 pub mod mail_fake;
 #[cfg(not(target_os = "android"))]

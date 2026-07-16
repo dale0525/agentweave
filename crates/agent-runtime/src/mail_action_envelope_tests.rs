@@ -47,7 +47,15 @@ fn send_preview() -> SendPreview {
         bcc: vec![],
         subject: "Status".into(),
         body_sha256: "1".repeat(64),
-        attachments: vec![],
+        attachments: vec![crate::mail::DraftAttachment {
+            host_attachment_id: Some("00000000-0000-4000-8000-000000000001".into()),
+            source_message_id: None,
+            source_attachment_id: None,
+            file_name: "brief.txt".into(),
+            mime_type: "text/plain".into(),
+            size_bytes: 16,
+            sha256: Some("3".repeat(64)),
+        }],
         reply_context: None,
         forward_context: None,
         outbox_id: "outbox-1".into(),
@@ -75,6 +83,10 @@ fn canonical_send_round_trips_through_foundation_envelope() {
     let envelope = canonical.clone().into_foundation_action().unwrap();
     assert_eq!(envelope.kind, MAIL_SEND_ACTION_KIND);
     assert_eq!(envelope.operation, MAIL_SEND_OPERATION);
+    assert_eq!(
+        envelope.preview.details["attachments"][0]["fileName"],
+        "brief.txt"
+    );
     assert_eq!(
         CanonicalMailSendEnvelope::from_foundation_action(&envelope).unwrap(),
         canonical
