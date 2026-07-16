@@ -1,7 +1,10 @@
 use crate::api;
+use agent_runtime::credential::SecretMaterial;
 use agent_runtime::platform::{CapabilitySet, PlatformId};
 use agent_runtime::prompt_composer::AppPromptConfig;
 use agent_runtime::skill_policy::SkillManagementPolicy;
+use agent_runtime::storage::Storage;
+use agent_runtime::storage_protection::StorageOpenOptions;
 use agent_runtime::tools::{CommandMode, RuntimeConfig};
 use agent_runtime::turn::ModelClient;
 use agent_server::owner_api::OwnerApiConfig;
@@ -47,11 +50,38 @@ pub(super) fn sqlite_database_path(url: &str) -> Option<PathBuf> {
     (!value.is_empty() && value != ":memory:").then(|| PathBuf::from(value))
 }
 
+pub(super) async fn open_storage(
+    database_url: &str,
+    storage_protection_key: Option<Arc<SecretMaterial>>,
+) -> anyhow::Result<(Storage, Option<PathBuf>)> {
+    let database_path = sqlite_database_path(database_url);
+    if let Some(path) = &database_path {
+        agent_server::data_protection::apply_pending_restore(path).await?;
+    }
+    let storage_options = storage_protection_key
+        .map(|key| StorageOpenOptions::default().with_key(key))
+        .unwrap_or_default();
+    let storage = Storage::connect_with_options(database_url, storage_options).await?;
+    Ok((storage, database_path))
+}
+
+pub(super) fn apply_storage_protection(
+    state: api::AppState,
+    database_path: &Option<PathBuf>,
+    key: &Option<Arc<SecretMaterial>>,
+) -> anyhow::Result<api::AppState> {
+    match (key.as_deref(), database_path) {
+        (Some(key), Some(path)) => state.with_borrowed_data_protection(path.clone(), key),
+        _ => Ok(state),
+    }
+}
+
 pub(super) async fn build_managed_tenant_registry(
     skills_root: &Path,
     managed: ManagedSkillsConfig,
     builtin_mode: BuiltinSkillsMode,
     management_policy: SkillManagementPolicy,
+    storage_protection_key: Option<Arc<SecretMaterial>>,
 ) -> anyhow::Result<TenantSkillManagerRegistry> {
     let builtin = load_builtin_skill_source(skills_root, builtin_mode).await?;
     let mut sources = vec![builtin];
@@ -68,6 +98,7 @@ pub(super) async fn build_managed_tenant_registry(
         allowed_overrides: Vec::new(),
         runtime_version: env!("CARGO_PKG_VERSION").parse()?,
         management_policy,
+        storage_protection_key,
     })
     .await?;
     Ok(TenantSkillManagerRegistry::new(factory))

@@ -39,8 +39,8 @@ use server_skill_startup::{
 #[cfg(test)]
 use server_skill_startup::{ManagedSkillsConfig, load_skill_manager};
 use server_tenant_startup::{
-    build_managed_tenant_registry, build_tenant_app_state, runtime_config_from_env,
-    skills_root_from_env, sqlite_database_path,
+    apply_storage_protection, build_managed_tenant_registry, build_tenant_app_state, open_storage,
+    runtime_config_from_env, skills_root_from_env, sqlite_database_path,
 };
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let mut transport = agent_server::local_transport::prepare_from_environment().await?;
-    let data_protection_key = transport.take_data_protection_key();
+    let data_protection_key = transport.take_data_protection_key().map(Arc::new);
 
     let skills_root = skills_root_from_env();
     let managed_skills = managed_skills_config_from_lookup(|name| std::env::var_os(name))?;
@@ -69,9 +69,14 @@ async fn main() -> anyhow::Result<()> {
                 mode: SkillManagementMode::DiagnosticsOnly,
                 ..SkillManagementPolicy::default()
             });
-        let registry =
-            build_managed_tenant_registry(&skills_root, managed_skills, builtin_mode, policy)
-                .await?;
+        let registry = build_managed_tenant_registry(
+            &skills_root,
+            managed_skills,
+            builtin_mode,
+            policy,
+            data_protection_key.clone(),
+        )
+        .await?;
         let runtime = registry.for_tenant(SINGLE_USER_TENANT_ID).await?;
         let database_path = runtime.database_path.clone();
         let control_roots = vec![
@@ -99,11 +104,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let database_url = std::env::var("AGENTWEAVE_DATABASE_URL")
             .unwrap_or_else(|_| DEFAULT_DATABASE_URL.into());
-        let database_path = sqlite_database_path(&database_url);
-        if let Some(path) = &database_path {
-            agent_server::data_protection::apply_pending_restore(path).await?;
-        }
-        let storage = Storage::connect(&database_url).await?;
+        let (storage, database_path) =
+            open_storage(&database_url, data_protection_key.clone()).await?;
         let loaded =
             load_skill_manager_with_mode(&skills_root, storage.clone(), None, builtin_mode).await?;
         if owner_host.is_none() {
@@ -171,10 +173,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         state
     };
-    let state = match (data_protection_key, database_path) {
-        (Some(key), Some(path)) => state.with_data_protection(path, key)?,
-        _ => state,
-    };
+    let state = apply_storage_protection(state, &database_path, &data_protection_key)?;
     let state = Arc::new(state.with_skills_root(skills_root.clone()));
     let app = api::router_for_transport(
         state,

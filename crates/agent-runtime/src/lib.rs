@@ -106,6 +106,7 @@ mod skill_store_windows;
 mod skill_store_windows_directory_create;
 mod skill_verified;
 pub mod storage;
+pub mod storage_protection;
 pub mod structured_content;
 pub mod subagent;
 pub mod task_sqlite;

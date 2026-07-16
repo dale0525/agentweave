@@ -91,7 +91,9 @@ pub struct MobileRuntime {
 }
 
 impl MobileRuntime {
-    pub fn initialize(config: MobileInitConfig) -> Result<Self> {
+    pub fn initialize(mut config: MobileInitConfig) -> Result<Self> {
+        let storage_protection_key =
+            decode_storage_protection_key(config.storage_protection_key_hex.take())?;
         let tokio = Runtime::new()?;
         let platform = parse_platform(&config.platform)?;
         let capabilities = CapabilitySet::from_names(config.capabilities.clone());
@@ -150,11 +152,7 @@ impl MobileRuntime {
                 &quarantine_skills_path,
             ],
         )?;
-        if let Some(parent) = database_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let database_url = format!("sqlite://{}?mode=rwc", database_path.display());
-        let storage = tokio.block_on(Storage::connect(&database_url))?;
+        let storage = open_mobile_storage(&tokio, &database_path, storage_protection_key)?;
         let init = MobileRuntimeInit {
             platform,
             capabilities,
@@ -273,8 +271,8 @@ impl MobileRuntime {
             skill_manager,
             skill_management,
             skill_state: state,
-            skill_policy: config.skill_policy,
-            actor_context: config.actor_context,
+            skill_policy: config.skill_policy.clone(),
+            actor_context: config.actor_context.clone(),
             runtime_config,
             database_ready: true,
             skills_ready: true,
@@ -351,6 +349,7 @@ impl MobileRuntime {
             platform: platform_name(self.init.platform).to_string(),
             capabilities: self.init.capabilities.names().to_vec(),
             database_ready: self.database_ready,
+            storage_protection_state: self.storage.protection_status().state().as_str().into(),
             skills_ready: self.skills_ready,
             model_configured: self.model_configured.load(Ordering::Acquire),
             skill_management_mode: management_mode_name(self.skill_policy.mode).into(),

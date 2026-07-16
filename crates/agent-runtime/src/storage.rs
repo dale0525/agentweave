@@ -5,22 +5,29 @@ use crate::session::{
     ConversationEventRecord, ConversationScope, Message, Session, SessionMutation, SessionPage,
     SessionPageCursor,
 };
+use crate::storage_protection::{StorageOpenOptions, StorageProtectionStatus, open_storage_pool};
 use chrono::{DateTime, Duration, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
+use sqlx::sqlite::SqliteRow;
 use sqlx::{Executor, Row, Sqlite, SqlitePool};
 use std::path::Path;
-use std::str::FromStr;
-use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Storage {
     pool: SqlitePool,
+    protection: StorageProtectionStatus,
 }
 
 impl Storage {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
-        let storage = Self::connect_without_migrations(url).await?;
+        Self::connect_with_options(url, StorageOpenOptions::default()).await
+    }
+
+    pub async fn connect_with_options(
+        url: &str,
+        options: StorageOpenOptions,
+    ) -> anyhow::Result<Self> {
+        let storage = Self::connect_without_migrations_with_options(url, options).await?;
         if let Err(error) = storage.run_migrations().await {
             storage.close().await;
             return Err(error);
@@ -30,11 +37,15 @@ impl Storage {
     }
 
     pub async fn connect_without_migrations(url: &str) -> anyhow::Result<Self> {
-        let options = SqliteConnectOptions::from_str(url)?
-            .foreign_keys(true)
-            .busy_timeout(StdDuration::from_secs(5));
-        let pool = SqlitePoolOptions::new().connect_with(options).await?;
-        Ok(Self { pool })
+        Self::connect_without_migrations_with_options(url, StorageOpenOptions::default()).await
+    }
+
+    pub async fn connect_without_migrations_with_options(
+        url: &str,
+        options: StorageOpenOptions,
+    ) -> anyhow::Result<Self> {
+        let (pool, protection) = open_storage_pool(url, options).await?;
+        Ok(Self { pool, protection })
     }
 
     pub async fn run_migrations(&self) -> anyhow::Result<()> {
@@ -85,6 +96,10 @@ impl Storage {
 
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub fn protection_status(&self) -> &StorageProtectionStatus {
+        &self.protection
     }
 
     pub fn local_memory_provider(&self) -> crate::memory_sqlite::SqliteMemoryProvider {
