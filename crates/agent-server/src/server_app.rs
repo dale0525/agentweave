@@ -11,6 +11,10 @@ use agent_runtime::calendar_connector_transport::{
 };
 use agent_runtime::connector::ConnectorRuntime;
 use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
+use agent_runtime::contacts::FakeContactsConnector;
+use agent_runtime::contacts_connector_transport::{
+    CONTACTS_CONNECTOR_ID, CONTACTS_TOOL_NAMES, ContactsConnectorTransport,
+};
 use agent_runtime::credential::{ConnectorAccount, CredentialScope, ProviderCredential};
 use agent_runtime::mail::{MailAccount, MailAddress, MailConnector};
 use agent_runtime::mail_attachments::{MailAttachmentSource, StoredMailAttachmentSource};
@@ -37,6 +41,7 @@ pub(super) struct ResolvedConnectorFoundation {
     pub(super) tools: ConnectorToolRuntime,
     pub(super) mail_actions: Option<agent_runtime::foundation_actions::MailActionService>,
     pub(super) calendar_actions: Option<agent_runtime::calendar_actions::CalendarActionService>,
+    pub(super) contacts_actions: Option<agent_runtime::contacts_actions::ContactsActionService>,
 }
 
 pub(super) struct ResolvedServerApp {
@@ -117,6 +122,7 @@ pub(super) async fn resolve_app(
             .chain([
                 MAIL_CONNECTOR_ID.to_string(),
                 CALENDAR_CONNECTOR_ID.to_string(),
+                CONTACTS_CONNECTOR_ID.to_string(),
             ])
             .collect(),
     };
@@ -142,6 +148,7 @@ fn first_party_capabilities() -> impl Iterator<Item = String> {
         "credential-vault",
         "mail-connector",
         "calendar-connector",
+        "contacts-connector",
         "host-tools",
         "task-provider",
         "scheduler",
@@ -160,6 +167,7 @@ fn first_party_tool_names() -> impl Iterator<Item = String> {
         .chain(agent_runtime::attachment_tools::ATTACHMENT_TOOL_NAMES)
         .chain(MAIL_TOOL_NAMES)
         .chain(CALENDAR_TOOL_NAMES)
+        .chain(CONTACTS_TOOL_NAMES)
         .map(str::to_string)
 }
 
@@ -267,7 +275,16 @@ pub(super) async fn resolve_connector_tools(
         std::env::var("AGENTWEAVE_FAKE_CALENDAR").as_deref() == Ok("enabled");
     let calendar_enabled =
         calendar_foundation_allowed(runtime_config, calendar_declared, calendar_enabled_by_host);
-    if !mail_enabled && !calendar_enabled {
+    let contacts_declared = app_prompt
+        .identity
+        .enabled_capabilities
+        .iter()
+        .any(|capability| capability == "contacts-connector");
+    let contacts_enabled_by_host =
+        std::env::var("AGENTWEAVE_FAKE_CONTACTS").as_deref() == Ok("enabled");
+    let contacts_enabled =
+        contacts_foundation_allowed(runtime_config, contacts_declared, contacts_enabled_by_host);
+    if !mail_enabled && !calendar_enabled && !contacts_enabled {
         return Ok(None);
     }
 
@@ -386,6 +403,17 @@ pub(super) async fn resolve_connector_tools(
             )
             .await?;
     }
+    if contacts_enabled {
+        runtime
+            .register(
+                ContactsConnectorTransport::descriptor("Fake Contacts", true),
+                Arc::new(ContactsConnectorTransport::new(
+                    Arc::new(FakeContactsConnector::default()),
+                    scope.clone(),
+                )?),
+            )
+            .await?;
+    }
     let context = Arc::new(EphemeralConnectorContextProvider::fail_closed(
         scope.clone(),
         Duration::from_secs(30),
@@ -410,6 +438,20 @@ pub(super) async fn resolve_connector_tools(
             agent_runtime::calendar_actions::CalendarActionService::new(
                 storage,
                 tools.clone(),
+                context.clone(),
+                scope.clone(),
+                "agentweave.foundation-actions.v1",
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let contacts_actions = if contacts_enabled {
+        Some(
+            agent_runtime::contacts_actions::ContactsActionService::new(
+                storage,
+                tools.clone(),
                 context,
                 scope,
                 "agentweave.foundation-actions.v1",
@@ -423,6 +465,7 @@ pub(super) async fn resolve_connector_tools(
         tools,
         mail_actions,
         calendar_actions,
+        contacts_actions,
     }))
 }
 
@@ -465,6 +508,21 @@ fn calendar_foundation_allowed(
         .map_or(declared_by_app || enabled_by_host, |policy| {
             policy.network() != AppNetworkPolicy::Deny
                 && policy.declares_connector(CALENDAR_CONNECTOR_ID)
+                && declared_by_app
+        })
+}
+
+fn contacts_foundation_allowed(
+    runtime_config: &RuntimeConfig,
+    declared_by_app: bool,
+    enabled_by_host: bool,
+) -> bool {
+    runtime_config
+        .agent_app_policy
+        .as_ref()
+        .map_or(declared_by_app || enabled_by_host, |policy| {
+            policy.network() != AppNetworkPolicy::Deny
+                && policy.declares_connector(CONTACTS_CONNECTOR_ID)
                 && declared_by_app
         })
 }
@@ -653,5 +711,19 @@ mod tests {
             runtime_config_with_policy("declared_only", "disabled", &[CALENDAR_CONNECTOR_ID]);
         assert!(calendar_foundation_allowed(&declared, true, false));
         assert!(!calendar_foundation_allowed(&declared, false, true));
+    }
+
+    #[test]
+    fn manifest_network_policy_cannot_be_bypassed_by_fake_contacts_flag() {
+        let denied = runtime_config_with_policy("deny", "disabled", &[CONTACTS_CONNECTOR_ID]);
+        assert!(!contacts_foundation_allowed(&denied, true, true));
+
+        let undeclared = runtime_config_with_policy("declared_only", "disabled", &[]);
+        assert!(!contacts_foundation_allowed(&undeclared, true, true));
+
+        let declared =
+            runtime_config_with_policy("declared_only", "disabled", &[CONTACTS_CONNECTOR_ID]);
+        assert!(contacts_foundation_allowed(&declared, true, false));
+        assert!(!contacts_foundation_allowed(&declared, false, true));
     }
 }
