@@ -14,8 +14,6 @@ use agent_runtime::{
     turn::{AgentRunner, ModelClient, RuntimeEventObserver, TurnRunner},
     turn_request::TurnRequest,
 };
-#[cfg(test)]
-use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -39,7 +37,10 @@ use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
 mod runtime_tools;
-
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+use test_support::{DeterministicAgent, default_runtime_config};
 #[derive(Clone)]
 pub struct AppState {
     storage: Storage,
@@ -62,6 +63,7 @@ pub struct AppState {
     connector_tools: Option<agent_runtime::connector_tools::ConnectorToolRuntime>,
     mail_actions: Option<agent_runtime::foundation_actions::MailActionService>,
     automation: Option<crate::automation_api::AutomationApiState>,
+    oauth_broker: Option<agent_runtime::oauth::OAuthBroker>,
 }
 
 impl AppState {
@@ -120,6 +122,7 @@ impl AppState {
             automation_tools,
             attachment_tools,
             connector_tools,
+            mail_actions,
         } = foundations;
         let mut runner = TurnRunner::new_with_manager_and_config(
             model,
@@ -146,6 +149,9 @@ impl AppState {
         if let Some(connectors) = &connector_tools {
             runner = runner.with_connector_tools(connectors.clone());
         }
+        if let Some(actions) = &mail_actions {
+            runner = runner.with_mail_actions(actions.clone());
+        }
         let conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
         Self {
             storage,
@@ -166,8 +172,9 @@ impl AppState {
             attachment_tools,
             data_protection: None,
             connector_tools,
-            mail_actions: None,
+            mail_actions,
             automation: None,
+            oauth_broker: None,
         }
     }
 
@@ -231,6 +238,7 @@ impl AppState {
             automation_tools,
             attachment_tools,
             connector_tools,
+            mail_actions,
         } = foundations;
         let mut runner = TurnRunner::new_with_manager_and_config(
             model,
@@ -258,6 +266,9 @@ impl AppState {
         if let Some(connectors) = &connector_tools {
             runner = runner.with_connector_tools(connectors.clone());
         }
+        if let Some(actions) = &mail_actions {
+            runner = runner.with_mail_actions(actions.clone());
+        }
         let conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
         Self {
             storage,
@@ -278,8 +289,9 @@ impl AppState {
             attachment_tools,
             data_protection: None,
             connector_tools,
-            mail_actions: None,
+            mail_actions,
             automation: None,
+            oauth_broker: None,
         }
     }
 
@@ -337,6 +349,7 @@ impl AppState {
             connector_tools: None,
             mail_actions: None,
             automation: None,
+            oauth_broker: None,
         }
     }
 
@@ -350,6 +363,17 @@ impl AppState {
         mut self,
         mail_actions: agent_runtime::foundation_actions::MailActionService,
     ) -> Self {
+        if self
+            .runtime_config
+            .agent_app_policy
+            .as_ref()
+            .is_some_and(|policy| {
+                policy.external_side_effects()
+                    == agent_runtime::app_manifest::ExternalSideEffectPolicy::Deny
+            })
+        {
+            return self;
+        }
         self.mail_actions = Some(mail_actions);
         self
     }
@@ -358,6 +382,11 @@ impl AppState {
         self.automation =
             Some(crate::automation_api::AutomationApiState::from_storage(storage).await?);
         Ok(self)
+    }
+
+    pub fn with_oauth_broker(mut self, oauth_broker: agent_runtime::oauth::OAuthBroker) -> Self {
+        self.oauth_broker = Some(oauth_broker);
+        self
     }
 
     pub fn with_mail_foundation(
@@ -437,37 +466,6 @@ impl AppState {
         }
         self.host_discovery = host_discovery;
         Ok(self)
-    }
-}
-
-#[cfg(test)]
-fn default_runtime_config() -> RuntimeConfig {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    RuntimeConfig::workspace_write(cwd.clone(), cwd).without_builtin_tools()
-}
-
-#[cfg(test)]
-struct DeterministicAgent;
-
-#[cfg(test)]
-#[async_trait]
-impl AgentRunner for DeterministicAgent {
-    async fn run(&self, user_text: &str) -> anyhow::Result<Vec<RuntimeEvent>> {
-        let turn_id = uuid::Uuid::new_v4().to_string();
-        let assistant_text = deterministic_assistant_reply(user_text);
-
-        Ok(vec![
-            RuntimeEvent::TurnStarted {
-                turn_id: turn_id.clone(),
-            },
-            RuntimeEvent::AssistantTextDelta {
-                text: assistant_text.clone(),
-            },
-            RuntimeEvent::AssistantMessageFinished {
-                text: assistant_text,
-            },
-            RuntimeEvent::TurnFinished { turn_id },
-        ])
     }
 }
 
@@ -575,21 +573,25 @@ pub fn router_for_transport(
         .merge(crate::task_api::router())
         .merge(crate::attachment_api::router())
         .merge(crate::data_protection_api::router())
-        .merge(crate::automation_api::router());
+        .merge(crate::automation_api::router())
+        .merge(crate::oauth_api::protected_router());
     if let Some(owner_routes) = crate::owner_api::router(&state) {
         router = router.merge(owner_routes);
     }
     if include_dev_routes {
         router = router.merge(crate::dev_api::routes());
     }
-    match transport_auth {
-        Some(auth) => router.route_layer(middleware::from_fn_with_state(
-            auth,
-            crate::local_transport::require_transport,
-        )),
-        None => router.layer(desktop_cors_layer()),
-    }
-    .with_state(state)
+    let callback_router = crate::oauth_api::callback_router();
+    let router = match transport_auth {
+        Some(auth) => router
+            .route_layer(middleware::from_fn_with_state(
+                auth,
+                crate::local_transport::require_transport,
+            ))
+            .merge(callback_router),
+        None => router.merge(callback_router).layer(desktop_cors_layer()),
+    };
+    router.with_state(state)
 }
 
 impl AppState {
@@ -660,6 +662,10 @@ impl AppState {
 
     pub(crate) fn automation(&self) -> Option<&crate::automation_api::AutomationApiState> {
         self.automation.as_ref()
+    }
+
+    pub fn oauth_broker(&self) -> Option<&agent_runtime::oauth::OAuthBroker> {
+        self.oauth_broker.as_ref()
     }
 }
 
@@ -856,6 +862,9 @@ async fn run_agent_turn_internal(
         if let Some(connectors) = &state.connector_tools {
             runner = runner.with_connector_tools(connectors.clone());
         }
+        if let Some(actions) = &state.mail_actions {
+            runner = runner.with_mail_actions(actions.clone());
+        }
 
         return match observer {
             Some((turn_id, observer)) => {
@@ -940,11 +949,6 @@ fn test_connection_gateway_request() -> GatewayRequest {
         })],
         tools: Vec::new(),
     }
-}
-
-#[cfg(test)]
-fn deterministic_assistant_reply(content: &str) -> String {
-    format!("MVP agent received: {content}")
 }
 
 #[cfg(test)]

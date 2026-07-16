@@ -1,12 +1,13 @@
 use agent_runtime::app_definition::{
-    AgentAppHostDiscovery, AgentAppRuntimeInventory, ResolvedAgentApp,
+    AgentAppHostDiscovery, AgentAppRuntimeInventory, AgentAppRuntimePolicy, ResolvedAgentApp,
 };
+use agent_runtime::app_manifest::AppNetworkPolicy;
 use agent_runtime::attachment_tools::AttachmentToolRuntime;
 use agent_runtime::attachments::{AttachmentScope, SqliteAttachmentStore};
 use agent_runtime::automation_tools::{AutomationScope, AutomationToolRuntime};
 use agent_runtime::connector::ConnectorRuntime;
 use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
-use agent_runtime::credential::{ConnectorAccount, CredentialScope};
+use agent_runtime::credential::{ConnectorAccount, CredentialScope, ProviderCredential};
 use agent_runtime::mail::{MailAccount, MailAddress, MailConnector};
 use agent_runtime::mail_connector_transport::{
     MAIL_CONNECTOR_ID, MAIL_TOOL_NAMES, MailConnectorTransport,
@@ -35,6 +36,16 @@ pub(super) struct ResolvedConnectorFoundation {
 pub(super) struct ResolvedServerApp {
     pub(super) prompt: AppPromptConfig,
     pub(super) host_discovery: Option<AgentAppHostDiscovery>,
+    pub(super) runtime_policy: Option<AgentAppRuntimePolicy>,
+}
+
+impl ResolvedServerApp {
+    pub(super) fn enforce_runtime_policy(&self, runtime_config: RuntimeConfig) -> RuntimeConfig {
+        match &self.runtime_policy {
+            Some(policy) => runtime_config.with_agent_app_policy(policy.clone()),
+            None => runtime_config,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +63,7 @@ pub(super) async fn resolve_app(
         return Ok(ResolvedServerApp {
             prompt: AppPromptConfig::default(),
             host_discovery: None,
+            runtime_policy: None,
         });
     };
     let snapshot = manager.current_snapshot();
@@ -102,9 +114,11 @@ pub(super) async fn resolve_app(
     let resolved =
         ResolvedAgentApp::load(PathBuf::from(root).as_path(), &inventory, 64 * 1024).await?;
     let host_discovery = resolved.host_discovery().clone();
+    let runtime_policy = resolved.runtime_policy().clone();
     Ok(ResolvedServerApp {
         prompt: resolved.prompt,
         host_discovery: Some(host_discovery),
+        runtime_policy: Some(runtime_policy),
     })
 }
 
@@ -183,14 +197,15 @@ pub(super) async fn resolve_task_tools(
 pub(super) async fn resolve_automation_tools(
     storage: &Storage,
     app_prompt: &AppPromptConfig,
+    runtime_config: &RuntimeConfig,
 ) -> anyhow::Result<Option<AutomationToolRuntime>> {
-    let enabled = app_prompt
+    let declared = app_prompt
         .identity
         .enabled_capabilities
         .iter()
-        .any(|capability| capability == "scheduler")
-        || std::env::var("AGENTWEAVE_AUTOMATION").as_deref() == Ok("enabled");
-    if !enabled {
+        .any(|capability| capability == "scheduler");
+    let enabled_by_host = std::env::var("AGENTWEAVE_AUTOMATION").as_deref() == Ok("enabled");
+    if !background_execution_allowed(runtime_config, declared, enabled_by_host) {
         return Ok(None);
     }
     AutomationToolRuntime::from_storage(
@@ -223,13 +238,15 @@ pub(super) async fn resolve_attachment_tools(
 pub(super) async fn resolve_connector_tools(
     storage: &Storage,
     app_prompt: &AppPromptConfig,
+    runtime_config: &RuntimeConfig,
 ) -> anyhow::Result<Option<ResolvedConnectorFoundation>> {
-    let enabled = app_prompt
+    let declared = app_prompt
         .identity
         .enabled_capabilities
         .iter()
-        .any(|capability| capability == "mail-connector")
-        || std::env::var("AGENTWEAVE_FAKE_MAIL").as_deref() == Ok("enabled");
+        .any(|capability| capability == "mail-connector");
+    let enabled_by_host = std::env::var("AGENTWEAVE_FAKE_MAIL").as_deref() == Ok("enabled");
+    let enabled = mail_foundation_allowed(runtime_config, declared, enabled_by_host);
     if !enabled {
         return Ok(None);
     }
@@ -249,19 +266,34 @@ pub(super) async fn resolve_connector_tools(
                 let configured_vault = vault.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("IMAP/SMTP requires the persistent Credential Vault")
                 })?;
+                let granted_scopes = BTreeSet::from([
+                    "mail.message.read".into(),
+                    "mail.message.organize".into(),
+                    "mail.message.send".into(),
+                ]);
+                let credential_id = config.credential_secret_id.as_str().to_string();
+                configured_vault
+                    .register_provider_credential_persistent(
+                        &config.credential_scope,
+                        ProviderCredential {
+                            access_secret_id: config.credential_secret_id.clone(),
+                            credential_id: credential_id.clone(),
+                            expires_at: None,
+                            granted_scopes: granted_scopes.clone(),
+                            provider_id: "imap-smtp".into(),
+                            provider_subject: config.username.clone(),
+                            refresh_secret_id: None,
+                            revoked_at: None,
+                        },
+                    )
+                    .await?;
                 configured_vault
                     .register_account_persistent(ConnectorAccount {
                         account_id: config.account.id.clone(),
+                        allowed_scopes: granted_scopes,
                         connector_id: "agentweave.connector.mail.imap-smtp".into(),
-                        provider_id: "imap-smtp".into(),
-                        secret_id: config.credential_secret_id.clone(),
+                        credential_id,
                         scope: config.credential_scope.clone(),
-                        granted_scopes: BTreeSet::from([
-                            "mail.message.read".into(),
-                            "mail.message.organize".into(),
-                            "mail.message.send".into(),
-                        ]),
-                        expires_at: None,
                     })
                     .await?;
                 (
@@ -323,6 +355,34 @@ pub(super) async fn resolve_connector_tools(
     )
     .await?;
     Ok(Some(ResolvedConnectorFoundation { tools, actions }))
+}
+
+pub(super) fn background_execution_allowed(
+    runtime_config: &RuntimeConfig,
+    declared_by_app: bool,
+    enabled_by_host: bool,
+) -> bool {
+    runtime_config
+        .agent_app_policy
+        .as_ref()
+        .map_or(declared_by_app || enabled_by_host, |policy| {
+            policy.allows_background_execution(declared_by_app, enabled_by_host)
+        })
+}
+
+fn mail_foundation_allowed(
+    runtime_config: &RuntimeConfig,
+    declared_by_app: bool,
+    enabled_by_host: bool,
+) -> bool {
+    runtime_config
+        .agent_app_policy
+        .as_ref()
+        .map_or(declared_by_app || enabled_by_host, |policy| {
+            policy.network() != AppNetworkPolicy::Deny
+                && policy.declares_connector(MAIL_CONNECTOR_ID)
+                && declared_by_app
+        })
 }
 
 fn mail_connector_mode_from_lookup<F>(lookup: F) -> anyhow::Result<MailConnectorMode>
@@ -400,6 +460,8 @@ async fn resolve_credential_vault(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_runtime::app_definition::AgentAppRuntimePolicy;
+    use agent_runtime::app_manifest::AgentAppManifest;
     use std::collections::HashMap;
     use std::ffi::OsString;
 
@@ -409,6 +471,38 @@ mod tests {
             .map(|(name, value)| ((*name).to_string(), OsString::from(value)))
             .collect::<HashMap<_, _>>();
         mail_connector_mode_from_lookup(|name| values.get(name).cloned())
+    }
+
+    fn runtime_config_with_policy(
+        network: &str,
+        background: &str,
+        connectors: &[&str],
+    ) -> RuntimeConfig {
+        let manifest = serde_json::json!({
+            "schemaVersion": 1,
+            "appId": "com.example.policy-test",
+            "package": {"id": "com.example.policy-test.app", "version": "0.1.0"},
+            "requires": {
+                "packages": [],
+                "capabilities": [],
+                "runtimeTools": [],
+                "connectors": connectors
+            },
+            "features": [],
+            "policy": {
+                "externalSideEffects": "require_approval",
+                "network": network,
+                "backgroundExecution": background,
+                "memoryPersistence": "disabled",
+                "skillManagement": "disabled"
+            },
+            "branding": {"displayName": "Policy Test"},
+            "instructions": {"system": "prompts/system.md"}
+        });
+        let manifest =
+            AgentAppManifest::parse_json(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        RuntimeConfig::workspace_write(".", ".")
+            .with_agent_app_policy(AgentAppRuntimePolicy::compile(&manifest))
     }
 
     #[test]
@@ -434,5 +528,32 @@ mod tests {
             MailConnectorMode::ImapSmtp
         );
         assert!(connector_mode(&[("AGENTWEAVE_MAIL_CONNECTOR", "unknown")]).is_err());
+    }
+
+    #[test]
+    fn manifest_background_policy_cannot_be_bypassed_by_host_flags() {
+        let disabled = runtime_config_with_policy("deny", "disabled", &[]);
+        assert!(!background_execution_allowed(&disabled, true, true));
+
+        let declared = runtime_config_with_policy("deny", "declared_only", &[]);
+        assert!(!background_execution_allowed(&declared, false, true));
+        assert!(background_execution_allowed(&declared, true, false));
+
+        let enabled = runtime_config_with_policy("deny", "enabled", &[]);
+        assert!(background_execution_allowed(&enabled, false, true));
+    }
+
+    #[test]
+    fn manifest_network_policy_cannot_be_bypassed_by_fake_mail_flag() {
+        let denied = runtime_config_with_policy("deny", "disabled", &[MAIL_CONNECTOR_ID]);
+        assert!(!mail_foundation_allowed(&denied, true, true));
+
+        let undeclared = runtime_config_with_policy("declared_only", "disabled", &[]);
+        assert!(!mail_foundation_allowed(&undeclared, true, true));
+
+        let declared =
+            runtime_config_with_policy("declared_only", "disabled", &[MAIL_CONNECTOR_ID]);
+        assert!(mail_foundation_allowed(&declared, true, false));
+        assert!(!mail_foundation_allowed(&declared, false, true));
     }
 }

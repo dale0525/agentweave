@@ -6,27 +6,79 @@ use agent_runtime::foundation_actions::MailActionService;
 use agent_runtime::mail::{DraftContent, MailAccount, MailAddress, OutgoingBody};
 use agent_runtime::mail_connector_transport::MailConnectorTransport;
 use agent_runtime::mail_fake::FakeMailConnector;
+use agent_runtime::prompt_composer::AppPromptConfig;
+use agent_runtime::skill::SkillRegistry;
+use agent_runtime::skill_catalog::SkillCatalog;
+use agent_runtime::skill_manager::SkillManager;
+use agent_runtime::tools::RuntimeConfig;
+use agent_runtime::turn::{ModelClient, ModelEventStream};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
+use futures::stream;
+use model_gateway::responses::{GatewayEvent, GatewayRequest};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tower::ServiceExt;
 
+struct MailPreviewModel {
+    calls: AtomicUsize,
+    draft_id: String,
+}
+
+#[async_trait::async_trait]
+impl ModelClient for MailPreviewModel {
+    async fn stream(&self, request: GatewayRequest) -> anyhow::Result<ModelEventStream> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let events = if call == 0 {
+            let names: Vec<_> = request
+                .tools
+                .iter()
+                .map(|tool| tool.advertised_name())
+                .collect();
+            assert!(names.contains(&"mail_send_preview"));
+            assert!(!names.contains(&"mail_send"));
+            assert!(!names.contains(&"connector__agentweave-mail__mail_send"));
+            assert!(!names.contains(&"connector__agentweave-mail__mail_send_preview"));
+            vec![
+                GatewayEvent::ToolCall {
+                    call_id: "call-preview".into(),
+                    name: "mail_send_preview".into(),
+                    legacy_alias_selected: false,
+                    arguments: json!({
+                        "accountId": "primary",
+                        "draftId": self.draft_id,
+                        "expectedRevision": 1
+                    }),
+                },
+                GatewayEvent::Completed,
+            ]
+        } else {
+            let result = request
+                .input
+                .iter()
+                .find(|item| item["role"] == "tool")
+                .expect("preview tool result must be sent back to the model");
+            assert_eq!(result["content"]["data"]["status"], "waiting_approval");
+            assert!(result["content"]["data"].get("approval").is_none());
+            assert!(result["content"]["data"].get("action").is_none());
+            assert!(result["content"]["data"]["preview"].is_object());
+            vec![
+                GatewayEvent::TextDelta {
+                    text: "Waiting for approval.".into(),
+                },
+                GatewayEvent::Completed,
+            ]
+        };
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
 #[tokio::test]
-async fn foundation_mail_approval_api_resumes_exactly_once() {
+async fn agent_mail_preview_persists_a_session_bound_action_through_server_turns() {
     let storage = Storage::connect("sqlite::memory:").await.unwrap();
     let mail = Arc::new(FakeMailConnector::new());
-    mail.add_account(MailAccount {
-        id: "primary".into(),
-        display_name: "Work Mail".into(),
-        primary_address: MailAddress {
-            name: Some("Local User".into()),
-            address: "local@example.test".into(),
-        },
-        addresses: Vec::new(),
-        provider_reference: None,
-    })
-    .unwrap();
+    mail.add_account(test_mail_account()).unwrap();
     let runtime = Arc::new(ConnectorRuntime::new(None, 256 * 1024).unwrap());
     runtime
         .register(
@@ -45,34 +97,86 @@ async fn foundation_mail_approval_api_resumes_exactly_once() {
             .unwrap(),
     );
     let tools = ConnectorToolRuntime::load(runtime, context.clone()).unwrap();
-    let draft = tools
-        .execute_trusted_host_action(
-            "mail_draft_create",
-            "api-draft",
-            serde_json::to_value(agent_runtime::mail::CreateDraftRequest {
-                account_id: "primary".into(),
-                content: DraftContent {
-                    to: vec![MailAddress {
-                        name: Some("Recipient".into()),
-                        address: "recipient@example.test".into(),
-                    }],
-                    cc: Vec::new(),
-                    bcc: Vec::new(),
-                    subject: "Approval API".into(),
-                    body: OutgoingBody {
-                        plain_text: "Please review".into(),
-                        html: None,
-                    },
-                    attachments: Vec::new(),
-                    reply_context: None,
-                    forward_context: None,
-                },
-            })
-            .unwrap(),
+    let draft_id = create_test_draft(&tools, "server-agent-draft").await;
+    let actions = MailActionService::new(
+        &storage,
+        tools.clone(),
+        context,
+        scope,
+        "server-agent-test-v1",
+    )
+    .await
+    .unwrap();
+    let skill_manager =
+        SkillManager::from_registry_and_catalog(SkillRegistry::empty(), SkillCatalog::empty());
+    let root = std::env::temp_dir();
+    let state = AppState::new_with_model_app_foundations_and_skill_manager(
+        storage,
+        MailPreviewModel {
+            calls: AtomicUsize::new(0),
+            draft_id,
+        },
+        skill_manager,
+        RuntimeConfig::workspace_write(root.clone(), root).without_builtin_tools(),
+        AppPromptConfig::default(),
+        AppFoundationRuntimes::new(None, None, Some(tools))
+            .with_mail_actions(Some(actions.clone())),
+    );
+    let app = router(Arc::new(state));
+    let created = app
+        .clone()
+        .oneshot(json_request("/sessions", json!({"title": "Mail approval"})))
+        .await
+        .unwrap();
+    let session_id = read_json(created).await["id"].as_str().unwrap().to_string();
+
+    let response = app
+        .oneshot(json_request(
+            &format!("/sessions/{session_id}/messages"),
+            json!({"content": "Send the reviewed draft"}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["assistant_message"]["content"],
+        "Waiting for approval."
+    );
+    let pending = actions.list_actions().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].approval.binding.session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(mail.provider_submission_count(), 0);
+}
+
+#[tokio::test]
+async fn foundation_mail_approval_api_resumes_exactly_once() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let mail = Arc::new(FakeMailConnector::new());
+    mail.add_account(test_mail_account()).unwrap();
+    let runtime = Arc::new(ConnectorRuntime::new(None, 256 * 1024).unwrap());
+    runtime
+        .register(
+            MailConnectorTransport::descriptor("Fake Mail", true),
+            Arc::new(MailConnectorTransport::new(mail.clone())),
         )
         .await
         .unwrap();
-    let draft_id = draft["output"]["id"].as_str().unwrap();
+    let scope = CredentialScope {
+        app_id: "agentweave.default".into(),
+        tenant_id: "local".into(),
+        user_id: "local-user".into(),
+    };
+    let context = Arc::new(
+        EphemeralConnectorContextProvider::fail_closed(scope.clone(), Duration::from_secs(2))
+            .unwrap(),
+    );
+    let tools = ConnectorToolRuntime::load(runtime, context.clone()).unwrap();
+    let draft_id = create_test_draft(&tools, "api-draft").await;
     let actions = MailActionService::new(&storage, tools.clone(), context, scope, "api-test-v1")
         .await
         .unwrap();
@@ -125,6 +229,50 @@ async fn foundation_mail_approval_api_resumes_exactly_once() {
     }
     assert_eq!(mail.provider_submission_count(), 1);
     assert_eq!(mail.logical_delivery_count(), 1);
+}
+
+fn test_mail_account() -> MailAccount {
+    MailAccount {
+        id: "primary".into(),
+        display_name: "Work Mail".into(),
+        primary_address: MailAddress {
+            name: Some("Local User".into()),
+            address: "local@example.test".into(),
+        },
+        addresses: Vec::new(),
+        provider_reference: None,
+    }
+}
+
+async fn create_test_draft(tools: &ConnectorToolRuntime, call_id: &str) -> String {
+    let draft = tools
+        .execute_trusted_host_action(
+            "mail_draft_create",
+            call_id,
+            serde_json::to_value(agent_runtime::mail::CreateDraftRequest {
+                account_id: "primary".into(),
+                content: DraftContent {
+                    to: vec![MailAddress {
+                        name: Some("Recipient".into()),
+                        address: "recipient@example.test".into(),
+                    }],
+                    cc: Vec::new(),
+                    bcc: Vec::new(),
+                    subject: "Approval API".into(),
+                    body: OutgoingBody {
+                        plain_text: "Please review".into(),
+                        html: None,
+                    },
+                    attachments: Vec::new(),
+                    reply_context: None,
+                    forward_context: None,
+                },
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    draft["output"]["id"].as_str().unwrap().to_string()
 }
 
 fn json_request(uri: &str, body: Value) -> Request<Body> {

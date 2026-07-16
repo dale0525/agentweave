@@ -7,6 +7,7 @@ use crate::types::{
     MobileSkillDto, MobileTurnDto,
 };
 use agent_runtime::app_definition::ResolvedAgentApp;
+use agent_runtime::app_manifest::{AppNetworkPolicy, ExternalSideEffectPolicy};
 use agent_runtime::automation::{
     DeclarativeScheduledRunExecutor, NotificationDeliveryOutcome, NotificationRecord,
     NotificationStore, SchedulerRunner,
@@ -14,9 +15,7 @@ use agent_runtime::automation::{
 use agent_runtime::connector::ConnectorRuntime;
 use agent_runtime::connector_ledger::SqliteConnectorActionLedger;
 use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
-use agent_runtime::credential::{
-    CredentialScope, CredentialVault, InMemorySecretStore, SecretMaterial,
-};
+use agent_runtime::credential::{CredentialScope, CredentialVault, InMemorySecretStore};
 use agent_runtime::foundation_actions::MailActionService;
 use agent_runtime::mail::{MailAccount, MailAddress};
 use agent_runtime::mail_connector_transport::MailConnectorTransport;
@@ -46,7 +45,6 @@ use agent_runtime::skill_source::{
 use agent_runtime::skill_state::{SkillApprovalRecord, SkillSnapshotStatus, SkillStateStore};
 use agent_runtime::skill_store::{SkillRevisionStore, SkillStorePaths};
 use agent_runtime::storage::Storage;
-use agent_runtime::storage_protection::StorageOpenOptions;
 use agent_runtime::tools::RuntimeConfig;
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -64,6 +62,9 @@ use uuid::Uuid;
 #[path = "runtime_support.rs"]
 mod support;
 use support::*;
+
+#[path = "runtime_policy.rs"]
+mod runtime_policy;
 
 pub struct MobileRuntime {
     tokio: Runtime,
@@ -151,17 +152,7 @@ impl MobileRuntime {
                 &quarantine_skills_path,
             ],
         )?;
-        if let Some(parent) = database_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let database_url = format!("sqlite://{}?mode=rwc", database_path.display());
-        let storage_options = storage_protection_key
-            .map(|key| StorageOpenOptions::default().with_key(key))
-            .unwrap_or_default();
-        let storage = tokio.block_on(Storage::connect_with_options(
-            &database_url,
-            storage_options,
-        ))?;
+        let storage = open_mobile_storage(&tokio, &database_path, storage_protection_key)?;
         let init = MobileRuntimeInit {
             platform,
             capabilities,
@@ -245,22 +236,32 @@ impl MobileRuntime {
         }
         let runtime_config = RuntimeConfig::workspace_write(&app_data_dir, &app_data_dir)
             .excluding_workspace_roots(excluded_roots);
-        let app_prompt = if let Some(path) = app_package_path {
+        let (app_prompt, runtime_config) = if let Some(path) = app_package_path {
             let inventory =
                 crate::mobile_app::runtime_inventory(&skill_manager, &init, &runtime_config)?;
-            tokio
-                .block_on(ResolvedAgentApp::load(&path, &inventory, 64 * 1024))?
-                .prompt
+            let resolved = tokio.block_on(ResolvedAgentApp::load(&path, &inventory, 64 * 1024))?;
+            let runtime_config =
+                runtime_config.with_agent_app_policy(resolved.runtime_policy().clone());
+            (resolved.prompt, runtime_config)
         } else {
-            AppPromptConfig::default()
+            (AppPromptConfig::default(), runtime_config)
         };
         let conversation_scope = ConversationScope::local(&app_prompt.identity.app_id);
         let memory_tools = tokio.block_on(resolve_mobile_memory(&storage, &app_prompt))?;
-        let connector_foundation = tokio.block_on(resolve_mobile_mail(&storage, &app_prompt))?;
+        let connector_foundation =
+            tokio.block_on(resolve_mobile_mail(&storage, &app_prompt, &runtime_config))?;
         let connector_tools = connector_foundation
             .as_ref()
             .map(|foundation| foundation.0.clone());
-        let mail_actions = connector_foundation.map(|foundation| foundation.1);
+        let mail_actions = connector_foundation.as_ref().and_then(|foundation| {
+            runtime_config
+                .agent_app_policy
+                .as_ref()
+                .is_none_or(|policy| {
+                    policy.external_side_effects() != ExternalSideEffectPolicy::Deny
+                })
+                .then(|| foundation.1.clone())
+        });
         let scheduler = tokio.block_on(SchedulerStore::from_storage(&storage))?;
         let notifications = tokio.block_on(NotificationStore::from_storage(&storage))?;
         Ok(Self {
@@ -292,11 +293,13 @@ impl MobileRuntime {
     }
 
     pub fn create_scheduled_job(&self, request: ScheduledJobRequest) -> Result<ScheduledJob> {
+        self.ensure_background_execution_allowed()?;
         self.tokio
             .block_on(self.scheduler.create_job(request, Utc::now()))
     }
 
     pub fn run_scheduler_tick(&self, limit: usize) -> Result<usize> {
+        self.ensure_background_execution_allowed()?;
         let runner = SchedulerRunner::new(
             self.scheduler.clone(),
             self.notifications.clone(),
@@ -312,6 +315,7 @@ impl MobileRuntime {
         worker: &str,
         limit: usize,
     ) -> Result<Vec<NotificationRecord>> {
+        self.ensure_background_execution_allowed()?;
         self.tokio.block_on(self.notifications.claim_due(
             worker,
             Utc::now(),
@@ -326,6 +330,7 @@ impl MobileRuntime {
         worker: &str,
         outcome: NotificationDeliveryOutcome,
     ) -> Result<bool> {
+        self.ensure_background_execution_allowed()?;
         self.tokio.block_on(
             self.notifications
                 .finish(notification_id, worker, outcome, Utc::now()),
@@ -793,6 +798,7 @@ impl MobileRuntime {
         approval_id: &str,
         decision: agent_runtime::approval::ApprovalDecision,
     ) -> Result<agent_runtime::foundation_actions::FoundationActionResolution> {
+        self.ensure_external_side_effect_allowed()?;
         self.tokio.block_on(
             self.mail_actions
                 .as_ref()
@@ -874,6 +880,7 @@ impl MobileRuntime {
                 )?
                 .with_app_prompt(self.app_prompt.clone())
                 .with_foundations(self.memory_tools.clone(), self.connector_tools.clone())
+                .with_mail_actions(self.mail_actions.clone())
                 .with_owner_turn_context(self.skill_management.clone(), self.actor_context.clone());
                 host.send_message_after_user_persisted(session_id, content)
                     .await
@@ -920,12 +927,24 @@ async fn resolve_mobile_memory(
 async fn resolve_mobile_mail(
     storage: &Storage,
     app_prompt: &AppPromptConfig,
+    runtime_config: &RuntimeConfig,
 ) -> Result<Option<(ConnectorToolRuntime, MailActionService)>> {
     if !app_prompt
         .identity
         .enabled_capabilities
         .iter()
         .any(|capability| capability == "mail-connector")
+    {
+        return Ok(None);
+    }
+    if runtime_config
+        .agent_app_policy
+        .as_ref()
+        .is_some_and(|policy| {
+            policy.network() == AppNetworkPolicy::Deny
+                || !policy
+                    .declares_connector(agent_runtime::mail_connector_transport::MAIL_CONNECTOR_ID)
+        })
     {
         return Ok(None);
     }

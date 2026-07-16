@@ -1,3 +1,4 @@
+use crate::event_persistence::project_runtime_event_for_persistence;
 use crate::events::RuntimeEvent;
 use crate::model_config::StoredModelConfig;
 use crate::session::{
@@ -760,7 +761,7 @@ async fn insert_runtime_events(
     .fetch_one(&mut *executor)
     .await?;
     for (offset, event) in events.iter().enumerate() {
-        let payload = serde_json::to_value(event)?;
+        let payload = project_runtime_event_for_persistence(event)?;
         let kind = payload
             .get("type")
             .and_then(serde_json::Value::as_str)
