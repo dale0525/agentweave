@@ -7,7 +7,6 @@ use agent_runtime::{
     skill_policy::{ActorContext, SkillGrant, SkillManagementMode, SkillManagementPolicy},
     skill_state::SkillStateStore,
     storage::Storage,
-    storage_protection::StorageOpenOptions,
 };
 use agent_server::api;
 use agent_server::owner_api::{OwnerApiConfig, OwnerAuth};
@@ -40,8 +39,8 @@ use server_skill_startup::{
 #[cfg(test)]
 use server_skill_startup::{ManagedSkillsConfig, load_skill_manager};
 use server_tenant_startup::{
-    build_managed_tenant_registry, build_tenant_app_state, runtime_config_from_env,
-    skills_root_from_env, sqlite_database_path,
+    apply_storage_protection, build_managed_tenant_registry, build_tenant_app_state, open_storage,
+    runtime_config_from_env, skills_root_from_env, sqlite_database_path,
 };
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -105,15 +104,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let database_url = std::env::var("AGENTWEAVE_DATABASE_URL")
             .unwrap_or_else(|_| DEFAULT_DATABASE_URL.into());
-        let database_path = sqlite_database_path(&database_url);
-        if let Some(path) = &database_path {
-            agent_server::data_protection::apply_pending_restore(path).await?;
-        }
-        let mut storage_options = StorageOpenOptions::default();
-        if let Some(key) = &data_protection_key {
-            storage_options = storage_options.with_key(key.clone());
-        }
-        let storage = Storage::connect_with_options(&database_url, storage_options).await?;
+        let (storage, database_path) =
+            open_storage(&database_url, data_protection_key.clone()).await?;
         let loaded =
             load_skill_manager_with_mode(&skills_root, storage.clone(), None, builtin_mode).await?;
         if owner_host.is_none() {
@@ -181,10 +173,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         state
     };
-    let state = match (data_protection_key.as_deref(), database_path) {
-        (Some(key), Some(path)) => state.with_borrowed_data_protection(path, key)?,
-        _ => state,
-    };
+    let state = apply_storage_protection(state, &database_path, &data_protection_key)?;
     let state = Arc::new(state.with_skills_root(skills_root.clone()));
     let app = api::router_for_transport(
         state,

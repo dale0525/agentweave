@@ -15,9 +15,7 @@ use agent_runtime::automation::{
 use agent_runtime::connector::ConnectorRuntime;
 use agent_runtime::connector_ledger::SqliteConnectorActionLedger;
 use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
-use agent_runtime::credential::{
-    CredentialScope, CredentialVault, InMemorySecretStore, SecretMaterial,
-};
+use agent_runtime::credential::{CredentialScope, CredentialVault, InMemorySecretStore};
 use agent_runtime::foundation_actions::MailActionService;
 use agent_runtime::mail::{MailAccount, MailAddress};
 use agent_runtime::mail_connector_transport::MailConnectorTransport;
@@ -47,7 +45,6 @@ use agent_runtime::skill_source::{
 use agent_runtime::skill_state::{SkillApprovalRecord, SkillSnapshotStatus, SkillStateStore};
 use agent_runtime::skill_store::{SkillRevisionStore, SkillStorePaths};
 use agent_runtime::storage::Storage;
-use agent_runtime::storage_protection::StorageOpenOptions;
 use agent_runtime::tools::RuntimeConfig;
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -155,17 +152,7 @@ impl MobileRuntime {
                 &quarantine_skills_path,
             ],
         )?;
-        if let Some(parent) = database_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let database_url = format!("sqlite://{}?mode=rwc", database_path.display());
-        let storage_options = storage_protection_key
-            .map(|key| StorageOpenOptions::default().with_key(key))
-            .unwrap_or_default();
-        let storage = tokio.block_on(Storage::connect_with_options(
-            &database_url,
-            storage_options,
-        ))?;
+        let storage = open_mobile_storage(&tokio, &database_path, storage_protection_key)?;
         let init = MobileRuntimeInit {
             platform,
             capabilities,
