@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
         ];
         let runtime_config = base_runtime_config.excluding_workspace_roots(control_roots);
         let resolved_app = server_app::resolve_app(&runtime.manager, &runtime_config).await?;
+        let runtime_config = resolved_app.enforce_runtime_policy(runtime_config);
         let owner_management =
             build_tenant_owner_api_config(owner_host, &runtime, connector_catalog).await?;
         let storage = runtime.storage.clone();
@@ -124,19 +125,25 @@ async fn main() -> anyhow::Result<()> {
         }
         let runtime_config = base_runtime_config.excluding_workspace_roots(control_roots);
         let resolved_app = server_app::resolve_app(&loaded.manager, &runtime_config).await?;
+        let runtime_config = resolved_app.enforce_runtime_policy(runtime_config);
         let owner_management =
             build_owner_api_config(owner_host, &loaded, storage.clone(), connector_catalog).await?;
         let memory_tools = server_app::resolve_memory_tools(&storage, &resolved_app.prompt).await?;
         let task_tools = server_app::resolve_task_tools(&storage, &resolved_app.prompt).await?;
         let automation_tools =
-            server_app::resolve_automation_tools(&storage, &resolved_app.prompt).await?;
+            server_app::resolve_automation_tools(&storage, &resolved_app.prompt, &runtime_config)
+                .await?;
         let attachment_tools =
             server_app::resolve_attachment_tools(&storage, &resolved_app.prompt).await?;
         let connector_foundation =
-            server_app::resolve_connector_tools(&storage, &resolved_app.prompt).await?;
+            server_app::resolve_connector_tools(&storage, &resolved_app.prompt, &runtime_config)
+                .await?;
         let connector_tools = connector_foundation
             .as_ref()
             .map(|foundation| foundation.tools.clone());
+        let mail_actions = connector_foundation
+            .as_ref()
+            .map(|foundation| foundation.actions.clone());
         let state = if let Some(owner_management) = owner_management {
             api::AppState::new_with_model_app_foundations_skill_manager_and_owner(
                 storage.clone(),
@@ -146,7 +153,8 @@ async fn main() -> anyhow::Result<()> {
                 resolved_app.prompt,
                 api::AppFoundationRuntimes::new(memory_tools, task_tools, connector_tools)
                     .with_automation_tools(automation_tools)
-                    .with_attachment_tools(attachment_tools),
+                    .with_attachment_tools(attachment_tools)
+                    .with_mail_actions(mail_actions),
                 owner_management,
             )
         } else {
@@ -158,23 +166,25 @@ async fn main() -> anyhow::Result<()> {
                 resolved_app.prompt,
                 api::AppFoundationRuntimes::new(memory_tools, task_tools, connector_tools)
                     .with_automation_tools(automation_tools)
-                    .with_attachment_tools(attachment_tools),
+                    .with_attachment_tools(attachment_tools)
+                    .with_mail_actions(mail_actions),
             )
         }
         .with_host_discovery(resolved_app.host_discovery)?;
-        let state = match connector_foundation {
-            Some(foundation) => state.with_mail_actions(foundation.actions),
-            None => state,
-        };
         (state, storage, database_path)
     };
-    let state = state.with_default_automation(&automation_storage).await?;
+    let host_scheduler_requested =
+        std::env::var("AGENTWEAVE_SCHEDULER_WORKER").as_deref() == Ok("1");
+    let scheduler_worker_enabled = state.allows_background_execution(host_scheduler_requested);
+    let state = if state.allows_automation_api(host_scheduler_requested) {
+        state.with_default_automation(&automation_storage).await?
+    } else {
+        state
+    };
     let state = match (data_protection_key.as_deref(), database_path) {
         (Some(key), Some(path)) => state.with_borrowed_data_protection(path, key)?,
         _ => state,
     };
-    let scheduler_worker_enabled = state.has_automation_tools()
-        || std::env::var("AGENTWEAVE_SCHEDULER_WORKER").as_deref() == Ok("1");
     let state = Arc::new(state.with_skills_root(skills_root.clone()));
     let app = api::router_for_transport(
         state,

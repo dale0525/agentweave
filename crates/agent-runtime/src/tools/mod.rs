@@ -1,6 +1,8 @@
 pub mod builtin;
 pub mod command;
+mod definition_support;
 pub mod discovery;
+mod foundation_actions;
 mod host_dispatch;
 pub mod patch;
 pub mod path;
@@ -10,11 +12,17 @@ pub mod result;
 pub mod schema;
 pub mod search;
 
+use crate::app_definition::AgentAppRuntimePolicy;
+use crate::app_manifest::{AppNetworkPolicy, ExternalSideEffectPolicy};
 use crate::policy::{ApprovalPolicy, SandboxProfile};
 use crate::skill::{SkillExecutionContext, SkillRegistry};
 use crate::skill_management_tools::{SkillManagementToolContext, SkillManagementTools};
 use crate::skill_runtime_source::RuntimeToolBinding;
 use builtin::BuiltInTools;
+use definition_support::{
+    app_policy_allows_discovery, app_policy_allows_tool, external_definitions, external_discovery,
+    runtime_tool_definition, serialized_len, tool_has_external_side_effect,
+};
 use discovery::{ConnectorMetadata, ExternalToolConfig, ExternalToolExecution, ToolDiscoveryItem};
 use result::{ToolError, ToolResult, ToolResultMetadata};
 use schema::{ToolDiagnostic, validate_tool_definition};
@@ -51,6 +59,8 @@ pub struct RuntimeConfig {
     pub output_limit_bytes: usize,
     pub approval_policy: ApprovalPolicy,
     pub sandbox_profile: SandboxProfile,
+    #[serde(default)]
+    pub agent_app_policy: Option<AgentAppRuntimePolicy>,
     pub external_tools: Vec<ExternalToolConfig>,
     pub connectors: Vec<ConnectorMetadata>,
 }
@@ -77,6 +87,7 @@ impl RuntimeConfig {
             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
             approval_policy: ApprovalPolicy::Never,
             sandbox_profile: SandboxProfile::default(),
+            agent_app_policy: None,
             external_tools: Vec::new(),
             connectors: Vec::new(),
         }
@@ -89,6 +100,11 @@ impl RuntimeConfig {
 
     pub fn without_builtin_tools(mut self) -> Self {
         self.built_in_tools_enabled = false;
+        self
+    }
+
+    pub fn with_agent_app_policy(mut self, policy: AgentAppRuntimePolicy) -> Self {
+        self.agent_app_policy = Some(policy);
         self
     }
 
@@ -237,6 +253,8 @@ pub struct ToolRegistry {
     task_tools: Option<crate::task_tools::TaskToolRuntime>,
     automation_tools: Option<crate::automation_tools::AutomationToolRuntime>,
     attachment_tools: Option<crate::attachment_tools::AttachmentToolRuntime>,
+    mail_actions: Option<crate::foundation_actions::MailActionService>,
+    foundation_action_context: Option<crate::foundation_actions::FoundationActionTurnContext>,
     workspace_root: PathBuf,
     cwd: PathBuf,
     mode: RuntimeMode,
@@ -245,6 +263,7 @@ pub struct ToolRegistry {
     tool_timeout: Duration,
     output_limit_bytes: usize,
     approval_policy: ApprovalPolicy,
+    agent_app_policy: Option<AgentAppRuntimePolicy>,
     management: Option<SkillManagementToolContext>,
     turn_execution_lease: Option<crate::skill_snapshot::TurnExecutionLease>,
     execution_observer: Option<Arc<dyn ToolExecutionObserver>>,
@@ -261,6 +280,7 @@ impl std::fmt::Debug for ToolRegistry {
             .field("has_task_tools", &self.task_tools.is_some())
             .field("has_automation_tools", &self.automation_tools.is_some())
             .field("has_attachment_tools", &self.attachment_tools.is_some())
+            .field("has_mail_actions", &self.mail_actions.is_some())
             .field("has_connector_tools", &self.connector_tools.is_some())
             .field("has_management", &self.management.is_some())
             .field("has_execution_observer", &self.execution_observer.is_some())
@@ -306,6 +326,8 @@ impl ToolRegistry {
             task_tools: None,
             automation_tools: None,
             attachment_tools: None,
+            mail_actions: None,
+            foundation_action_context: None,
             workspace_root: config.workspace_root.clone(),
             cwd: config.cwd.clone(),
             mode: config.mode,
@@ -314,6 +336,7 @@ impl ToolRegistry {
             tool_timeout: Duration::from_millis(config.tool_timeout_ms),
             output_limit_bytes: config.output_limit_bytes,
             approval_policy: config.approval_policy,
+            agent_app_policy: config.agent_app_policy.clone(),
             management,
             turn_execution_lease: None,
             execution_observer: None,
@@ -364,6 +387,14 @@ impl ToolRegistry {
     }
 
     fn non_management_definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = self.unfiltered_non_management_definitions();
+        if let Some(policy) = &self.agent_app_policy {
+            definitions.retain(|definition| app_policy_allows_tool(policy, definition));
+        }
+        definitions
+    }
+
+    fn unfiltered_non_management_definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = if self.built_in_tools_enabled {
             self.builtins.definitions()
         } else {
@@ -383,7 +414,10 @@ impl ToolRegistry {
             definitions.extend(attachments.definitions());
         }
         if let Some(connectors) = &self.connector_tools {
-            definitions.extend(connectors.definitions());
+            definitions.extend(self.foundation_connector_definitions(connectors));
+        }
+        if self.mail_actions.is_some() {
+            definitions.push(foundation_actions::mail_send_preview_definition());
         }
 
         let mut runtime_tools = self.skills.tools_with_runtime_sources();
@@ -440,6 +474,15 @@ impl ToolRegistry {
             .definitions()
             .into_iter()
             .find(|definition| definition.name == name)?;
+        if self.agent_app_policy.as_ref().is_some_and(|policy| {
+            policy.external_side_effects() == ExternalSideEffectPolicy::RequireApproval
+                && tool_has_external_side_effect(&definition)
+        }) {
+            return Some(ApprovalRequirement {
+                permission: definition.permission,
+                policy: ApprovalPolicy::OnWrites,
+            });
+        }
         self.approval_policy
             .requires_approval(definition.permission)
             .then_some(ApprovalRequirement {
@@ -467,6 +510,11 @@ impl ToolRegistry {
             self.external_discovery
                 .iter()
                 .filter(|item| item.deferred)
+                .filter(|item| {
+                    self.agent_app_policy
+                        .as_ref()
+                        .is_none_or(|policy| app_policy_allows_discovery(policy, item))
+                })
                 .cloned(),
         );
         tools.sort_by(|left, right| {
@@ -477,7 +525,17 @@ impl ToolRegistry {
 
         ToolDiscovery {
             tools,
-            connectors: self.connectors.clone(),
+            connectors: self
+                .connectors
+                .iter()
+                .filter(|connector| {
+                    self.agent_app_policy.as_ref().is_none_or(|policy| {
+                        policy.network() != AppNetworkPolicy::Deny
+                            && policy.declares_connector(&connector.id)
+                    })
+                })
+                .cloned()
+                .collect(),
         }
     }
 
@@ -494,6 +552,32 @@ impl ToolRegistry {
                 call_id,
                 "unknown_tool",
                 format!("unknown tool: {name}"),
+                false,
+                registry_metadata(started),
+            );
+        }
+        if let Some(policy) = &self.agent_app_policy
+            && let Some(definition) = self
+                .unfiltered_non_management_definitions()
+                .into_iter()
+                .find(|definition| definition.name == name)
+            && !app_policy_allows_tool(policy, &definition)
+        {
+            return registry_failure(
+                name,
+                call_id,
+                "permission_denied",
+                "tool is not allowed by the active Agent App policy",
+                false,
+                registry_metadata(started),
+            );
+        }
+        if self.approval_requirement(name).is_some() {
+            return registry_failure(
+                name,
+                call_id,
+                "approval_required",
+                "tool call requires approval before execution",
                 false,
                 registry_metadata(started),
             );
@@ -607,6 +691,12 @@ impl ToolRegistry {
         }
         if let Some(outcome) = self
             .dispatch_attachment_tools(name, call_id, &arguments, started)
+            .await
+        {
+            return outcome;
+        }
+        if let Some(outcome) = self
+            .dispatch_foundation_mail_action(name, call_id, &arguments, started)
             .await
         {
             return outcome;
@@ -843,42 +933,6 @@ impl ToolRegistry {
     }
 }
 
-fn runtime_tool_definition(binding: &RuntimeToolBinding, name: String) -> ToolDefinition {
-    let namespace = match &binding.source {
-        ToolSource::RuntimeSkill { package_id, .. } => Some(package_id.clone()),
-        _ => None,
-    };
-    ToolDefinition {
-        name,
-        namespace,
-        description: binding.tool.description.clone(),
-        input_schema: binding.tool.input_schema.clone(),
-        output_schema: None,
-        permission: binding.tool.permission,
-        source: binding.source.clone(),
-    }
-}
-
-fn external_definitions(tools: &[ExternalToolConfig]) -> anyhow::Result<Vec<ToolDefinition>> {
-    tools
-        .iter()
-        .filter_map(|tool| tool.tool_definition().transpose())
-        .collect()
-}
-
-fn external_discovery(tools: &[ExternalToolConfig]) -> anyhow::Result<Vec<ToolDiscoveryItem>> {
-    tools
-        .iter()
-        .map(ExternalToolConfig::discovery_summary)
-        .collect()
-}
-
-fn serialized_len<T: Serialize>(value: &T) -> usize {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
-}
-
 fn registry_metadata(started: Instant) -> ToolResultMetadata {
     ToolResultMetadata {
         duration_ms: started.elapsed().as_millis() as u64,
@@ -920,6 +974,9 @@ fn skill_error_code(message: &str) -> &'static str {
 
 #[cfg(test)]
 mod registry_tests;
+
+#[cfg(test)]
+mod app_policy_command_tests;
 
 #[cfg(test)]
 mod execution_observer_tests;

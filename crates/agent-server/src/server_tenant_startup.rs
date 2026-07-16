@@ -90,14 +90,19 @@ where
         super::server_app::resolve_memory_tools(&runtime.storage, &app_prompt).await?;
     let task_tools = super::server_app::resolve_task_tools(&runtime.storage, &app_prompt).await?;
     let automation_tools =
-        super::server_app::resolve_automation_tools(&runtime.storage, &app_prompt).await?;
+        super::server_app::resolve_automation_tools(&runtime.storage, &app_prompt, &runtime_config)
+            .await?;
     let attachment_tools =
         super::server_app::resolve_attachment_tools(&runtime.storage, &app_prompt).await?;
     let connector_foundation =
-        super::server_app::resolve_connector_tools(&runtime.storage, &app_prompt).await?;
+        super::server_app::resolve_connector_tools(&runtime.storage, &app_prompt, &runtime_config)
+            .await?;
     let connector_tools = connector_foundation
         .as_ref()
         .map(|foundation| foundation.tools.clone());
+    let mail_actions = connector_foundation
+        .as_ref()
+        .map(|foundation| foundation.actions.clone());
     let state = if let Some(owner_management) = owner_management {
         api::AppState::new_with_model_app_foundations_skill_manager_and_owner(
             runtime.storage.clone(),
@@ -107,7 +112,8 @@ where
             app_prompt,
             api::AppFoundationRuntimes::new(memory_tools, task_tools, connector_tools)
                 .with_automation_tools(automation_tools)
-                .with_attachment_tools(attachment_tools),
+                .with_attachment_tools(attachment_tools)
+                .with_mail_actions(mail_actions),
             owner_management,
         )
     } else {
@@ -119,11 +125,9 @@ where
             app_prompt,
             api::AppFoundationRuntimes::new(memory_tools, task_tools, connector_tools)
                 .with_automation_tools(automation_tools)
-                .with_attachment_tools(attachment_tools),
+                .with_attachment_tools(attachment_tools)
+                .with_mail_actions(mail_actions),
         )
     };
-    Ok(match connector_foundation {
-        Some(foundation) => state.with_mail_actions(foundation.actions),
-        None => state,
-    })
+    Ok(state)
 }
