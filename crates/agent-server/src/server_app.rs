@@ -6,7 +6,7 @@ use agent_runtime::attachments::{AttachmentScope, SqliteAttachmentStore};
 use agent_runtime::automation_tools::{AutomationScope, AutomationToolRuntime};
 use agent_runtime::connector::ConnectorRuntime;
 use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
-use agent_runtime::credential::{ConnectorAccount, CredentialScope};
+use agent_runtime::credential::{ConnectorAccount, CredentialScope, ProviderCredential};
 use agent_runtime::mail::{MailAccount, MailAddress, MailConnector};
 use agent_runtime::mail_connector_transport::{
     MAIL_CONNECTOR_ID, MAIL_TOOL_NAMES, MailConnectorTransport,
@@ -249,19 +249,34 @@ pub(super) async fn resolve_connector_tools(
                 let configured_vault = vault.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("IMAP/SMTP requires the persistent Credential Vault")
                 })?;
+                let granted_scopes = BTreeSet::from([
+                    "mail.message.read".into(),
+                    "mail.message.organize".into(),
+                    "mail.message.send".into(),
+                ]);
+                let credential_id = config.credential_secret_id.as_str().to_string();
+                configured_vault
+                    .register_provider_credential_persistent(
+                        &config.credential_scope,
+                        ProviderCredential {
+                            access_secret_id: config.credential_secret_id.clone(),
+                            credential_id: credential_id.clone(),
+                            expires_at: None,
+                            granted_scopes: granted_scopes.clone(),
+                            provider_id: "imap-smtp".into(),
+                            provider_subject: config.username.clone(),
+                            refresh_secret_id: None,
+                            revoked_at: None,
+                        },
+                    )
+                    .await?;
                 configured_vault
                     .register_account_persistent(ConnectorAccount {
                         account_id: config.account.id.clone(),
+                        allowed_scopes: granted_scopes,
                         connector_id: "agentweave.connector.mail.imap-smtp".into(),
-                        provider_id: "imap-smtp".into(),
-                        secret_id: config.credential_secret_id.clone(),
+                        credential_id,
                         scope: config.credential_scope.clone(),
-                        granted_scopes: BTreeSet::from([
-                            "mail.message.read".into(),
-                            "mail.message.organize".into(),
-                            "mail.message.send".into(),
-                        ]),
-                        expires_at: None,
                     })
                     .await?;
                 (
