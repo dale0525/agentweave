@@ -8,7 +8,9 @@ use crate::durable_run::{
     ActionOutcome, ActionStatus, DurableAction, DurableRunStore, OutboxStatus, QueueActionRequest,
     RunScope, RunStatus,
 };
-use crate::mail::{ApprovedSendRequest, DeliveryState, SendPreview};
+use crate::mail::{
+    ApprovedSendRequest, DeliveryState, PreviewSendRequest, SendPreview, sha256_hex,
+};
 use crate::mail_connector_transport::MAIL_CONNECTOR_ID;
 use crate::storage::Storage;
 use chrono::{DateTime, Duration, Utc};
@@ -17,6 +19,47 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 const MAIL_SEND_ACTION: &str = "mail_send";
+const MAIL_SEND_PREVIEW_ACTION: &str = "mail_send_preview";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentMailSendPreviewRequest {
+    pub account_id: String,
+    pub draft_id: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoundationActionTurnContext {
+    session_id: String,
+    turn_id: String,
+}
+
+impl FoundationActionTurnContext {
+    pub fn new(session_id: impl Into<String>, turn_id: impl Into<String>) -> anyhow::Result<Self> {
+        let context = Self {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+        };
+        anyhow::ensure!(
+            !context.session_id.trim().is_empty(),
+            "foundation action session id is required"
+        );
+        anyhow::ensure!(
+            !context.turn_id.trim().is_empty(),
+            "foundation action turn id is required"
+        );
+        Ok(context)
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -64,6 +107,65 @@ impl MailActionService {
             scope,
             policy_version,
         })
+    }
+
+    pub async fn request_send_from_agent_preview(
+        &self,
+        request: AgentMailSendPreviewRequest,
+        context: &FoundationActionTurnContext,
+        call_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<PendingFoundationAction> {
+        anyhow::ensure!(
+            !request.account_id.trim().is_empty(),
+            "mail account id is required"
+        );
+        anyhow::ensure!(
+            !request.draft_id.trim().is_empty(),
+            "mail draft id is required"
+        );
+        anyhow::ensure!(
+            request.expected_revision > 0,
+            "mail draft revision must be positive"
+        );
+        anyhow::ensure!(
+            !call_id.trim().is_empty(),
+            "mail preview call id is required"
+        );
+        let idempotency_key = agent_preview_idempotency_key(&self.scope, context, call_id)?;
+        let connector_request = PreviewSendRequest {
+            account_id: request.account_id,
+            draft_id: request.draft_id,
+            expected_revision: request.expected_revision,
+            idempotency_key: idempotency_key.clone(),
+        };
+        let connector_value = self
+            .tools
+            .execute(
+                MAIL_SEND_PREVIEW_ACTION,
+                call_id,
+                serde_json::to_value(&connector_request)?,
+            )
+            .await?;
+        let connector_result: ConnectorExecutionResult = serde_json::from_value(connector_value)?;
+        anyhow::ensure!(
+            connector_result.connector_id == MAIL_CONNECTOR_ID
+                && connector_result.tool_name == MAIL_SEND_PREVIEW_ACTION,
+            "mail preview connector result is invalid"
+        );
+        let preview: SendPreview = serde_json::from_value(connector_result.output)?;
+        anyhow::ensure!(
+            preview.account_id == connector_request.account_id
+                && preview.draft_id == connector_request.draft_id
+                && preview.draft_revision == connector_request.expected_revision,
+            "mail preview does not match the requested draft revision"
+        );
+        anyhow::ensure!(
+            preview.idempotency_key == idempotency_key,
+            "mail preview idempotency key mismatch"
+        );
+        self.request_send(preview, Some(context.session_id.clone()), now)
+            .await
     }
 
     pub async fn request_send(
@@ -545,3 +647,24 @@ fn mail_risk_summary(preview: &SendPreview) -> String {
     .take(1024)
     .collect()
 }
+
+fn agent_preview_idempotency_key(
+    scope: &CredentialScope,
+    context: &FoundationActionTurnContext,
+    call_id: &str,
+) -> anyhow::Result<String> {
+    let material = serde_json::to_vec(&(
+        "agentweave.foundation.mail.send.v1",
+        &scope.app_id,
+        &scope.tenant_id,
+        &scope.user_id,
+        context.session_id(),
+        context.turn_id(),
+        call_id,
+    ))?;
+    Ok(format!("agent-mail-send-v1-{}", sha256_hex(material)))
+}
+
+#[cfg(test)]
+#[path = "foundation_actions_agent_tests.rs"]
+mod agent_tests;
