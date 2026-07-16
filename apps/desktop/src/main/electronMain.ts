@@ -126,6 +126,7 @@ app.whenReady().then(async () => {
         }));
         disposers.push(registerSidecarApiController({
           ipcMain,
+          openExternal: (url) => shell.openExternal(url),
           requesterWebContents: mainWindow.webContents,
           sidecarRequest: sidecar.request,
         }));

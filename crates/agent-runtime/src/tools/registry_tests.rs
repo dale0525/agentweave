@@ -338,6 +338,7 @@ fn disabled_background_policy_rejects_declared_automation_tools() {
         input_schema: serde_json::json!({"type":"object"}),
         output_schema: None,
         permission: ToolPermission::PersistData,
+        persistence: ToolPersistence::for_permission(ToolPermission::PersistData),
         source: ToolSource::HostCapability {
             capability: "agentweave.host.automation/v1".into(),
         },

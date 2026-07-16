@@ -1,5 +1,8 @@
 import {
   SIDECAR_API_REQUEST_CHANNEL,
+  type OAuthAuthorizationStatus,
+  type OAuthAuthorizationSummary,
+  type OAuthAuthorizationView,
   type SidecarApiOperation,
   type SidecarApiRequest,
 } from "../shared/sidecarApi";
@@ -19,6 +22,16 @@ const NOTIFICATION_STATUSES = new Set([
   "uncertain",
   "cancelled",
 ]);
+const OAUTH_AUTHORIZATION_STATUSES = new Set<OAuthAuthorizationStatus>([
+  "cancelled",
+  "completed",
+  "denied",
+  "exchanging",
+  "expired",
+  "failed",
+  "pending",
+  "preparing",
+]);
 
 type IpcEvent = { sender: { id: number } };
 
@@ -30,11 +43,18 @@ type IpcMainLike = {
 type RequestDescription = {
   body?: unknown;
   method: "DELETE" | "GET" | "PATCH" | "POST";
+  oauthAuthorization?: string;
+  oauthStartInput?: {
+    connectorIds: readonly string[];
+    providerId: string;
+    requestedCapabilities: readonly string[];
+  };
   pathname: string;
 };
 
 export function registerSidecarApiController(options: {
   ipcMain: IpcMainLike;
+  openExternal: (url: string) => Promise<unknown> | unknown;
   requesterWebContents: { id: number };
   sidecarRequest: SidecarRequest;
 }): () => void {
@@ -43,9 +63,36 @@ export function registerSidecarApiController(options: {
       throw new Error("Sidecar API is restricted to the requester window");
     }
     const request = describeRequest(parseRequest(value));
-    return requestSidecarJson(options.sidecarRequest, request);
+    const payload = await requestSidecarJson(options.sidecarRequest, request);
+    if (request.oauthStartInput) {
+      const start = parseOAuthStartResponse(payload, request.oauthStartInput);
+      try {
+        await options.openExternal(start.authorizationUrl);
+      } catch {
+        await cancelUnopenedOAuth(options.sidecarRequest, start.summary.authorizationId);
+        throw new Error("OAuth authorization could not be opened");
+      }
+      return start.summary;
+    }
+    if (request.oauthAuthorization) {
+      return parseOAuthAuthorizationSummary(payload, request.oauthAuthorization);
+    }
+    return payload;
   });
   return () => options.ipcMain.removeHandler(SIDECAR_API_REQUEST_CHANNEL);
+}
+
+async function cancelUnopenedOAuth(
+  request: SidecarRequest,
+  authorizationId: string,
+): Promise<void> {
+  try {
+    await request(`/host/oauth/authorizations/${encodeURIComponent(authorizationId)}`, {
+      method: "DELETE",
+    });
+  } catch {
+    // The controller still returns only the sanitized open failure across IPC.
+  }
 }
 
 function parseRequest(value: unknown): SidecarApiRequest {
@@ -248,6 +295,44 @@ function describeRequest(request: SidecarApiRequest): RequestDescription {
         `/foundation/notifications/${identifier(request.input, "id")}/cancel`,
         {},
       );
+    case "oauth.start": {
+      const input = exactRecord(
+        request.input,
+        ["connectorIds", "providerId", "requestedCapabilities"],
+      );
+      const providerId = oauthIdentifier(input, "providerId");
+      const connectorIds = oauthIdentifierArray(input, "connectorIds");
+      const requestedCapabilities = oauthIdentifierArray(input, "requestedCapabilities");
+      return {
+        ...json("POST", "/host/oauth/authorizations", {
+          providerId,
+          connectorIds,
+          requestedCapabilities,
+        }),
+        oauthStartInput: { connectorIds, providerId, requestedCapabilities },
+      };
+    }
+    case "oauth.status": {
+      const authorizationId = oauthIdentifier(
+        exactRecord(request.input, ["authorizationId"]),
+        "authorizationId",
+      );
+      return {
+        ...get(`/host/oauth/authorizations/${encodeURIComponent(authorizationId)}`),
+        oauthAuthorization: authorizationId,
+      };
+    }
+    case "oauth.cancel": {
+      const authorizationId = oauthIdentifier(
+        exactRecord(request.input, ["authorizationId"]),
+        "authorizationId",
+      );
+      return {
+        method: "DELETE",
+        oauthAuthorization: authorizationId,
+        pathname: `/host/oauth/authorizations/${encodeURIComponent(authorizationId)}`,
+      };
+    }
     case "mail.list":
       return get("/foundation/mail/accounts");
     case "mail.status":
@@ -308,6 +393,148 @@ async function requestSidecarJson(
   return payload;
 }
 
+function parseOAuthStartResponse(
+  value: unknown,
+  expected: NonNullable<RequestDescription["oauthStartInput"]>,
+): { authorizationUrl: string; summary: OAuthAuthorizationSummary } {
+  const response = exactRecord(value, [
+    "authorizationId",
+    "authorizationOrigin",
+    "authorizationUrl",
+    "connectorIds",
+    "expiresAt",
+    "providerId",
+    "requestedCapabilities",
+    "status",
+  ]);
+  const connectorIds = oauthIdentifierArray(response, "connectorIds");
+  const requestedCapabilities = oauthIdentifierArray(response, "requestedCapabilities");
+  const summary = parseOAuthAuthorizationFields(response);
+  if (summary.providerId !== expected.providerId) {
+    throw new Error("OAuth authorization provider is invalid");
+  }
+  if (!sameIdentifierSet(connectorIds, expected.connectorIds)) {
+    throw new Error("OAuth authorization connectors are invalid");
+  }
+  if (!sameIdentifierSet(requestedCapabilities, expected.requestedCapabilities)) {
+    throw new Error("OAuth authorization capabilities are invalid");
+  }
+  if (summary.status !== "pending") {
+    throw new Error("OAuth authorization status is invalid");
+  }
+  const authorizationUrl = fieldString(response, "authorizationUrl", 16 * 1_024);
+  const authorizationOrigin = fieldString(response, "authorizationOrigin", 2_048);
+  let parsed: URL;
+  try {
+    parsed = new URL(authorizationUrl);
+  } catch {
+    throw new Error("OAuth authorization URL is invalid");
+  }
+  if (
+    parsed.protocol !== "https:"
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || authorizationUrl.includes("#")
+    || parsed.origin !== authorizationOrigin
+  ) {
+    throw new Error("OAuth authorization URL is invalid");
+  }
+  return { authorizationUrl: parsed.href, summary };
+}
+
+function parseOAuthAuthorizationSummary(
+  value: unknown,
+  expectedAuthorizationId: string,
+): OAuthAuthorizationView {
+  const response = exactRecord(value, [
+    "authorizationId",
+    "bindings",
+    "connectorIds",
+    "createdAt",
+    "errorCode",
+    "expiresAt",
+    "providerId",
+    "requestedCapabilities",
+    "status",
+    "updatedAt",
+  ]);
+  const summary = parseOAuthAuthorizationFields(response);
+  if (summary.authorizationId !== expectedAuthorizationId) {
+    throw new Error("OAuth authorization identifier is invalid");
+  }
+  const connectorIds = oauthIdentifierArray(response, "connectorIds");
+  const requestedCapabilities = oauthIdentifierArray(response, "requestedCapabilities");
+  const bindings = oauthAuthorizationBindings(response, connectorIds);
+  const errorCode = oauthErrorCode(response);
+  if (summary.status === "completed") {
+    if (bindings.length !== connectorIds.length || errorCode !== null) {
+      throw new Error("OAuth authorization result is invalid");
+    }
+  } else if (bindings.length !== 0) {
+    throw new Error("OAuth authorization result is invalid");
+  }
+  if (
+    ["cancelled", "denied", "expired", "failed"].includes(summary.status)
+    !== (errorCode !== null)
+  ) {
+    throw new Error("OAuth authorization result is invalid");
+  }
+  return {
+    ...summary,
+    bindings,
+    connectorIds,
+    createdAt: timestamp(fieldString(response, "createdAt", 64), "createdAt"),
+    errorCode,
+    requestedCapabilities,
+    updatedAt: timestamp(fieldString(response, "updatedAt", 64), "updatedAt"),
+  };
+}
+
+function parseOAuthAuthorizationFields(
+  response: Record<string, unknown>,
+): OAuthAuthorizationSummary {
+  return {
+    authorizationId: oauthIdentifier(response, "authorizationId"),
+    expiresAt: timestamp(fieldString(response, "expiresAt", 64), "expiresAt"),
+    providerId: oauthIdentifier(response, "providerId"),
+    status: fieldEnum(
+      response,
+      "status",
+      OAUTH_AUTHORIZATION_STATUSES,
+    ) as OAuthAuthorizationStatus,
+  };
+}
+
+function oauthAuthorizationBindings(
+  response: Record<string, unknown>,
+  connectorIds: readonly string[],
+): Array<{ accountId: string; connectorId: string }> {
+  const field = recordField(response, "bindings");
+  if (!Array.isArray(field) || field.length > 8) {
+    throw new Error("bindings is invalid");
+  }
+  const bindings = field.map((value) => {
+    const binding = exactRecord(value, ["accountId", "connectorId"]);
+    return {
+      accountId: oauthIdentifier(binding, "accountId"),
+      connectorId: oauthIdentifier(binding, "connectorId"),
+    };
+  });
+  if (
+    bindings.some((binding) => !connectorIds.includes(binding.connectorId))
+    || new Set(bindings.map((binding) => binding.connectorId)).size !== bindings.length
+  ) {
+    throw new Error("bindings is invalid");
+  }
+  return bindings;
+}
+
+function oauthErrorCode(response: Record<string, unknown>): string | null {
+  const field = recordField(response, "errorCode");
+  if (field === null) return null;
+  return oauthIdentifier(response, "errorCode");
+}
+
 function get(pathname: string): RequestDescription {
   return { method: "GET", pathname };
 }
@@ -334,6 +561,31 @@ function uuidIdentifier(value: unknown, name: string): string {
     throw new Error(`${name} is invalid`);
   }
   return id;
+}
+
+function oauthIdentifier(value: unknown, name: string): string {
+  const id = fieldString(value, name, 128);
+  if (!UUID_OR_ID.test(id) || id === "." || id === "..") {
+    throw new Error(`${name} is invalid`);
+  }
+  return id;
+}
+
+function oauthIdentifierArray(value: unknown, name: string): string[] {
+  const field = recordField(value, name);
+  if (!Array.isArray(field) || field.length === 0 || field.length > 32) {
+    throw new Error(`${name} is invalid`);
+  }
+  const identifiers = field.map((item) => oauthIdentifier({ [name]: item }, name));
+  if (new Set(identifiers).size !== identifiers.length) {
+    throw new Error(`${name} is invalid`);
+  }
+  return identifiers;
+}
+
+function sameIdentifierSet(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length
+    && actual.every((identifier) => expected.includes(identifier));
 }
 
 function taskContent(value: unknown): Record<string, unknown> {
@@ -592,6 +844,9 @@ const OPERATIONS = new Set<SidecarApiOperation>([
   "notifications.enqueue",
   "notifications.get",
   "notifications.list",
+  "oauth.cancel",
+  "oauth.start",
+  "oauth.status",
   "schedules.create",
   "schedules.get",
   "schedules.list",

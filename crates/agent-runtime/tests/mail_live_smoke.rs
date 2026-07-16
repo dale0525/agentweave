@@ -1,7 +1,7 @@
 use agent_runtime::{
     credential::{
-        ConnectorAccount, CredentialScope, CredentialVault, InMemorySecretStore, SecretId,
-        SecretMaterial, SecretStore,
+        ConnectorAccount, CredentialScope, CredentialVault, InMemorySecretStore,
+        ProviderCredential, SecretId, SecretMaterial, SecretStore,
     },
     mail::{
         ApprovedSendRequest, CreateDraftRequest, DeliveryState, DraftContent, MailAccount,
@@ -107,18 +107,30 @@ async fn connector(settings: LiveMailSettings) -> Result<ImapSmtpMailConnector, 
         .await
         .map_err(|_| "live Mail credential could not be stored")?;
     let vault = Arc::new(CredentialVault::new(store));
+    let credential_id = "live-mail-primary";
+    let allowed_scopes = BTreeSet::from(["mail.message.read".into(), "mail.message.send".into()]);
+    vault
+        .register_provider_credential(
+            &account_scope,
+            ProviderCredential {
+                access_secret_id: secret_id.clone(),
+                credential_id: credential_id.into(),
+                expires_at: None,
+                granted_scopes: allowed_scopes.clone(),
+                provider_id: "imap-smtp".into(),
+                provider_subject: settings.username.clone(),
+                refresh_secret_id: None,
+                revoked_at: None,
+            },
+        )
+        .map_err(|_| "live Mail credential could not be registered")?;
     vault
         .register_account(ConnectorAccount {
             account_id: ACCOUNT_ID.into(),
+            allowed_scopes,
             connector_id: CONNECTOR_ID.into(),
-            expires_at: None,
-            granted_scopes: BTreeSet::from([
-                "mail.message.read".into(),
-                "mail.message.send".into(),
-            ]),
-            provider_id: "imap-smtp".into(),
+            credential_id: credential_id.into(),
             scope: account_scope.clone(),
-            secret_id: secret_id.clone(),
         })
         .map_err(|_| "live Mail account could not be registered")?;
     let account = MailAccount {

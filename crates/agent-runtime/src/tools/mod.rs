@@ -21,14 +21,14 @@ use crate::skill_runtime_source::RuntimeToolBinding;
 use builtin::BuiltInTools;
 use definition_support::{
     app_policy_allows_discovery, app_policy_allows_tool, external_definitions, external_discovery,
-    runtime_tool_definition, serialized_len, tool_has_external_side_effect,
+    serialized_len, tool_has_external_side_effect,
 };
 use discovery::{ConnectorMetadata, ExternalToolConfig, ExternalToolExecution, ToolDiscoveryItem};
 use result::{ToolError, ToolResult, ToolResultMetadata};
 use schema::{ToolDiagnostic, validate_tool_definition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -148,6 +148,23 @@ pub enum ToolPermission {
     ManageSkills,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPersistence {
+    Full,
+    #[default]
+    MetadataOnly,
+}
+
+impl ToolPersistence {
+    pub const fn for_permission(permission: ToolPermission) -> Self {
+        match permission {
+            ToolPermission::ReadSensitive | ToolPermission::CredentialAccess => Self::MetadataOnly,
+            _ => Self::Full,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ToolDefinition {
     pub name: String,
@@ -156,7 +173,20 @@ pub struct ToolDefinition {
     pub input_schema: Value,
     pub output_schema: Option<Value>,
     pub permission: ToolPermission,
+    #[serde(default)]
+    pub persistence: ToolPersistence,
     pub source: ToolSource,
+}
+
+impl ToolDefinition {
+    pub const fn effective_persistence(&self) -> ToolPersistence {
+        match self.permission {
+            ToolPermission::ReadSensitive | ToolPermission::CredentialAccess => {
+                ToolPersistence::MetadataOnly
+            }
+            _ => self.persistence,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -386,67 +416,6 @@ impl ToolRegistry {
         definitions
     }
 
-    fn non_management_definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = self.unfiltered_non_management_definitions();
-        if let Some(policy) = &self.agent_app_policy {
-            definitions.retain(|definition| app_policy_allows_tool(policy, definition));
-        }
-        definitions
-    }
-
-    fn unfiltered_non_management_definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = if self.built_in_tools_enabled {
-            self.builtins.definitions()
-        } else {
-            Vec::new()
-        };
-        definitions.extend(self.external_definitions.clone());
-        if let Some(memory) = &self.memory {
-            definitions.extend(memory.definitions());
-        }
-        if let Some(tasks) = &self.task_tools {
-            definitions.extend(tasks.definitions());
-        }
-        if let Some(automation) = &self.automation_tools {
-            definitions.extend(automation.definitions());
-        }
-        if let Some(attachments) = &self.attachment_tools {
-            definitions.extend(attachments.definitions());
-        }
-        if let Some(connectors) = &self.connector_tools {
-            definitions.extend(self.foundation_connector_definitions(connectors));
-        }
-        if self.mail_actions.is_some() {
-            definitions.push(foundation_actions::mail_send_preview_definition());
-        }
-
-        let mut runtime_tools = self.skills.tools_with_runtime_sources();
-        runtime_tools.sort_by(|left, right| left.canonical_id.cmp(&right.canonical_id));
-        let mut local_counts = BTreeMap::<String, usize>::new();
-        for binding in &runtime_tools {
-            *local_counts.entry(binding.local_name.clone()).or_default() += 1;
-            definitions.push(runtime_tool_definition(
-                binding,
-                binding.canonical_id.clone(),
-            ));
-        }
-        for binding in runtime_tools {
-            if local_counts.get(&binding.local_name) == Some(&1)
-                && !self.runtime_alias_is_shadowed(&binding.local_name)
-            {
-                definitions.push(runtime_tool_definition(
-                    &binding,
-                    binding.local_name.clone(),
-                ));
-            }
-        }
-        if self.commands_blocked_by_exclusions {
-            definitions
-                .retain(|definition| definition.permission != ToolPermission::ExecuteCommand);
-        }
-        definitions
-    }
-
     pub fn diagnostics(&self) -> Vec<ToolDiagnostic> {
         let mut diagnostics: Vec<_> = self
             .definitions()
@@ -489,6 +458,14 @@ impl ToolRegistry {
                 permission: definition.permission,
                 policy: self.approval_policy,
             })
+    }
+
+    pub fn persistence_for(&self, name: &str) -> ToolPersistence {
+        self.definitions()
+            .into_iter()
+            .find(|definition| definition.name == name)
+            .map(|definition| definition.effective_persistence())
+            .unwrap_or(ToolPersistence::MetadataOnly)
     }
 
     pub fn discovery(&self) -> ToolDiscovery {
@@ -1009,3 +986,7 @@ mod management_permission_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "persistence_policy_tests.rs"]
+mod persistence_policy_tests;

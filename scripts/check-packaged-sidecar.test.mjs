@@ -11,6 +11,7 @@ import test from "node:test";
 
 import {
   assertPackagedDiscovery,
+  assertPackagedMailPreviewEvent,
   foundationScenarioSupported,
   packagedSidecarPlan,
   scriptedModelReply,
@@ -136,9 +137,35 @@ test("packaged Foundation scenario requires the complete reusable contract", () 
   assert.equal(foundationScenarioSupported({ ...expected, connectors: [] }), false);
 });
 
+test("packaged Mail preview persists only bounded success metadata", () => {
+  const event = {
+    payload: {
+      type: "tool_call_finished",
+      call_id: "foundation-mail-preview",
+      persistence: "metadata_only",
+      result_metadata: { ok: true, serialized_bytes: 512 },
+    },
+  };
+
+  assert.equal(assertPackagedMailPreviewEvent(event), true);
+  assert.throws(
+    () => assertPackagedMailPreviewEvent({
+      payload: { ...event.payload, result: { secret: "must-not-persist" } },
+    }),
+    /persistence policy is invalid/,
+  );
+  assert.throws(
+    () => assertPackagedMailPreviewEvent({
+      payload: { ...event.payload, result_metadata: { ok: false } },
+    }),
+    /persistence policy is invalid/,
+  );
+});
+
 test("scripted model advances only through successful Foundation tool results", () => {
   const body = scriptedBody();
   const proposed = scriptedModelReply(body);
+  assert.equal(proposed.choices[0].finish_reason, "tool_calls");
   assert.equal(toolCall(proposed).id, "foundation-memory-propose");
   assert.equal(toolArguments(proposed).draft.retention.mode, "persistent");
 
@@ -167,13 +194,16 @@ test("scripted model advances only through successful Foundation tool results", 
   }));
   const previewed = scriptedModelReply(body);
   assert.equal(toolCall(previewed).id, "foundation-mail-preview");
+  assert.equal(toolCall(previewed).function.name, "mail_send_preview");
   assert.equal(toolArguments(previewed).draftId, "draft-1");
+  assert.equal("idempotencyKey" in toolArguments(previewed), false);
 
   body.messages.push(toolMessage("foundation-mail-preview", {
     id: "preview-1",
     idempotencyKey: "packaged-foundation-send-v1",
   }));
   const completed = scriptedModelReply(body);
+  assert.equal(completed.choices[0].finish_reason, "stop");
   assert.equal(completed.choices[0].message.content, "Packaged Foundation scenario completed.");
 
   const failed = scriptedBody();
@@ -199,7 +229,10 @@ function scriptedBody() {
       "memory_propose",
     ].map((name) => ({
       type: "function",
-      function: { name: `ga_fixture_${name}`, parameters: { type: "object" } },
+      function: {
+        name: name === "mail_send_preview" ? name : `ga_fixture_${name}`,
+        parameters: { type: "object" },
+      },
     })),
   };
 }

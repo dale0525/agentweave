@@ -6,6 +6,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 use std::collections::BTreeSet;
 
+#[path = "credential_cleanup_sqlite.rs"]
+mod cleanup;
+
 const CREATE_CREDENTIAL_RECORDS: &str = r#"CREATE TABLE IF NOT EXISTS credential_records (
     app_id TEXT NOT NULL,
     tenant_id TEXT NOT NULL,
@@ -52,6 +55,26 @@ const CREATE_OAUTH_STATES: &str = r#"CREATE TABLE IF NOT EXISTS oauth_authorizat
     PRIMARY KEY(app_id, tenant_id, user_id, state_id)
 )"#;
 
+const CREATE_SECRET_CLEANUP: &str = r#"CREATE TABLE IF NOT EXISTS credential_secret_cleanup (
+    app_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    secret_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    not_before TEXT NOT NULL,
+    phase TEXT NOT NULL DEFAULT 'cleanup',
+    operation_id TEXT,
+    lease_expires_at TEXT,
+    cleaned_at TEXT,
+    PRIMARY KEY(app_id, tenant_id, user_id, secret_id),
+    CHECK (
+        (phase = 'staging' AND operation_id IS NOT NULL
+            AND lease_expires_at IS NOT NULL AND cleaned_at IS NULL)
+        OR
+        (phase = 'cleanup' AND operation_id IS NULL AND lease_expires_at IS NULL)
+    )
+)"#;
+
 #[derive(Clone)]
 pub struct SqliteCredentialMetadataStore {
     pool: SqlitePool,
@@ -72,6 +95,28 @@ impl SqliteCredentialMetadataStore {
             .execute(&mut *tx)
             .await?;
         sqlx::query(CREATE_OAUTH_STATES).execute(&mut *tx).await?;
+        sqlx::query(CREATE_SECRET_CLEANUP).execute(&mut *tx).await?;
+        let cleanup_columns = table_columns(&mut tx, "credential_secret_cleanup").await?;
+        for (column, definition) in [
+            ("not_before", "TEXT NOT NULL DEFAULT ''"),
+            ("phase", "TEXT NOT NULL DEFAULT 'cleanup'"),
+            ("operation_id", "TEXT"),
+            ("lease_expires_at", "TEXT"),
+            ("cleaned_at", "TEXT"),
+        ] {
+            if !cleanup_columns.contains(column) {
+                sqlx::query(&format!(
+                    "ALTER TABLE credential_secret_cleanup ADD COLUMN {column} {definition}"
+                ))
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        sqlx::query(
+            "UPDATE credential_secret_cleanup SET not_before = created_at WHERE not_before = ''",
+        )
+        .execute(&mut *tx)
+        .await?;
 
         let connector_columns = table_columns(&mut tx, "connector_accounts").await?;
         if !connector_columns.is_empty() && !connector_columns.contains("credential_id") {
@@ -231,9 +276,6 @@ impl SqliteCredentialMetadataStore {
         let Some(credential) = credential else {
             return Ok(None);
         };
-        if credential.revoked_at.is_some() {
-            return Ok(None);
-        }
         let bindings: i64 = sqlx::query_scalar(
             r#"SELECT COUNT(*) FROM connector_accounts
             WHERE app_id = ? AND tenant_id = ? AND user_id = ? AND credential_id = ?"#,
@@ -248,6 +290,14 @@ impl SqliteCredentialMetadataStore {
             bindings == 0,
             "provider credential is still bound to a connector"
         );
+        cleanup::enqueue_cleanup_tombstone(&mut tx, scope, &credential.access_secret_id).await?;
+        if let Some(secret_id) = &credential.refresh_secret_id {
+            cleanup::enqueue_cleanup_tombstone(&mut tx, scope, secret_id).await?;
+        }
+        if credential.revoked_at.is_some() {
+            tx.commit().await?;
+            return Ok(Some(credential));
+        }
         let result = sqlx::query(
             r#"UPDATE credential_records SET revoked_at = ?, updated_at = ?
             WHERE app_id = ? AND tenant_id = ? AND user_id = ? AND credential_id = ?
@@ -270,8 +320,35 @@ impl SqliteCredentialMetadataStore {
     }
 
     pub async fn upsert_account(&self, account: &ConnectorAccount) -> anyhow::Result<()> {
+        self.write_account(account, true, None).await
+    }
+
+    pub async fn insert_account(&self, account: &ConnectorAccount) -> anyhow::Result<()> {
+        self.write_account(account, false, None).await
+    }
+
+    pub async fn insert_account_fenced(
+        &self,
+        account: &ConnectorAccount,
+        authorization_id: &str,
+        owner_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.write_account(account, false, Some((authorization_id, owner_id, now)))
+            .await
+    }
+
+    async fn write_account(
+        &self,
+        account: &ConnectorAccount,
+        overwrite: bool,
+        fence: Option<(&str, &str, DateTime<Utc>)>,
+    ) -> anyhow::Result<()> {
         validate_account(account)?;
         let mut tx = self.pool.begin().await?;
+        if let Some((authorization_id, owner_id, now)) = fence {
+            validate_oauth_fence(&mut tx, &account.scope, authorization_id, owner_id, now).await?;
+        }
         let credential = sqlx::query(
             r#"SELECT credential_id, provider_id, provider_subject, access_secret_id,
                 refresh_secret_id, granted_scopes_json, expires_at, revoked_at
@@ -295,7 +372,7 @@ impl SqliteCredentialMetadataStore {
             credential.revoked_at.is_none(),
             "connector account credential is revoked"
         );
-        sqlx::query(
+        let statement = if overwrite {
             r#"INSERT INTO connector_accounts(
                 app_id, tenant_id, user_id, connector_id, account_id, credential_id,
                 allowed_scopes_json, updated_at
@@ -303,18 +380,24 @@ impl SqliteCredentialMetadataStore {
             ON CONFLICT(app_id, tenant_id, user_id, connector_id, account_id) DO UPDATE SET
                 credential_id = excluded.credential_id,
                 allowed_scopes_json = excluded.allowed_scopes_json,
-                updated_at = excluded.updated_at"#,
-        )
-        .bind(&account.scope.app_id)
-        .bind(&account.scope.tenant_id)
-        .bind(&account.scope.user_id)
-        .bind(&account.connector_id)
-        .bind(&account.account_id)
-        .bind(&account.credential_id)
-        .bind(serde_json::to_string(&account.allowed_scopes)?)
-        .bind(Utc::now().to_rfc3339())
-        .execute(&mut *tx)
-        .await?;
+                updated_at = excluded.updated_at"#
+        } else {
+            r#"INSERT INTO connector_accounts(
+                app_id, tenant_id, user_id, connector_id, account_id, credential_id,
+                allowed_scopes_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#
+        };
+        sqlx::query(statement)
+            .bind(&account.scope.app_id)
+            .bind(&account.scope.tenant_id)
+            .bind(&account.scope.user_id)
+            .bind(&account.connector_id)
+            .bind(&account.account_id)
+            .bind(&account.credential_id)
+            .bind(serde_json::to_string(&account.allowed_scopes)?)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -517,6 +600,31 @@ impl SqliteCredentialMetadataStore {
     }
 }
 
+async fn validate_oauth_fence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    scope: &CredentialScope,
+    authorization_id: &str,
+    owner_id: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let owned: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM oauth_broker_sessions
+        WHERE app_id = ? AND tenant_id = ? AND user_id = ?
+            AND authorization_id = ? AND status = 'exchanging'
+            AND exchange_owner_id = ? AND exchange_lease_expires_at > ?"#,
+    )
+    .bind(&scope.app_id)
+    .bind(&scope.tenant_id)
+    .bind(&scope.user_id)
+    .bind(authorization_id)
+    .bind(owner_id)
+    .bind(now.to_rfc3339())
+    .fetch_one(&mut **tx)
+    .await?;
+    anyhow::ensure!(owned == 1, "OAuth credential write ownership changed");
+    Ok(())
+}
+
 async fn table_columns(
     connection: &mut SqliteConnection,
     table: &str,
@@ -636,237 +744,9 @@ fn parse_required_time(value: &str) -> anyhow::Result<DateTime<Utc>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::credential::{CredentialVault, InMemorySecretStore, SecretMaterial, SecretStore};
-    use chrono::Duration;
-    use std::sync::Arc;
+#[path = "credential_sqlite_tests.rs"]
+mod tests;
 
-    fn scope(app_id: &str) -> CredentialScope {
-        CredentialScope {
-            app_id: app_id.into(),
-            tenant_id: "tenant".into(),
-            user_id: "user".into(),
-        }
-    }
-
-    fn credential(secret_id: &SecretId) -> ProviderCredential {
-        ProviderCredential {
-            access_secret_id: secret_id.clone(),
-            credential_id: "workspace-principal".into(),
-            expires_at: Some(Utc::now() + Duration::minutes(10)),
-            granted_scopes: BTreeSet::from(["calendar.read".into(), "contacts.read".into()]),
-            provider_id: "workspace".into(),
-            provider_subject: "provider-user-1".into(),
-            refresh_secret_id: None,
-            revoked_at: None,
-        }
-    }
-
-    fn binding(
-        account_scope: &CredentialScope,
-        connector_id: &str,
-        allowed_scope: &str,
-    ) -> ConnectorAccount {
-        ConnectorAccount {
-            account_id: "primary".into(),
-            allowed_scopes: BTreeSet::from([allowed_scope.into()]),
-            connector_id: connector_id.into(),
-            credential_id: "workspace-principal".into(),
-            scope: account_scope.clone(),
-        }
-    }
-
-    #[tokio::test]
-    async fn shared_principal_bindings_survive_and_revoke_only_after_last_unbind() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let metadata = SqliteCredentialMetadataStore::from_storage(&storage)
-            .await
-            .unwrap();
-        let secrets = Arc::new(InMemorySecretStore::default());
-        let vault = CredentialVault::new_persistent(secrets.clone(), metadata.clone());
-        let account_scope = scope("app-a");
-        let secret_id = SecretId::parse("workspace.access").unwrap();
-        secrets
-            .save(
-                &account_scope,
-                &secret_id,
-                SecretMaterial::new("access-token").unwrap(),
-            )
-            .await
-            .unwrap();
-        vault
-            .register_provider_credential_persistent(&account_scope, credential(&secret_id))
-            .await
-            .unwrap();
-        for account in [
-            binding(&account_scope, "calendar", "calendar.read"),
-            binding(&account_scope, "contacts", "contacts.read"),
-        ] {
-            vault.register_account_persistent(account).await.unwrap();
-        }
-        let mut overbroad = binding(&account_scope, "mail", "mail.send");
-        overbroad.allowed_scopes.insert("calendar.read".into());
-        assert!(vault.register_account_persistent(overbroad).await.is_err());
-
-        let resumed = CredentialVault::new_persistent(secrets.clone(), metadata);
-        assert_eq!(
-            resumed
-                .list_connector_accounts(&account_scope, None)
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            resumed
-                .list_connector_accounts(&account_scope, Some("calendar"))
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-        for (connector_id, required) in
-            [("calendar", "calendar.read"), ("contacts", "contacts.read")]
-        {
-            let leased = resumed
-                .lease_for_connector(
-                    &account_scope,
-                    connector_id,
-                    "primary",
-                    &BTreeSet::from([required.into()]),
-                )
-                .await
-                .unwrap();
-            assert_eq!(leased.expose_bytes(), b"access-token");
-        }
-        let (_, remaining) = resumed
-            .remove_connector_account(&account_scope, "calendar", "primary")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(remaining, 1);
-        assert!(
-            resumed
-                .revoke_provider_credential(&account_scope, "workspace-principal", Utc::now())
-                .await
-                .is_err()
-        );
-        let (_, remaining) = resumed
-            .remove_connector_account(&account_scope, "contacts", "primary")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(remaining, 0);
-        assert!(
-            resumed
-                .revoke_provider_credential(&account_scope, "workspace-principal", Utc::now())
-                .await
-                .unwrap()
-        );
-        assert!(
-            secrets
-                .load(&account_scope, &secret_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn legacy_account_schema_migrates_without_exposing_secret_material() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(
-            r#"CREATE TABLE connector_accounts (
-                app_id TEXT NOT NULL, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
-                account_id TEXT NOT NULL, connector_id TEXT NOT NULL, provider_id TEXT NOT NULL,
-                secret_id TEXT NOT NULL, granted_scopes_json TEXT NOT NULL, expires_at TEXT,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY(app_id, tenant_id, user_id, account_id)
-            )"#,
-        )
-        .execute(storage.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            r#"INSERT INTO connector_accounts VALUES (
-                'app-a', 'tenant', 'user', 'primary', 'mail', 'imap-smtp',
-                'mail.password', '["mail.read"]', NULL, '2026-07-15T00:00:00Z'
-            )"#,
-        )
-        .execute(storage.pool())
-        .await
-        .unwrap();
-        let metadata = SqliteCredentialMetadataStore::from_storage(&storage)
-            .await
-            .unwrap();
-        let secrets = Arc::new(InMemorySecretStore::default());
-        let account_scope = scope("app-a");
-        let secret_id = SecretId::parse("mail.password").unwrap();
-        secrets
-            .save(
-                &account_scope,
-                &secret_id,
-                SecretMaterial::new("password").unwrap(),
-            )
-            .await
-            .unwrap();
-        let resumed = CredentialVault::new_persistent(secrets, metadata);
-        let leased = resumed
-            .lease_for_connector(
-                &account_scope,
-                "mail",
-                "primary",
-                &BTreeSet::from(["mail.read".into()]),
-            )
-            .await
-            .unwrap();
-        assert_eq!(leased.expose_bytes(), b"password");
-    }
-
-    #[tokio::test]
-    async fn oauth_state_is_single_use_and_pkce_secret_is_scrubbed() {
-        let storage = Storage::connect("sqlite::memory:").await.unwrap();
-        let metadata = SqliteCredentialMetadataStore::from_storage(&storage)
-            .await
-            .unwrap();
-        let secrets = Arc::new(InMemorySecretStore::default());
-        let vault = CredentialVault::new_persistent(secrets.clone(), metadata);
-        let account_scope = scope("app-a");
-        let verifier_id = SecretId::parse("oauth.state.verifier").unwrap();
-        vault
-            .begin_oauth_authorization(
-                &account_scope,
-                OAuthAuthorizationState {
-                    state_id: "state-1".into(),
-                    connector_id: "calendar".into(),
-                    account_id: "primary".into(),
-                    pkce_verifier_secret_id: verifier_id.clone(),
-                    redirect_uri: "http://127.0.0.1/callback".into(),
-                    requested_scopes: BTreeSet::from(["calendar.read".into()]),
-                    expires_at: Utc::now() + Duration::minutes(5),
-                },
-                SecretMaterial::new("verifier").unwrap(),
-            )
-            .await
-            .unwrap();
-        let (_, verifier) = vault
-            .consume_oauth_authorization(&account_scope, "state-1", Utc::now())
-            .await
-            .unwrap();
-        assert_eq!(verifier.expose_bytes(), b"verifier");
-        assert!(
-            secrets
-                .load(&account_scope, &verifier_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            vault
-                .consume_oauth_authorization(&account_scope, "state-1", Utc::now())
-                .await
-                .is_err()
-        );
-    }
-}
+#[cfg(test)]
+#[path = "credential_cleanup_sqlite_tests.rs"]
+mod cleanup_tests;
