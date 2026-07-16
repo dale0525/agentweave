@@ -145,6 +145,81 @@ async fn durable_event_persistence_projects_sensitive_tool_payloads_across_resta
 }
 
 #[tokio::test]
+async fn turn_writes_wait_for_a_competing_immediate_transaction() {
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("turn-write-contention.db");
+    let url = format!("sqlite://{}?mode=rwc", database.display());
+    let scope = ConversationScope::local("com.example.turn-write-contention");
+    let storage = Storage::connect(&url).await.unwrap();
+    let session = storage
+        .create_scoped_session(&scope, "Write contention")
+        .await
+        .unwrap();
+    let started = storage
+        .begin_scoped_turn(&scope, &session.id, "request-contention", "hello")
+        .await
+        .unwrap();
+    let blocker = Storage::connect_without_migrations(&url).await.unwrap();
+
+    let blocking_tx = blocker.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let append_storage = storage.clone();
+    let append_scope = scope.clone();
+    let append_session_id = session.id.clone();
+    let append_turn_id = started.turn.id.clone();
+    let append = tokio::spawn(async move {
+        append_storage
+            .append_scoped_turn_event(
+                &append_scope,
+                &append_session_id,
+                &append_turn_id,
+                &RuntimeEvent::AssistantTextDelta { text: "hi".into() },
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!append.is_finished());
+    blocking_tx.commit().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), append)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let blocking_tx = blocker.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let finish_storage = storage.clone();
+    let finish_scope = scope.clone();
+    let finish_session_id = session.id.clone();
+    let finish_turn_id = started.turn.id.clone();
+    let finish = tokio::spawn(async move {
+        let terminal = RuntimeEvent::TurnFinished {
+            turn_id: finish_turn_id.clone(),
+        };
+        finish_storage
+            .finish_scoped_turn(
+                &finish_scope,
+                &finish_session_id,
+                &finish_turn_id,
+                ConversationTurnCompletion {
+                    status: ConversationTurnStatus::Completed,
+                    terminal_event: &terminal,
+                    assistant_content: Some("hi"),
+                    failure_message: None,
+                },
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!finish.is_finished());
+    blocking_tx.commit().await.unwrap();
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(2), finish)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished.status, ConversationTurnStatus::Completed);
+}
+
+#[tokio::test]
 async fn restart_marks_running_turn_interrupted_with_terminal_event() {
     let root = tempfile::tempdir().unwrap();
     let database = root.path().join("turns.db");

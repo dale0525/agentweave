@@ -11,6 +11,7 @@ import test from "node:test";
 
 import {
   assertPackagedDiscovery,
+  assertPackagedMailPreviewEvent,
   foundationScenarioSupported,
   packagedSidecarPlan,
   scriptedModelReply,
@@ -134,6 +135,31 @@ test("packaged Foundation scenario requires the complete reusable contract", () 
     runtimeTools: expected.runtimeTools.filter((tool) => tool !== "memory_confirm"),
   }), false);
   assert.equal(foundationScenarioSupported({ ...expected, connectors: [] }), false);
+});
+
+test("packaged Mail preview persists only bounded success metadata", () => {
+  const event = {
+    payload: {
+      type: "tool_call_finished",
+      call_id: "foundation-mail-preview",
+      persistence: "metadata_only",
+      result_metadata: { ok: true, serialized_bytes: 512 },
+    },
+  };
+
+  assert.equal(assertPackagedMailPreviewEvent(event), true);
+  assert.throws(
+    () => assertPackagedMailPreviewEvent({
+      payload: { ...event.payload, result: { secret: "must-not-persist" } },
+    }),
+    /persistence policy is invalid/,
+  );
+  assert.throws(
+    () => assertPackagedMailPreviewEvent({
+      payload: { ...event.payload, result_metadata: { ok: false } },
+    }),
+    /persistence policy is invalid/,
+  );
 });
 
 test("scripted model advances only through successful Foundation tool results", () => {

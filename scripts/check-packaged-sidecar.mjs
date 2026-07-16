@@ -458,18 +458,21 @@ async function createPackagedFoundationState(origin, token) {
     event?.payload?.type === "tool_call_finished"
     && event.payload.call_id === "foundation-mail-preview"
   ));
-  if (!previewEvent) fail("packaged Mail preview is missing");
-  const preview = successfulToolResultData(
-    previewEvent.payload.result,
-    "packaged Mail preview",
-  );
-  if (preview.status !== "waiting_approval" || !preview.preview) {
-    fail("packaged Mail preview did not create a waiting approval");
+  assertPackagedMailPreviewEvent(previewEvent);
+}
+
+export function assertPackagedMailPreviewEvent(event) {
+  const payload = event?.payload;
+  if (
+    payload?.type !== "tool_call_finished"
+    || payload.call_id !== "foundation-mail-preview"
+    || payload.persistence !== "metadata_only"
+    || Object.hasOwn(payload, "result")
+    || payload.result_metadata?.ok !== true
+  ) {
+    fail("packaged Mail preview persistence policy is invalid");
   }
-  requireString(preview.preview.accountId, "Mail preview account identifier");
-  requireString(preview.preview.draftId, "Mail preview draft identifier");
-  requirePositiveInteger(preview.preview.draftRevision, "Mail preview revision");
-  requireString(preview.preview.idempotencyKey, "Mail preview idempotency key");
+  return true;
 }
 
 async function waitForTurn(origin, token, sessionId, turnId) {
