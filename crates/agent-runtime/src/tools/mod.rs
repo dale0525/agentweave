@@ -21,14 +21,14 @@ use crate::skill_runtime_source::RuntimeToolBinding;
 use builtin::BuiltInTools;
 use definition_support::{
     app_policy_allows_discovery, app_policy_allows_tool, external_definitions, external_discovery,
-    runtime_tool_definition, serialized_len, tool_has_external_side_effect,
+    serialized_len, tool_has_external_side_effect,
 };
 use discovery::{ConnectorMetadata, ExternalToolConfig, ExternalToolExecution, ToolDiscoveryItem};
 use result::{ToolError, ToolResult, ToolResultMetadata};
 use schema::{ToolDiagnostic, validate_tool_definition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -382,67 +382,6 @@ impl ToolRegistry {
                 &context.service,
                 &context.actor,
             ));
-        }
-        definitions
-    }
-
-    fn non_management_definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = self.unfiltered_non_management_definitions();
-        if let Some(policy) = &self.agent_app_policy {
-            definitions.retain(|definition| app_policy_allows_tool(policy, definition));
-        }
-        definitions
-    }
-
-    fn unfiltered_non_management_definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = if self.built_in_tools_enabled {
-            self.builtins.definitions()
-        } else {
-            Vec::new()
-        };
-        definitions.extend(self.external_definitions.clone());
-        if let Some(memory) = &self.memory {
-            definitions.extend(memory.definitions());
-        }
-        if let Some(tasks) = &self.task_tools {
-            definitions.extend(tasks.definitions());
-        }
-        if let Some(automation) = &self.automation_tools {
-            definitions.extend(automation.definitions());
-        }
-        if let Some(attachments) = &self.attachment_tools {
-            definitions.extend(attachments.definitions());
-        }
-        if let Some(connectors) = &self.connector_tools {
-            definitions.extend(self.foundation_connector_definitions(connectors));
-        }
-        if self.mail_actions.is_some() {
-            definitions.push(foundation_actions::mail_send_preview_definition());
-        }
-
-        let mut runtime_tools = self.skills.tools_with_runtime_sources();
-        runtime_tools.sort_by(|left, right| left.canonical_id.cmp(&right.canonical_id));
-        let mut local_counts = BTreeMap::<String, usize>::new();
-        for binding in &runtime_tools {
-            *local_counts.entry(binding.local_name.clone()).or_default() += 1;
-            definitions.push(runtime_tool_definition(
-                binding,
-                binding.canonical_id.clone(),
-            ));
-        }
-        for binding in runtime_tools {
-            if local_counts.get(&binding.local_name) == Some(&1)
-                && !self.runtime_alias_is_shadowed(&binding.local_name)
-            {
-                definitions.push(runtime_tool_definition(
-                    &binding,
-                    binding.local_name.clone(),
-                ));
-            }
-        }
-        if self.commands_blocked_by_exclusions {
-            definitions
-                .retain(|definition| definition.permission != ToolPermission::ExecuteCommand);
         }
         definitions
     }

@@ -14,8 +14,6 @@ use agent_runtime::{
     turn::{AgentRunner, ModelClient, RuntimeEventObserver, TurnRunner},
     turn_request::TurnRequest,
 };
-#[cfg(test)]
-use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -39,6 +37,10 @@ use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
 mod runtime_tools;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+use test_support::{DeterministicAgent, default_runtime_config};
 #[derive(Clone)]
 pub struct AppState {
     storage: Storage,
@@ -464,37 +466,6 @@ impl AppState {
         }
         self.host_discovery = host_discovery;
         Ok(self)
-    }
-}
-
-#[cfg(test)]
-fn default_runtime_config() -> RuntimeConfig {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    RuntimeConfig::workspace_write(cwd.clone(), cwd).without_builtin_tools()
-}
-
-#[cfg(test)]
-struct DeterministicAgent;
-
-#[cfg(test)]
-#[async_trait]
-impl AgentRunner for DeterministicAgent {
-    async fn run(&self, user_text: &str) -> anyhow::Result<Vec<RuntimeEvent>> {
-        let turn_id = uuid::Uuid::new_v4().to_string();
-        let assistant_text = deterministic_assistant_reply(user_text);
-
-        Ok(vec![
-            RuntimeEvent::TurnStarted {
-                turn_id: turn_id.clone(),
-            },
-            RuntimeEvent::AssistantTextDelta {
-                text: assistant_text.clone(),
-            },
-            RuntimeEvent::AssistantMessageFinished {
-                text: assistant_text,
-            },
-            RuntimeEvent::TurnFinished { turn_id },
-        ])
     }
 }
 
@@ -978,11 +949,6 @@ fn test_connection_gateway_request() -> GatewayRequest {
         })],
         tools: Vec::new(),
     }
-}
-
-#[cfg(test)]
-fn deterministic_assistant_reply(content: &str) -> String {
-    format!("MVP agent received: {content}")
 }
 
 #[cfg(test)]
