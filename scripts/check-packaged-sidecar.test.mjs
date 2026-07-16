@@ -139,6 +139,7 @@ test("packaged Foundation scenario requires the complete reusable contract", () 
 test("scripted model advances only through successful Foundation tool results", () => {
   const body = scriptedBody();
   const proposed = scriptedModelReply(body);
+  assert.equal(proposed.choices[0].finish_reason, "tool_calls");
   assert.equal(toolCall(proposed).id, "foundation-memory-propose");
   assert.equal(toolArguments(proposed).draft.retention.mode, "persistent");
 
@@ -176,6 +177,7 @@ test("scripted model advances only through successful Foundation tool results", 
     idempotencyKey: "packaged-foundation-send-v1",
   }));
   const completed = scriptedModelReply(body);
+  assert.equal(completed.choices[0].finish_reason, "stop");
   assert.equal(completed.choices[0].message.content, "Packaged Foundation scenario completed.");
 
   const failed = scriptedBody();
