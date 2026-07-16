@@ -1,7 +1,7 @@
 use super::{
     AgentAppRuntimePolicy, AppNetworkPolicy, ExternalSideEffectPolicy, ExternalToolConfig,
-    RuntimeToolBinding, ToolDefinition, ToolDiscoveryItem, ToolPermission, ToolRegistry,
-    ToolSource, Value,
+    RuntimeToolBinding, ToolDefinition, ToolDiscoveryItem, ToolPermission, ToolPersistence,
+    ToolRegistry, ToolSource, Value,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -21,6 +21,7 @@ pub(super) fn runtime_tool_definition(
         input_schema: binding.tool.input_schema.clone(),
         output_schema: None,
         permission: binding.tool.permission,
+        persistence: ToolPersistence::for_permission(binding.tool.permission),
         source: binding.source.clone(),
     }
 }
@@ -56,6 +57,7 @@ pub(super) fn app_policy_allows_discovery(
             input_schema: Value::Null,
             output_schema: None,
             permission: item.permission,
+            persistence: ToolPersistence::for_permission(item.permission),
             source: item.source.clone(),
         },
     )

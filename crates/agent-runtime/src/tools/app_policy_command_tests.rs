@@ -73,6 +73,7 @@ fn restricted_network_policy_fails_closed_for_unknown_host_capabilities() {
         input_schema: serde_json::json!({"type":"object"}),
         output_schema: None,
         permission: ToolPermission::ReadSensitive,
+        persistence: ToolPersistence::for_permission(ToolPermission::ReadSensitive),
         source: ToolSource::HostCapability {
             capability: "example.host.network/v1".into(),
         },

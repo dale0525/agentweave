@@ -472,6 +472,7 @@ where
                             );
                             return Ok(events);
                         }
+                        let persistence = tools.persistence_for(&name);
                         if let Some(requirement) = tools.approval_requirement(&name) {
                             emit(
                                 &mut events,
@@ -500,6 +501,7 @@ where
                                 RuntimeEvent::ToolCallFinished {
                                     call_id: call_id.clone(),
                                     result: result.clone(),
+                                    persistence,
                                 },
                             );
                             input.push(serde_json::json!({
@@ -529,6 +531,7 @@ where
                                 call_id: call_id.clone(),
                                 name: name.clone(),
                                 arguments: arguments.clone(),
+                                persistence,
                             },
                         );
                         input.push(serde_json::json!({
@@ -587,6 +590,7 @@ where
                             RuntimeEvent::ToolCallFinished {
                                 call_id: call_id.clone(),
                                 result: result.clone(),
+                                persistence,
                             },
                         );
                         input.push(serde_json::json!({

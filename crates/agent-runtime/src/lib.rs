@@ -20,6 +20,7 @@ pub mod credential_sqlite;
 pub mod data_protection;
 pub mod documents;
 pub mod durable_run;
+pub mod event_persistence;
 pub mod events;
 pub mod foundation_actions;
 pub mod instructions;

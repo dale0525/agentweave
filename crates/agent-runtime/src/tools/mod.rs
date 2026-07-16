@@ -148,6 +148,23 @@ pub enum ToolPermission {
     ManageSkills,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPersistence {
+    Full,
+    #[default]
+    MetadataOnly,
+}
+
+impl ToolPersistence {
+    pub const fn for_permission(permission: ToolPermission) -> Self {
+        match permission {
+            ToolPermission::ReadSensitive | ToolPermission::CredentialAccess => Self::MetadataOnly,
+            _ => Self::Full,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ToolDefinition {
     pub name: String,
@@ -156,7 +173,20 @@ pub struct ToolDefinition {
     pub input_schema: Value,
     pub output_schema: Option<Value>,
     pub permission: ToolPermission,
+    #[serde(default)]
+    pub persistence: ToolPersistence,
     pub source: ToolSource,
+}
+
+impl ToolDefinition {
+    pub const fn effective_persistence(&self) -> ToolPersistence {
+        match self.permission {
+            ToolPermission::ReadSensitive | ToolPermission::CredentialAccess => {
+                ToolPersistence::MetadataOnly
+            }
+            _ => self.persistence,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -428,6 +458,14 @@ impl ToolRegistry {
                 permission: definition.permission,
                 policy: self.approval_policy,
             })
+    }
+
+    pub fn persistence_for(&self, name: &str) -> ToolPersistence {
+        self.definitions()
+            .into_iter()
+            .find(|definition| definition.name == name)
+            .map(|definition| definition.effective_persistence())
+            .unwrap_or(ToolPersistence::MetadataOnly)
     }
 
     pub fn discovery(&self) -> ToolDiscovery {
@@ -948,3 +986,7 @@ mod management_permission_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "persistence_policy_tests.rs"]
+mod persistence_policy_tests;

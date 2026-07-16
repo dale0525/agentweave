@@ -22,6 +22,7 @@ pub(super) fn mail_send_preview_definition() -> ToolDefinition {
         }),
         output_schema: None,
         permission: ToolPermission::ReadSensitive,
+        persistence: ToolPersistence::for_permission(ToolPermission::ReadSensitive),
         source: ToolSource::HostCapability {
             capability: "agentweave.foundation.mail/v1".into(),
         },
