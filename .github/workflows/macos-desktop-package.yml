@@ -7,6 +7,7 @@ on:
       - "apps/desktop/**"
       - "crates/**"
       - "examples/**"
+      - "products/**"
       - "scripts/**"
       - "Cargo.lock"
       - "Cargo.toml"
@@ -20,7 +21,7 @@ permissions:
 jobs:
   package:
     name: ${{ matrix.app }}
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
