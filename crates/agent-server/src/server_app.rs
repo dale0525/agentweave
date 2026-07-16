@@ -1,3 +1,8 @@
+use agent_provider_adapters::credential_source::VaultCredentialSource;
+use agent_provider_adapters::google_calendar::GoogleCalendarConnector;
+use agent_provider_adapters::google_contacts::GoogleContactsConnector;
+use agent_provider_adapters::http::ReqwestProviderHttpClient;
+use agent_provider_adapters::oauth_provider::WorkspaceOAuthProvider;
 use agent_runtime::app_definition::{
     AgentAppHostDiscovery, AgentAppRuntimeInventory, AgentAppRuntimePolicy, ResolvedAgentApp,
 };
@@ -42,6 +47,7 @@ pub(super) struct ResolvedConnectorFoundation {
     pub(super) mail_actions: Option<agent_runtime::foundation_actions::MailActionService>,
     pub(super) calendar_actions: Option<agent_runtime::calendar_actions::CalendarActionService>,
     pub(super) contacts_actions: Option<agent_runtime::contacts_actions::ContactsActionService>,
+    pub(super) oauth_broker: Option<agent_runtime::oauth::OAuthBroker>,
 }
 
 pub(super) struct ResolvedServerApp {
@@ -64,6 +70,12 @@ enum MailConnectorMode {
     Unconfigured,
     Fake,
     ImapSmtp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceProviderMode {
+    Fake,
+    Google,
 }
 
 pub(super) async fn resolve_app(
@@ -284,6 +296,7 @@ pub(super) async fn resolve_connector_tools(
         std::env::var("AGENTWEAVE_FAKE_CONTACTS").as_deref() == Ok("enabled");
     let contacts_enabled =
         contacts_foundation_allowed(runtime_config, contacts_declared, contacts_enabled_by_host);
+    let workspace_provider = workspace_provider_mode_from_lookup(|name| std::env::var_os(name))?;
     if !mail_enabled && !calendar_enabled && !contacts_enabled {
         return Ok(None);
     }
@@ -301,6 +314,43 @@ pub(super) async fn resolve_connector_tools(
         app_id: app_prompt.identity.app_id.clone(),
         tenant_id: "local".into(),
         user_id: "local-user".into(),
+    };
+    let oauth_broker = if workspace_provider == WorkspaceProviderMode::Google {
+        let configured_vault = vault.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Google Workspace requires the persistent Credential Vault")
+        })?;
+        let client_id = std::env::var("AGENTWEAVE_GOOGLE_CLIENT_ID")
+            .map_err(|_| anyhow::anyhow!("AGENTWEAVE_GOOGLE_CLIENT_ID is required"))?;
+        let client_secret = std::env::var("AGENTWEAVE_GOOGLE_CLIENT_SECRET")
+            .ok()
+            .map(agent_runtime::credential::SecretMaterial::new)
+            .transpose()?;
+        let provider = Arc::new(WorkspaceOAuthProvider::google(client_id, client_secret)?);
+        Some(
+            agent_runtime::oauth::OAuthBroker::new(
+                storage,
+                scope.clone(),
+                std::env::var("AGENTWEAVE_OAUTH_CALLBACK_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:43121/oauth/callback".into()),
+                Arc::new(configured_vault.clone()),
+                vec![provider],
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let google_credentials = if workspace_provider == WorkspaceProviderMode::Google {
+        Some(Arc::new(VaultCredentialSource::new(
+            Arc::new(vault.as_ref().expect("checked above").clone()),
+            oauth_broker.clone(),
+            scope.clone(),
+        )?)
+            as Arc<
+                dyn agent_provider_adapters::credential_source::ProviderCredentialSource,
+            >)
+    } else {
+        None
     };
     if mail_enabled {
         let attachments_enabled = app_prompt
@@ -393,24 +443,60 @@ pub(super) async fn resolve_connector_tools(
             .await?;
     }
     if calendar_enabled {
+        let calendar: Arc<dyn agent_runtime::calendar::CalendarConnector> = match workspace_provider
+        {
+            WorkspaceProviderMode::Google => Arc::new(GoogleCalendarConnector::new(
+                Arc::new(ReqwestProviderHttpClient::new(
+                    "https://www.googleapis.com/",
+                    false,
+                )?),
+                google_credentials
+                    .as_ref()
+                    .expect("configured above")
+                    .clone(),
+            )),
+            WorkspaceProviderMode::Fake => Arc::new(FakeCalendarConnector::default()),
+        };
         runtime
             .register(
-                CalendarConnectorTransport::descriptor("Fake Calendar", true),
-                Arc::new(CalendarConnectorTransport::new(
-                    Arc::new(FakeCalendarConnector::default()),
-                    scope.clone(),
-                )?),
+                CalendarConnectorTransport::descriptor(
+                    if workspace_provider == WorkspaceProviderMode::Google {
+                        "Google Calendar"
+                    } else {
+                        "Fake Calendar"
+                    },
+                    true,
+                ),
+                Arc::new(CalendarConnectorTransport::new(calendar, scope.clone())?),
             )
             .await?;
     }
     if contacts_enabled {
+        let contacts: Arc<dyn agent_runtime::contacts::ContactsConnector> = match workspace_provider
+        {
+            WorkspaceProviderMode::Google => Arc::new(GoogleContactsConnector::new(
+                Arc::new(ReqwestProviderHttpClient::new(
+                    "https://people.googleapis.com/",
+                    false,
+                )?),
+                google_credentials
+                    .as_ref()
+                    .expect("configured above")
+                    .clone(),
+            )),
+            WorkspaceProviderMode::Fake => Arc::new(FakeContactsConnector::default()),
+        };
         runtime
             .register(
-                ContactsConnectorTransport::descriptor("Fake Contacts", true),
-                Arc::new(ContactsConnectorTransport::new(
-                    Arc::new(FakeContactsConnector::default()),
-                    scope.clone(),
-                )?),
+                ContactsConnectorTransport::descriptor(
+                    if workspace_provider == WorkspaceProviderMode::Google {
+                        "Google Contacts"
+                    } else {
+                        "Fake Contacts"
+                    },
+                    true,
+                ),
+                Arc::new(ContactsConnectorTransport::new(contacts, scope.clone())?),
             )
             .await?;
     }
@@ -466,6 +552,7 @@ pub(super) async fn resolve_connector_tools(
         mail_actions,
         calendar_actions,
         contacts_actions,
+        oauth_broker,
     }))
 }
 
@@ -525,6 +612,22 @@ fn contacts_foundation_allowed(
                 && policy.declares_connector(CONTACTS_CONNECTOR_ID)
                 && declared_by_app
         })
+}
+
+fn workspace_provider_mode_from_lookup<F>(lookup: F) -> anyhow::Result<WorkspaceProviderMode>
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    match lookup("AGENTWEAVE_WORKSPACE_PROVIDER")
+        .map(|value| value.into_string())
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("AGENTWEAVE_WORKSPACE_PROVIDER must be valid UTF-8"))?
+        .as_deref()
+    {
+        Some("google") => Ok(WorkspaceProviderMode::Google),
+        Some(value) => anyhow::bail!("unsupported AGENTWEAVE_WORKSPACE_PROVIDER '{value}'"),
+        None => Ok(WorkspaceProviderMode::Fake),
+    }
 }
 
 fn mail_connector_mode_from_lookup<F>(lookup: F) -> anyhow::Result<MailConnectorMode>
