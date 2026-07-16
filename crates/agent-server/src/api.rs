@@ -39,7 +39,6 @@ use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
 mod runtime_tools;
-
 #[derive(Clone)]
 pub struct AppState {
     storage: Storage,

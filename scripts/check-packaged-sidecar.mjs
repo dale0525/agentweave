@@ -359,7 +359,6 @@ export function scriptedModelReply(body) {
       accountId: "primary",
       draftId: requireString(draft.id, "Mail draft identifier"),
       expectedRevision: requirePositiveInteger(draft.revision, "Mail draft revision"),
-      idempotencyKey: "packaged-foundation-send-v1",
     });
   }
   successfulToolOutput(body, "foundation-mail-preview");
@@ -369,7 +368,10 @@ export function scriptedModelReply(body) {
 function modelToolCall(body, canonicalName, callId, argumentsValue) {
   const suffix = `_${canonicalName}`;
   const tool = Array.isArray(body.tools)
-    ? body.tools.find((candidate) => candidate?.function?.name?.endsWith(suffix))
+    ? body.tools.find((candidate) => (
+      candidate?.function?.name === canonicalName
+      || candidate?.function?.name?.endsWith(suffix)
+    ))
     : undefined;
   if (!tool) fail(`scripted model is missing '${canonicalName}'`);
   return {
