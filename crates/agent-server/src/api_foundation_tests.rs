@@ -1,4 +1,7 @@
 use super::*;
+use agent_runtime::calendar::FakeCalendarConnector;
+use agent_runtime::calendar_actions::CalendarActionService;
+use agent_runtime::calendar_connector_transport::CalendarConnectorTransport;
 use agent_runtime::connector::ConnectorRuntime;
 use agent_runtime::connector_tools::{ConnectorToolRuntime, EphemeralConnectorContextProvider};
 use agent_runtime::credential::CredentialScope;
@@ -273,6 +276,94 @@ async fn create_test_draft(tools: &ConnectorToolRuntime, call_id: &str) -> Strin
         .await
         .unwrap();
     draft["output"]["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn foundation_calendar_approval_api_resumes_exactly_once() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let scope = CredentialScope {
+        app_id: "agentweave.default".into(),
+        tenant_id: "local".into(),
+        user_id: "local-user".into(),
+    };
+    let runtime = Arc::new(ConnectorRuntime::new(None, 256 * 1024).unwrap());
+    runtime
+        .register(
+            CalendarConnectorTransport::descriptor("Fake Calendar", true),
+            Arc::new(
+                CalendarConnectorTransport::new(
+                    Arc::new(FakeCalendarConnector::default()),
+                    scope.clone(),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let context = Arc::new(
+        EphemeralConnectorContextProvider::fail_closed(scope.clone(), Duration::from_secs(2))
+            .unwrap(),
+    );
+    let tools = ConnectorToolRuntime::load(runtime, context.clone()).unwrap();
+    let actions =
+        CalendarActionService::new(&storage, tools.clone(), context, scope, "api-test-v1")
+            .await
+            .unwrap();
+    let app = router(Arc::new(
+        AppState::new(storage).with_calendar_foundation(tools, actions),
+    ));
+    let start = chrono::Utc::now() + chrono::Duration::hours(1);
+    let requested = app
+        .clone()
+        .oneshot(json_request(
+            "/foundation/calendar/create-approvals",
+            json!({
+                "accountId": "primary",
+                "content": {
+                    "calendarId": "primary",
+                    "title": "Planning",
+                    "description": null,
+                    "start": start,
+                    "end": start + chrono::Duration::hours(1),
+                    "timezone": "Asia/Shanghai",
+                    "location": null,
+                    "attendees": [],
+                    "recurrence": null
+                },
+                "idempotencyKey": "api-calendar-create-1",
+                "sessionId": null
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(requested.status(), StatusCode::OK);
+    let requested = read_json(requested).await;
+    let approval_id = requested["approval"]["approval_id"].as_str().unwrap();
+
+    for _ in 0..2 {
+        let resolved = app
+            .clone()
+            .oneshot(json_request(
+                &format!("/foundation/actions/{approval_id}"),
+                json!({"decision": "approve_once"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resolved.status(), StatusCode::OK);
+        assert_eq!(read_json(resolved).await["action"]["status"], "succeeded");
+    }
+
+    let listed = app
+        .oneshot(
+            Request::builder()
+                .uri("/foundation/actions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    assert_eq!(read_json(listed).await.as_array().unwrap().len(), 1);
 }
 
 fn json_request(uri: &str, body: Value) -> Request<Body> {

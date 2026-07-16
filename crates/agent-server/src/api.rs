@@ -62,6 +62,7 @@ pub struct AppState {
     data_protection: Option<crate::data_protection::DataProtectionService>,
     connector_tools: Option<agent_runtime::connector_tools::ConnectorToolRuntime>,
     mail_actions: Option<agent_runtime::foundation_actions::MailActionService>,
+    calendar_actions: Option<agent_runtime::calendar_actions::CalendarActionService>,
     automation: Option<crate::automation_api::AutomationApiState>,
     oauth_broker: Option<agent_runtime::oauth::OAuthBroker>,
 }
@@ -173,6 +174,7 @@ impl AppState {
             data_protection: None,
             connector_tools,
             mail_actions,
+            calendar_actions: None,
             automation: None,
             oauth_broker: None,
         }
@@ -290,6 +292,7 @@ impl AppState {
             data_protection: None,
             connector_tools,
             mail_actions,
+            calendar_actions: None,
             automation: None,
             oauth_broker: None,
         }
@@ -348,6 +351,7 @@ impl AppState {
             data_protection: None,
             connector_tools: None,
             mail_actions: None,
+            calendar_actions: None,
             automation: None,
             oauth_broker: None,
         }
@@ -359,9 +363,10 @@ impl AppState {
         self
     }
 
-    pub fn with_mail_actions(
+    pub fn with_connector_actions(
         mut self,
-        mail_actions: agent_runtime::foundation_actions::MailActionService,
+        mail_actions: Option<agent_runtime::foundation_actions::MailActionService>,
+        calendar_actions: Option<agent_runtime::calendar_actions::CalendarActionService>,
     ) -> Self {
         if self
             .runtime_config
@@ -374,7 +379,8 @@ impl AppState {
         {
             return self;
         }
-        self.mail_actions = Some(mail_actions);
+        self.mail_actions = mail_actions;
+        self.calendar_actions = calendar_actions;
         self
     }
 
@@ -396,6 +402,16 @@ impl AppState {
     ) -> Self {
         self.connector_tools = Some(connector_tools);
         self.mail_actions = Some(mail_actions);
+        self
+    }
+
+    pub fn with_calendar_foundation(
+        mut self,
+        connector_tools: agent_runtime::connector_tools::ConnectorToolRuntime,
+        calendar_actions: agent_runtime::calendar_actions::CalendarActionService,
+    ) -> Self {
+        self.connector_tools = Some(connector_tools);
+        self.calendar_actions = Some(calendar_actions);
         self
     }
 
@@ -658,6 +674,12 @@ impl AppState {
         &self,
     ) -> Option<agent_runtime::foundation_actions::MailActionService> {
         self.mail_actions.clone()
+    }
+
+    pub(crate) fn calendar_actions(
+        &self,
+    ) -> Option<agent_runtime::calendar_actions::CalendarActionService> {
+        self.calendar_actions.clone()
     }
 
     pub(crate) fn automation(&self) -> Option<&crate::automation_api::AutomationApiState> {

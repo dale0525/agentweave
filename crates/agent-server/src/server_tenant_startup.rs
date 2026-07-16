@@ -20,10 +20,12 @@ use super::server_skill_startup::{
     load_builtin_skill_source,
 };
 
+const DEFAULT_SKILLS_ROOT: &str = "skills";
+
 pub(super) fn skills_root_from_env() -> PathBuf {
     std::env::var("AGENTWEAVE_SKILLS_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(super::DEFAULT_SKILLS_ROOT))
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_SKILLS_ROOT))
 }
 
 pub(super) fn runtime_config_from_env() -> RuntimeConfig {
@@ -73,6 +75,18 @@ pub(super) fn apply_storage_protection(
     match (key.as_deref(), database_path) {
         (Some(key), Some(path)) => state.with_borrowed_data_protection(path.clone(), key),
         _ => Ok(state),
+    }
+}
+
+pub(super) fn apply_connector_foundation(
+    state: api::AppState,
+    foundation: Option<super::server_app::ResolvedConnectorFoundation>,
+) -> api::AppState {
+    match foundation {
+        Some(foundation) => {
+            state.with_connector_actions(foundation.mail_actions, foundation.calendar_actions)
+        }
+        None => state,
     }
 }
 
@@ -130,7 +144,7 @@ where
         .map(|foundation| foundation.tools.clone());
     let mail_actions = connector_foundation
         .as_ref()
-        .map(|foundation| foundation.actions.clone());
+        .and_then(|foundation| foundation.mail_actions.clone());
     let state = if let Some(owner_management) = owner_management {
         api::AppState::new_with_model_app_foundations_skill_manager_and_owner(
             runtime.storage.clone(),
@@ -157,5 +171,5 @@ where
                 .with_mail_actions(mail_actions),
         )
     };
-    Ok(state)
+    Ok(apply_connector_foundation(state, connector_foundation))
 }
