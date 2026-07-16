@@ -358,6 +358,17 @@ impl AppState {
         mut self,
         mail_actions: agent_runtime::foundation_actions::MailActionService,
     ) -> Self {
+        if self
+            .runtime_config
+            .agent_app_policy
+            .as_ref()
+            .is_some_and(|policy| {
+                policy.external_side_effects()
+                    == agent_runtime::app_manifest::ExternalSideEffectPolicy::Deny
+            })
+        {
+            return self;
+        }
         self.mail_actions = Some(mail_actions);
         self
     }

@@ -87,11 +87,13 @@ where
         super::server_app::resolve_memory_tools(&runtime.storage, &app_prompt).await?;
     let task_tools = super::server_app::resolve_task_tools(&runtime.storage, &app_prompt).await?;
     let automation_tools =
-        super::server_app::resolve_automation_tools(&runtime.storage, &app_prompt).await?;
+        super::server_app::resolve_automation_tools(&runtime.storage, &app_prompt, &runtime_config)
+            .await?;
     let attachment_tools =
         super::server_app::resolve_attachment_tools(&runtime.storage, &app_prompt).await?;
     let connector_foundation =
-        super::server_app::resolve_connector_tools(&runtime.storage, &app_prompt).await?;
+        super::server_app::resolve_connector_tools(&runtime.storage, &app_prompt, &runtime_config)
+            .await?;
     let connector_tools = connector_foundation
         .as_ref()
         .map(|foundation| foundation.tools.clone());
