@@ -87,6 +87,20 @@ impl AppState {
         self.automation_tools.is_some()
     }
 
+    pub fn allows_background_execution(&self, enabled_by_host: bool) -> bool {
+        self.runtime_config.agent_app_policy.as_ref().map_or(
+            self.has_automation_tools() || enabled_by_host,
+            |policy| {
+                policy.allows_background_execution(self.has_automation_tools(), enabled_by_host)
+            },
+        )
+    }
+
+    pub fn allows_automation_api(&self, enabled_by_host: bool) -> bool {
+        self.runtime_config.agent_app_policy.is_none()
+            || self.allows_background_execution(enabled_by_host)
+    }
+
     pub(crate) fn connector_tools(
         &self,
     ) -> Option<agent_runtime::connector_tools::ConnectorToolRuntime> {
