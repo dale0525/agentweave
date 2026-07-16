@@ -22,6 +22,7 @@ pub mod documents;
 pub mod durable_run;
 pub mod event_persistence;
 pub mod events;
+pub mod foundation_action_envelope;
 pub mod foundation_actions;
 pub mod instructions;
 pub mod mail;
