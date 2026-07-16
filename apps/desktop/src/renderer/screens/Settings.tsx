@@ -12,6 +12,7 @@ import { useI18n } from "../i18n/I18nProvider";
 import { OwnerPolicy, canInspectOwnerSkills } from "../ownerBridge";
 
 type SettingsProps = {
+  developerToolsAvailable: boolean;
   onBack: () => void;
   onOpenDeveloperTools: () => void;
   onOpenOwnerSkills: () => void;
@@ -22,6 +23,7 @@ type SettingsProps = {
 };
 
 export function Settings({
+  developerToolsAvailable,
   onBack,
   onOpenDeveloperTools,
   onOpenOwnerSkills,
@@ -70,7 +72,7 @@ export function Settings({
           </section>
         ) : null}
         <SettingsDeveloperTools
-          enabled={bootstrap.features.skillManagement}
+          enabled={developerToolsAvailable}
           onOpenDeveloperTools={onOpenDeveloperTools}
         />
       </div>
