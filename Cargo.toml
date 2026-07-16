@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/model-gateway",
   "crates/agent-runtime",
+  "crates/storage-sqlcipher",
   "crates/agent-server",
   "crates/mobile-ffi",
 ]
