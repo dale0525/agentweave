@@ -95,6 +95,9 @@ where
     let connector_tools = connector_foundation
         .as_ref()
         .map(|foundation| foundation.tools.clone());
+    let mail_actions = connector_foundation
+        .as_ref()
+        .map(|foundation| foundation.actions.clone());
     let state = if let Some(owner_management) = owner_management {
         api::AppState::new_with_model_app_foundations_skill_manager_and_owner(
             runtime.storage.clone(),
@@ -104,7 +107,8 @@ where
             app_prompt,
             api::AppFoundationRuntimes::new(memory_tools, task_tools, connector_tools)
                 .with_automation_tools(automation_tools)
-                .with_attachment_tools(attachment_tools),
+                .with_attachment_tools(attachment_tools)
+                .with_mail_actions(mail_actions),
             owner_management,
         )
     } else {
@@ -116,11 +120,9 @@ where
             app_prompt,
             api::AppFoundationRuntimes::new(memory_tools, task_tools, connector_tools)
                 .with_automation_tools(automation_tools)
-                .with_attachment_tools(attachment_tools),
+                .with_attachment_tools(attachment_tools)
+                .with_mail_actions(mail_actions),
         )
     };
-    Ok(match connector_foundation {
-        Some(foundation) => state.with_mail_actions(foundation.actions),
-        None => state,
-    })
+    Ok(state)
 }
