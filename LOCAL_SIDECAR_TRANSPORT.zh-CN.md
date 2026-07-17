@@ -35,7 +35,7 @@ AGENTWEAVE_LAUNCH_RESULT_FD
 }
 ```
 
-输入上限为 4096 字节；未知字段会被拒绝；`launchId` 必须是规范 UUID；传输凭据只能由 base64url 兼容字符组成，长度为 43～128 个字符。每个用途密钥都是可选字段，必须恰好解码为 32 字节，并由 sidecar 作为 secret material 使用。`backupKeyHex` 只启用认证备份与恢复，`credentialVaultKeyHex` 只解锁持久 Host secret store，`storageProtectionKeyHex` 只供已配置的数据库静态加密 Provider 使用。为兼容旧 Host，协议仍接受把同一材料用于备份与存储保护的 `dataProtectionKeyHex`，但它不能和两个对应的新字段同时出现。
+输入上限为 4096 字节；未知字段会被拒绝；`launchId` 必须是规范 UUID；传输凭据只能由 base64url 兼容字符组成，长度为 43～128 个字符。每个用途密钥都是可选字段，必须恰好解码为 32 字节，并由 sidecar 作为 secret material 使用。`backupKeyHex` 只启用认证备份与恢复，`credentialVaultKeyHex` 只解锁持久 Host secret store，`storageProtectionKeyHex` 只供已配置的数据库静态加密 Provider 使用。为兼容旧 Host，协议仍接受把同一材料用于备份与存储保护的 `dataProtectionKeyHex`，但它不能与任一用途专用字段同时出现。
 
 第二条管道由子进程写向宿主。sidecar 完成监听端口绑定后，写入一份以换行结束的 JSON 文档，然后关闭管道：
 

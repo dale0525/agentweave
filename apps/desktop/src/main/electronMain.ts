@@ -58,7 +58,13 @@ app.whenReady().then(async () => {
     onError: () => console.error("Failed to stop the managed sidecar"),
   });
   await startDesktopSidecarWithSecurity({
-    onCredentialVaultUnavailable: () => console.error("Credential Vault is locked"),
+    onCredentialVaultStartupFailure: (failure) => {
+      console.error(failure === "credential-key-unavailable"
+        ? "Credential Vault key is unavailable"
+        : failure === "sidecar-startup-failed"
+          ? "Sidecar could not start with Credential Vault"
+          : "Credential Vault startup failed");
+    },
     resolution: sidecarResolution,
     security,
     sidecar,

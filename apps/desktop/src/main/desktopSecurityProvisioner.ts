@@ -5,6 +5,26 @@ export type ProvisionedBackupKey = Readonly<{
   wrappedKey: string;
 }>;
 
+export type DesktopSecurityProvisioningFailure =
+  | "credential-key-unavailable"
+  | "sidecar-startup-failed";
+
+export class DesktopSecurityProvisioningError extends Error {
+  readonly failure: DesktopSecurityProvisioningFailure;
+
+  constructor(failure: DesktopSecurityProvisioningFailure) {
+    super(`Desktop security provisioning failed: ${failure}`);
+    this.name = "DesktopSecurityProvisioningError";
+    this.failure = failure;
+  }
+}
+
+export function securityProvisioningFailure(
+  error: unknown,
+): DesktopSecurityProvisioningFailure | "unknown" {
+  return error instanceof DesktopSecurityProvisioningError ? error.failure : "unknown";
+}
+
 export type DesktopSecurityProvisioner = Readonly<{
   ensureBackup(): Promise<ProvisionedBackupKey>;
   ensureCredentialVault(options?: { allowCreate?: boolean }): Promise<void>;
@@ -46,9 +66,18 @@ export function createDesktopSecurityProvisioner(options: {
     if (credentialVaultReady) return Promise.resolve();
     if (credentialVaultOperation) return credentialVaultOperation;
     const operation = Promise.resolve().then(async () => {
-      const key = options.keyStore.loadCredentialVaultKey({ allowCreate });
+      let key: Buffer;
       try {
-        await options.sidecar.provisionLaunchKeys({ credentialVaultKey: key });
+        key = options.keyStore.loadCredentialVaultKey({ allowCreate });
+      } catch {
+        throw new DesktopSecurityProvisioningError("credential-key-unavailable");
+      }
+      try {
+        try {
+          await options.sidecar.provisionLaunchKeys({ credentialVaultKey: key });
+        } catch {
+          throw new DesktopSecurityProvisioningError("sidecar-startup-failed");
+        }
         credentialVaultReady = true;
       } finally {
         key.fill(0);

@@ -7,7 +7,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { deriveCredentialVaultKey } from "../src/main/dataProtectionKey";
-import { createDesktopSecurityProvisioner } from "../src/main/desktopSecurityProvisioner";
+import {
+  createDesktopSecurityProvisioner,
+  DesktopSecurityProvisioningError,
+} from "../src/main/desktopSecurityProvisioner";
 import { startDesktopSidecarWithSecurity } from "../src/main/desktopStartupSecurity";
 import {
   createDesktopSecurityKeyStore,
@@ -165,6 +168,29 @@ describe("desktop Credential Vault startup policy", () => {
     expect(ensureCredentialVault).toHaveBeenCalledWith({ allowCreate: false });
     expect(start).not.toHaveBeenCalled();
   });
+
+  it("reports a sidecar failure without mislabeling the Vault key as unavailable", async () => {
+    const root = temporaryRoot();
+    const credentialRoot = path.join(root, "credentials");
+    mkdirSync(credentialRoot, { recursive: true });
+    writeFileSync(path.join(credentialRoot, "account.secret"), "encrypted");
+    const onCredentialVaultStartupFailure = vi.fn();
+    const start = vi.fn(async () => readyStatus());
+
+    await startDesktopSidecarWithSecurity({
+      onCredentialVaultStartupFailure,
+      resolution: managedResolution(root),
+      security: {
+        ensureCredentialVault: vi.fn(async () => {
+          throw new DesktopSecurityProvisioningError("sidecar-startup-failed");
+        }),
+      },
+      sidecar: { start },
+    });
+
+    expect(onCredentialVaultStartupFailure).toHaveBeenCalledWith("sidecar-startup-failed");
+    expect(start).toHaveBeenCalledOnce();
+  });
 });
 
 describe("desktop security provisioner", () => {
@@ -213,6 +239,40 @@ describe("desktop security provisioner", () => {
     await provisioner.ensureCredentialVault();
     expect(loadCredentialVaultKey).toHaveBeenCalledOnce();
     expect(loadCredentialVaultKey).toHaveBeenCalledWith({ allowCreate: false });
+    expect(key).toEqual(Buffer.alloc(32));
+  });
+
+  it("classifies key loading separately from sidecar startup failures", async () => {
+    const missing = createDesktopSecurityProvisioner({
+      keyStore: {
+        loadBackupKey: vi.fn(),
+        loadCredentialVaultKey: vi.fn(() => {
+          throw new Error("missing");
+        }),
+        unwrapBackupKey: vi.fn(),
+      },
+      sidecar: { provisionLaunchKeys: vi.fn() },
+    });
+    await expect(missing.ensureCredentialVault({ allowCreate: false })).rejects.toMatchObject({
+      failure: "credential-key-unavailable",
+    });
+
+    const key = Buffer.alloc(32, 9);
+    const failedSidecar = createDesktopSecurityProvisioner({
+      keyStore: {
+        loadBackupKey: vi.fn(),
+        loadCredentialVaultKey: vi.fn(() => key),
+        unwrapBackupKey: vi.fn(),
+      },
+      sidecar: {
+        provisionLaunchKeys: vi.fn(async () => {
+          throw new Error("crashed");
+        }),
+      },
+    });
+    await expect(failedSidecar.ensureCredentialVault()).rejects.toMatchObject({
+      failure: "sidecar-startup-failed",
+    });
     expect(key).toEqual(Buffer.alloc(32));
   });
 });

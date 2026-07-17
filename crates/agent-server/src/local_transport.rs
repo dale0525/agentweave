@@ -257,7 +257,9 @@ fn validate_launch_config(wire: LaunchConfigWire) -> anyhow::Result<LaunchConfig
         let auth = TransportAuth::new(&token)?;
         anyhow::ensure!(
             legacy_data_protection_key.is_none()
-                || (backup_key.is_none() && storage_protection_key.is_none()),
+                || (backup_key.is_none()
+                    && storage_protection_key.is_none()
+                    && credential_vault_key.is_none()),
             "legacy data protection key cannot be combined with purpose keys"
         );
         let backup_key = decode_launch_key(
@@ -425,6 +427,11 @@ mod tests {
             ),
             format!(
                 r#"{{"schemaVersion":1,"launchId":"{LAUNCH_ID}","transportToken":"{TOKEN}","dataProtectionKeyHex":"{}","backupKeyHex":"{}"}}"#,
+                "ab".repeat(32),
+                "cd".repeat(32),
+            ),
+            format!(
+                r#"{{"schemaVersion":1,"launchId":"{LAUNCH_ID}","transportToken":"{TOKEN}","dataProtectionKeyHex":"{}","credentialVaultKeyHex":"{}"}}"#,
                 "ab".repeat(32),
                 "cd".repeat(32),
             ),

@@ -35,7 +35,7 @@ The first descriptor is host-to-child. The host writes one bounded JSON document
 }
 ```
 
-The input is limited to 4096 bytes, rejects unknown fields, requires a canonical UUID, and accepts only a 43-to-128-character base64url-compatible transport credential. Each purpose key is optional, must decode to exactly 32 bytes, and is consumed as secret material by the sidecar. `backupKeyHex` enables authenticated backup and restore, `credentialVaultKeyHex` unlocks the persistent Host secret store, and `storageProtectionKeyHex` is reserved for a configured at-rest storage provider. The legacy `dataProtectionKeyHex` field remains accepted as both backup and storage-protection material for compatibility, but cannot be combined with either purpose-specific field.
+The input is limited to 4096 bytes, rejects unknown fields, requires a canonical UUID, and accepts only a 43-to-128-character base64url-compatible transport credential. Each purpose key is optional, must decode to exactly 32 bytes, and is consumed as secret material by the sidecar. `backupKeyHex` enables authenticated backup and restore, `credentialVaultKeyHex` unlocks the persistent Host secret store, and `storageProtectionKeyHex` is reserved for a configured at-rest storage provider. The legacy `dataProtectionKeyHex` field remains accepted as both backup and storage-protection material for compatibility, but cannot be combined with any purpose-specific field.
 
 The second descriptor is child-to-host. After binding the listener, the sidecar writes one newline-terminated JSON document and closes the pipe:
 

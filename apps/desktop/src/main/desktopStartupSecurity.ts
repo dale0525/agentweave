@@ -1,10 +1,16 @@
-import type { DesktopSecurityProvisioner } from "./desktopSecurityProvisioner";
+import {
+  securityProvisioningFailure,
+  type DesktopSecurityProvisioner,
+  type DesktopSecurityProvisioningFailure,
+} from "./desktopSecurityProvisioner";
 import { credentialVaultStartupPolicy } from "./desktopSecurityKeys";
 import type { DesktopSidecarController } from "./sidecarController";
 import type { DesktopSidecarResolution } from "./sidecarRuntime";
 
 export async function startDesktopSidecarWithSecurity(options: {
-  onCredentialVaultUnavailable?: () => void;
+  onCredentialVaultStartupFailure?: (
+    failure: DesktopSecurityProvisioningFailure | "unknown",
+  ) => void;
   resolution: DesktopSidecarResolution;
   security: Pick<DesktopSecurityProvisioner, "ensureCredentialVault">;
   sidecar: Pick<DesktopSidecarController, "start">;
@@ -18,8 +24,8 @@ export async function startDesktopSidecarWithSecurity(options: {
       try {
         await options.security.ensureCredentialVault({ allowCreate: policy.allowCreate });
         return;
-      } catch {
-        options.onCredentialVaultUnavailable?.();
+      } catch (error) {
+        options.onCredentialVaultStartupFailure?.(securityProvisioningFailure(error));
       }
     }
   }
