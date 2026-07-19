@@ -257,6 +257,7 @@
   "developer.deleteNamed": "Delete {name}",
   "developer.authoring.createTitle": "Create with Skill Creator",
   "developer.authoring.editTitle": "Improve with Skill Creator",
+  "developer.authoring.eyebrow": "SKILL CREATOR",
   "developer.authoring.createSubtitle": "Describe what the skill should do. The agent handles the package details.",
   "developer.authoring.editSubtitle": "Refine {name} through a focused conversation.",
   "developer.authoring.close": "Close Skill Creator",

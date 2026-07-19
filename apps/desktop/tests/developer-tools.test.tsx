@@ -422,6 +422,55 @@ describe("DeveloperTools", () => {
     expect(eventRequestTimes[1]! - eventRequestTimes[0]!).toBeGreaterThanOrEqual(200);
   });
 
+  it("disposes an authoring session that finishes creating after the dialog closes", async () => {
+    const user = userEvent.setup();
+    const emptyInventory: DevSkillInventory = { root: "/repo/skills", packages: [] };
+    const createdSession = deferred<ReturnType<typeof serverSession>>();
+    const startTurn = vi.fn(async () => ({}));
+    installHostBootstrap();
+    const serverRequest = vi.fn(async (operation: string) => {
+      if (operation === "sessions.create") return createdSession.promise;
+      if (operation === "sessions.load") {
+        return { events: [], messages: [], session: serverSession() };
+      }
+      if (operation === "sessions.delete") return {};
+      throw new Error(`Unexpected operation: ${operation}`);
+    });
+    if (!window.agentWeave) throw new Error("Host bootstrap must be installed first");
+    window.agentWeave.server = { request: serverRequest };
+    window.agentWeave.modelSettings = modelSettingsBridge({ saved: true, startTurn });
+
+    render(
+      <DeveloperTools
+        initialInventory={emptyInventory}
+        initialStatus="available"
+        onBack={() => undefined}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "New skill" }));
+    const dialog = screen.getByRole("dialog", { name: "Create with Skill Creator" });
+    await user.type(
+      await within(dialog).findByRole("textbox", { name: "Message Skill Creator" }),
+      "Create a planning skill.",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Send to Skill Creator" }));
+    await waitFor(() => expect(serverRequest).toHaveBeenCalledWith(
+      "sessions.create",
+      expect.any(Object),
+    ));
+
+    await user.click(within(dialog).getByRole("button", { name: "Close Skill Creator" }));
+    expect(screen.queryByRole("dialog", { name: "Create with Skill Creator" })).not.toBeInTheDocument();
+    await act(async () => createdSession.resolve(serverSession()));
+
+    await waitFor(() => expect(serverRequest).toHaveBeenCalledWith(
+      "sessions.delete",
+      expect.objectContaining({ id: "skill-authoring-session" }),
+    ));
+    expect(startTurn).not.toHaveBeenCalled();
+  });
+
   it("creates a new instruction Skill without asking for package fields", async () => {
     const user = userEvent.setup();
     const emptyInventory: DevSkillInventory = { root: "/repo/skills", packages: [] };

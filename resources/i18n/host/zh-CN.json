@@ -257,6 +257,7 @@
   "developer.deleteNamed": "删除 {name}",
   "developer.authoring.createTitle": "使用 Skill Creator 创建",
   "developer.authoring.editTitle": "使用 Skill Creator 改进",
+  "developer.authoring.eyebrow": "技能创作",
   "developer.authoring.createSubtitle": "描述技能要完成的工作，其余包细节交给 Agent。",
   "developer.authoring.editSubtitle": "通过一次专注的对话改进 {name}。",
   "developer.authoring.close": "关闭 Skill Creator",
