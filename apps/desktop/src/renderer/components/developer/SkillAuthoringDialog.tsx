@@ -202,7 +202,10 @@ export function SkillAuthoringDialog({
       let session = sessionRef.current;
       if (!session) {
         session = await createServerSession(authoringTitle(target, t));
-        if (generationRef.current !== generation) return;
+        if (generationRef.current !== generation) {
+          void disposeSession(session);
+          return;
+        }
         sessionRef.current = session;
       }
       const context = editingTarget
@@ -398,7 +401,9 @@ export function SkillAuthoringDialog({
           ) : (
             <div className="developer-authoring-workspace">
               <aside className="developer-authoring-guide">
-                <span className="developer-authoring-eyebrow">Skill Creator</span>
+                <span className="developer-authoring-eyebrow">
+                  {t("developer.authoring.eyebrow")}
+                </span>
                 <h3>{t("developer.authoring.guideTitle")}</h3>
                 <ol>
                   <li data-active={mutationStatus === "idle" && !candidate}>{t("developer.authoring.stepDescribe")}</li>
