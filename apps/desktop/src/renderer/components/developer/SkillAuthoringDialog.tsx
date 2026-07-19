@@ -60,6 +60,7 @@ type SkillAuthoringDialogProps = {
 
 type SetupStatus = "checking" | "loading" | "needs-model" | "ready" | "failed";
 type MutationStatus = "idle" | "applying" | "complete";
+const TURN_EVENT_POLL_INTERVAL_MS = 250;
 
 function createMessageId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -196,6 +197,7 @@ export function SkillAuthoringDialog({
     setProtocolError(null);
     setIsSending(true);
 
+    let startedTurnId: string | null = null;
     try {
       let session = sessionRef.current;
       if (!session) {
@@ -212,6 +214,7 @@ export function SkillAuthoringDialog({
       const settings = await loadSavedModelSettings();
       const response = await startSessionTurn(session.id, createMessageId(), content, settings);
       if (generationRef.current !== generation) return;
+      startedTurnId = response.turn.id;
       initialContextSentRef.current = true;
       activeTurnRef.current = { sessionId: session.id, turnId: response.turn.id };
       setMessages((current) => current.map((message) => (
@@ -226,7 +229,12 @@ export function SkillAuthoringDialog({
       });
     } catch {
       if (generationRef.current === generation) {
-        setMessages((current) => current.filter((message) => message.id !== pendingId));
+        const turnPrefix = startedTurnId ? `skill-authoring:${startedTurnId}:` : null;
+        setMessages((current) => current.filter((message) => (
+          message.id !== pendingId && (!turnPrefix || !message.id.startsWith(turnPrefix))
+        )));
+        setCandidate(null);
+        setProtocolError(null);
         setConversationError(t("developer.authoring.sendFailed"));
       }
     } finally {
@@ -266,7 +274,10 @@ export function SkillAuthoringDialog({
         ...current.filter((message) => message.id !== options.pendingId && !message.id.startsWith(prefix)),
         ...turnMessages.messages,
       ]);
-      if (page.turn.status === "running") continue;
+      if (page.turn.status === "running") {
+        await waitForTurnPoll();
+        continue;
+      }
       if (page.turn.status !== "completed") {
         throw new Error(`Skill authoring turn ended with ${page.turn.status}`);
       }
@@ -545,6 +556,12 @@ function authoringTitle(
   return target && target !== "new"
     ? t("developer.authoring.sessionEdit", { name: target.name })
     : t("developer.authoring.sessionCreate");
+}
+
+function waitForTurnPoll(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, TURN_EVENT_POLL_INTERVAL_MS);
+  });
 }
 
 function visibleTurnMessages(
