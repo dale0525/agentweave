@@ -27,6 +27,12 @@ function validActiveCount(value) {
   return Number.isInteger(value) && value >= 0 && value <= MAX_CONCURRENCY;
 }
 
+async function rebuildActiveCount(transaction, now) {
+  const leases = await transaction.list({ prefix: LEASE_PREFIX, limit: MAX_CONCURRENCY + 1 });
+  if (leases.size > MAX_CONCURRENCY) return MAX_CONCURRENCY;
+  return [...leases.values()].filter((value) => value?.expiresAt > now).length;
+}
+
 export class ConcurrencyLeaseCore {
   constructor(storage, { nowMilliseconds = () => Date.now() } = {}) {
     this.storage = storage;
@@ -46,8 +52,7 @@ export class ConcurrencyLeaseCore {
       const hasMetadata = validActiveCount(metadata?.active);
       let active = hasMetadata ? metadata.active : null;
       if (active === null) {
-        const leases = await transaction.list({ prefix: LEASE_PREFIX, limit: MAX_CONCURRENCY });
-        active = [...leases.values()].filter((value) => value?.expiresAt > now).length;
+        active = await rebuildActiveCount(transaction, now);
       }
       if (existing?.expiresAt > now) {
         await transaction.put(leaseKey(leaseId), { expiresAt });
@@ -58,12 +63,21 @@ export class ConcurrencyLeaseCore {
         await transaction.delete(key);
         if (hasMetadata) active = Math.max(0, active - 1);
       }
-      if (active >= limit) return { acquired: false, active };
+      if (active >= limit) {
+        if (!hasMetadata) await transaction.put(META_KEY, { active });
+        return { acquired: false, active };
+      }
       await transaction.put(key, { expiresAt });
       await transaction.put(META_KEY, { active: active + 1 });
       return { acquired: true, active: active + 1 };
     });
-    if (result.acquired) await this.#schedule(expiresAt);
+    if (result.acquired) {
+      try {
+        await this.#schedule(expiresAt);
+      } catch {
+        // The committed lease must be returned so its caller can release it.
+      }
+    }
     return result;
   }
 
@@ -79,8 +93,7 @@ export class ConcurrencyLeaseCore {
       if (validActiveCount(metadata?.active)) {
         await transaction.put(META_KEY, { active: Math.max(0, metadata.active - 1) });
       } else {
-        const leases = await transaction.list({ prefix: LEASE_PREFIX, limit: MAX_CONCURRENCY });
-        const active = [...leases.values()].filter((value) => value?.expiresAt > now).length;
+        const active = await rebuildActiveCount(transaction, now);
         await transaction.put(META_KEY, { active });
       }
       return true;
@@ -90,7 +103,7 @@ export class ConcurrencyLeaseCore {
   async purgeExpired() {
     const now = this.nowMilliseconds();
     const result = await this.storage.transaction(async (transaction) => {
-      const leases = await transaction.list({ prefix: LEASE_PREFIX, limit: MAX_CONCURRENCY });
+      const leases = await transaction.list({ prefix: LEASE_PREFIX, limit: MAX_CONCURRENCY + 1 });
       const expired = [];
       let earliest = null;
       for (const [key, value] of leases) {
@@ -98,10 +111,10 @@ export class ConcurrencyLeaseCore {
         else earliest = earliest === null ? value.expiresAt : Math.min(earliest, value.expiresAt);
       }
       if (expired.length > 0) await deleteInChunks(transaction, expired);
-      const metadata = await transaction.get(META_KEY);
-      const active = validActiveCount(metadata?.active) ? metadata.active : leases.size;
-      await transaction.put(META_KEY, { active: Math.max(0, active - expired.length) });
-      return earliest;
+      const truncated = leases.size > MAX_CONCURRENCY;
+      const active = truncated ? MAX_CONCURRENCY : leases.size - expired.length;
+      await transaction.put(META_KEY, { active });
+      return truncated && expired.length > 0 ? now + 1 : earliest;
     });
     if (result !== null && typeof this.storage.setAlarm === "function") {
       await this.storage.setAlarm(result);

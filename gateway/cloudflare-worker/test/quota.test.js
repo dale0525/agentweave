@@ -24,7 +24,10 @@ class MemoryStorage {
   transaction(operation) {
     const run = this.lock.then(() => operation({
       list: async ({ prefix, limit }) => new Map(
-        [...this.values].filter(([key]) => key.startsWith(prefix)).slice(0, limit),
+        [...this.values]
+          .filter(([key]) => key.startsWith(prefix))
+          .sort(([left], [right]) => left.localeCompare(right))
+          .slice(0, limit),
       ),
       get: async (key) => this.values.get(key),
       put: async (key, value) => { this.values.set(key, structuredClone(value)); },
@@ -98,6 +101,45 @@ test("Durable Object expiration cleanup respects the 128-key batch deletion limi
   const core = new ConcurrencyLeaseCore(storage, { nowMilliseconds: () => 1_000 });
   await core.purgeExpired();
   assert.equal([...storage.values.keys()].filter((key) => key.startsWith("lease:")).length, 0);
+  assert.deepEqual(storage.values.get("metadata"), { active: 0 });
+});
+
+test("lease metadata reconstruction fails closed across a truncated storage scan", async () => {
+  const storage = new MemoryStorage();
+  for (let index = 0; index < 1_000; index += 1) {
+    storage.values.set(`lease:expired_${String(index).padStart(4, "0")}`, { expiresAt: 999 });
+  }
+  storage.values.set("lease:zzzz_active", { expiresAt: 2_000 });
+  const core = new ConcurrencyLeaseCore(storage, { nowMilliseconds: () => 1_000 });
+
+  assert.deepEqual(
+    await core.acquire({ leaseId: "lease_new", limit: 1_000, expiresAt: 2_000 }),
+    { acquired: false, active: 1_000 },
+  );
+  assert.deepEqual(storage.values.get("metadata"), { active: 1_000 });
+
+  storage.values.set("lease:release_target", { expiresAt: 2_000 });
+  storage.values.set("metadata", { active: -1 });
+  assert.equal(await core.release("release_target"), true);
+  assert.deepEqual(storage.values.get("metadata"), { active: 1_000 });
+
+  await core.purgeExpired();
+  assert.deepEqual(storage.values.get("metadata"), { active: 1_000 });
+  assert.equal(storage.alarm, 1_001);
+  await core.purgeExpired();
+  assert.deepEqual(storage.values.get("metadata"), { active: 1 });
+});
+
+test("a committed lease remains releasable when alarm scheduling fails", async () => {
+  const storage = new MemoryStorage();
+  storage.setAlarm = async () => { throw new Error("alarm unavailable"); };
+  const core = new ConcurrencyLeaseCore(storage, { nowMilliseconds: () => 1_000 });
+
+  assert.deepEqual(
+    await core.acquire({ leaseId: "lease_alarm", limit: 1, expiresAt: 2_000 }),
+    { acquired: true, active: 1 },
+  );
+  assert.equal(await core.release("lease_alarm"), true);
   assert.deepEqual(storage.values.get("metadata"), { active: 0 });
 });
 

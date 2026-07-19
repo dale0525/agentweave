@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use url::{Host, Url};
 
+const MAX_SCOPE_CATALOG_DEPTH: usize = 8;
+
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct CloudflareOAuthScope {
     pub id: String,
@@ -30,7 +32,7 @@ pub struct CloudflareOAuthScopeCatalog {
 impl CloudflareOAuthScopeCatalog {
     pub fn from_api_result(value: &Value) -> DevkitResult<Self> {
         let mut scopes = BTreeSet::new();
-        collect_scope_records(value, &mut scopes);
+        collect_scope_records(value, 0, &mut scopes)?;
         Self::from_records(scopes)
     }
 
@@ -114,11 +116,21 @@ impl CloudflareOAuthScopeCatalog {
     }
 }
 
-fn collect_scope_records(value: &Value, scopes: &mut BTreeSet<CloudflareOAuthScope>) {
+fn collect_scope_records(
+    value: &Value,
+    depth: usize,
+    scopes: &mut BTreeSet<CloudflareOAuthScope>,
+) -> DevkitResult<()> {
+    if depth > MAX_SCOPE_CATALOG_DEPTH {
+        return Err(DevkitError::new(
+            DevkitErrorCode::RemoteProtocol,
+            "Cloudflare OAuth scope catalog exceeded the maximum nesting depth",
+        ));
+    }
     match value {
         Value::Array(values) => {
             for value in values {
-                collect_scope_records(value, scopes);
+                collect_scope_records(value, depth + 1, scopes)?;
             }
         }
         Value::Object(object) => {
@@ -143,13 +155,14 @@ fn collect_scope_records(value: &Value, scopes: &mut BTreeSet<CloudflareOAuthSco
                 });
             }
             for value in object.values() {
-                if !value.is_string() {
-                    collect_scope_records(value, scopes);
+                if value.is_array() || value.is_object() {
+                    collect_scope_records(value, depth + 1, scopes)?;
                 }
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -517,5 +530,39 @@ impl OAuthScopeGrant {
             Self::List(scopes) => scopes.into_iter().collect(),
             Self::Missing => BTreeSet::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn nested_scope(depth: usize) -> Value {
+        let mut value = json!({"id": "scope-read", "name": "Workers Scripts Read"});
+        for _ in 0..depth {
+            value = json!({"nested": value});
+        }
+        value
+    }
+
+    #[test]
+    fn scope_catalog_accepts_the_depth_boundary() {
+        let catalog =
+            CloudflareOAuthScopeCatalog::from_api_result(&nested_scope(MAX_SCOPE_CATALOG_DEPTH))
+                .unwrap();
+
+        assert_eq!(catalog.scopes.len(), 1);
+    }
+
+    #[test]
+    fn scope_catalog_fails_closed_beyond_the_depth_boundary() {
+        let error = CloudflareOAuthScopeCatalog::from_api_result(&nested_scope(
+            MAX_SCOPE_CATALOG_DEPTH + 1,
+        ))
+        .unwrap_err();
+
+        assert_eq!(error.code, DevkitErrorCode::RemoteProtocol);
+        assert!(error.safe_message.contains("maximum nesting depth"));
     }
 }
