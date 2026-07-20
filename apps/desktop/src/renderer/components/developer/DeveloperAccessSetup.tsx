@@ -96,6 +96,7 @@ export function DeveloperAccessSetup({
   const [completed, setCompleted] = useState(false);
   const automaticAccountRef = useRef<string | null>(null);
   const previousAuthorizationPhaseRef = useRef(initialControlStatus?.authorization.phase);
+  const onControlStatusRef = useRef(onControlStatus);
 
   const identityProviders = providers.filter((item) => item.kind === "identity");
   const entitlementProviders = providers.filter((item) => item.kind === "entitlement"
@@ -125,14 +126,18 @@ export function DeveloperAccessSetup({
 
   const updateControlStatus = useCallback((status: DeveloperControlStatus) => {
     setControlStatus(status);
-    onControlStatus(status);
-  }, [onControlStatus]);
+    onControlStatusRef.current(status);
+  }, []);
 
   const refreshControl = useCallback(async () => {
     const status = await loadDeveloperControlStatus();
     updateControlStatus(status);
     return status;
   }, [updateControlStatus]);
+
+  useEffect(() => {
+    onControlStatusRef.current = onControlStatus;
+  }, [onControlStatus]);
 
   useEffect(() => {
     let active = true;
