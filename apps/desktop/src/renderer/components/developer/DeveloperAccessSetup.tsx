@@ -13,7 +13,7 @@ import {
   ShieldCheck,
   TriangleAlert,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { DeveloperProjectSnapshot } from "../../../shared/developerProject";
 import {
@@ -123,16 +123,28 @@ export function DeveloperAccessSetup({
       }
     : workingSnapshot.verifiedDeployment ?? null;
 
-  const updateControlStatus = (status: DeveloperControlStatus) => {
+  const updateControlStatus = useCallback((status: DeveloperControlStatus) => {
     setControlStatus(status);
     onControlStatus(status);
-  };
+  }, [onControlStatus]);
 
-  const refreshControl = async () => {
+  const refreshControl = useCallback(async () => {
     const status = await loadDeveloperControlStatus();
     updateControlStatus(status);
     return status;
-  };
+  }, [updateControlStatus]);
+
+  useEffect(() => {
+    let active = true;
+    void loadDeveloperControlStatus()
+      .then((status) => {
+        if (active) updateControlStatus(status);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [updateControlStatus]);
 
   useEffect(() => {
     setWorkingSnapshot(snapshot);
@@ -162,7 +174,7 @@ export function DeveloperAccessSetup({
       void refreshControl().catch(() => undefined);
     }, 1_500);
     return () => window.clearInterval(timer);
-  }, [controlStatus?.authorization.phase]);
+  }, [controlStatus?.authorization.phase, refreshControl]);
 
   useEffect(() => {
     if (controlStatus?.authorization.phase !== "select_account") return;
