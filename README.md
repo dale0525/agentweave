@@ -2,33 +2,148 @@
 
 English | [简体中文](./README.zh-CN.md)
 
-AgentWeave is an **Agent App Framework** for developers. It provides a reusable Agent runtime, model adapters, an extension system, security boundaries, and cross-platform hosts so that a new Agent App is defined primarily by its prompts, Skills, Connectors, policies, and product interface—not by a copied and rewritten core turn loop.
+**Build a branded Agent App on a reusable runtime instead of rebuilding the Agent loop, permissions, storage, and host integration from scratch.**
 
-You can use it to build personal assistants, research assistants, content workflows, internal enterprise Agents, and other vertical applications. The secretary app in this repository is only a reference implementation, not the framework's fixed product form.
+AgentWeave is an open-source **Agent App Framework** for product and engineering teams. It provides the shared machinery behind an Agent application: multi-turn conversations, model access, Skills, Connectors, approvals, credentials, persistence, background work, and Desktop, Android, and Server hosts. Your product supplies the audience, user journey, prompts, enabled capabilities, provider choices, policies, branding, and final interface.
+
+AgentWeave is not a finished assistant, a hosted SaaS, or a no-code App builder. The secretary in this repository is a reference application, not the framework's fixed product form.
 
 > [!IMPORTANT]
-> The project is still in the `0.1.x` stage. Manifests, Host APIs, and Foundation Skill contracts may change before they stabilize. It is currently best suited to prototyping, framework development, and controlled integrations. Do not use it with production credentials or high-risk external operations without a security review.
+> AgentWeave is still at `0.1.x`. It is a good fit for prototypes, framework development, and controlled pilots. Manifests, Host APIs, Foundation Skill contracts, provider coverage, and cross-platform behavior may change. Do not use production credentials or high-risk external actions without an application-specific security and data review.
 
-## Choose a path
+## Is AgentWeave a fit for your product?
 
-| Goal | Start here |
+### Good reasons to evaluate it
+
+- You are building a personal assistant, research tool, content workflow, internal enterprise Agent, or another product whose behavior should come mainly from App configuration and extensions.
+- You want one App contract to describe prompts, capabilities, policies, languages, themes, and private Skills across more than one Host.
+- You need deterministic permission, approval, credential, persistence, and idempotency boundaries around model-driven behavior.
+- You have engineers who can integrate model and workspace providers, test the complete user journey, and own release and operations.
+- You can begin with fake or local providers, then introduce real accounts in a controlled pilot.
+
+### It is not yet the default choice when
+
+- A non-technical product owner must create and publish the App without engineers.
+- You need a production SLA, managed cloud hosting, billing, organization administration, or customer support from the framework itself.
+- Your launch depends on stable parity across every capability and Host. Most Foundation capabilities are still Preview.
+- You require a ready-made iOS, Windows, or public browser-hosted end-user application. Those release targets are not currently provided.
+- Your first release will perform high-risk external actions or process regulated data before you can complete security, privacy, provider, and recovery reviews.
+
+### What the framework provides—and what your team still owns
+
+| AgentWeave provides | Your App team owns |
 | --- | --- |
-| Run the project first | Continue to the “5-minute quick start” below |
-| Build your own Agent App on the framework | [Developing Agent Apps](./DEVELOPING_AGENT_APPS.md) |
-| Contribute to the runtime, hosts, or Foundation Skills | [Contributing Guide](./CONTRIBUTING.md) |
-| Connect a real IMAP/SMTP mailbox | [Mail Connector Setup](./MAIL_CONNECTOR_SETUP.md) |
-| Integrate a managed desktop sidecar | [Local Sidecar Transport](./LOCAL_SIDECAR_TRANSPORT.md) |
-| Integrate durable conversation history | [Conversation Lifecycle](./CONVERSATION_LIFECYCLE.md) |
-| Stream, stop, and recover turns | [Streaming Turn Lifecycle](./STREAMING_TURN_LIFECYCLE.md) |
-| Add encrypted local backup and restore | [Local Data Protection and Backup](./DATA_PROTECTION.md) |
+| Agent runtime, model protocol adapters, sessions, events, and persistence | Product definition, user journeys, acceptance criteria, and model quality evaluation |
+| Versioned App Manifest, prompts, optional packages, themes, fonts, and localization | Brand, copy, information architecture, final interaction design, and accessibility review |
+| Foundation Skill contracts, fake/local implementations, Connector and Host Tool boundaries | Which capabilities ship, which providers are connected, and how real accounts are onboarded |
+| Credential, approval, permission, audit, and idempotency primitives | Threat model, privacy disclosures, retention policy, provider terms, and production security review |
+| Desktop, Android, and Server reference Hosts plus packaging tools | Distribution, signing credentials, deployment, monitoring, support, upgrades, and incident response |
 
-## 5-minute quick start
+## Choose your path
+
+| Your goal | Start here |
+| --- | --- |
+| Decide whether AgentWeave can support a product idea | Read [current capability and platform coverage](#current-capability-and-platform-coverage) and the [delivery path](#from-product-idea-to-delivery) |
+| Prove the local runtime works | Follow the [technical quick start](#technical-quick-start) |
+| Create a separate branded Agent App | Follow [Developing Agent Apps](./DEVELOPING_AGENT_APPS.md) |
+| Study a complete local workflow | Run the [Secretary Agent](./examples/secretary-agent/README.md) with Fake Mail and local Memory |
+| Connect Google Workspace, Microsoft 365, or IMAP/SMTP | Read [provider adapters](./crates/provider-adapters/README.md) and [Mail Connector Setup](./MAIL_CONNECTOR_SETUP.md) |
+| Build and release a macOS application | Read [macOS Desktop Packaging](./DESKTOP_PACKAGING.md) |
+| Build a managed model and identity path | Study the [Managed Gateway Agent](./examples/managed-gateway-agent/README.md) |
+| Contribute to the framework itself | Read the [Contributing Guide](./CONTRIBUTING.md) |
+
+## Current capability and platform coverage
+
+The Foundation Catalog at [`catalog/foundation-skills.json`](./catalog/foundation-skills.json) is the machine-readable source of package status. The table below translates it into a product-planning view.
+
+| Capability area | Catalog status | Declared Hosts | Available backing or integration |
+| --- | --- | --- | --- |
+| Filesystem | Stable | Desktop, Server | Approved local workspace access |
+| Memory | Stable | Android, Desktop, Server | Persistent, auditable App-scoped Memory |
+| Skill Creator | Stable, developer-only | Desktop, Server | Skill authoring and validation; not a consumer default |
+| Mail | Preview | Android, Desktop, Server | Deterministic Fake Mail and IMAP/SMTP; Server adapters for Google Workspace and Microsoft 365 |
+| Calendar | Preview | Android, Desktop, Server | Fake/local coverage; Server adapters for Google Calendar and Microsoft Graph |
+| Contacts | Preview | Android, Desktop, Server | Fake/local coverage; Server adapters for Google and Microsoft Graph |
+| Tasks and Reminders | Preview | Desktop, Server | Local task state and approval-aware mutations |
+| Web Research, Documents, Scheduler, Notifications, Structured Content | Preview | Desktop, Server | Framework contracts and deterministic fake/local coverage; provider or product integration may still be required |
+| Notes and Messaging | Preview | Android, Desktop, Server | Provider-neutral Connector contracts; verify or supply the real provider adapter needed by your App |
+
+“Declared Host” means the package contract includes that platform; it does not promise identical UI, provider coverage, or production readiness on every Host. Preview means the package is implemented and validated in the repository, while its API, provider support, and cross-platform behavior may still change.
+
+### Host and release targets
+
+| Target | Current role | Important boundary |
+| --- | --- | --- |
+| macOS Desktop | Electron Host, managed local Rust sidecar, self-contained packaging, signing and notarization workflow | Production distribution still requires your Developer ID, Apple credentials, release testing, and update operations |
+| Android | Kotlin Compose Host with Rust FFI and frozen App resources | Requires a project-local Android SDK/NDK; capability and UX parity must be validated for the selected App |
+| Server | Local HTTP Host, development diagnostics, background execution, and custom managed-host integration | The stock development server is not a turnkey public SaaS deployment |
+| Linux | Supported development environment for the declared Pixi platform | No end-user Linux Desktop release pipeline is documented yet |
+| iOS, Windows, public web App | Not currently provided as release targets | A downstream product must add and maintain these Hosts or choose another delivery surface |
+
+## From product idea to delivery
+
+Use this sequence to turn an idea into evidence. Do not treat “the repository starts” as proof that a product is ready.
+
+| Phase | Decision or output | Typical owner |
+| --- | --- | --- |
+| 1. Product fit | Target user, critical journey, required capabilities, target Hosts, and unacceptable actions | Product and design |
+| 2. Technical spike | Minimal App starts, one real model completes a turn, and required packages resolve | App engineering |
+| 3. App definition | Validated Manifest, prompts, languages, brand, policies, and private Skills | Product, design, and App engineering |
+| 4. Provider plan | Exact model, identity, mail/calendar/contact providers, scopes, account isolation, and fallback behavior | Integration and security engineering |
+| 5. Safe local proof | Fake/local providers cover success, denial, approval, retry, conflict, restart, and duplicate-action paths | Engineering and QA |
+| 6. Controlled pilot | Dedicated test accounts prove real provider behavior without production data or broad access | Product, QA, security, and legal |
+| 7. Release candidate | Frozen App lock, installable Host package, signing, clean-machine smoke, recovery plan, and known limitations | Release engineering |
+| 8. Operation | Monitoring, backups, upgrades, support ownership, incident response, data export, and deletion | Product operations and security |
+
+A reasonable first approval is a time-boxed technical prototype with explicit exit criteria. A production decision needs evidence for provider coverage, model quality, data handling, failure recovery, platform behavior, distribution, maintenance cost, and licensing.
+
+## How the system fits together
+
+```text
+User
+  |
+  v
+Desktop / Android / Server Host
+  UI + identity + credentials + approvals + platform capabilities
+  |
+  v
+Agent runtime -----------------------> Model gateway ------> Model provider
+  |                                         |
+  |                                         v
+  |                                   model response
+  |
+  +--> Skills describe task behavior
+  |
+  +--> Runtime / Host Tools perform deterministic local work
+  |
+  +--> Approval --> Connector --> external account or service
+  |
+  +--> App-scoped storage, events, Memory, tasks, and durable runs
+```
+
+The model can propose work, but it does not grant itself permissions. Credentials stay in Host-controlled storage. External side effects remain subject to Runtime and Host policy, approval, and idempotency checks.
+
+### Terms in product language
+
+| Framework term | What it means for an App creator |
+| --- | --- |
+| Agent App | The product-specific definition: identity, behavior, capabilities, policy, brand, languages, and private packages |
+| App Manifest (`agent-app.json`) | The versioned contract that tells Hosts what the App requires and what policies apply |
+| Prompt | Product-authored instructions that shape persona and behavior; never a permission boundary |
+| Skill | A reusable description of how the Agent handles a class of tasks, optionally with resources and controlled tools |
+| Connector | Deterministic access to an external account or service under authentication, scope, approval, and audit rules |
+| Host Tool | A trusted capability supplied by Desktop, Android, Server, or another Host |
+| Host | The platform shell that owns UI, credentials, approvals, and platform integration |
+| Runtime | The shared engine that runs turns, resolves tools and packages, applies policy, and persists state |
+| Foundation Skill | An optional first-party package for a broadly useful capability such as Memory or Mail |
+
+## Technical quick start
+
+This path is for an engineer. It proves the local Host and Runtime chain before you add a model or real external account.
 
 ### 1. Prepare the environment
 
-You only need Git and [pixi](https://pixi.prefix.dev/latest/) installed beforehand. The project's Pixi environment manages Rust, Node.js, Python, OpenJDK, and the other command-line dependencies, so you do not need to install them system-wide.
-
-The current `pixi.toml` declares macOS Apple Silicon, macOS Intel, and Linux x86_64 as supported platforms. Android builds additionally require a project-local Android SDK/NDK, but you can skip that when first trying the Desktop or Server hosts.
+Install Git and [Pixi](https://pixi.prefix.dev/latest/). The project environment manages Rust, Node.js, Python, OpenJDK, and other command-line dependencies. The declared development platforms are macOS Apple Silicon, macOS Intel, and Linux x86_64.
 
 ```bash
 git clone https://github.com/dale0525/agentweave.git
@@ -38,31 +153,42 @@ pixi install
 pixi run npm --prefix apps/desktop ci
 ```
 
-The second install command only writes to `apps/desktop/node_modules`. Keep generated files, caches, and local tools in ignored project directories; do not install project dependencies into the system environment.
+Android work additionally requires the project-local SDK/NDK described in the [Contributing Guide](./CONTRIBUTING.md#android-environment).
 
-### 2. Validate repository assets
+### 2. Validate the repository and App examples
 
 ```bash
 pixi run validate-agent-assets
 pixi run test-dev-script
 ```
 
-These quick checks validate the App Manifest, example Apps, scaffolding and packaging scripts, and local development entry points. They do not require a model API key or an external account.
+These checks require no model key or external account.
 
-### 3. Start the minimal example
+### 3. Start the minimal App
 
 ```bash
 AGENTWEAVE_APP_ROOT=examples/minimal-agent pixi run dev
 ```
 
-This command starts both the local Agent Server and the Desktop development page:
-
-- Development page: <http://127.0.0.1:5173>
+- Desktop development page: <http://127.0.0.1:5173>
 - Server health check: <http://127.0.0.1:49321/health>
 
-If the health check returns `ok` and the development page loads, the local path is working. A model is not required to start the app. To have an actual conversation, enter a model URL, endpoint type, and model name compatible with the Responses, Chat Completions, or Completion protocol on the Settings page. Press `Ctrl+C` to stop both processes.
+If the page loads and the health check returns `ok`, the local shell is working. This does **not** yet prove that an AI turn or external Connector works. Press `Ctrl+C` to stop both processes.
 
-### 4. Create your own Agent App
+### 4. Complete the first real conversation
+
+Open **Settings → Model** and enter:
+
+- **Base URL**: the provider API root. AgentWeave appends `/responses`, `/chat/completions`, or `/completions` according to the selected protocol. For example, if the provider documents `https://model.example/v1/chat/completions`, enter `https://model.example/v1`.
+- **Endpoint type**: Responses, Chat Completions, or Completions. It must match the provider's actual protocol.
+- **Model name**: the exact model identifier accepted by that endpoint.
+- **API key**: optional for a local endpoint, normally required by a hosted provider. Desktop encrypts a supplied key with Electron safe storage before local persistence.
+
+Select **Test connection** before sending a message. A failed test usually means the Base URL includes too much or too little path, the endpoint type is wrong, the model name is unavailable, or authentication failed. Use a development credential first; do not paste a production key into an unreviewed build.
+
+AgentWeave also supports an App-managed model path with replaceable identity, entitlement, and gateway providers. Use the [Managed Gateway Agent](./examples/managed-gateway-agent/README.md) when end users must not configure model endpoints themselves.
+
+### 5. Create a separate App
 
 ```bash
 pixi run scaffold-agent-app -- \
@@ -74,124 +200,100 @@ pixi run scaffold-agent-app -- --validate output/research-agent
 AGENTWEAVE_APP_ROOT=output/research-agent pixi run dev
 ```
 
-In the generated directory, `agent-app.json` defines the application identity, compatibility, available languages, capabilities, and security policies. The `locales/` directory contains UI dictionaries, `prompts/` defines Agent behavior, and `packages/` contains app-private Skills. See [Developing Agent Apps](./DEVELOPING_AGENT_APPS.md) for complete guidance on the Manifest, i18n, themes, fonts, Skills, and release artifacts.
-
-For a self-contained macOS application with the bundled Rust sidecar and locked App resources, see [macOS Desktop Packaging](./DESKTOP_PACKAGING.md).
-
-## How the framework fits together
+The generated App contains:
 
 ```text
-Custom Agent App
-  agent-app.json + prompts + app packages + branding
-                         |
-                         v
-AgentWeave Framework
-  runtime + model gateway + skills + policy + storage + events
-                         |
-                         v
-Desktop / Android / Server Hosts
-  credentials + connectors + approvals + platform capabilities
+output/research-agent/
+  agent-app.json          identity, compatibility, requirements, and policy
+  prompts/                system and developer behavior
+  locales/                packaged interface languages
+  themes/                 optional custom color themes
+  fonts/                  optional packaged fonts
+  packages/               App-private Skills and packages
 ```
 
-The core design principles are:
+The Manifest sections answer different questions:
 
-- **Replaceable application behavior**: Personas, domain workflows, and default capabilities are defined by the App Manifest, prompts, and optional packages.
-- **Stable extension contracts first**: General-purpose capabilities belong in runtime, SDK, Host Tool, or Connector contracts. Product-specific logic stays in downstream Apps.
-- **Prompts are not security boundaries**: Credential access, persistent writes, networking, and external side effects must be governed by deterministic runtime and host permissions and approvals.
-- **Optional Foundation Skills**: First-party foundation capabilities are packaged independently, so downstream Apps can enable, replace, disable, or omit them.
-- **Default tests do not depend on external services**: Capabilities such as Mail and Memory provide fake or local backing for repeatable coverage of approvals, idempotency, and error paths.
-
-## Repository structure
-
-```text
-apps/
-  desktop/                 Electron + React host
-  android/                 Kotlin Compose + Rust FFI host
-crates/
-  agent-runtime/           turns, sessions, tools, policy, storage, and extension lifecycle
-  model-gateway/           model endpoints and streaming protocol adapters
-  agent-server/            local HTTP API, development diagnostics, and background execution
-  mobile-ffi/              bridge between Android and the Rust runtime
-skills/                    built-in, Foundation, and developer Skills
-catalog/                   machine-readable Foundation Skill and theme catalogs
-examples/                  runnable Agent App reference implementations
-templates/agent-app/       App scaffolding template
-scripts/                   development, validation, packaging, and mobile build scripts
-```
-
-If a change only serves one domain or product, put it in `skills/`, a standalone Connector, or `examples/` first. Only protocols, state models, and security mechanisms reusable across many Agent Apps should enter the core crates.
-
-## Extension points
-
-### Agent Apps and prompts
-
-`agent-app.json` is the versioned application contract shared by Desktop, Android, and Server. System prompts and developer instructions can define a persona and behavior, but they cannot grant permissions or bypass Host approvals.
-
-### Skills
-
-A Skill describes how to perform a class of tasks. It may include `SKILL.md`, `references/`, `scripts/`, `assets/`, and a runtime tool manifest. A Skill should not take responsibility for general OAuth, credential storage, or high-risk operation approval.
-
-### Connectors and Host Tools
-
-Connectors and Host Tools access mailboxes, calendars, browsers, or device capabilities deterministically and run within the framework's authentication, permission, timeout, cancellation, audit, and idempotency mechanisms. Vendor adapters can be published independently; the core runtime maintains only the contract and the secure execution boundary.
-
-### Cross-platform hosts
-
-Desktop, Android, and Server share the same App and Skill contracts, while each host implements its own credential storage, platform capabilities, and UI. When adding a capability, first establish which parts belong in the runtime and which must be provided by a host.
-
-## Current capabilities and maturity
-
-The repository currently includes a versioned Agent App Manifest, replaceable prompts, multi-turn sessions, Skill resource and release lifecycles, persistent Memory, Durable Runs, approvals, a Credential Vault, a Connector Runtime, a Scheduler, and Desktop, Android, and Server hosts.
-
-The Foundation Catalog at [`catalog/foundation-skills.json`](./catalog/foundation-skills.json) is the single machine-readable source of capability status. The current overview is:
-
-- Stable: Filesystem and Memory. Skill Creator is available for developers.
-- Preview: Mail, Calendar, Tasks, Web Research, Documents, Contacts, Notifications, Notes, Messaging, and Scheduler.
-- Reference only: `echo` and similar examples validate extension mechanisms but do not define the framework's product direction.
-
-Preview packages are implemented and pass local package validation, but their APIs, provider and Connector coverage, and cross-platform behavior may still change. Each App's Manifest always determines which capabilities are enabled.
-
-## Common development commands
-
-| Command | Purpose |
+| Section | Question it answers |
 | --- | --- |
-| `pixi run dev` | Start the Server and Desktop development page together |
-| `pixi run server` | Start only the local Server |
-| `pixi run test` | Run Rust workspace tests |
-| `pixi run check-skills` | Validate Skill packages in the repository |
-| `pixi run test-dev-script` | Test scaffolding, packaging, and other Node scripts |
-| `pixi run source-lines` | Check that code-like files stay under 1,000 lines |
-| `pixi run skill-lifecycle-check` | Run the complete quality gate, including the Android build |
+| `appId`, `package`, `compatibility` | What is this App, which Runtime version does it accept, and which Hosts can load it? |
+| `requires` | Which packages, capabilities, Runtime Tools, and Connectors must exist? |
+| `policy` | Are external effects, networking, background work, Memory, and Skill management allowed? |
+| `instructions` | Which system, developer, and additional Prompt resources define behavior? |
+| `branding`, `appearance`, `localization` | What name, themes, fonts, and languages ship to users? |
 
-The complete gate requires a local Android SDK/NDK. See the [Contributing Guide](./CONTRIBUTING.md) for test selection by change scope, Android setup, and Pull Request requirements.
+Start with the generated deny-by-default policy. Add only the requirements demanded by packages you have chosen. See the exact [Minimal Agent Manifest](./examples/minimal-agent/agent-app.json) and the full [App development guide](./DEVELOPING_AGENT_APPS.md).
 
-## Security model summary
+## Model, data, and security boundaries
 
-- Apps and Skills declare requested capabilities; the Host decides what is actually granted.
-- External side effects require recoverable approval and idempotency identifiers that prevent duplicate execution.
-- Credentials are stored in the Host Credential Vault and never placed in prompts, Skill packages, Manifests, or Git.
-- Workspace tools must stay within approved directories and must not treat application, Skill, cache, or database control directories as ordinary workspace content.
-- Tests against external services must be explicitly enabled. Default tests use only fake servers or local storage.
+- Apps and packages request capabilities; the Host and Runtime decide what is granted.
+- Prompts and external documents cannot grant permissions or bypass approval.
+- Credentials remain in Host-controlled stores and are referenced by scoped, opaque identifiers rather than copied into Manifests, prompts, packages, or ordinary logs.
+- Writes such as sending mail or changing calendar data require durable approval and idempotency protection where the contract declares an external side effect.
+- Default tests use fake services or local storage. Real-provider tests and pilots must be enabled deliberately with dedicated accounts.
+- Encrypted local backup protects exported SQLite backup envelopes, not every live database or arbitrary workspace file. Read [Local Data Protection and Backup](./DATA_PROTECTION.md) before making at-rest or recovery claims.
+- Your model and Connector providers may receive user data. Your product team remains responsible for provider terms, data location, retention, deletion, user consent, logging, and incident response.
 
-When reporting a potential security issue, do not include real credentials, mailbox content, or personal data in example configurations, test logs, or public issues.
+## Packaging and release meaning
+
+There are two different artifacts:
+
+1. `package-agent-app` creates a frozen, hash-locked App definition. It is an input to a Host build, not an installable end-user application by itself.
+2. A Host packaging pipeline combines that App definition with the Runtime and platform shell to create an installable or deployable product.
+
+Create and verify a frozen App definition:
+
+```bash
+pixi run package-agent-app -- \
+  --input output/research-agent \
+  --output output/research-agent-release \
+  --runtime-version 0.1.0
+
+pixi run package-agent-app -- --verify output/research-agent-release
+```
+
+Build a self-contained macOS App:
+
+```bash
+pixi run package-macos \
+  --input output/research-agent \
+  --output dist/macos/research-agent \
+  --overwrite
+```
+
+Local builds receive an ad-hoc signature and are for development. Formal macOS distribution requires Developer ID signing, notarization, clean-machine testing, release metadata, and your own credentials and operational process. Android uses the selected App definition during `pixi run android-assemble`. Server deployment remains a custom managed-Host responsibility rather than a one-command hosted service.
+
+## Repository map
+
+```text
+apps/                     Desktop and Android Hosts
+crates/agent-runtime/     turns, sessions, tools, policy, storage, and packages
+crates/model-gateway/     model endpoint and streaming adapters
+crates/agent-server/      local HTTP Host, diagnostics, and background execution
+crates/provider-adapters/ Google Workspace and Microsoft 365 adapters
+skills/                   built-in, Foundation, and developer Skills
+catalog/                  machine-readable Foundation Skill and theme catalogs
+examples/                 runnable Agent App references
+templates/agent-app/      deny-by-default App scaffold
+scripts/                  validation, packaging, and development tooling
+```
+
+Product-specific behavior belongs in an App, Skill, Connector, provider adapter, or example. Only reusable protocols, state models, security boundaries, and Host infrastructure should enter the core Runtime.
 
 ## Documentation
 
-- [Contributing Guide](./CONTRIBUTING.md): environment setup, change boundaries, the test matrix, and the PR checklist.
-- [Developing Agent Apps](./DEVELOPING_AGENT_APPS.md): Manifests, prompts, Skills, themes, fonts, and release artifacts.
-- [Minimal Agent](./examples/minimal-agent/README.md): the smallest consumer application.
-- [Secretary Agent](./examples/secretary-agent/README.md): a reference app combining Mail, Memory, and an app-private Skill.
-- [Managed Gateway Agent](./examples/managed-gateway-agent/README.md): an app-managed model path with replaceable identity, entitlement, and Cloudflare gateway providers.
-- [Mail Connector Setup](./MAIL_CONNECTOR_SETUP.md): local IMAP/SMTP and Credential Vault configuration.
-- [Local Data Protection and Backup](./DATA_PROTECTION.md): encrypted backup, trusted Desktop key handling, and restart-safe restore.
-- [Repository collaboration rules](./AGENTS.md): architecture boundaries, tooling, coding, and repository-level constraints.
-
-## Contributing
-
-Contributions to reusable runtime capabilities, Host and Connector contracts, Foundation Skills, test fixtures, examples, and documentation are welcome. Before writing code, read the [Contributing Guide](./CONTRIBUTING.md) to decide whether your change belongs in the core, an optional package, or an example, and add failure and recovery coverage for any path involving permissions, credentials, persistence, or external side effects.
+- [Developing Agent Apps](./DEVELOPING_AGENT_APPS.md): Manifest, prompts, Skills, themes, fonts, local testing, and frozen releases.
+- [Secretary Agent](./examples/secretary-agent/README.md): Mail, Memory, approval, and an App-private workflow using local backing.
+- [Managed Gateway Agent](./examples/managed-gateway-agent/README.md): App-managed identity, entitlement, model access, and Cloudflare deployment.
+- [Provider adapters](./crates/provider-adapters/README.md): Google Workspace and Microsoft 365 OAuth and Connector coverage.
+- [Mail Connector Setup](./MAIL_CONNECTOR_SETUP.md): IMAP/SMTP, TLS, Credential Vault, and live-smoke boundaries.
+- [macOS Desktop Packaging](./DESKTOP_PACKAGING.md): self-contained App builds, signing, notarization, and release verification.
+- [Local Data Protection and Backup](./DATA_PROTECTION.md): encrypted export, restore, key separation, and explicit exclusions.
+- [Conversation Lifecycle](./CONVERSATION_LIFECYCLE.md) and [Streaming Turn Lifecycle](./STREAMING_TURN_LIFECYCLE.md): durable history, turn streaming, stop, and recovery contracts.
+- [Contributing Guide](./CONTRIBUTING.md): architecture placement, environment, tests, and Pull Request requirements.
 
 ## License
 
-Except for separately identified third-party material, AgentWeave is dual-licensed under the [Apache License 2.0](./LICENSE-APACHE) or the [MIT License](./LICENSE-MIT), at your option. See [LICENSE](./LICENSE) for the contribution terms and [NOTICE](./NOTICE) for repository-level attributions.
+Except for separately identified third-party material, AgentWeave is dual-licensed under the [Apache License 2.0](./LICENSE-APACHE) or the [MIT License](./LICENSE-MIT), at your option. See [LICENSE](./LICENSE) for contribution terms and [NOTICE](./NOTICE) for repository-level attributions.
 
-Third-party Skills, scripts, themes, protocols, Connectors, dependencies, and assets retain their own licenses and copyright notices. Preserve the package-local license and notice files when redistributing them.
+Third-party Skills, scripts, themes, protocols, Connectors, dependencies, and assets retain their own licenses and copyright notices. Preserve package-local license and notice files when redistributing them.
