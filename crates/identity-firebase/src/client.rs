@@ -164,12 +164,7 @@ impl FirebaseIdentityProvider {
         &self,
         request: &SecurityContextRequest,
     ) -> Result<FirebaseSecret> {
-        self.security_context_inner(request).await?;
-        self.store
-            .load_session()
-            .await?
-            .map(|session| session.id_token)
-            .ok_or(FirebaseError::AuthenticationRequired)
+        Ok(self.validated_session(request).await?.id_token)
     }
 
     pub async fn sign_out(&self) -> Result<()> {
@@ -181,6 +176,11 @@ impl FirebaseIdentityProvider {
         &self,
         request: &SecurityContextRequest,
     ) -> Result<SecurityContext> {
+        let session = self.validated_session(request).await?;
+        self.context(request, &session)
+    }
+
+    async fn validated_session(&self, request: &SecurityContextRequest) -> Result<FirebaseSession> {
         validate_request(&self.config, request)?;
         let _guard = self.session_gate.lock().await;
         let mut session = self
@@ -192,7 +192,8 @@ impl FirebaseIdentityProvider {
             session = self.refresh(session).await?;
             self.store.save_session(session.clone()).await?;
         }
-        self.context(request, &session)
+        self.context(request, &session)?;
+        Ok(session)
     }
 
     async fn refresh(&self, previous: FirebaseSession) -> Result<FirebaseSession> {

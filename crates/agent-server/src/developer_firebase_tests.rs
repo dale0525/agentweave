@@ -1,11 +1,61 @@
 use super::*;
-use agent_runtime::{credential::InMemorySecretStore, storage::Storage};
-use std::{collections::VecDeque, sync::Arc};
+use agent_runtime::{
+    credential::{CredentialScope, InMemorySecretStore, SecretId, SecretMaterial, SecretStore},
+    storage::Storage,
+};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::sync::Mutex;
 
 struct FakeFirebaseHttp {
     responses: Mutex<VecDeque<FirebaseControlResponse>>,
     requests: Mutex<Vec<String>>,
+}
+
+struct DeleteFailingSecretStore {
+    inner: InMemorySecretStore,
+    fail_delete: AtomicBool,
+}
+
+#[async_trait]
+impl SecretStore for DeleteFailingSecretStore {
+    async fn save(
+        &self,
+        scope: &CredentialScope,
+        secret_id: &SecretId,
+        value: SecretMaterial,
+    ) -> anyhow::Result<()> {
+        self.inner.save(scope, secret_id, value).await
+    }
+
+    async fn load(
+        &self,
+        scope: &CredentialScope,
+        secret_id: &SecretId,
+    ) -> anyhow::Result<Option<SecretMaterial>> {
+        self.inner.load(scope, secret_id).await
+    }
+
+    async fn delete(&self, scope: &CredentialScope, secret_id: &SecretId) -> anyhow::Result<bool> {
+        if self.fail_delete.load(Ordering::SeqCst) {
+            anyhow::bail!("injected secret deletion failure");
+        }
+        self.inner.delete(scope, secret_id).await
+    }
+
+    async fn rotate(
+        &self,
+        scope: &CredentialScope,
+        secret_id: &SecretId,
+        value: SecretMaterial,
+    ) -> anyhow::Result<()> {
+        self.inner.rotate(scope, secret_id, value).await
+    }
 }
 
 #[async_trait]
@@ -261,5 +311,181 @@ async fn expired_google_access_token_refreshes_without_reauthorizing() {
             .filter(|request| request.contains("oauth2.googleapis.com/token"))
             .count(),
         2
+    );
+}
+
+#[tokio::test]
+async fn transient_token_exchange_failure_preserves_the_pending_authorization() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let mut control = DeveloperControlPlane::cloudflare(
+        storage.sqlite_pool(),
+        Arc::new(InMemorySecretStore::default()),
+        "firebase-retry-test-project",
+        "com.example.agent",
+        crate::developer_control_plane::CloudflareOAuthDefaults::default(),
+    )
+    .await
+    .unwrap();
+    let fake = Arc::new(FakeFirebaseHttp {
+        responses: Mutex::new(VecDeque::from([
+            response(503, json!({})),
+            response(
+                200,
+                json!({
+                    "access_token": "google-access-token",
+                    "refresh_token": "google-refresh-token",
+                    "expires_in": 3600,
+                    "scope": format!("{GOOGLE_SCOPE_CLOUD} {GOOGLE_SCOPE_FIREBASE}"),
+                    "token_type": "Bearer"
+                }),
+            ),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    control.firebase_http = fake.clone();
+    let start = control
+        .start_firebase_authorization(
+            FirebaseOAuthClientSelection::Custom {
+                client_id: "desktop-client.apps.googleusercontent.com".into(),
+                client_secret: None,
+            },
+            Url::parse("http://127.0.0.1:43894/firebase/callback").unwrap(),
+        )
+        .await
+        .unwrap();
+    let state = Url::parse(&start.authorization_url)
+        .unwrap()
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let callback =
+        format!("http://127.0.0.1:43894/firebase/callback?code=one-time-code&state={state}");
+
+    assert_eq!(
+        control
+            .complete_firebase_authorization(&callback)
+            .await
+            .unwrap_err()
+            .code,
+        DevkitErrorCode::Unavailable
+    );
+    assert_eq!(
+        control.firebase_authorization_status().await.unwrap().phase,
+        FirebaseAuthorizationPhase::AwaitingCallback
+    );
+    assert_eq!(
+        control
+            .complete_firebase_authorization(&callback)
+            .await
+            .unwrap()
+            .phase,
+        FirebaseAuthorizationPhase::SelectProject
+    );
+    assert_eq!(fake.requests.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn invalid_token_exchange_consumes_the_pending_authorization() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let mut control = DeveloperControlPlane::cloudflare(
+        storage.sqlite_pool(),
+        Arc::new(InMemorySecretStore::default()),
+        "firebase-invalid-code-test-project",
+        "com.example.agent",
+        crate::developer_control_plane::CloudflareOAuthDefaults::default(),
+    )
+    .await
+    .unwrap();
+    let fake = Arc::new(FakeFirebaseHttp {
+        responses: Mutex::new(VecDeque::from([response(400, json!({}))])),
+        requests: Mutex::new(Vec::new()),
+    });
+    control.firebase_http = fake.clone();
+    let start = control
+        .start_firebase_authorization(
+            FirebaseOAuthClientSelection::Custom {
+                client_id: "desktop-client.apps.googleusercontent.com".into(),
+                client_secret: None,
+            },
+            Url::parse("http://127.0.0.1:43895/firebase/callback").unwrap(),
+        )
+        .await
+        .unwrap();
+    let state = Url::parse(&start.authorization_url)
+        .unwrap()
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let callback =
+        format!("http://127.0.0.1:43895/firebase/callback?code=invalid-code&state={state}");
+
+    assert_eq!(
+        control
+            .complete_firebase_authorization(&callback)
+            .await
+            .unwrap_err()
+            .code,
+        DevkitErrorCode::InvalidAuthorization
+    );
+    assert_eq!(
+        control
+            .complete_firebase_authorization(&callback)
+            .await
+            .unwrap_err()
+            .code,
+        DevkitErrorCode::InvalidAuthorization
+    );
+    assert_eq!(fake.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn cancel_is_idempotent_when_pending_secret_cleanup_fails() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let secrets = Arc::new(DeleteFailingSecretStore {
+        inner: InMemorySecretStore::default(),
+        fail_delete: AtomicBool::new(false),
+    });
+    let control = DeveloperControlPlane::cloudflare(
+        storage.sqlite_pool(),
+        secrets.clone(),
+        "firebase-cancel-test-project",
+        "com.example.agent",
+        crate::developer_control_plane::CloudflareOAuthDefaults::default(),
+    )
+    .await
+    .unwrap();
+    control
+        .start_firebase_authorization(
+            FirebaseOAuthClientSelection::Custom {
+                client_id: "desktop-client.apps.googleusercontent.com".into(),
+                client_secret: None,
+            },
+            Url::parse("http://127.0.0.1:43896/firebase/callback").unwrap(),
+        )
+        .await
+        .unwrap();
+    secrets.fail_delete.store(true, Ordering::SeqCst);
+
+    assert_eq!(
+        control.cancel_firebase_authorization().await.unwrap().phase,
+        FirebaseAuthorizationPhase::Disconnected
+    );
+    assert_eq!(
+        control.cancel_firebase_authorization().await.unwrap().phase,
+        FirebaseAuthorizationPhase::Disconnected
+    );
+}
+
+#[test]
+fn operation_names_reject_parent_path_segments() {
+    assert_eq!(
+        validate_operation_name("operations/../../admin")
+            .unwrap_err()
+            .code,
+        DevkitErrorCode::RemoteProtocol
     );
 }

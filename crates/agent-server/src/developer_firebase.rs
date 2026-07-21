@@ -139,6 +139,29 @@ pub(super) struct PendingFirebaseAuthorization {
     expires_at_unix_ms: u64,
 }
 
+struct FirebaseAuthorizationCompletionError {
+    error: DevkitError,
+    retain_pending: bool,
+}
+
+impl From<DevkitError> for FirebaseAuthorizationCompletionError {
+    fn from(error: DevkitError) -> Self {
+        Self {
+            error,
+            retain_pending: false,
+        }
+    }
+}
+
+impl FirebaseAuthorizationCompletionError {
+    fn retryable(error: DevkitError) -> Self {
+        Self {
+            error,
+            retain_pending: true,
+        }
+    }
+}
+
 pub(crate) struct FirebaseControlRequest {
     pub(crate) method: Method,
     pub(crate) url: Url,
@@ -360,19 +383,31 @@ impl DeveloperControlPlane {
         let result = self
             .complete_firebase_authorization_inner(callback_url, &pending)
             .await;
-        let mut handles = vec![pending.state_handle, pending.verifier_handle];
-        handles.extend(pending.client_secret_handle);
-        let _ = self.sensitive.delete_handles(handles).await;
-        result
+        match result {
+            Ok(status) => {
+                self.delete_pending_firebase_authorization_handles(pending)
+                    .await;
+                Ok(status)
+            }
+            Err(failure) if failure.retain_pending => {
+                *self.pending_firebase_authorization.lock().await = Some(pending);
+                Err(failure.error)
+            }
+            Err(failure) => {
+                self.delete_pending_firebase_authorization_handles(pending)
+                    .await;
+                Err(failure.error)
+            }
+        }
     }
 
     async fn complete_firebase_authorization_inner(
         &self,
         callback_url: &str,
         pending: &PendingFirebaseAuthorization,
-    ) -> DevkitResult<FirebaseAuthorizationStatus> {
+    ) -> Result<FirebaseAuthorizationStatus, FirebaseAuthorizationCompletionError> {
         if pending.expires_at_unix_ms <= now_unix_ms() {
-            return Err(invalid_authorization());
+            return Err(invalid_authorization().into());
         }
         let callback = Url::parse(callback_url).map_err(|_| invalid_authorization())?;
         validate_callback(&callback, &pending.redirect_uri)?;
@@ -383,7 +418,7 @@ impl DeveloperControlPlane {
             Ok(Sha256::digest(bytes).as_slice() == Sha256::digest(state.as_bytes()).as_slice())
         })?;
         if !state_matches || query.contains_key("error") {
-            return Err(invalid_authorization());
+            return Err(invalid_authorization().into());
         }
         let code = query.get("code").ok_or_else(invalid_authorization)?;
         let verifier = sensitive_text(&*self.sensitive, &pending.verifier_handle).await?;
@@ -407,17 +442,36 @@ impl DeveloperControlPlane {
         if let Some(secret) = &client_secret {
             form.push(("client_secret".into(), secret.clone()));
         }
+        let token_url =
+            Url::parse("https://oauth2.googleapis.com/token").map_err(|_| internal())?;
         let response = self
             .firebase_http
             .send(FirebaseControlRequest {
                 method: Method::POST,
-                url: Url::parse("https://oauth2.googleapis.com/token").map_err(|_| internal())?,
+                url: token_url,
                 bearer: None,
                 body: FirebaseControlBody::Form(form),
             })
-            .await?;
+            .await
+            .map_err(|error| {
+                if matches!(
+                    error.code,
+                    DevkitErrorCode::RateLimited
+                        | DevkitErrorCode::Timeout
+                        | DevkitErrorCode::Unavailable
+                ) {
+                    FirebaseAuthorizationCompletionError::retryable(error)
+                } else {
+                    error.into()
+                }
+            })?;
+        if response.status == 429 || (500..=599).contains(&response.status) {
+            return Err(FirebaseAuthorizationCompletionError::retryable(
+                unavailable(),
+            ));
+        }
         if response.status != 200 {
-            return Err(invalid_authorization());
+            return Err(invalid_authorization().into());
         }
         let token: GoogleTokenResponse =
             serde_json::from_slice(&response.body).map_err(|_| remote_protocol())?;
@@ -445,7 +499,7 @@ impl DeveloperControlPlane {
                 Ok(handle) => Some(handle),
                 Err(error) => {
                     let _ = self.sensitive.delete_handle(&token_handle).await;
-                    return Err(error);
+                    return Err(error.into());
                 }
             },
             None => None,
@@ -466,9 +520,11 @@ impl DeveloperControlPlane {
             let mut handles = vec![authorization.token_handle().clone()];
             handles.extend(authorization.refresh_token_handle().cloned());
             let _ = self.sensitive.delete_handles(handles).await;
-            return Err(error);
+            return Err(error.into());
         }
-        self.firebase_authorization_status().await
+        self.firebase_authorization_status()
+            .await
+            .map_err(Into::into)
     }
 
     pub(crate) async fn list_firebase_projects(&self) -> DevkitResult<Vec<FirebaseProjectSummary>> {
@@ -859,11 +915,19 @@ impl DeveloperControlPlane {
 
     async fn clear_pending_firebase_authorization(&self) -> DevkitResult<()> {
         if let Some(pending) = self.pending_firebase_authorization.lock().await.take() {
-            let mut handles = vec![pending.state_handle, pending.verifier_handle];
-            handles.extend(pending.client_secret_handle);
-            self.sensitive.delete_handles(handles).await?;
+            self.delete_pending_firebase_authorization_handles(pending)
+                .await;
         }
         Ok(())
+    }
+
+    async fn delete_pending_firebase_authorization_handles(
+        &self,
+        pending: PendingFirebaseAuthorization,
+    ) {
+        let mut handles = vec![pending.state_handle, pending.verifier_handle];
+        handles.extend(pending.client_secret_handle);
+        let _ = self.sensitive.delete_handles(handles).await;
     }
 
     fn firebase_oauth_client(

@@ -2,12 +2,23 @@ use super::*;
 use agent_runtime::identity::{IdentityProvider, SecurityContextRequest};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 use tokio::sync::Mutex;
 use url::Url;
 
 #[derive(Default)]
 struct MemoryStore(Mutex<Option<FirebaseSession>>);
+
+struct LoadCountingStore {
+    session: Mutex<Option<FirebaseSession>>,
+    loads: AtomicUsize,
+}
 
 #[async_trait]
 impl FirebaseSessionStore for MemoryStore {
@@ -22,6 +33,24 @@ impl FirebaseSessionStore for MemoryStore {
 
     async fn delete_session(&self) -> Result<()> {
         *self.0.lock().await = None;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl FirebaseSessionStore for LoadCountingStore {
+    async fn load_session(&self) -> Result<Option<FirebaseSession>> {
+        self.loads.fetch_add(1, Ordering::SeqCst);
+        Ok(self.session.lock().await.clone())
+    }
+
+    async fn save_session(&self, session: FirebaseSession) -> Result<()> {
+        *self.session.lock().await = Some(session);
+        Ok(())
+    }
+
+    async fn delete_session(&self) -> Result<()> {
+        *self.session.lock().await = None;
         Ok(())
     }
 }
@@ -186,4 +215,29 @@ async fn refresh_rejects_a_token_from_a_different_firebase_project() {
             .code,
         agent_runtime::identity::IdentityProviderErrorCode::InvalidResponse
     );
+}
+
+#[tokio::test]
+async fn gateway_assertion_uses_the_session_validated_under_one_gate() {
+    let store = Arc::new(LoadCountingStore {
+        session: Mutex::new(Some(FirebaseSession {
+            subject: "firebase-subject".into(),
+            id_token: FirebaseSecret::new("id-token-sentinel"),
+            refresh_token: FirebaseSecret::new("refresh-token-sentinel"),
+            authenticated_at: Utc::now() - Duration::minutes(1),
+            expires_at: Utc::now() + Duration::hours(1),
+        })),
+        loads: AtomicUsize::new(0),
+    });
+    let provider = FirebaseIdentityProvider::new(
+        config(),
+        store.clone(),
+        Arc::new(FakeHttp(Mutex::new(Vec::new()))),
+    )
+    .unwrap();
+
+    let assertion = provider.gateway_assertion(&request()).await.unwrap();
+
+    assert_eq!(assertion.expose_secret(), "id-token-sentinel");
+    assert_eq!(store.loads.load(Ordering::SeqCst), 1);
 }

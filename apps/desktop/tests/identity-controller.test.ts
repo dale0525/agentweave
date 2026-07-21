@@ -128,6 +128,40 @@ describe("desktop identity controller", () => {
     expect(JSON.stringify(result)).not.toContain("password-sentinel");
   });
 
+  it("rejects control characters in Firebase email credentials before sidecar transport", async () => {
+    const handlers = new Map<string, (
+      event: { sender: { id: number } },
+      value?: unknown,
+    ) => unknown>();
+    const sidecarRequest = vi.fn();
+    const dispose = registerIdentityController({
+      ensureCredentialVault: async () => undefined,
+      ipcMain: {
+        handle: (channel, handler) => handlers.set(channel, handler),
+        removeHandler: (channel) => handlers.delete(channel),
+      },
+      loadHostDiscovery: async () => firebaseDiscovery(),
+      openExternal: vi.fn(),
+      requesterWebContents: { id: 7 },
+      sidecarRequest,
+    });
+    disposers.push(dispose);
+    const passwordHandler = handlers.get(IDENTITY_PASSWORD_CHANNEL)!;
+
+    for (const request of [
+      { email: "person\r@example.test", password: "password-sentinel" },
+      { email: "person\n@example.test", password: "password-sentinel" },
+      { email: "person\x7f@example.test", password: "password-sentinel" },
+      { email: "person@example.test", password: "password\r-sentinel" },
+      { email: "person@example.test", password: "password\n-sentinel" },
+      { email: "person@example.test", password: "password\x7f-sentinel" },
+    ]) {
+      await expect(passwordHandler({ sender: { id: 7 } }, request))
+        .rejects.toThrow(/credentials are invalid/);
+    }
+    expect(sidecarRequest).not.toHaveBeenCalled();
+  });
+
   it("accepts only a fixed literal IPv4 loopback callback", () => {
     expect(parseDesktopRedirectUri("http://127.0.0.1:43122/identity/callback").port)
       .toBe("43122");

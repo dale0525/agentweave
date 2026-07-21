@@ -137,8 +137,8 @@ function parsePasswordRequest(value: unknown): IdentityPasswordRequest {
     || typeof request.password !== "string"
     || request.password.length === 0
     || request.password.length > 4096
-    || request.email.includes("\0")
-    || request.password.includes("\0")
+    || /[\x00-\x1f\x7f]/.test(request.email)
+    || /[\x00-\x1f\x7f]/.test(request.password)
   ) {
     throw new Error("Identity credentials are invalid");
   }

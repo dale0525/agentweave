@@ -343,7 +343,7 @@ pub(crate) fn validate_operation_name(value: &str) -> DevkitResult<&str> {
         && value.len() <= 1024
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || "/._:-".contains(byte as char))
+            .all(|byte| byte.is_ascii_alphanumeric() || "/_:-".contains(byte as char))
     {
         Ok(value)
     } else {
