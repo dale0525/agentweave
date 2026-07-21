@@ -605,7 +605,6 @@ impl DeveloperControlPlane {
         &self,
     ) -> DevkitResult<FirebaseAuthorizationStatus> {
         let _mutation = self.mutation.lock().await;
-        let _refresh = self.firebase_refresh.lock().await;
         self.clear_pending_firebase_authorization().await?;
         self.firebase_authorization_status().await
     }

@@ -9,6 +9,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 use tokio::sync::Mutex;
 
@@ -478,6 +479,85 @@ async fn cancel_is_idempotent_when_pending_secret_cleanup_fails() {
         control.cancel_firebase_authorization().await.unwrap().phase,
         FirebaseAuthorizationPhase::Disconnected
     );
+}
+
+#[tokio::test]
+async fn cancel_does_not_self_deadlock_when_existing_authorization_needs_refresh() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let mut control = DeveloperControlPlane::cloudflare(
+        storage.sqlite_pool(),
+        Arc::new(InMemorySecretStore::default()),
+        "firebase-cancel-refresh-test-project",
+        "com.example.agent",
+        crate::developer_control_plane::CloudflareOAuthDefaults::default(),
+    )
+    .await
+    .unwrap();
+    let fake = Arc::new(FakeFirebaseHttp {
+        responses: Mutex::new(VecDeque::from([
+            response(
+                200,
+                json!({
+                    "access_token": "initial-google-access-token",
+                    "refresh_token": "persistent-google-refresh-token",
+                    "expires_in": 3600,
+                    "scope": format!("{GOOGLE_SCOPE_CLOUD} {GOOGLE_SCOPE_FIREBASE}"),
+                    "token_type": "Bearer"
+                }),
+            ),
+            response(
+                200,
+                json!({
+                    "access_token": "refreshed-google-access-token",
+                    "expires_in": 3600,
+                    "scope": format!("{GOOGLE_SCOPE_CLOUD} {GOOGLE_SCOPE_FIREBASE}"),
+                    "token_type": "Bearer"
+                }),
+            ),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    control.firebase_http = fake;
+    let start = control
+        .start_firebase_authorization(
+            FirebaseOAuthClientSelection::Custom {
+                client_id: "desktop-client.apps.googleusercontent.com".into(),
+                client_secret: None,
+            },
+            Url::parse("http://127.0.0.1:43897/firebase/callback").unwrap(),
+        )
+        .await
+        .unwrap();
+    let state = Url::parse(&start.authorization_url)
+        .unwrap()
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    control
+        .complete_firebase_authorization(&format!(
+            "http://127.0.0.1:43897/firebase/callback?code=one-time-code&state={state}"
+        ))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE developer_provider_authorizations SET authorization_json = json_set(authorization_json, '$.expires_at_unix_ms', ?1) WHERE project_key = ?2 AND provider_id = ?3")
+        .bind(now_unix_ms().saturating_add(1) as i64)
+        .bind(&control.project_key)
+        .bind(FIREBASE_DEVELOPER_PROVIDER_ID)
+        .execute(&control.pool)
+        .await
+        .unwrap();
+
+    let status = tokio::time::timeout(
+        Duration::from_secs(1),
+        control.cancel_firebase_authorization(),
+    )
+    .await
+    .expect("cancel must not self-deadlock")
+    .unwrap();
+
+    assert_eq!(status.phase, FirebaseAuthorizationPhase::SelectProject);
 }
 
 #[test]
