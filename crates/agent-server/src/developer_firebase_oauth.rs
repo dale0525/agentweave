@@ -1,5 +1,8 @@
 const OFFICIAL_FIREBASE_OAUTH_CLIENT_ID: &str =
-    "11389499001-um0m9juhv6r9np9jor9c94gaovrq1ue4.apps.googleusercontent.com";
+    "11389499001-bib8sttfdcudgcodohveg2o2kthq4qrq.apps.googleusercontent.com";
+// Google requires this value for Desktop token exchange. Installed-app client
+// secrets are non-confidential metadata, matching Firebase CLI's public client.
+const OFFICIAL_FIREBASE_OAUTH_CLIENT_SECRET: &str = "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";
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FirebaseOAuthDefaults {
@@ -11,7 +14,7 @@ impl FirebaseOAuthDefaults {
     pub(crate) fn official() -> Self {
         Self {
             client_id: Some(OFFICIAL_FIREBASE_OAUTH_CLIENT_ID.into()),
-            client_secret: None,
+            client_secret: Some(OFFICIAL_FIREBASE_OAUTH_CLIENT_SECRET.into()),
         }
     }
 
@@ -43,9 +46,7 @@ impl FirebaseOAuthDefaults {
             .flatten()
         {
             anyhow::ensure!(
-                !value.trim().is_empty()
-                    && value.len() <= 4096
-                    && !value.chars().any(char::is_control),
+                value.len() <= 4096 && !value.chars().any(char::is_control),
                 "Firebase OAuth client configuration is invalid"
             );
         }
@@ -71,14 +72,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn official_client_is_public_and_requires_no_secret() {
+    fn official_desktop_client_contains_required_public_metadata() {
         let defaults = FirebaseOAuthDefaults::official();
 
         assert_eq!(
             defaults.client_id.as_deref(),
             Some(OFFICIAL_FIREBASE_OAUTH_CLIENT_ID)
         );
-        assert_eq!(defaults.client_secret, None);
+        assert_eq!(
+            defaults.client_secret.as_deref(),
+            Some(OFFICIAL_FIREBASE_OAUTH_CLIENT_SECRET)
+        );
         assert!(defaults.public_client_available());
     }
 
@@ -94,7 +98,10 @@ mod tests {
                 defaults.client_id.as_deref(),
                 Some(OFFICIAL_FIREBASE_OAUTH_CLIENT_ID)
             );
-            assert_eq!(defaults.client_secret, None);
+            assert_eq!(
+                defaults.client_secret.as_deref(),
+                Some(OFFICIAL_FIREBASE_OAUTH_CLIENT_SECRET)
+            );
         }
     }
 
