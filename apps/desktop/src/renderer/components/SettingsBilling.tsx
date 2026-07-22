@@ -136,14 +136,14 @@ export function SettingsBilling(): JSX.Element | null {
   );
 }
 
-function subscriptionMessage(
+export function subscriptionMessage(
   status: BillingStatus,
   t: (key: string, values?: Record<string, string | number>) => string,
 ): string {
   const subscription = status.subscription;
   if (status.mode === "uniform_bounded") return t("settings.billing.uniformPlan");
   if (!subscription) return t("settings.billing.noSubscriptionHint");
-  if (subscription.revoked || ["expired", "unpaid", "refund", "dispute"].includes(subscription.status)) {
+  if (subscription.revoked || ["expired", "unpaid", "refunded", "disputed"].includes(subscription.status)) {
     return t("settings.billing.revoked");
   }
   if (["scheduled_cancel", "past_due", "paused", "canceled"].includes(subscription.status)) {

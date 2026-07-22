@@ -73,7 +73,7 @@ function enabledPlan(config, planId) {
   return plan;
 }
 
-async function verifyReconcile(request, body, secret, nowSeconds, cryptoImpl) {
+async function verifyReconcile(request, body, secrets, nowSeconds, cryptoImpl) {
   const timestamp = request.headers.get("x-agentweave-reconcile-timestamp");
   const signature = request.headers.get("x-agentweave-reconcile-signature");
   if (!/^\d{1,16}$/.test(timestamp ?? "") || !signature?.startsWith("v1=")) {
@@ -83,12 +83,21 @@ async function verifyReconcile(request, body, secret, nowSeconds, cryptoImpl) {
   if (!Number.isSafeInteger(timestampValue) || Math.abs(timestampValue - nowSeconds()) > 300) {
     fail(401, "commerce_reconcile_unauthorized", "Reconciliation authorization is invalid.");
   }
-  const valid = await cryptoImpl.subtle.verify(
-    "HMAC",
-    await hmacKey(secret, cryptoImpl),
-    decodeBase64Url(signature.slice(3)),
-    canonical(RECONCILE_DOMAIN, [timestamp], body),
-  ).catch(() => false);
+  let signatureBytes;
+  try {
+    signatureBytes = decodeBase64Url(signature.slice(3));
+  } catch {
+    fail(401, "commerce_reconcile_unauthorized", "Reconciliation authorization is invalid.");
+  }
+  const signed = canonical(RECONCILE_DOMAIN, [timestamp], body);
+  let valid = false;
+  for (const secret of secrets) {
+    const key = await hmacKey(secret, cryptoImpl);
+    if (await cryptoImpl.subtle.verify("HMAC", key, signatureBytes, signed).catch(() => false)) {
+      valid = true;
+      break;
+    }
+  }
   if (!valid) fail(401, "commerce_reconcile_unauthorized", "Reconciliation authorization is invalid.");
 }
 
@@ -182,7 +191,14 @@ export function createEntitlementWorker({
         }
         if (request.method === "POST" && url.pathname === "/agentweave/commerce/v1/reconcile") {
           const parsed = await jsonBody(request, ["subscriptionId"]);
-          await verifyReconcile(request, parsed.bytes, env.ENTITLEMENT_PROJECTION_SECRET, nowSeconds, cryptoImpl);
+          await verifyReconcile(
+            request,
+            parsed.bytes,
+            [env.ENTITLEMENT_PROJECTION_SECRET, env.ENTITLEMENT_PROJECTION_SECRET_NEXT]
+              .filter((secret) => typeof secret === "string"),
+            nowSeconds,
+            cryptoImpl,
+          );
           const subscriptionId = boundedText(parsed.value.subscriptionId);
           const result = await reconcileSubscription(subscriptionId, config, store, api, nowSeconds, cryptoImpl);
           return json({ reconciled: true, subscriptionId: result.fact?.subscriptionId ?? subscriptionId });
