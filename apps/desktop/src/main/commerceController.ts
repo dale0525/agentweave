@@ -38,7 +38,7 @@ export function registerCommerceController(options: {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ planId }),
     }));
-    await options.openExternal(trustedCreemUrl(response.checkoutUrl));
+    await openBillingDestination(options.openExternal, response.checkoutUrl);
     return Object.freeze<CommerceOpenReceipt>({ opened: true });
   });
   options.ipcMain.handle(COMMERCE_PORTAL_CHANNEL, async (event, value) => {
@@ -49,7 +49,7 @@ export function registerCommerceController(options: {
       "/commerce/customer-portal",
       { method: "POST" },
     ));
-    await options.openExternal(trustedCreemUrl(response.portalUrl));
+    await openBillingDestination(options.openExternal, response.portalUrl);
     const verificationNonce = boundedText(response.verificationNonce, 256);
     const verification = record(await requestJson(
       options.sidecarRequest,
@@ -70,6 +70,18 @@ export function registerCommerceController(options: {
     options.ipcMain.removeHandler(COMMERCE_CHECKOUT_CHANNEL);
     options.ipcMain.removeHandler(COMMERCE_PORTAL_CHANNEL);
   };
+}
+
+async function openBillingDestination(
+  openExternal: (url: string) => Promise<unknown> | unknown,
+  value: unknown,
+): Promise<void> {
+  const url = trustedCreemUrl(value);
+  try {
+    await openExternal(url);
+  } catch {
+    throw new Error("commerce_browser_open_failed");
+  }
 }
 
 function planRequest(value: unknown): string {

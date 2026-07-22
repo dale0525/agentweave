@@ -158,7 +158,7 @@ function billingError(error: unknown, t: (key: string) => string): string {
   const code = error instanceof Error ? error.message : "";
   if (code.includes("commerce_customer_unbound")) return t("settings.billing.unboundHint");
   if (code.includes("commerce_unauthenticated")) return t("settings.billing.signInRequired");
-  if (code.includes("commerce_portal_open_failed")) return t("settings.billing.openFailed");
+  if (code.includes("commerce_browser_open_failed")) return t("settings.billing.openFailed");
   return t("settings.billing.unavailable");
 }
 

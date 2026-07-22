@@ -59,7 +59,7 @@ describe("trusted Commerce Host controller", () => {
       sidecarRequest,
     });
 
-    await expect(harness.invoke(COMMERCE_PORTAL_CHANNEL)).rejects.toThrow("open failed");
+    await expect(harness.invoke(COMMERCE_PORTAL_CHANNEL)).rejects.toThrow("commerce_browser_open_failed");
     expect(sidecarRequest).toHaveBeenCalledTimes(1);
   });
 

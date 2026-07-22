@@ -362,19 +362,26 @@ test("scheduled reconciliation bounds parallel Creem requests", async () => {
   let active = 0;
   let maximum = 0;
   const completed = [];
+  const failures = [];
   await workerInternals.allSettledInBatches(
     Array.from({ length: 11 }, (_, index) => index),
     async (index) => {
       active += 1;
       maximum = Math.max(maximum, active);
-      await new Promise((resolve) => setImmediate(resolve));
-      completed.push(index);
-      active -= 1;
+      try {
+        await new Promise((resolve) => setImmediate(resolve));
+        if (index === 5) throw new Error("provider unavailable");
+        completed.push(index);
+      } finally {
+        active -= 1;
+      }
     },
     4,
+    (index, error) => failures.push({ index, message: error.message }),
   );
   assert.equal(maximum, 4);
-  assert.deepEqual(completed.sort((left, right) => left - right), Array.from({ length: 11 }, (_, index) => index));
+  assert.deepEqual(completed.sort((left, right) => left - right), [0, 1, 2, 3, 4, 6, 7, 8, 9, 10]);
+  assert.deepEqual(failures, [{ index: 5, message: "provider unavailable" }]);
 });
 
 test("checkout binds a verified subject and customer portal never accepts a client customer id", async () => {

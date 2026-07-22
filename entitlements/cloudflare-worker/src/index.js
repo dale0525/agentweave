@@ -111,9 +111,18 @@ async function reconcileSubscription(subscriptionId, config, store, api, nowSeco
   return normalized;
 }
 
-async function allSettledInBatches(items, worker, batchSize = 4) {
+async function allSettledInBatches(items, worker, batchSize = 4, onRejected = () => {}) {
   for (let start = 0; start < items.length; start += batchSize) {
-    await Promise.allSettled(items.slice(start, start + batchSize).map(worker));
+    const batch = items.slice(start, start + batchSize);
+    const results = await Promise.allSettled(batch.map(worker));
+    results.forEach((result, index) => {
+      if (result.status !== "rejected") return;
+      try {
+        onRejected(batch[index], result.reason);
+      } catch {
+        // Reporting must not prevent later subscriptions from reconciling.
+      }
+    });
   }
 }
 
@@ -122,6 +131,7 @@ export function createEntitlementWorker({
   cryptoImpl = globalThis.crypto,
   nowSeconds = () => Math.floor(Date.now() / 1000),
   authenticatorFactory = (config) => new Authenticator(config),
+  logger = console,
 } = {}) {
   return {
     async fetch(request, env) {
@@ -256,8 +266,15 @@ export function createEntitlementWorker({
       const store = commerceStore(config, env, nowSeconds);
       const api = new CreemApi(config, env.CREEM_API_KEY, { fetchImpl });
       const candidates = await store.reconciliationCandidates(50);
-      const work = allSettledInBatches(candidates, (subscriptionId) =>
-        reconcileSubscription(subscriptionId, config, store, api, nowSeconds, cryptoImpl));
+      const work = allSettledInBatches(
+        candidates,
+        (subscriptionId) => reconcileSubscription(subscriptionId, config, store, api, nowSeconds, cryptoImpl),
+        4,
+        (subscriptionId, error) => logger.error("Subscription reconciliation failed.", {
+          subscriptionId,
+          code: error instanceof EntitlementWorkerError ? error.code : "entitlement_service_unavailable",
+        }),
+      );
       context.waitUntil(work);
     },
   };
