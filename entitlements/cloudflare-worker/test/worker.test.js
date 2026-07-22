@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { parseEntitlementConfig } from "../src/config.js";
 import { canonical, hmacKey } from "../src/crypto.js";
-import { createEntitlementWorker } from "../src/index.js";
+import { createEntitlementWorker, workerInternals } from "../src/index.js";
 import { billingStatus, handleProjection, policyInternals } from "../src/policy.js";
 
 const migration = ["0001_commerce.sql", "0002_portal_verification_nonce.sql"]
@@ -338,6 +338,43 @@ test("the unique eligible subscription wins when a newer inactive row sorts firs
   );
   assert.equal(status.plan.id, "pro-monthly");
   assert.equal(status.subscription.status, "active");
+
+  const mismatched = await billingStatus(
+    {
+      ...commerceConfig(),
+      policy: {
+        ...commerceConfig().policy,
+        productPlans: [{
+          ...commerceConfig().policy.productPlans[0],
+          productId: "prod_other",
+        }],
+      },
+    },
+    store,
+    identity,
+    env,
+    { cryptoImpl: webcrypto, nowSeconds: () => NOW },
+  );
+  assert.equal(mismatched.plan, null);
+});
+
+test("scheduled reconciliation bounds parallel Creem requests", async () => {
+  let active = 0;
+  let maximum = 0;
+  const completed = [];
+  await workerInternals.allSettledInBatches(
+    Array.from({ length: 11 }, (_, index) => index),
+    async (index) => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setImmediate(resolve));
+      completed.push(index);
+      active -= 1;
+    },
+    4,
+  );
+  assert.equal(maximum, 4);
+  assert.deepEqual(completed.sort((left, right) => left - right), Array.from({ length: 11 }, (_, index) => index));
 });
 
 test("checkout binds a verified subject and customer portal never accepts a client customer id", async () => {

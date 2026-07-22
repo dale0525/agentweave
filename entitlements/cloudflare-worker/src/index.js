@@ -111,6 +111,12 @@ async function reconcileSubscription(subscriptionId, config, store, api, nowSeco
   return normalized;
 }
 
+async function allSettledInBatches(items, worker, batchSize = 4) {
+  for (let start = 0; start < items.length; start += batchSize) {
+    await Promise.allSettled(items.slice(start, start + batchSize).map(worker));
+  }
+}
+
 export function createEntitlementWorker({
   fetchImpl = globalThis.fetch,
   cryptoImpl = globalThis.crypto,
@@ -250,8 +256,8 @@ export function createEntitlementWorker({
       const store = commerceStore(config, env, nowSeconds);
       const api = new CreemApi(config, env.CREEM_API_KEY, { fetchImpl });
       const candidates = await store.reconciliationCandidates(50);
-      const work = Promise.allSettled(candidates.map((subscriptionId) =>
-        reconcileSubscription(subscriptionId, config, store, api, nowSeconds, cryptoImpl)));
+      const work = allSettledInBatches(candidates, (subscriptionId) =>
+        reconcileSubscription(subscriptionId, config, store, api, nowSeconds, cryptoImpl));
       context.waitUntil(work);
     },
   };
@@ -259,4 +265,8 @@ export function createEntitlementWorker({
 
 export default createEntitlementWorker();
 
-export const workerInternals = Object.freeze({ RECONCILE_DOMAIN, reconcileSubscription });
+export const workerInternals = Object.freeze({
+  RECONCILE_DOMAIN,
+  allSettledInBatches,
+  reconcileSubscription,
+});

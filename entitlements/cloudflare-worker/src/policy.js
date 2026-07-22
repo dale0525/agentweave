@@ -237,7 +237,9 @@ export async function billingStatus(config, store, identity, env, {
     fail(409, "commerce_subscription_conflict", "Multiple active subscriptions require support.");
   }
   const plan = subscription
-    ? config.policy.productPlans.find((candidate) => candidate.id === subscription.plan_id) ?? null
+    ? config.policy.productPlans.find((candidate) => candidate.enabled
+      && candidate.id === subscription.plan_id
+      && candidate.productId === subscription.product_id) ?? null
     : null;
   return Object.freeze({
     mode: "commerce_provider",
