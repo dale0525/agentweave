@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 pub(crate) const FIREBASE_DEVELOPER_PROVIDER_ID: &str = "google.firebase";
 const AUTHORIZATION_LIFETIME_MS: u64 = 10 * 60 * 1_000;
+const GOOGLE_OAUTH_ISSUER: &str = "https://accounts.google.com";
 pub(crate) const GOOGLE_SCOPE_CLOUD: &str = "https://www.googleapis.com/auth/cloud-platform";
 pub(crate) const GOOGLE_SCOPE_FIREBASE: &str = "https://www.googleapis.com/auth/firebase";
 pub(crate) const CAPABILITY_PROJECTS: &str = "firebase.projects.manage";
@@ -369,6 +370,12 @@ impl DeveloperControlPlane {
         validate_callback(&callback, &pending.redirect_uri)?;
         let query = unique_query(&callback)?;
         let state = query.get("state").ok_or_else(invalid_authorization)?;
+        if query
+            .get("iss")
+            .is_some_and(|issuer| issuer != GOOGLE_OAUTH_ISSUER)
+        {
+            return Err(invalid_authorization().into());
+        }
         let expected = self.sensitive.resolve(&pending.state_handle).await?;
         let state_matches = expected.expose(|bytes| {
             Ok(Sha256::digest(bytes).as_slice() == Sha256::digest(state.as_bytes()).as_slice())
@@ -646,16 +653,45 @@ impl DeveloperControlPlane {
         authorization: &DeveloperAuthorization,
         project: &FirebaseProjectSummary,
     ) -> DevkitResult<()> {
-        let response = self
+        let update_url = format!(
+            "https://identitytoolkit.googleapis.com/admin/v2/projects/{}/config?updateMask=signIn.email",
+            project.project_id
+        );
+        let config = json!({
+            "signIn": { "email": { "enabled": true, "passwordRequired": true } }
+        });
+        let mut response = self
             .firebase_request(
                 authorization,
                 Method::PATCH,
-                &format!("https://identitytoolkit.googleapis.com/v2/projects/{}/config?updateMask=signIn.email", project.project_id),
-                FirebaseControlBody::Json(json!({
-                    "signIn": { "email": { "enabled": true, "passwordRequired": true } }
-                })),
+                &update_url,
+                FirebaseControlBody::Json(config.clone()),
             )
             .await?;
+        if response.status == 404 {
+            let initialized = self
+                .firebase_request(
+                    authorization,
+                    Method::POST,
+                    &format!(
+                        "https://identitytoolkit.googleapis.com/v2/projects/{}/identityPlatform:initializeAuth",
+                        project.project_id
+                    ),
+                    FirebaseControlBody::Json(json!({})),
+                )
+                .await?;
+            if initialized.status != 200 {
+                return Err(permission());
+            }
+            response = self
+                .firebase_request(
+                    authorization,
+                    Method::PATCH,
+                    &update_url,
+                    FirebaseControlBody::Json(config),
+                )
+                .await?;
+        }
         if response.status == 200 {
             Ok(())
         } else {
