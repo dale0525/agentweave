@@ -2,10 +2,12 @@ import { Badge, Button, Callout, Spinner } from "@radix-ui/themes";
 import { Check, Clipboard, CloudCog, ExternalLink, RotateCcw, Webhook } from "lucide-react";
 import { useState } from "react";
 
-import type { DeveloperCreemWebhookBootstrapReceipt } from "../../../shared/developerAccess";
 import { openCreemWebhookDashboard } from "../../developerCommerceApi";
 import { useI18n } from "../../i18n/I18nProvider";
-import type { CreemWebhookBootstrapStatus } from "./useCreemWebhookBootstrap";
+import type {
+  CreemWebhookBootstrapStatus,
+  CreemWebhookEndpoint,
+} from "./useCreemWebhookBootstrap";
 
 export function DeveloperCommerceWebhookSetup({
   error,
@@ -15,7 +17,7 @@ export function DeveloperCommerceWebhookSetup({
 }: {
   error: string | null;
   onRetry: () => void;
-  receipt: DeveloperCreemWebhookBootstrapReceipt | null;
+  receipt: CreemWebhookEndpoint | null;
   status: CreemWebhookBootstrapStatus;
 }): JSX.Element {
   const { t } = useI18n();

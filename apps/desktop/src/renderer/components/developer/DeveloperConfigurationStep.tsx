@@ -18,8 +18,10 @@ import {
 import { useI18n } from "../../i18n/I18nProvider";
 import { ProviderSchemaForm, SensitiveSchemaFields } from "./ProviderSchemaForm";
 import { DeveloperCommerceConfiguration } from "./DeveloperCommerceConfiguration";
-import type { DeveloperCreemWebhookBootstrapReceipt } from "../../../shared/developerAccess";
-import type { CreemWebhookBootstrapStatus } from "./useCreemWebhookBootstrap";
+import type {
+  CreemWebhookBootstrapStatus,
+  CreemWebhookEndpoint,
+} from "./useCreemWebhookBootstrap";
 
 const OPENAI_BASE_URL = "https://api.openai.com";
 
@@ -41,7 +43,7 @@ export function DeveloperConfigurationStep({
   configuredSlots: ReadonlySet<string>;
   commerceBootstrap: Readonly<{
     error: string | null;
-    receipt: DeveloperCreemWebhookBootstrapReceipt | null;
+    receipt: CreemWebhookEndpoint | null;
     retry: () => void;
     status: CreemWebhookBootstrapStatus;
   }>;

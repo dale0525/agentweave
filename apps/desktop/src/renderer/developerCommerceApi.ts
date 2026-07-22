@@ -65,23 +65,24 @@ function parseBootstrap(value: unknown): DeveloperCreemWebhookBootstrapReceipt {
   if (expectedWebhook.toString() !== webhookUrl) {
     throw new Error("Creem webhook URL is not bound to the Entitlement Worker");
   }
+  const target = record(receipt.target);
   return Object.freeze({
     state: state as DeveloperCreemWebhookBootstrapReceipt["state"],
     providerId: text(receipt.providerId),
     providerVersion: text(receipt.providerVersion),
     target: Object.freeze({
-      accountId: text(record(receipt.target).accountId),
-      deploymentId: text(record(receipt.target).deploymentId),
-      workerName: text(record(receipt.target).workerName),
-      ...(record(receipt.target).environment === undefined
+      accountId: text(target.accountId),
+      deploymentId: text(target.deploymentId),
+      workerName: text(target.workerName),
+      ...(target.environment === undefined
         ? {}
-        : { environment: text(record(receipt.target).environment) }),
+        : { environment: text(target.environment) }),
     }),
     versionId: text(receipt.versionId),
     endpoint,
     webhookUrl,
     operationId: receipt.operationId === null ? null : text(receipt.operationId),
-    completedAtUnixMs: integer(receipt.completedAtUnixMs),
+    completedAtUnixMs: positiveInteger(receipt.completedAtUnixMs),
   });
 }
 
@@ -140,4 +141,10 @@ function integer(value: unknown): number {
     throw new Error("Developer Commerce integer is invalid");
   }
   return Number(value);
+}
+
+function positiveInteger(value: unknown): number {
+  const result = integer(value);
+  if (result === 0) throw new Error("Developer Commerce integer is invalid");
+  return result;
 }

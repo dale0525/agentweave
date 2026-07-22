@@ -7,6 +7,7 @@ import { bootstrapCreemWebhook } from "../../developerCommerceApi";
 import type { ManagedProjectDraft } from "../../developerProjectModel";
 
 export type CreemWebhookBootstrapStatus = "idle" | "deploying" | "ready" | "error";
+export type CreemWebhookEndpoint = Pick<DeveloperCreemWebhookBootstrapReceipt, "webhookUrl">;
 
 export function useCreemWebhookBootstrap({
   authorizationReady,
@@ -20,7 +21,7 @@ export function useCreemWebhookBootstrap({
   snapshot: DeveloperProjectSnapshot;
 }) {
   const [status, setStatus] = useState<CreemWebhookBootstrapStatus>("idle");
-  const [receipt, setReceipt] = useState<DeveloperCreemWebhookBootstrapReceipt | null>(null);
+  const [receipt, setReceipt] = useState<CreemWebhookEndpoint | null>(null);
   const [error, setError] = useState<string | null>(null);
   const attemptedKey = useRef<string | null>(null);
   const running = useRef(false);
@@ -81,7 +82,7 @@ export function useCreemWebhookBootstrap({
     }
     if (verifiedMatchesSelection && verifiedBundle) {
       attemptedKey.current = null;
-      setReceipt(receiptFromVerifiedBundle(verifiedBundle, draft.providers.gateway));
+      setReceipt(receiptFromVerifiedBundle(verifiedBundle));
       setStatus("ready");
       setError(null);
       return;
@@ -99,21 +100,12 @@ export function useCreemWebhookBootstrap({
 
 function receiptFromVerifiedBundle(
   bundle: NonNullable<DeveloperProjectSnapshot["verifiedBundle"]>,
-  gateway: ManagedProjectDraft["providers"]["gateway"],
-): DeveloperCreemWebhookBootstrapReceipt {
+): CreemWebhookEndpoint {
   const endpoint = new URL(bundle.entitlementPolicy.endpoint);
   endpoint.pathname = "/agentweave/commerce/v1/webhooks/creem";
   endpoint.search = "";
   endpoint.hash = "";
   return Object.freeze({
-    state: "commerce_active",
-    providerId: gateway.id,
-    providerVersion: gateway.version,
-    target: bundle.entitlementPolicy.target,
-    versionId: bundle.entitlementPolicy.versionId,
-    endpoint: bundle.entitlementPolicy.endpoint,
     webhookUrl: endpoint.toString(),
-    operationId: null,
-    completedAtUnixMs: bundle.testedAtUnixMs,
   });
 }

@@ -12,7 +12,6 @@ import {
 import { CheckCircle2, CreditCard, PackageSearch, ShieldAlert, Webhook } from "lucide-react";
 import { useState } from "react";
 
-import type { DeveloperCreemWebhookBootstrapReceipt } from "../../../shared/developerAccess";
 import {
   discoverCreemProducts,
   type CreemProduct,
@@ -26,7 +25,10 @@ import {
 } from "../../developerProjectModel";
 import { useI18n } from "../../i18n/I18nProvider";
 import { DeveloperCommerceWebhookSetup } from "./DeveloperCommerceWebhookSetup";
-import type { CreemWebhookBootstrapStatus } from "./useCreemWebhookBootstrap";
+import type {
+  CreemWebhookBootstrapStatus,
+  CreemWebhookEndpoint,
+} from "./useCreemWebhookBootstrap";
 
 export function DeveloperCommerceConfiguration({
   bootstrap,
@@ -41,7 +43,7 @@ export function DeveloperCommerceConfiguration({
 }: {
   bootstrap: Readonly<{
     error: string | null;
-    receipt: DeveloperCreemWebhookBootstrapReceipt | null;
+    receipt: CreemWebhookEndpoint | null;
     retry: () => void;
     status: CreemWebhookBootstrapStatus;
   }>;
