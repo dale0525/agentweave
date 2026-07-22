@@ -7,7 +7,7 @@ import test from "node:test";
 import { parseEntitlementConfig } from "../src/config.js";
 import { canonical, hmacKey } from "../src/crypto.js";
 import { createEntitlementWorker } from "../src/index.js";
-import { policyInternals } from "../src/policy.js";
+import { billingStatus, handleProjection, policyInternals } from "../src/policy.js";
 
 const migration = ["0001_commerce.sql", "0002_portal_verification_nonce.sql"]
   .map((name) => readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"))
@@ -158,10 +158,14 @@ function authenticatorFactory() {
   return { async authenticate() { return identity; } };
 }
 
-async function projectionRequest(model = "model-small", secret = PROJECTION_SECRET) {
+async function projectionRequest(
+  model = "model-small",
+  secret = PROJECTION_SECRET,
+  sourceId = "agentweave.entitlements.cloudflare_policy",
+) {
   const body = new TextEncoder().encode(JSON.stringify({
     schemaVersion: 2,
-    sourceId: "agentweave.entitlements.cloudflare_policy",
+    sourceId,
     nonce: "00000000-0000-4000-8000-000000000001",
     deploymentId: "deployment-test",
     providerId: identity.providerId,
@@ -279,6 +283,61 @@ test("projection rotation accepts current and next secrets and signs with the ma
     );
     assert.equal(valid, true);
   }
+});
+
+test("the unique eligible subscription wins when a newer inactive row sorts first", async () => {
+  const inactive = {
+    subscription_id: "sub_expired",
+    normalized_status: "expired",
+    plan_id: "pro-monthly",
+    product_id: "prod_123",
+    current_period_start: NOW - 7200,
+    current_period_end: NOW - 3600,
+    paid_through: NOW - 3600,
+    provider_updated_at: NOW - 10,
+    revoked_at: null,
+    projection_revision: "expired-revision",
+  };
+  const active = {
+    subscription_id: "sub_active",
+    normalized_status: "active",
+    plan_id: "pro-monthly",
+    product_id: "prod_123",
+    current_period_start: NOW - 3600,
+    current_period_end: NOW + 3600,
+    paid_through: NOW + 3600,
+    provider_updated_at: NOW - 100,
+    revoked_at: null,
+    projection_revision: "active-revision",
+  };
+  const store = {
+    subscriptionForSubject: async () => [inactive, active],
+    customerForSubject: async () => ({ customer_id: "cust_123" }),
+  };
+  const env = environment(null);
+
+  const response = await handleProjection(
+    await projectionRequest("model-small", PROJECTION_SECRET, "agentweave.commerce.creem"),
+    commerceConfig(),
+    store,
+    env,
+    { cryptoImpl: webcrypto, nowSeconds: () => NOW },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    { decision: (await response.json()).decision, selected: policyInternals.selectSubscription([inactive, active], NOW).subscription.subscription_id },
+    { decision: "allow", selected: "sub_active" },
+  );
+
+  const status = await billingStatus(
+    commerceConfig(),
+    store,
+    identity,
+    env,
+    { cryptoImpl: webcrypto, nowSeconds: () => NOW },
+  );
+  assert.equal(status.plan.id, "pro-monthly");
+  assert.equal(status.subscription.status, "active");
 });
 
 test("checkout binds a verified subject and customer portal never accepts a client customer id", async () => {

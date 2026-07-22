@@ -32,7 +32,7 @@ export class CommerceStore {
     }
   }
 
-  async subscriptionForSubject(subjectRef) {
+  async subscriptionForSubject(subjectRef, now = this.nowSeconds()) {
     try {
       const result = await this.database.prepare(`
         SELECT subscription_id, customer_id, product_id, plan_id, normalized_status,
@@ -40,9 +40,14 @@ export class CommerceStore {
           revoked_at, projection_revision
         FROM commerce_subscriptions
         WHERE app_id = ?1 AND environment = ?2 AND subject_ref = ?3
-        ORDER BY provider_updated_at DESC, subscription_id ASC
+        ORDER BY CASE
+          WHEN revoked_at IS NULL
+            AND normalized_status NOT IN ('expired', 'unpaid', 'refunded', 'disputed')
+            AND paid_through > ?4
+          THEN 0 ELSE 1
+        END ASC, provider_updated_at DESC, subscription_id ASC
         LIMIT 2
-      `).bind(this.appId, this.environment, subjectRef).all();
+      `).bind(this.appId, this.environment, subjectRef, now).all();
       return rows(result);
     } catch {
       unavailable();

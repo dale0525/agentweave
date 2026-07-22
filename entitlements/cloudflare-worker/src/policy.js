@@ -66,6 +66,14 @@ function subscriptionPermits(row, now) {
   return Number.isSafeInteger(Number(row.paid_through)) && Number(row.paid_through) > now;
 }
 
+function selectSubscription(subscriptions, now) {
+  const eligible = subscriptions.filter((row) => subscriptionPermits(row, now));
+  return Object.freeze({
+    eligible,
+    subscription: eligible.length === 1 ? eligible[0] : subscriptions[0] ?? null,
+  });
+}
+
 async function planFor(config, store, identity, model, now, cryptoImpl, env) {
   if (config.policy.sourceMode === "uniform_bounded") {
     const plan = config.policy.uniformPlan;
@@ -79,16 +87,15 @@ async function planFor(config, store, identity, model, now, cryptoImpl, env) {
     };
   }
   const reference = await subjectRef(config, identity, env.COMMERCE_SUBJECT_BINDING_SECRET, cryptoImpl);
-  const subscriptions = await store.subscriptionForSubject(reference);
+  const subscriptions = await store.subscriptionForSubject(reference, now);
   if (!Array.isArray(subscriptions) || subscriptions.length === 0) {
     return { plan: null, ...uniformPeriod(now), reasonCode: "subscription_required", subjectRef: reference, subscription: null };
   }
-  const eligible = subscriptions.filter((row) => subscriptionPermits(row, now));
+  const { eligible, subscription } = selectSubscription(subscriptions, now);
   if (eligible.length > 1) {
     return { plan: null, ...uniformPeriod(now), reasonCode: "subscription_conflict", subjectRef: reference, subscription: null };
   }
-  const subscription = subscriptions[0];
-  if (eligible.length !== 1 || eligible[0] !== subscription) {
+  if (eligible.length !== 1) {
     return {
       plan: null,
       periodStart: Number(subscription.current_period_start ?? now),
@@ -222,12 +229,13 @@ export async function billingStatus(config, store, identity, env, {
     });
   }
   const reference = await subjectRef(config, identity, env.COMMERCE_SUBJECT_BINDING_SECRET, cryptoImpl);
-  const subscriptions = await store.subscriptionForSubject(reference);
+  const now = nowSeconds();
+  const subscriptions = await store.subscriptionForSubject(reference, now);
   const customer = await store.customerForSubject(reference);
-  if (subscriptions.length > 1 && subscriptions.filter((row) => subscriptionPermits(row, nowSeconds())).length > 1) {
+  const { eligible, subscription } = selectSubscription(subscriptions, now);
+  if (eligible.length > 1) {
     fail(409, "commerce_subscription_conflict", "Multiple active subscriptions require support.");
   }
-  const subscription = subscriptions[0] ?? null;
   const plan = subscription
     ? config.policy.productPlans.find((candidate) => candidate.id === subscription.plan_id) ?? null
     : null;
@@ -250,6 +258,7 @@ export const policyInternals = Object.freeze({
   REQUEST_DOMAIN_V2,
   RESPONSE_DOMAIN_V2,
   SIGNATURE_HEADER,
+  selectSubscription,
   sourceId,
   subscriptionPermits,
   uniformPeriod,
