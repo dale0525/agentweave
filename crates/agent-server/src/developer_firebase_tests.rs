@@ -231,6 +231,172 @@ async fn one_click_configuration_binds_project_and_returns_public_web_config() {
 }
 
 #[tokio::test]
+async fn email_password_configuration_succeeds_without_initializing_an_existing_auth_project() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let mut control = DeveloperControlPlane::cloudflare(
+        storage.sqlite_pool(),
+        Arc::new(InMemorySecretStore::default()),
+        "firebase-existing-auth-project",
+        "com.example.agent",
+        crate::developer_control_plane::CloudflareOAuthDefaults::default(),
+    )
+    .await
+    .unwrap();
+    let fake = Arc::new(FakeFirebaseHttp {
+        responses: Mutex::new(VecDeque::from([
+            response(
+                200,
+                json!({
+                    "access_token": "google-access-token",
+                    "refresh_token": "google-refresh-token",
+                    "expires_in": 3600,
+                    "scope": format!("{GOOGLE_SCOPE_CLOUD} {GOOGLE_SCOPE_FIREBASE}"),
+                    "token_type": "Bearer"
+                }),
+            ),
+            response(200, json!({"signIn": {"email": {"enabled": true}}})),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    control.firebase_http = fake.clone();
+    let start = control
+        .start_firebase_authorization(
+            FirebaseOAuthClientSelection::Custom {
+                client_id: "desktop-client.apps.googleusercontent.com".into(),
+                client_secret: None,
+            },
+            Url::parse("http://127.0.0.1:43900/firebase/callback").unwrap(),
+        )
+        .await
+        .unwrap();
+    let state = Url::parse(&start.authorization_url)
+        .unwrap()
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    control
+        .complete_firebase_authorization(&format!(
+            "http://127.0.0.1:43900/firebase/callback?code=one-time-code&state={state}"
+        ))
+        .await
+        .unwrap();
+    let authorization = control
+        .load_firebase_authorization()
+        .await
+        .unwrap()
+        .unwrap();
+    control
+        .enable_email_password(
+            &authorization,
+            &FirebaseProjectSummary {
+                project_id: "existing-auth-project".into(),
+                project_number: "123456789".into(),
+                display_name: "Existing Auth Project".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let requests = fake.requests.lock().await;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.contains("identitytoolkit.googleapis.com/admin/v2"))
+            .count(),
+        1
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.contains("identityPlatform:initializeAuth"))
+    );
+}
+
+#[tokio::test]
+async fn initialize_auth_transient_failures_remain_retryable() {
+    let storage = Storage::connect("sqlite::memory:").await.unwrap();
+    let mut control = DeveloperControlPlane::cloudflare(
+        storage.sqlite_pool(),
+        Arc::new(InMemorySecretStore::default()),
+        "firebase-auth-retry-project",
+        "com.example.agent",
+        crate::developer_control_plane::CloudflareOAuthDefaults::default(),
+    )
+    .await
+    .unwrap();
+    let fake = Arc::new(FakeFirebaseHttp {
+        responses: Mutex::new(VecDeque::from([
+            response(
+                200,
+                json!({
+                    "access_token": "google-access-token",
+                    "refresh_token": "google-refresh-token",
+                    "expires_in": 3600,
+                    "scope": format!("{GOOGLE_SCOPE_CLOUD} {GOOGLE_SCOPE_FIREBASE}"),
+                    "token_type": "Bearer"
+                }),
+            ),
+            response(404, json!({})),
+            response(503, json!({})),
+            response(404, json!({})),
+            response(429, json!({})),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    control.firebase_http = fake;
+    let start = control
+        .start_firebase_authorization(
+            FirebaseOAuthClientSelection::Custom {
+                client_id: "desktop-client.apps.googleusercontent.com".into(),
+                client_secret: None,
+            },
+            Url::parse("http://127.0.0.1:43901/firebase/callback").unwrap(),
+        )
+        .await
+        .unwrap();
+    let state = Url::parse(&start.authorization_url)
+        .unwrap()
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    control
+        .complete_firebase_authorization(&format!(
+            "http://127.0.0.1:43901/firebase/callback?code=one-time-code&state={state}"
+        ))
+        .await
+        .unwrap();
+    let authorization = control
+        .load_firebase_authorization()
+        .await
+        .unwrap()
+        .unwrap();
+    let project = FirebaseProjectSummary {
+        project_id: "auth-retry-project".into(),
+        project_number: "123456789".into(),
+        display_name: "Auth Retry Project".into(),
+    };
+
+    assert_eq!(
+        control
+            .enable_email_password(&authorization, &project)
+            .await
+            .unwrap_err()
+            .code,
+        DevkitErrorCode::Unavailable
+    );
+    let rate_limited = control
+        .enable_email_password(&authorization, &project)
+        .await
+        .unwrap_err();
+    assert_eq!(rate_limited.code, DevkitErrorCode::RateLimited);
+    assert_eq!(rate_limited.retry_after_ms, Some(1_000));
+}
+
+#[tokio::test]
 async fn oauth_callback_rejects_an_unexpected_authorization_server_issuer() {
     let storage = Storage::connect("sqlite::memory:").await.unwrap();
     let mut control = DeveloperControlPlane::cloudflare(

@@ -28,6 +28,22 @@ pub(crate) const CAPABILITY_AUTH: &str = "firebase.authentication.configure";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_LIST_PAGES: usize = 1_000;
 
+fn firebase_configuration_error(status: u16) -> DevkitError {
+    match status {
+        404 => DevkitError::new(
+            DevkitErrorCode::NotFound,
+            "The selected Firebase project was not found",
+        ),
+        429 => DevkitError::new(
+            DevkitErrorCode::RateLimited,
+            "Firebase developer services are rate limited",
+        )
+        .retry_after(1_000),
+        500..=599 => unavailable(),
+        _ => permission(),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(
     tag = "mode",
@@ -681,7 +697,7 @@ impl DeveloperControlPlane {
                 )
                 .await?;
             if initialized.status != 200 {
-                return Err(permission());
+                return Err(firebase_configuration_error(initialized.status));
             }
             response = self
                 .firebase_request(
@@ -695,7 +711,7 @@ impl DeveloperControlPlane {
         if response.status == 200 {
             Ok(())
         } else {
-            Err(permission())
+            Err(firebase_configuration_error(response.status))
         }
     }
 
