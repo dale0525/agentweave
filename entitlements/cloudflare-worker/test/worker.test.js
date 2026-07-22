@@ -192,6 +192,25 @@ async function projectionRequest(
   });
 }
 
+async function reconcileRequest(secret) {
+  const timestamp = String(NOW);
+  const body = new TextEncoder().encode(JSON.stringify({ subscriptionId: "sub_123" }));
+  const signature = await webcrypto.subtle.sign(
+    "HMAC",
+    await hmacKey(secret, webcrypto),
+    canonical(workerInternals.RECONCILE_DOMAIN, [timestamp], body),
+  );
+  return new Request("https://entitlements.example.test/agentweave/commerce/v1/reconcile", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-agentweave-reconcile-timestamp": timestamp,
+      "x-agentweave-reconcile-signature": `v1=${Buffer.from(signature).toString("base64url")}`,
+    },
+    body,
+  });
+}
+
 async function signedWebhook(value) {
   const body = new TextEncoder().encode(JSON.stringify(value));
   const signature = await webcrypto.subtle.sign(
@@ -283,6 +302,33 @@ test("projection rotation accepts current and next secrets and signs with the ma
     );
     assert.equal(valid, true);
   }
+});
+
+test("targeted reconciliation accepts both projection secrets during rotation", async () => {
+  const nextSecret = "next-projection-secret-with-at-least-32-bytes";
+  let providerCalls = 0;
+  const worker = createEntitlementWorker({
+    cryptoImpl: webcrypto,
+    nowSeconds: () => NOW,
+    fetchImpl: async () => {
+      providerCalls += 1;
+      return Response.json({ mode: "test" });
+    },
+  });
+  const env = {
+    ...environment(new LocalD1()),
+    ENTITLEMENT_PROJECTION_SECRET_NEXT: nextSecret,
+  };
+  for (const secret of [PROJECTION_SECRET, nextSecret]) {
+    const response = await worker.fetch(await reconcileRequest(secret), env);
+    assert.equal(response.status, 400);
+  }
+  const rejected = await worker.fetch(
+    await reconcileRequest("unrecognized-projection-secret-with-32-bytes"),
+    env,
+  );
+  assert.equal(rejected.status, 401);
+  assert.equal(providerCalls, 2);
 });
 
 test("the unique eligible subscription wins when a newer inactive row sorts first", async () => {
